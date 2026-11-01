@@ -1,71 +1,77 @@
 //! Unique termination ownership and terminal-result publication.
-
 use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
 
-enum TerminationState {
-    Open,
-    Terminating,
-    Terminated(XllResult<()>),
+/// The single initial transition permission, moved out rather than recreated
+/// from a status observation. It cannot be cloned, reset or independently issued.
+struct UnclaimedTermination;
+
+enum TerminalResult {
+    Completed(XllResult<()>),
     Failed(XllError),
+}
+impl TerminalResult {
+    fn result(&self) -> XllResult<()> {
+        match self {
+            Self::Completed(result) => result.clone(),
+            Self::Failed(error) => Err(error.clone()),
+        }
+    }
+}
+enum CompletionState {
+    Pending,
+    Done(TerminalResult),
+}
+struct TerminationState {
+    unclaimed: Option<UnclaimedTermination>,
+    completion: CompletionState,
 }
 
 pub(super) struct TerminationCoordinator {
     state: Mutex<TerminationState>,
     completed: Condvar,
 }
-
 impl Default for TerminationCoordinator {
     fn default() -> Self {
         Self {
-            state: Mutex::new(TerminationState::Open),
+            state: Mutex::new(TerminationState {
+                unclaimed: Some(UnclaimedTermination),
+                completion: CompletionState::Pending,
+            }),
             completed: Condvar::new(),
         }
     }
 }
-
 impl TerminationCoordinator {
-    /// Claims the sole completion authority before the caller begins cleanup.
-    /// No coordinator lock survives this call into callbacks or waiting work.
     pub(super) fn begin(&self) -> TerminationClaim<'_> {
         let mut state = self.state.lock();
-        match &*state {
-            TerminationState::Open => {
-                *state = TerminationState::Terminating;
-                TerminationClaim::Owner(TerminationOwner {
-                    coordinator: Some(self),
-                })
-            }
-            TerminationState::Terminating => {
+        if let Some(start) = state.unclaimed.take() {
+            return TerminationClaim::Owner(TerminationOwner {
+                permit: Some(TerminationPermit {
+                    coordinator: self,
+                    _start: start,
+                }),
+            });
+        }
+        match &state.completion {
+            CompletionState::Pending => {
                 TerminationClaim::Waiter(TerminationWaiter { coordinator: self })
             }
-            TerminationState::Terminated(result) => {
-                TerminationClaim::Complete(TerminationCompleted {
-                    result: result.clone(),
-                })
-            }
-            TerminationState::Failed(error) => TerminationClaim::Complete(TerminationCompleted {
-                result: Err(error.clone()),
+            CompletionState::Done(result) => TerminationClaim::Complete(TerminationCompleted {
+                result: result.result(),
             }),
         }
     }
-
-    fn publish(&self, result: TerminationState) {
-        let mut state = self.state.lock();
-        if !matches!(*state, TerminationState::Terminating) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        *state = result;
-        self.completed.notify_all();
-    }
-
     #[cfg(test)]
     pub(super) fn phase(&self) -> TerminationPhase {
-        match *self.state.lock() {
-            TerminationState::Open => TerminationPhase::Open,
-            TerminationState::Terminating => TerminationPhase::Terminating,
-            TerminationState::Terminated(_) => TerminationPhase::Terminated,
-            TerminationState::Failed(_) => TerminationPhase::Failed,
+        let state = self.state.lock();
+        if state.unclaimed.is_some() {
+            return TerminationPhase::Open;
+        }
+        match state.completion {
+            CompletionState::Pending => TerminationPhase::Terminating,
+            CompletionState::Done(TerminalResult::Completed(_)) => TerminationPhase::Terminated,
+            CompletionState::Done(TerminalResult::Failed(_)) => TerminationPhase::Failed,
         }
     }
 }
@@ -76,37 +82,45 @@ pub(super) enum TerminationClaim<'a> {
     Complete(TerminationCompleted),
 }
 
-/// Affine completion authority. Abandonment publishes failure and wakes waiters;
-/// it never certifies that the owner's remaining cleanup has completed.
-#[must_use = "complete termination, report failure, or leave a failed coordinator on Drop"]
-pub(super) struct TerminationOwner<'a> {
-    coordinator: Option<&'a TerminationCoordinator>,
+struct TerminationPermit<'a> {
+    coordinator: &'a TerminationCoordinator,
+    _start: UnclaimedTermination,
+}
+impl TerminationPermit<'_> {
+    fn publish(self, result: TerminalResult) {
+        // Only the one initial permission can publish, and the coordinator has
+        // no reset/rewind API. A broad phase check supplies no additional fact.
+        self.coordinator.state.lock().completion = CompletionState::Done(result);
+        self.coordinator.completed.notify_all();
+    }
 }
 
+#[must_use = "complete termination, report failure, or leave failed state on Drop"]
+pub(super) struct TerminationOwner<'a> {
+    permit: Option<TerminationPermit<'a>>,
+}
 impl TerminationOwner<'_> {
-    /// Cleanup finished, even if one of its callbacks reported an error.
     pub(super) fn complete(mut self, result: XllResult<()>) -> XllResult<()> {
-        self.coordinator
+        let terminal = TerminalResult::Completed(result.clone());
+        self.permit
+            .take()
             .expect("live termination owner")
-            .publish(TerminationState::Terminated(result.clone()));
-        self.coordinator = None;
+            .publish(terminal);
         result
     }
-
-    /// Cleanup could not finish; callers must retain the affected resources.
     pub(super) fn fail(mut self, error: XllError) -> XllError {
-        self.coordinator
+        let terminal = TerminalResult::Failed(error.clone());
+        self.permit
+            .take()
             .expect("live termination owner")
-            .publish(TerminationState::Failed(error.clone()));
-        self.coordinator = None;
+            .publish(terminal);
         error
     }
 }
-
 impl Drop for TerminationOwner<'_> {
     fn drop(&mut self) {
-        if let Some(coordinator) = self.coordinator.take() {
-            coordinator.publish(TerminationState::Failed(XllError::Panic));
+        if let Some(permit) = self.permit.take() {
+            permit.publish(TerminalResult::Failed(XllError::Panic));
         }
     }
 }
@@ -114,25 +128,20 @@ impl Drop for TerminationOwner<'_> {
 pub(super) struct TerminationWaiter<'a> {
     coordinator: &'a TerminationCoordinator,
 }
-
 impl TerminationWaiter<'_> {
     pub(super) fn wait(self) -> XllResult<()> {
         let mut state = self.coordinator.state.lock();
         loop {
-            match &*state {
-                TerminationState::Terminating => self.coordinator.completed.wait(&mut state),
-                TerminationState::Terminated(result) => return result.clone(),
-                TerminationState::Failed(error) => return Err(error.clone()),
-                TerminationState::Open => xlfn_kernel::invariant::fail_stop(),
+            match &state.completion {
+                CompletionState::Pending => self.coordinator.completed.wait(&mut state),
+                CompletionState::Done(result) => return result.result(),
             }
         }
     }
 }
-
 pub(super) struct TerminationCompleted {
     result: XllResult<()>,
 }
-
 impl TerminationCompleted {
     pub(super) fn result(self) -> XllResult<()> {
         self.result

@@ -13,11 +13,42 @@ use crate::{XllError, XllResult};
 use crossbeam_utils::CachePadded;
 use rustc_hash::FxHashMap;
 use std::any::{Any, TypeId, type_name};
-use std::collections::hash_map::Entry;
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 use xlfn_kernel::published_owner::PublishedOwner;
+
+/// A unique identity reserved from, and inseparable from, its original arena.
+/// The allocator is private and monotonic, so insertion cannot overwrite an
+/// existing live object or accept a separately supplied copied ObjectId.
+struct FreshObject<'arena> {
+    arena: &'arena PublishedOwner<ObjectArena>,
+    id: ObjectId,
+}
+impl FreshObject<'_> {
+    /// The registry retains its arena through all bindings and final releases.
+    unsafe fn insert<T: Send + Sync + 'static>(self, value: T) -> XllResult<ObjectBinding> {
+        let cell = ObjectAllocationOwner::new(NonNull::from(self.arena.as_ref()), self.id, value);
+        let pointer = NonNull::from(cell.as_ref());
+        let mut state = self.arena.state(self.id).lock();
+        if state.sealed {
+            return Err(XllError::Closing);
+        }
+        state.objects.insert(
+            self.id,
+            ObjectEntry {
+                cell,
+                bindings: 1,
+                pins: 0,
+            },
+        );
+        drop(state);
+        self.arena
+            .record(crate::shutdown_trace::ShutdownEvent::AddHandleObject);
+        Ok(ObjectBinding { cell: pointer })
+    }
+}
 
 /// A type-checked, non-owning projection into an [`ObjectCell`].
 pub(crate) struct TypedObjectProjection<T: 'static> {
@@ -103,6 +134,7 @@ struct ObjectArenaState {
 
 /// Unique owner and reclamation authority for handle payloads.
 pub(crate) struct ObjectArena {
+    next_object_id: AtomicU64,
     states: [CachePadded<Mutex<ObjectArenaState>>; OBJECT_SHARD_COUNT],
     cleanup: HandleCleanupState,
     #[cfg(any(test, feature = "refinement"))]
@@ -114,6 +146,7 @@ pub(crate) struct ObjectArena {
 impl ObjectArena {
     pub(crate) fn new() -> Self {
         Self {
+            next_object_id: AtomicU64::new(1),
             states: std::array::from_fn(|_| {
                 CachePadded::new(Mutex::new(ObjectArenaState {
                     objects: FxHashMap::default(),
@@ -145,40 +178,32 @@ impl ObjectArena {
         std::array::from_fn(|index| self.states[index].lock())
     }
 
-    /// Inserts an object under the registry's unique arena owner. Pending
-    /// bindings borrow that registry; published records belong to its table.
-    /// Taking the published owner fixes the allocation's address before any
-    /// binding pointer is created; moving a stack arena cannot invalidate it.
-    ///
-    /// # Safety
-    ///
-    /// The caller must retain the arena at this address through every binding,
-    /// pin and final release derived from the result. It must validate that
-    /// these capabilities have drained before recovering or dropping the
-    /// published allocation. The registry is the sole production caller.
+    fn reserve<'arena>(
+        arena: &'arena PublishedOwner<Self>,
+        session: u64,
+    ) -> XllResult<FreshObject<'arena>> {
+        let id = arena
+            .next_object_id
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .map(|sequence| ObjectId::new(session, sequence))
+            .map_err(|_| XllError::Domain {
+                code: crate::error::DomainErrorCode::Overflow,
+            })?;
+        Ok(FreshObject { arena, id })
+    }
+
+    // Fixtures choose IDs to exercise particular shards and allocation layouts.
+    // Production can only insert through a fresh identity's original arena.
+    #[cfg(test)]
     pub(crate) unsafe fn insert<T: Send + Sync + 'static>(
         arena: &PublishedOwner<Self>,
         id: ObjectId,
         value: T,
     ) -> XllResult<ObjectBinding> {
-        let cell = ObjectAllocationOwner::new(NonNull::from(arena.as_ref()), id, value);
-
-        let mut state = arena.state(id).lock();
-        if state.sealed {
-            return Err(XllError::Closing);
-        }
-        let entry = match state.objects.entry(id) {
-            Entry::Vacant(entry) => entry.insert(ObjectEntry {
-                cell,
-                bindings: 1,
-                pins: 0,
-            }),
-            Entry::Occupied(_) => xlfn_kernel::invariant::fail_stop(),
-        };
-        let cell_pointer = NonNull::from(entry.cell.as_ref());
-        drop(state);
-        arena.record(crate::shutdown_trace::ShutdownEvent::AddHandleObject);
-        Ok(ObjectBinding { cell: cell_pointer })
+        // SAFETY: the fixture retains the owner through every derived count.
+        unsafe { FreshObject { arena, id }.insert(value) }
     }
 
     fn duplicate_binding(&self, id: ObjectId, cell: NonNull<ObjectCell>) -> XllResult<()> {
@@ -641,13 +666,15 @@ pub(crate) struct PendingObjectBinding<'registry, T: Send + Sync + 'static> {
 impl<'registry, T: Send + Sync + 'static> PendingObjectBinding<'registry, T> {
     pub(super) fn new(
         registry: &'registry super::registry::HandleRegistry,
-        id: ObjectId,
         value: T,
     ) -> XllResult<Self> {
         // SAFETY: the registry retains the fixed arena allocation. This
         // pending binding borrows it, publication transfers the count into
         // its table, and registry reclamation drains every count and pin.
-        let binding = unsafe { ObjectArena::insert(&registry.objects, id, value) }?;
+        let fresh = ObjectArena::reserve(&registry.objects, registry.codec.session)?;
+        // SAFETY: this pending capability borrows the registry that retains
+        // the receipt's exact arena through every derived binding and pin.
+        let binding = unsafe { fresh.insert(value) }?;
         Ok(Self {
             binding,
             registry,
@@ -816,26 +843,30 @@ mod benchmark {
             let arena = Arc::new(PublishedOwner::new(ObjectArena::new()));
             // SAFETY: this benchmark retains the published arena owner until
             // all worker bindings, pins, and release completions have drained.
-            let binding = unsafe { ObjectArena::insert(&arena, ObjectId::new(1, 1), 42_u64) }
-                .expect("benchmark seed binding");
+            let binding = unsafe {
+                ObjectArena::reserve(&arena, 1)
+                    .expect("benchmark fresh ID")
+                    .insert(42_u64)
+            }
+            .expect("benchmark seed binding");
             let mut start_tx = Vec::with_capacity(worker_count);
             let mut done_rx = Vec::with_capacity(worker_count);
             let mut workers = Vec::with_capacity(worker_count);
             let barrier = Arc::new(Barrier::new(worker_count + 1));
-            for worker in 0..worker_count {
+            for _ in 0..worker_count {
                 let worker_binding = match case {
                     ObjectLeaseBenchCase::SameObject => {
                         binding.duplicate().expect("benchmark duplicate binding")
                     }
                     ObjectLeaseBenchCase::DistinctObjects => {
-                        let id = ObjectId::new(
-                            1,
-                            u64::try_from(worker + 2).expect("worker object ID fits u64"),
-                        );
                         // SAFETY: every worker retains an arena owner through
                         // explicit binding destruction and its release tail.
-                        unsafe { ObjectArena::insert(&arena, id, 42_u64) }
-                            .expect("benchmark worker binding")
+                        unsafe {
+                            ObjectArena::reserve(&arena, 1)
+                                .expect("benchmark fresh ID")
+                                .insert(42_u64)
+                        }
+                        .expect("benchmark worker binding")
                     }
                 };
                 let worker_arena = Arc::clone(&arena);
@@ -945,8 +976,12 @@ mod benchmark {
             let arena = PublishedOwner::new(ObjectArena::new());
             // SAFETY: this fixture retains the arena through the pin's final
             // release, including application destruction and completion.
-            let binding = unsafe { ObjectArena::insert(&arena, ObjectId::new(1, 1), 42_u64) }
-                .expect("benchmark final-pin binding");
+            let binding = unsafe {
+                ObjectArena::reserve(&arena, 1)
+                    .expect("benchmark fresh ID")
+                    .insert(42_u64)
+            }
+            .expect("benchmark final-pin binding");
             let pin = binding.acquire_lease().expect("benchmark final pin");
             drop(binding);
             Self {
@@ -968,6 +1003,42 @@ mod benchmark {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn miri_fresh_identity_keeps_its_own_arena_with_equal_foreign_ids() {
+        static_assertions::assert_not_impl_any!(FreshObject<'static>: Copy, Clone);
+        let first = PublishedOwner::new(ObjectArena::new());
+        let second = PublishedOwner::new(ObjectArena::new());
+        let own = ObjectArena::reserve(&first, 7).unwrap();
+        let foreign = ObjectArena::reserve(&second, 7).unwrap();
+        assert_eq!(
+            own.id, foreign.id,
+            "copied identity alone cannot identify an arena"
+        );
+        // SAFETY: both published arena owners outlive every derived binding.
+        let left = unsafe { own.insert(1_u32) }.unwrap();
+        // SAFETY: same independent owner-lifetime guarantee for the second arena.
+        let right = unsafe { foreign.insert(2_u32) }.unwrap();
+        assert_eq!(left.arena(), NonNull::from(first.as_ref()));
+        assert_eq!(right.arena(), NonNull::from(second.as_ref()));
+        drop(left);
+        drop(right);
+        assert!(first.finish_quiescence().is_ok());
+        assert!(second.finish_quiescence().is_ok());
+    }
+
+    #[test]
+    fn fresh_identity_overflow_does_not_issue_an_insertion_owner() {
+        let arena = PublishedOwner::new(ObjectArena::new());
+        arena.next_object_id.store(u64::MAX, Ordering::Relaxed);
+        assert!(matches!(
+            ObjectArena::reserve(&arena, 7),
+            Err(XllError::Domain {
+                code: crate::error::DomainErrorCode::Overflow
+            })
+        ));
+        assert!(arena.finish_quiescence().is_ok());
+    }
 
     #[test]
     fn distinct_object_pins_do_not_wait_for_an_unrelated_shard() {

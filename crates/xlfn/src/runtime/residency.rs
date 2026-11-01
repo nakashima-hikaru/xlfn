@@ -30,8 +30,8 @@ enum ReleaseReason<'a, A: Addin> {
 }
 
 impl<A: Addin> ResidencyRelease<'_, A> {
-    pub(crate) fn belongs_to(&self, module: &ModuleResidency) -> bool {
-        std::ptr::eq(self.module, module)
+    pub(crate) fn module(&self) -> &ModuleResidency {
+        self.module
     }
     pub(crate) fn acquisition(&self) -> Option<&ResidencyLeaseId> {
         match &self.reason {
@@ -40,7 +40,7 @@ impl<A: Addin> ResidencyRelease<'_, A> {
         }
     }
     fn release(self) -> XllResult<ResidencyReleaseOutcome> {
-        let outcome = self.module.release_authorized(&self)?;
+        let outcome = ModuleResidency::release_authorized(&self)?;
         if let ReleaseReason::Closed { completed, .. } = self.reason {
             completed.clear();
         }

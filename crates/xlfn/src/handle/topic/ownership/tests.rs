@@ -18,6 +18,8 @@ fn miri_published_topic_abandonment_keeps_live_reader_allocation() {
         let pointer = owner.owner.as_ptr();
         table
             .published
+            .entries
+            .pin()
             .insert(key, PublishedTopicPtr::from_ref(owner.as_ref()));
         let reader = table.enter_read_lease().unwrap();
         let publication = reader.load(&key).unwrap();
@@ -56,6 +58,8 @@ fn drained_topic_owner_reclaims_only_after_reader_release() {
     let key = test_topic_key("retired-topic-reader");
     table
         .published
+        .entries
+        .pin()
         .insert(key, PublishedTopicPtr::from_ref(owner.as_ref()));
     let reader = table.enter_read_lease().unwrap();
     let publication = reader.load(&key).unwrap();

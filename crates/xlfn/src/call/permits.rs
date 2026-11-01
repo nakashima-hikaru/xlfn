@@ -7,32 +7,39 @@ verus! {
 pub(crate) enum Retained<P> { Empty, Single(P), Multiple(Vec<P>) }
 }
 macro_rules! retain_logic {
-    ($slot:ident, $permit:ident, $impossible:expr) => {{
-        match $slot {
-            Retained::Empty => *$slot = Retained::Single($permit),
-            Retained::Single(_) => {
-                // Allocate before temporarily moving existing ownership out.
-                let mut list = Vec::with_capacity(2);
-                let mut previous = Retained::Empty;
-                core::mem::swap($slot, &mut previous);
-                match previous {
-                    Retained::Single(existing) => {
-                        list.push(existing);
-                        list.push($permit);
-                        *$slot = Retained::Multiple(list);
-                    }
-                    _ => $impossible,
-                }
+    ($slot:ident, $permit:ident) => {{
+        // Reserve while all existing permits still belong to the caller.
+        // Once movement starts every next push fits, and exhaustive matching
+        // transports ownership without a second, allegedly impossible phase.
+        let mut first_pair = match $slot {
+            Retained::Single(_) => Vec::with_capacity(2),
+            Retained::Multiple(list) => {
+                list.reserve(1);
+                Vec::new()
             }
-            Retained::Multiple(list) => list.push($permit),
-        }
+            Retained::Empty => Vec::new(),
+        };
+        let mut previous = Retained::Empty;
+        core::mem::swap($slot, &mut previous);
+        *$slot = match previous {
+            Retained::Empty => Retained::Single($permit),
+            Retained::Single(existing) => {
+                first_pair.push(existing);
+                first_pair.push($permit);
+                Retained::Multiple(first_pair)
+            }
+            Retained::Multiple(mut list) => {
+                list.push($permit);
+                Retained::Multiple(list)
+            }
+        };
     }};
 }
 #[cfg(not(verus_only))]
 impl<P> Retained<P> {
     #[inline]
     pub(crate) fn insert(&mut self, permit: P) {
-        retain_logic!(self, permit, xlfn_kernel::invariant::fail_stop());
+        retain_logic!(self, permit);
     }
 }
 #[cfg(verus_only)]
@@ -43,6 +50,6 @@ impl<P> Retained<P> {
     }
     pub(crate) fn insert(&mut self, permit: P)
         ensures final(self).view() == old(self).view().push(permit),
-    { retain_logic!(self, permit, vstd::prelude::verus_exec_expr!({ assert(false); })); }
+    { retain_logic!(self, permit); }
 }
 }

@@ -152,12 +152,6 @@ impl PublishedTopics {
         self.entries.pin().get(key).copied()
     }
 
-    fn insert(&self, key: HandleTopicKey, topic: PublishedTopicPtr) {
-        if self.entries.pin().try_insert(key, topic).is_err() {
-            xlfn_kernel::invariant::fail_stop();
-        }
-    }
-
     fn remove(&self, key: HandleTopicKey) {
         self.entries.pin().remove(&key);
     }
@@ -531,27 +525,14 @@ impl TopicTable {
         publication: PublishedTopicPtr,
         on_linearized: impl FnOnce(),
     ) -> XllResult<()> {
-        let mut state = self.state.write();
-        if state.closed || state.generation != generation {
-            return Err(XllError::Closing);
-        }
-        if state.initializing.get(&key) != Some(initialization) {
-            return Err(XllError::StaleHandle);
-        }
-        let Some(topic) = state.by_key.get_mut(&key) else {
-            return Err(XllError::StaleHandle);
-        };
-        if PublishedTopicPtr::from_ref(topic.publication.as_ref()) != publication {
-            return Err(XllError::StaleHandle);
-        }
-        topic
-            .publication
-            .state
-            .store(PublishedTopicState::Live as u8, Ordering::Release);
-        self.published.insert(key, publication);
-        state.initializing.remove(&key);
-        on_linearized();
-        Ok(())
+        ownership::commit_publication(
+            self,
+            key,
+            generation,
+            initialization,
+            publication,
+            on_linearized,
+        )
     }
 
     pub(crate) fn finish_initialization(

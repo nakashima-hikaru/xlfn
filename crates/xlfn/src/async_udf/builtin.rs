@@ -6,7 +6,7 @@ mod worker;
 use super::{AsyncExecutor, AsyncTask};
 use crate::diagnostics::id::DiagnosticId;
 use crate::error::DomainErrorCode;
-use crate::sync::{Condvar, Mutex};
+use crate::sync::{Condvar, Mutex, MutexGuard};
 use crate::{XllError, XllResult};
 use async_task::Runnable;
 use crossbeam_utils::sync::Parker;
@@ -140,6 +140,31 @@ enum Lifecycle {
     Stopped(XllResult<()>),
 }
 
+// Issued only by classifying Idle while holding this executor's lifecycle
+// lock. It owns startup through publication; neither the target nor the pool
+// can be supplied again by a caller after startup.
+struct BuiltinStartup<'executor> {
+    executor: &'executor BuiltinAsyncExecutor,
+    lifecycle: MutexGuard<'executor, Lifecycle>,
+}
+
+impl BuiltinStartup<'_> {
+    fn start(mut self) -> XllResult<()> {
+        #[cfg(test)]
+        let fail_at = self.executor.fail_start_at;
+        #[cfg(not(test))]
+        let fail_at = None;
+        let pool = Pool::start(self.executor.config.poller_count.get(), fail_at)?;
+        // This cell has one initializer: the consumed, locked Idle claim.
+        // Failed startup leaves it untouched so a later attempt can retry.
+        self.executor
+            .shared
+            .get_or_init(|| Arc::clone(&pool.shared));
+        *self.lifecycle = Lifecycle::Running(pool);
+        Ok(())
+    }
+}
+
 /// Owned scheduling state reserved before task publication.
 #[doc(hidden)]
 pub struct BuiltinReservation {
@@ -172,7 +197,7 @@ impl AsyncExecutor for BuiltinAsyncExecutor {
     type Reservation = BuiltinReservation;
 
     fn start(&self) -> XllResult<()> {
-        let mut lifecycle = self.lifecycle.lock();
+        let lifecycle = self.lifecycle.lock();
         match &*lifecycle {
             Lifecycle::Running(pool) => {
                 return if pool.shared.failed.load(Ordering::Acquire) {
@@ -184,16 +209,11 @@ impl AsyncExecutor for BuiltinAsyncExecutor {
             Lifecycle::Closing | Lifecycle::Stopped(_) => return Err(XllError::Closing),
             Lifecycle::Idle => {}
         }
-        #[cfg(test)]
-        let fail_at = self.fail_start_at;
-        #[cfg(not(test))]
-        let fail_at = None;
-        let pool = Pool::start(self.config.poller_count.get(), fail_at)?;
-        if self.shared.set(Arc::clone(&pool.shared)).is_err() {
-            xlfn_kernel::invariant::fail_stop();
+        BuiltinStartup {
+            executor: self,
+            lifecycle,
         }
-        *lifecycle = Lifecycle::Running(pool);
-        Ok(())
+        .start()
     }
 
     fn reserve(&self) -> XllResult<Self::Reservation> {
@@ -232,21 +252,19 @@ impl AsyncExecutor for BuiltinAsyncExecutor {
         let mut pool = {
             let mut lifecycle = self.lifecycle.lock();
             loop {
-                match &*lifecycle {
+                match std::mem::replace(&mut *lifecycle, Lifecycle::Closing) {
                     Lifecycle::Idle => {
                         *lifecycle = Lifecycle::Stopped(Ok(()));
                         self.stopped.notify_all();
                         return Ok(());
                     }
-                    Lifecycle::Stopped(result) => return result.clone(),
+                    Lifecycle::Stopped(result) => {
+                        *lifecycle = Lifecycle::Stopped(result.clone());
+                        return result;
+                    }
                     Lifecycle::Closing => self.stopped.wait(&mut lifecycle),
                     Lifecycle::Running(pool) => {
                         pool.shared.closing.store(true, Ordering::Release);
-                        let Lifecycle::Running(pool) =
-                            std::mem::replace(&mut *lifecycle, Lifecycle::Closing)
-                        else {
-                            xlfn_kernel::invariant::fail_stop();
-                        };
                         break pool;
                     }
                 }

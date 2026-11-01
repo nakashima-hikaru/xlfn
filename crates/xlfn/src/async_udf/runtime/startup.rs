@@ -15,7 +15,7 @@ struct StartupOwner<'a, E: AsyncExecutor> {
     runtime: &'a AsyncRuntime<E>,
     executor: Option<PublishedOwner<E>>,
     start_attempted: bool,
-    registry_armed: bool,
+    registry: Option<crate::async_udf::registry::control::RegistryPreparedStart<'a>>,
 }
 
 impl<'a, E: AsyncExecutor> StartupClaim<'a, E> {
@@ -32,7 +32,7 @@ impl<'a, E: AsyncExecutor> StartupClaim<'a, E> {
                 runtime,
                 executor: Some(PublishedOwner::new(executor)),
                 start_attempted: false,
-                registry_armed: false,
+                registry: None,
             },
         })
     }
@@ -58,8 +58,7 @@ impl<'a, E: AsyncExecutor> StartupClaim<'a, E> {
 
 impl<'a, E: AsyncExecutor> ExecutorStarted<'a, E> {
     fn arm(mut self, limit: crate::addin::AsyncTaskLimit) -> XllResult<RegistryArmed<'a, E>> {
-        self.owner.runtime.registry().start(limit)?;
-        self.owner.registry_armed = true;
+        self.owner.registry = Some(self.owner.runtime.registry().prepare_start(limit)?);
         Ok(RegistryArmed { owner: self.owner })
     }
 }
@@ -68,23 +67,20 @@ impl<E: AsyncExecutor> RegistryArmed<'_, E> {
     fn publish(mut self) {
         let runtime = self.owner.runtime;
         let mut state = runtime.state.lock();
-        if !matches!(*state, ExecutorSlot::Starting) {
-            xlfn_kernel::invariant::fail_stop();
-        }
+        // Only this startup owner can publish or roll back Starting; close
+        // waits for it and cannot replace the canonical slot meanwhile.
         let executor = self.owner.executor.take().expect("startup owns executor");
         let pointer = NonNull::from(executor.as_ref());
         *state = ExecutorSlot::Running(executor);
         runtime
             .publication
             .store(pointer.as_ptr(), Ordering::Release);
-        drop(
-            runtime
-                .spawn_admission
-                .control()
-                .wait_if_sealed()
-                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
-                .reopen(),
-        );
+        self.owner
+            .registry
+            .take()
+            .expect("armed startup owns registry preparation")
+            .publish();
+        drop(runtime.spawn_admission.control().seal().wait().reopen());
         runtime.state_changed.notify_all();
         drop(state);
         runtime
@@ -101,15 +97,10 @@ impl<E: AsyncExecutor> Drop for StartupOwner<'_, E> {
         };
         // Until publication, admission stays sealed. No executor callbacks or
         // destruction run under state, registry, or notification locks.
-        if self.registry_armed {
-            self.runtime
-                .registry()
-                .request_close()
-                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
-                .cancel()
-                .wait()
-                .finish();
-        }
+        // Dropping the exact preparation unlocks its management guards and
+        // destroys only an unpublished candidate; no second close claim is
+        // acquired and no broad phase reconstruction is needed on rollback.
+        drop(self.registry.take());
         let stopped = !self.start_attempted
             || crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
                 executor.shutdown()

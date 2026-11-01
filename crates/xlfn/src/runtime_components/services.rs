@@ -87,6 +87,7 @@ pub(crate) struct GenerationServices<
     E: RtdSubscription = (),
     C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
 > {
+    generation: RuntimeGeneration,
     marker: std::marker::PhantomData<fn() -> (E, C)>,
     #[cfg(feature = "handles")]
     formula_handles: crate::handle::FormulaHandleServiceSlot,
@@ -115,33 +116,20 @@ pub(crate) struct SealedGenerationServices {
 
 /// Reservation for a generation-owned service bundle.
 ///
-/// Arming is a transaction: until the reservation is committed, dropping it
-/// rolls both slots back. A rollback failure means the slot protocol has
-/// violated its ownership invariant, so it is fail-stopped instead of being
-/// silently discarded at an open boundary.
+/// Before publication this owner can destroy the exclusive service bundle.
+/// Slot destruction drains its own readers and reclaims outside its locks;
+/// it also handles a handle slot already initialized to Ready.
 #[must_use = "an armed service reservation must be committed or rolled back"]
 pub(crate) struct ArmedServices<
     E: RtdSubscription = (),
     C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
 > {
-    services: Option<GenerationServices<E, C>>,
+    services: GenerationServices<E, C>,
 }
 
 impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> ArmedServices<E, C> {
-    pub(crate) fn commit(mut self) -> Box<GenerationServices<E, C>> {
-        Box::new(
-            self.services
-                .take()
-                .expect("an armed service reservation owns its service bundle"),
-        )
-    }
-}
-
-impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop for ArmedServices<E, C> {
-    fn drop(&mut self) {
-        if let Some(services) = self.services.as_ref() {
-            services.disarm_or_abort();
-        }
+    pub(crate) fn commit(self) -> Box<GenerationServices<E, C>> {
+        Box::new(self.services)
     }
 }
 
@@ -155,6 +143,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
         #[cfg(not(feature = "rtd"))]
         let _ = (generation, inputs);
         let services = Self {
+            generation,
             marker: std::marker::PhantomData,
             #[cfg(feature = "handles")]
             formula_handles: crate::handle::FormulaHandleServiceSlot::new(),
@@ -167,23 +156,13 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
         #[cfg(feature = "handles")]
         services.formula_handles.arm(_config.handle_config())?;
         #[cfg(feature = "rtd")]
-        if let Err(error) =
-            services
-                .rtd
-                .subscriptions
-                .arm(generation, _config.rtd_limits(), inputs.rtd_sources)
-        {
-            services.disarm_or_abort();
-            return Err(error);
-        }
+        services
+            .rtd
+            .subscriptions
+            .arm(generation, _config.rtd_limits(), inputs.rtd_sources)?;
         #[cfg(feature = "handles")]
-        if let Err(error) = services.formula_handles.initialize() {
-            services.disarm_or_abort();
-            return Err(error);
-        }
-        Ok(ArmedServices {
-            services: Some(services),
-        })
+        services.formula_handles.initialize()?;
+        Ok(ArmedServices { services })
     }
 
     #[cfg(feature = "handles")]
@@ -242,13 +221,17 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
 
     pub(crate) fn seal(
         &self,
-        generation: Option<RuntimeGeneration>,
         subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     ) -> crate::XllResult<SealedGenerationServices> {
+        if subscriptions_stopped.generation() != Some(self.generation) {
+            return Err(crate::XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
+            });
+        }
         #[cfg(feature = "handles")]
-        let handles = self.formula_handles.seal(generation)?;
+        let handles = self.formula_handles.seal(self.generation)?;
         #[cfg(not(feature = "handles"))]
-        let handles = HandlesSealed::empty(generation);
+        let handles = HandlesSealed::empty(Some(self.generation));
         Ok(SealedGenerationServices {
             handles,
             subscriptions_stopped,
@@ -266,25 +249,6 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
         let subscriptions_none = true;
         handles_none && subscriptions_none
     }
-
-    pub(crate) fn disarm_or_abort(&self) {
-        if let Err(error) = self.disarm_generation() {
-            tracing::error!(%error, "generation service rollback violated its state invariant");
-            std::process::abort();
-        }
-    }
-
-    pub(crate) fn disarm_generation(&self) -> crate::XllResult<()> {
-        #[cfg(feature = "handles")]
-        let handle_result = self.formula_handles.disarm();
-        #[cfg(not(feature = "handles"))]
-        let handle_result: crate::XllResult<()> = Ok(());
-        #[cfg(feature = "rtd")]
-        let subscription_result = self.rtd.subscriptions.disarm();
-        #[cfg(not(feature = "rtd"))]
-        let subscription_result = Ok(());
-        handle_result.and(subscription_result)
-    }
 }
 
 impl SealedGenerationServices {
@@ -295,9 +259,8 @@ impl SealedGenerationServices {
         subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     ) -> crate::XllResult<Self> {
         let control = lifecycle.access();
-        let generation = control.protocol_generation();
         if let Some(services) = control.generation_services() {
-            return services.seal(generation, subscriptions_stopped);
+            return services.seal(subscriptions_stopped);
         }
         Ok(Self {
             handles: crate::shutdown::HandlesSealed::absent_services(&control)?,
@@ -313,5 +276,62 @@ impl SealedGenerationServices {
     )> {
         let handles_quiescent = self.handles.finish()?;
         Ok((handles_quiescent, self.subscriptions_stopped))
+    }
+}
+
+#[cfg(all(test, feature = "handles"))]
+mod tests {
+    use super::*;
+
+    fn armed() -> ArmedServices {
+        let generation = RuntimeGeneration::new(1).unwrap();
+        GenerationServices::arm_generation(
+            generation,
+            crate::addin::RuntimeConfig::default(),
+            #[cfg(feature = "rtd")]
+            crate::excel_rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
+            GenerationServiceInputs::empty_for_generation(generation),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn miri_unpublished_ready_service_bundle_can_be_abandoned() {
+        let reservation = armed();
+        assert!(
+            reservation
+                .services
+                .formula_handles
+                .read_if_ready()
+                .is_some()
+        );
+        // A Ready service is not a Cold disarm transaction. Exclusive slot
+        // destruction supplies drain/reclaim authority instead.
+        drop(reservation);
+    }
+
+    #[test]
+    fn miri_rejected_unpublished_service_bundle_destroys_its_ready_slot() {
+        let services = armed().commit();
+        assert!(services.formula_handles.read_if_ready().is_some());
+        drop(services);
+    }
+
+    #[test]
+    #[allow(
+        unsafe_code,
+        reason = "trusted test restores only its own forgotten unique allocation after checking retention"
+    )]
+    fn miri_forgotten_unpublished_services_do_not_reclaim_early() {
+        // `into_raw` is the recoverable form of forgetting the unique Box. It
+        // keeps provenance valid across ownership transfer, unlike a pointer
+        // borrowed from a Box before moving that Box into mem::forget.
+        let retained = Box::into_raw(Box::new(armed()));
+        // SAFETY: transferring the unique Box left this allocation live.
+        let service = unsafe { &*retained };
+        assert!(service.services.formula_handles.read_if_ready().is_some());
+        // SAFETY: the test restores the single forgotten Box after its
+        // observation, so Miri can also verify final destruction without leaks.
+        unsafe { drop(Box::from_raw(retained)) };
     }
 }

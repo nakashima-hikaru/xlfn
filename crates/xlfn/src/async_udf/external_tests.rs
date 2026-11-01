@@ -70,7 +70,7 @@ fn external_reservation_rejection_precedes_framework_task_registration() {
         Err(XllError::Overloaded)
     ));
     assert_eq!(runtime.registry().active_tasks.load(Ordering::Acquire), 0);
-    assert_eq!(runtime.registry().next_id.load(Ordering::Relaxed), 1);
+    assert_eq!(runtime.registry().next_task_id(), 1);
     assert!(runtime.close().unwrap().issues.is_empty());
 }
 

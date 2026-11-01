@@ -87,14 +87,16 @@ pub(crate) struct CleanupOnlyValue<'session> {
 }
 impl<'session> CallbackResult<'session> {
     #[cfg(test)]
-    fn classify(owner: ExcelCallbackValue<'session>) -> Self {
-        match owner.state {
-            CallbackValueReleaseState::Live => Self::Readable(owner),
-            CallbackValueReleaseState::TerminalSuppressed { .. } => {
-                Self::CleanupOnly(CleanupOnlyValue { owner })
-            }
-            CallbackValueReleaseState::Released => Self::Empty,
-            CallbackValueReleaseState::Indeterminate { .. } => xlfn_kernel::invariant::fail_stop(),
+    fn callback_for_test(
+        raw: XLOPER12,
+        status: ExcelCallbackStatus,
+        release: ReleaseCallback,
+    ) -> Self {
+        let owner = ExcelCallbackValue::from_callback_for_test(raw, status, release);
+        if status.is_terminal() {
+            Self::CleanupOnly(CleanupOnlyValue { owner })
+        } else {
+            Self::Readable(owner)
         }
     }
     pub(crate) fn readable(&mut self) -> XllResult<&mut ExcelCallbackValue<'session>> {
@@ -372,12 +374,8 @@ mod tests {
             ExcelCallbackStatus::Uncalced,
         ] {
             FREE_CALLS.store(0, Ordering::Relaxed);
-            let owner = ExcelCallbackValue::from_callback_for_test(
-                XLOPER12::integer(7),
-                status,
-                successful_free,
-            );
-            let mut result = CallbackResult::classify(owner);
+            let mut result =
+                CallbackResult::callback_for_test(XLOPER12::integer(7), status, successful_free);
             assert_eq!(
                 result.readable().is_ok(),
                 status == ExcelCallbackStatus::Success
@@ -391,12 +389,12 @@ mod tests {
     fn miri_consumed_callback_cleanup_failure_cannot_retry() {
         let _test_guard = TEST_LOCK.lock().unwrap();
         FREE_CALLS.store(0, Ordering::Relaxed);
-        let owner = ExcelCallbackValue::from_callback_for_test(
+        let result = CallbackResult::callback_for_test(
             XLOPER12::integer(7),
             ExcelCallbackStatus::Success,
             failed_free,
         );
-        let error = CallbackResult::classify(owner).release().unwrap_err();
+        let error = result.release().unwrap_err();
         assert!(matches!(error, XllError::ExcelApi { .. }));
         assert_eq!(
             FREE_CALLS.load(Ordering::Relaxed),
@@ -415,12 +413,12 @@ mod tests {
         FREE_CALLS.store(0, Ordering::Relaxed);
         // The fake integer callback has no actual allocation; only its one
         // cleanup obligation is deliberately retained by safe forget.
-        let owner = ExcelCallbackValue::from_callback_for_test(
+        let result = CallbackResult::callback_for_test(
             XLOPER12::integer(7),
             ExcelCallbackStatus::Success,
             successful_free,
         );
-        std::mem::forget(CallbackResult::classify(owner));
+        std::mem::forget(result);
         assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 0);
     }
     use crate::host_callback::HostCallbackSession;

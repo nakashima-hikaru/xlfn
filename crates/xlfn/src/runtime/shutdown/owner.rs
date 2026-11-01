@@ -22,6 +22,13 @@ pub(crate) struct RemovalClaimGuard<'runtime, A: crate::Addin> {
     finalization_failed: bool,
 }
 
+/// A module capability has returned, while the same canonical claim remains
+/// retained until terminal quarantine and binding cleanup complete. It exposes
+/// no second return or normal teardown progression operation.
+pub(super) struct ReturnedRemovalClaimGuard<'runtime, A: crate::Addin> {
+    _guard: RemovalClaimGuard<'runtime, A>,
+}
+
 impl<A: crate::Addin> Drop for RemovalClaimGuard<'_, A> {
     fn drop(&mut self) {
         let lifecycle = crate::lifecycle::LifecycleControl::new(self.lifecycle);
@@ -33,6 +40,7 @@ impl<A: crate::Addin> Drop for RemovalClaimGuard<'_, A> {
 }
 
 impl<'runtime, A: crate::Addin, K> RemovalOwner<'runtime, A, K> {
+    #[cfg(test)]
     fn new(
         deps: ShutdownDeps<'runtime, A>,
         claim: IssuedRemovalClaim<'runtime, A, K>,
@@ -71,13 +79,13 @@ impl<'runtime, A: crate::Addin, K> RemovalOwner<'runtime, A, K> {
 
 impl<A: crate::Addin, K> Drop for RemovalOwner<'_, A, K> {
     fn drop(&mut self) {
-        if let Some((mut guard, closing)) = self.state.take() {
-            guard.return_module_authority(ModuleCleanupAuthority::Closing(closing));
+        if let Some((guard, closing)) = self.state.take() {
+            drop(guard.return_module_authority(ModuleCleanupAuthority::Closing(closing)));
         }
     }
 }
 
-impl<A: crate::Addin> RemovalClaimGuard<'_, A> {
+impl<'runtime, A: crate::Addin> RemovalClaimGuard<'runtime, A> {
     pub(super) fn mark_finalization_failed(&mut self) {
         self.finalization_failed = true;
     }
@@ -97,68 +105,101 @@ impl<A: crate::Addin> RemovalClaimGuard<'_, A> {
         self.attempt
     }
 
-    pub(super) fn return_module_authority(&mut self, authority: ModuleCleanupAuthority) {
+    pub(super) fn return_module_authority(
+        self,
+        authority: ModuleCleanupAuthority,
+    ) -> ReturnedRemovalClaimGuard<'runtime, A> {
         let lifecycle = crate::lifecycle::LifecycleControl::new(self.lifecycle);
         let mut control = lifecycle.access();
         lifecycle.return_removal_authority(&mut control, self.attempt, authority);
+        ReturnedRemovalClaimGuard { _guard: self }
     }
 }
 
-impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A, FinalRemoval> {
-    pub(in crate::runtime) fn acquire_final(deps: ShutdownDeps<'runtime, A>) -> Option<Self> {
-        let mut wait_guard = deps.lifecycle().access();
-        wait_guard.begin_final_removal_request();
-        deps.returns().close_admission();
+// The dependency bundle and locked lifecycle access are acquired together.
+// Only this factory turns its own decisions into removal owners; production
+// callers cannot inject an independently issued claim into the bridge.
+struct RemovalAcquisition<'runtime, A: crate::Addin> {
+    deps: ShutdownDeps<'runtime, A>,
+    access: crate::lifecycle::LifecycleAccess<'runtime, A>,
+}
+
+impl<'runtime, A: crate::Addin> RemovalAcquisition<'runtime, A> {
+    fn new(deps: ShutdownDeps<'runtime, A>) -> Self {
+        Self {
+            deps,
+            access: deps.lifecycle().access(),
+        }
+    }
+
+    fn final_owner(mut self) -> Option<RemovalOwner<'runtime, A, FinalRemoval>> {
+        self.access.begin_final_removal_request();
+        self.deps.returns().close_admission();
         let mut request_recorded = false;
 
         loop {
-            match wait_guard.final_close_decision() {
+            match self.access.final_close_decision() {
                 FinalCloseDecision::ClosedIdle => {
-                    if deps.returns().returns_are_quiescent() {
-                        deps.observer().request_final_close(&mut request_recorded);
+                    if self.deps.returns().returns_are_quiescent() {
+                        self.deps
+                            .observer()
+                            .request_final_close(&mut request_recorded);
                         return None;
                     }
-                    drop(wait_guard);
-                    deps.returns().wait_for_returns();
-                    wait_guard = deps.lifecycle().access();
+                    drop(self.access);
+                    self.deps.returns().wait_for_returns();
+                    self.access = self.deps.lifecycle().access();
                     continue;
                 }
                 FinalCloseDecision::Quarantined => return None,
                 FinalCloseDecision::Wait => {
-                    deps.observer().request_final_close(&mut request_recorded);
+                    self.deps
+                        .observer()
+                        .request_final_close(&mut request_recorded);
                 }
                 FinalCloseDecision::Closing(closing) => {
-                    // `closing` borrows the access obtained from these deps.
-                    // The private owner bridge validates independently issued
-                    // claims when it joins them to their runtime dependencies.
-                    deps.observer().request_final_close(&mut request_recorded);
+                    // This access belongs to the factory's own dependency
+                    // bundle; no caller can supply an independent claim.
+                    self.deps
+                        .observer()
+                        .request_final_close(&mut request_recorded);
                     if let Some(claim) = closing.try_claim() {
-                        let owner = Self::new(deps, claim)
-                            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-                        drop(wait_guard);
-                        deps.observer().acquire_final_close_owner();
+                        let claim: IssuedRemovalClaim<'runtime, A, FinalRemoval> = claim;
+                        let (issuer, attempt, closing) = claim.into_issuer_parts();
+                        let owner = RemovalOwner {
+                            deps: self.deps,
+                            state: Some((
+                                RemovalClaimGuard {
+                                    lifecycle: issuer,
+                                    observer: self.deps.observer(),
+                                    attempt,
+                                    finalization_failed: false,
+                                },
+                                closing,
+                            )),
+                            _kind: std::marker::PhantomData,
+                        };
+                        drop(self.access);
+                        self.deps.observer().acquire_final_close_owner();
                         return Some(owner);
                     }
                 }
             }
-            wait_guard.wait_for_change();
+            self.access.wait_for_change();
         }
     }
-}
 
-impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A, OpenRollback> {
-    pub(in crate::runtime) fn acquire_rollback(
-        deps: ShutdownDeps<'runtime, A>,
-    ) -> OpenRollbackAcquisition<Self> {
-        let mut wait_guard = deps.lifecycle().access();
+    fn rollback_owner(
+        mut self,
+    ) -> OpenRollbackAcquisition<RemovalOwner<'runtime, A, OpenRollback>> {
         loop {
-            match wait_guard.rollback_decision() {
+            match self.access.rollback_decision() {
                 RollbackDecision::ClosedIdle => {
                     // These are read-side checks, not callbacks. Keep the
                     // canonical lock until this one result is classified.
-                    let finalized = deps.host().generation_callbacks_detached()
-                        && !deps.host().registration_state_unknown()
-                        && deps.residency().callbacks_retained_safely()
+                    let finalized = self.deps.host().generation_callbacks_detached()
+                        && !self.deps.host().registration_state_unknown()
+                        && self.deps.residency().callbacks_retained_safely()
                         && crate::excel_rtd_protocol::logical_quiescence_certified();
                     return if finalized {
                         OpenRollbackAcquisition::AlreadyFinalized
@@ -174,15 +215,41 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A, OpenRollback> {
                 }
                 RollbackDecision::Wait => {}
                 RollbackDecision::Claim(claim) => {
-                    let owner = Self::new(deps, claim)
-                        .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-                    drop(wait_guard);
-                    deps.observer().acquire_open_rollback_owner();
+                    let claim: IssuedRemovalClaim<'runtime, A, OpenRollback> = claim;
+                    let (issuer, attempt, closing) = claim.into_issuer_parts();
+                    let owner = RemovalOwner {
+                        deps: self.deps,
+                        state: Some((
+                            RemovalClaimGuard {
+                                lifecycle: issuer,
+                                observer: self.deps.observer(),
+                                attempt,
+                                finalization_failed: false,
+                            },
+                            closing,
+                        )),
+                        _kind: std::marker::PhantomData,
+                    };
+                    drop(self.access);
+                    self.deps.observer().acquire_open_rollback_owner();
                     return OpenRollbackAcquisition::Acquired(owner);
                 }
             }
-            wait_guard.wait_for_change();
+            self.access.wait_for_change();
         }
+    }
+}
+
+impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A, FinalRemoval> {
+    pub(in crate::runtime) fn acquire_final(deps: ShutdownDeps<'runtime, A>) -> Option<Self> {
+        RemovalAcquisition::new(deps).final_owner()
+    }
+}
+impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A, OpenRollback> {
+    pub(in crate::runtime) fn acquire_rollback(
+        deps: ShutdownDeps<'runtime, A>,
+    ) -> OpenRollbackAcquisition<Self> {
+        RemovalAcquisition::new(deps).rollback_owner()
     }
 }
 
@@ -191,6 +258,76 @@ mod tests {
     use super::*;
     use crate::lifecycle::LifecyclePhase;
     use crate::runtime::Runtime;
+
+    #[test]
+    fn returned_module_claim_is_retained_until_drop_or_unwind() {
+        for unwind in [false, true] {
+            let runtime = Runtime::<()>::new();
+            let opening = runtime.begin_open().unwrap();
+            assert!(opening.fail_for_test().requires_rollback());
+            let OpenRollbackAcquisition::Acquired(owner) =
+                RemovalOwner::acquire_rollback(runtime.shutdown_deps())
+            else {
+                panic!("rollback owner unavailable");
+            };
+            let (claim, closing) = owner.into_test_parts();
+            let attempt = claim.attempt();
+            let epoch = closing.id();
+            let returned = claim.return_module_authority(ModuleCleanupAuthority::Closing(closing));
+            assert_eq!(runtime.lifecycle.access().removal_attempt(), Some(attempt));
+            assert_eq!(runtime.lifecycle.access().module_epoch_id(), Some(epoch));
+            assert!(runtime.begin_open().is_err());
+            if unwind {
+                let failed =
+                    crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _retained = returned;
+                        panic!("terminal owner unwinds after returning module authority");
+                    }));
+                assert!(failed.is_err());
+            } else {
+                drop(returned);
+            }
+            assert!(runtime.lifecycle.access().removal_attempt().is_none());
+            assert_eq!(runtime.lifecycle.access().module_epoch_id(), Some(epoch));
+            assert_eq!(
+                runtime
+                    .composition_trace_json()
+                    .matches("releaseCleanupOwner")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    #[allow(
+        clippy::mem_forget,
+        reason = "a forgotten returned owner cannot release its canonical claim"
+    )]
+    fn forgotten_returned_module_claim_cannot_become_finalized() {
+        let runtime = Runtime::<()>::new();
+        let opening = runtime.begin_open().unwrap();
+        assert!(opening.fail_for_test().requires_rollback());
+        let OpenRollbackAcquisition::Acquired(owner) =
+            RemovalOwner::acquire_rollback(runtime.shutdown_deps())
+        else {
+            panic!("rollback owner unavailable");
+        };
+        let (claim, closing) = owner.into_test_parts();
+        let attempt = claim.attempt();
+        let returned = claim.return_module_authority(ModuleCleanupAuthority::Closing(closing));
+        std::mem::forget(returned);
+        assert_eq!(runtime.lifecycle.access().removal_attempt(), Some(attempt));
+        assert!(runtime.begin_open().is_err());
+        assert_eq!(
+            runtime
+                .composition_trace_json()
+                .matches("releaseCleanupOwner")
+                .count(),
+            0
+        );
+    }
 
     fn assert_drop_returns_to_issuer<K>(
         runtime: &Runtime<()>,

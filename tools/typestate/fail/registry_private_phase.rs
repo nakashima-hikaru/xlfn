@@ -1,6 +1,6 @@
 // module: async_udf
-use super::control::RegistryControl;
+use super::registry::control::RegistryControl;
 
 fn invalid(control: &RegistryControl) {
-    let _ = &control.phase; // error: E0616
+    let _ = &control.state; // error: E0616
 }

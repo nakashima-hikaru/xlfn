@@ -32,9 +32,9 @@ impl ExcelNameKey {
         // The library's long-string helper first allocates a String, then
         // copies it into an Arc. Normalize the fresh Arc in place instead.
         let mut normalized: Arc<str> = Arc::from(name);
-        Arc::get_mut(&mut normalized)
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
-            .make_ascii_uppercase();
+        // Fresh ownership gives make_mut the existing allocation. Its safe
+        // copy-on-write result also keeps exclusivity if construction changes.
+        Arc::make_mut(&mut normalized).make_ascii_uppercase();
         Self(SmolStr::from(normalized))
     }
 }

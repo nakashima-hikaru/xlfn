@@ -1,4 +1,6 @@
-//! Certificate-authorized queue detachment using production-shared control flow.
+//! Independent-certificate queue acceptance model. Production retirement uses
+//! a stricter issuer-owned queue operation; queue extraction itself shares the
+//! take_retired backend and the transition/barrier ordering remains shared.
 use vstd::prelude::*;
 use super::registration::Registration;
 macro_rules! width {

@@ -3,7 +3,7 @@ use crate::panic_boundary::catch_no_unwind;
 use crate::{XllError, XllResult};
 mod deferred_drop;
 mod reclamation;
-use reclamation::{reclaim_cache_entries, reclaim_unpublished};
+use reclamation::{reclaim_cache_entries, release_node_pin};
 mod endpoint_cache;
 #[cfg(test)]
 mod generation_tests;
@@ -241,37 +241,6 @@ pub struct CacheReclamationStats {
 // fast path. Resident-policy maintenance belongs to the index backend.
 const RECLAIM_BACKPRESSURE_NODES: usize = 256;
 
-/// Releases one active pin capability.
-///
-/// Formal theorem [TR-LEASE-1], [TR-RECLAIM-1]: releasing this pin capability
-/// decrements the node's pin count and enqueues for reclamation only if this is the final pin.
-unsafe fn release_node_pin<V>(node_ptr: NonNull<CacheNode<V>>) {
-    // SAFETY: node_ptr points to an allocated CacheNode whose pin is being released.
-    let node = unsafe { node_ptr.as_ref() };
-    // SAFETY: the caller transfers one live pin to the retirement decision.
-    if let Some(entry) = unsafe { ReclaimEntry::release_pin(node_ptr) } {
-        if node.published {
-            // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired (non-resident) node.
-            let domain = unsafe { node.domain.as_ref() };
-            domain.enqueue_reclaim(entry);
-            let retired = domain.quiesce_and_drain();
-            reclaim_cache_entries::<V>(retired);
-        } else if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
-            // SAFETY: A never-published node was never reachable through an index snapshot.
-            // Its final pin release can immediately destroy the node.
-            reclaim_unpublished(entry);
-        } else {
-            // Initializer-local drops still enter deferred reclamation so user destructors
-            // never run inside the cache initialization guard.
-            // SAFETY: node.domain is a valid pointer to CacheLookupDomain.
-            let domain = unsafe { node.domain.as_ref() };
-            domain.enqueue_reclaim(entry);
-            let retired = domain.quiesce_and_drain();
-            reclaim_cache_entries::<V>(retired);
-        }
-    }
-}
-
 impl<V> Drop for CacheLease<'_, V> {
     #[inline]
     fn drop(&mut self) {
@@ -469,25 +438,22 @@ impl CacheRegistry {
         }
         let _insertions = self.insertions.lock();
         let caches = self.caches.pin();
-        // Another initializer may have published while this thread waited.
-        if let Some(entry) = caches.get(&cache_key) {
-            return Self::downcast_cache::<Marker, K, V>(entry);
-        }
-        let cache = Box::new(StoredCache::<Marker, K, V> {
-            cache: CalculationCache::with_weigher(
-                self.weight_budget_per_endpoint,
-                endpoint.weigher.unwrap_or(unit_weight::<V>),
-            ),
-            weigher: endpoint.weigher,
-            _marker: PhantomData,
+        // One operation owns vacancy selection and publication. A later
+        // initializer cannot turn a separately checked vacancy into failure.
+        let entry = caches.get_or_insert_with(cache_key, || {
+            let cache = Box::new(StoredCache::<Marker, K, V> {
+                cache: CalculationCache::with_weigher(
+                    self.weight_budget_per_endpoint,
+                    endpoint.weigher.unwrap_or(unit_weight::<V>),
+                ),
+                weigher: endpoint.weigher,
+                _marker: PhantomData,
+            });
+            let erased: Box<dyn ErasedCache> = cache;
+            CacheEntry {
+                cache: xlfn_kernel::published_owner::PublishedOwner::from_box(erased),
+            }
         });
-        let erased: Box<dyn ErasedCache> = cache;
-        let entry = CacheEntry {
-            cache: xlfn_kernel::published_owner::PublishedOwner::from_box(erased),
-        };
-        let entry = caches
-            .try_insert(cache_key, entry)
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
         Self::downcast_cache::<Marker, K, V>(entry)
     }
 
@@ -683,16 +649,6 @@ impl<V> CacheNode<V> {
     #[inline]
     fn try_acquire_pin(&self) -> Result<bool, PinOverflow> {
         self.acquire_pin_with_ordering(Ordering::Relaxed)
-    }
-
-    /// Acquires a resident/flight anchor while the creator still owns a pin.
-    /// Flight publication can race index readers, so this increment must use
-    /// the same overflow check as reader pins rather than an unchecked add.
-    #[inline]
-    fn acquire_anchor_pin(&self) {
-        if self.acquire_pin_with_ordering(Ordering::Release) != Ok(true) {
-            xlfn_kernel::invariant::fail_stop();
-        }
     }
 
     #[inline]
@@ -916,36 +872,49 @@ where
 }
 
 struct CreatorPinGuard<'a, V> {
-    node: Option<NonNull<CacheNode<V>>>,
+    node: NonNull<CacheNode<V>>,
     _marker: PhantomData<&'a V>,
 }
 
 impl<'a, V> CreatorPinGuard<'a, V> {
     #[inline]
-    fn new(node: NonNull<CacheNode<V>>) -> Self {
+    fn new(mut node: Box<CacheNode<V>>) -> Self {
+        // Exclusive allocation ownership issues the initial creation pin.
+        // A copied raw observation cannot manufacture this authority.
+        node.pins = AtomicU32::new(1);
         Self {
-            node: Some(node),
+            node: Box::into_non_null(node),
             _marker: PhantomData,
         }
     }
 
     #[inline]
-    fn into_lease(mut self) -> CacheLease<'a, V> {
-        let node = self.node.take().expect("creator pin node present");
+    fn into_lease(self) -> CacheLease<'a, V> {
+        let owner = std::mem::ManuallyDrop::new(self);
         CacheLease {
-            node,
+            node: owner.node,
             _marker: PhantomData,
         }
     }
-}
 
+    fn acquire_anchor(&self) -> NodePtr<V> {
+        // SAFETY: this borrowed creator owner retains its live creation pin.
+        let node = unsafe { self.node.as_ref() };
+        // Zero cannot be observed while the creator is borrowed. The remaining
+        // failure is the genuinely shared pin-count ceiling, not a phase test.
+        node.pins
+            .try_update(Ordering::Release, Ordering::Relaxed, |pins| {
+                pins.checked_add(1)
+            })
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        NodePtr(self.node)
+    }
+}
 impl<V> Drop for CreatorPinGuard<'_, V> {
     fn drop(&mut self) {
-        if let Some(node) = self.node.take() {
-            // SAFETY: node points to an allocated CacheNode whose creator pin is held by this guard.
-            unsafe {
-                release_node_pin(node);
-            }
+        // SAFETY: this owner retains exactly one creation pin until consumed.
+        unsafe {
+            release_node_pin(self.node);
         }
     }
 }
@@ -970,6 +939,42 @@ impl<V> ReclaimEntry<V> {
         } else {
             None
         }
+    }
+
+    fn enqueue(self) {
+        self.enqueue_with_hook(|_| {});
+    }
+
+    fn enqueue_with_hook(self, after_generation_load: impl Fn(GenerationIndex)) {
+        // SAFETY: final-pin ownership retains the allocation and its original
+        // domain until registration and the final maintenance tail finish.
+        let domain = unsafe { self.domain.as_ref() };
+        let entry = self;
+        domain
+            .domain
+            .register_retired_with_hook(after_generation_load, |_, mut queue| {
+                let weight = entry.weight;
+                queue.append(entry);
+                let _nodes = domain
+                    .pending_nodes
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                        current.checked_add(1)
+                    })
+                    .map(|previous| previous + 1)
+                    .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+                let _weight = domain.add_pending_weight(weight);
+                #[cfg(any(test, feature = "bench-internals"))]
+                {
+                    domain
+                        .metrics
+                        .peak_pending_nodes
+                        .fetch_max(_nodes, Ordering::Relaxed);
+                    domain
+                        .metrics
+                        .peak_pending_weight
+                        .fetch_max(_weight, Ordering::Relaxed);
+                }
+            });
     }
 
     /// Queue-only tests never pass sentinel entries to a node reclaimer.
@@ -1099,21 +1104,20 @@ impl<V> CacheLookupDomain<V> {
     }
 
     fn add_pending_weight(&self, weight: u64) -> u64 {
-        let previous = self
-            .pending_weight
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                if self.pending_weight_saturated.load(Ordering::Relaxed) {
-                    Some(current)
-                } else if let Some(next) = current.checked_add(weight) {
-                    Some(next)
-                } else {
-                    // This closure may retry. Setting a sticky flag early is
-                    // conservative and cannot lose the backpressure signal.
-                    self.pending_weight_saturated.store(true, Ordering::Relaxed);
-                    Some(u64::MAX)
-                }
-            })
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        let previous =
+            self.pending_weight
+                .update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    if self.pending_weight_saturated.load(Ordering::Relaxed) {
+                        current
+                    } else if let Some(next) = current.checked_add(weight) {
+                        next
+                    } else {
+                        // This closure may retry. Setting a sticky flag early is
+                        // conservative and cannot lose the backpressure signal.
+                        self.pending_weight_saturated.store(true, Ordering::Relaxed);
+                        u64::MAX
+                    }
+                });
         if self.pending_weight_saturated.load(Ordering::Relaxed) {
             u64::MAX
         } else {
@@ -1132,57 +1136,6 @@ impl<V> CacheLookupDomain<V> {
                     .store(false, Ordering::Relaxed);
             }
         });
-    }
-
-    fn enqueue_reclaim(&self, entry: ReclaimEntry<V>) {
-        self.enqueue_reclaim_impl(entry, |_| {});
-    }
-
-    #[cfg(test)]
-    fn enqueue_reclaim_with_hook(
-        &self,
-        entry: ReclaimEntry<V>,
-        after_generation_load: impl Fn(GenerationIndex),
-    ) {
-        self.enqueue_reclaim_impl(entry, after_generation_load);
-    }
-
-    fn enqueue_reclaim_impl(
-        &self,
-        entry: ReclaimEntry<V>,
-        after_generation_load: impl Fn(GenerationIndex),
-    ) {
-        crate::retirement_queue::append_owned_batch!(
-            std::ptr::from_ref(self), entry.domain.as_ptr();
-            xlfn_kernel::invariant::fail_stop(), {
-                // The queue lock is the enqueue linearization point. Revalidate the
-                // generation while holding it so a rotation cannot drain the queue
-                // just before this retired node is appended. Rotation also takes this
-                // lock before publishing its replacement generation: withdrawals
-                // already registered here must happen before new-generation lookups.
-                // The index protects its own entries, not the copied non-owning NodePtr.
-                self.domain.register_retired_with_hook(
-                    after_generation_load,
-                    |_, mut queue| {
-                        let weight = entry.weight;
-                        queue.append(entry);
-                        let _nodes = self
-                            .pending_nodes
-                            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                                current.checked_add(1)
-                            })
-                            .map(|previous| previous + 1)
-                            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-                        let _weight = self.add_pending_weight(weight);
-                        #[cfg(any(test, feature = "bench-internals"))]
-                        {
-                            self.metrics.peak_pending_nodes.fetch_max(_nodes, Ordering::Relaxed);
-                            self.metrics.peak_pending_weight.fetch_max(_weight, Ordering::Relaxed);
-                        }
-                    },
-                );
-            }
-        );
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
@@ -1464,13 +1417,11 @@ where
             resident = node_layout::resident!(node),
             // SAFETY: the successful acquisition owns this rollback pin.
             rollback retired = unsafe { ReclaimEntry::release_pin(node_ptr.0) },
-            context domain_ptr = node.domain,
+            context _domain_ptr = node.domain,
             leave = drop(permit),
             reclaim = {
                 if let Some(entry) = retired {
-                    // SAFETY: the domain outlives the lookup; the last pin owns retirement.
-                    let domain = unsafe { domain_ptr.as_ref() };
-                    domain.enqueue_reclaim(entry);
+                    entry.enqueue();
                     // The caller may hold the singleflight table lock while
                     // repeating this lookup. Its maintenance runs after that
                     // coordination ends and owns all value destruction.
@@ -1674,14 +1625,13 @@ where
                         domain: NonNull::from(&*self.domain),
                     });
                     // Transfer allocation ownership to the pin/reclamation protocol.
-                    let node_ptr = NodePtr(Box::into_non_null(node));
-                    let creator_guard = CreatorPinGuard::new(node_ptr.0);
+                    let creator_guard = CreatorPinGuard::new(node);
 
                     // 2. Publish resident first, if eligible.
                     // ResidentEntry owns the new pin before any key code or index insertion can unwind.
                     if publish {
                         // SAFETY: creator_guard retains the new allocation.
-                        let resident = unsafe { ResidentPin::acquire(node_ptr) };
+                        let resident = ResidentPin::acquire(&creator_guard);
                         self.index
                             .insert_resident(&flight.key, ResidentEntry::new(resident, w));
 
@@ -1693,7 +1643,7 @@ where
                     // 3. Publish result to followers.
                     // Increment pins for Flight, transferring 1 pin to FlightState::Finished.
                     // SAFETY: creator_guard retains the new allocation.
-                    let anchor = unsafe { FlightAnchor::acquire(node_ptr) };
+                    let anchor = FlightAnchor::acquire(&creator_guard);
                     // 4. Completion publishes before removing registration.
                     guard.complete(Ok((anchor, w)));
 
@@ -2011,8 +1961,8 @@ mod tests {
     #[test]
     fn large_retirement_weights_do_not_interrupt_registration_or_drain() {
         let domain = CacheLookupDomain::<()>::new();
-        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, u64::MAX));
-        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, u64::MAX));
+        ReclaimEntry::sentinel(&domain, u64::MAX).enqueue();
+        ReclaimEntry::sentinel(&domain, u64::MAX).enqueue();
         assert_eq!(domain.stats().pending_nodes, 2);
         assert_eq!(domain.stats().pending_weight, u64::MAX);
 
@@ -2033,15 +1983,12 @@ mod tests {
         let enqueuer_domain = Arc::clone(&domain);
         let enqueuer = std::thread::spawn(move || {
             let first_load = std::cell::Cell::new(true);
-            enqueuer_domain.enqueue_reclaim_with_hook(
-                ReclaimEntry::sentinel(&enqueuer_domain, 0),
-                |generation| {
-                    if first_load.replace(false) {
-                        loaded_tx.send(generation).unwrap();
-                        resume_rx.recv().unwrap();
-                    }
-                },
-            );
+            ReclaimEntry::sentinel(&enqueuer_domain, 0).enqueue_with_hook(|generation| {
+                if first_load.replace(false) {
+                    loaded_tx.send(generation).unwrap();
+                    resume_rx.recv().unwrap();
+                }
+            });
         });
 
         assert_eq!(loaded_rx.recv().unwrap().index(), 0);
@@ -2067,7 +2014,7 @@ mod tests {
     #[test]
     fn cache_idle_reclamation_does_not_publish_before_registration_unlocks() {
         let domain = Arc::new(CacheLookupDomain::<()>::new());
-        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, 7));
+        ReclaimEntry::sentinel(&domain, 7).enqueue();
         let generation = domain.domain.current_generation();
         let (worker, result, observed_generation) =
             domain.domain.observe_queue_len(generation.index(), |_| {
@@ -3146,7 +3093,7 @@ mod tests {
             for index in indexes {
                 let drops = Arc::new(AtomicUsize::new(0));
                 let domain = Box::new(CacheLookupDomain::new());
-                let node = Box::into_non_null(Box::new(CacheNode {
+                let node = Box::new(CacheNode {
                     value: DropProbe(Arc::clone(&drops)),
                     pins: AtomicU32::new(1),
                     resident: AtomicBool::new(true),
@@ -3154,10 +3101,11 @@ mod tests {
                     weight: 1,
                     generation: 0,
                     domain: NonNull::from(&*domain),
-                }));
+                });
                 let creator = CreatorPinGuard::new(node);
+                let node = creator.node;
                 // SAFETY: creator owns the initial pin in this live allocation.
-                unsafe { node.as_ref() }.acquire_anchor_pin();
+                creator.acquire_anchor();
                 // SAFETY: the acquired anchor is transferred once to residency.
                 let entry =
                     ResidentEntry::new(unsafe { ResidentPin::from_index(NodePtr(node)) }, 1);
@@ -3591,8 +3539,8 @@ mod tests {
     fn pending_weight_preserves_totals_above_the_32_bit_limit() {
         let domain = CacheLookupDomain::<()>::new();
         // Sentinel pointers never reach a reclaimer in this queue-only test.
-        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, u64::from(u32::MAX)));
-        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, u64::from(u32::MAX)));
+        ReclaimEntry::sentinel(&domain, u64::from(u32::MAX)).enqueue();
+        ReclaimEntry::sentinel(&domain, u64::from(u32::MAX)).enqueue();
         assert_eq!(domain.stats().pending_weight, 2 * u64::from(u32::MAX));
         let entries = domain.quiesce_and_drain();
         assert_eq!(entries.len(), 2);

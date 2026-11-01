@@ -246,7 +246,7 @@ mod tests {
         crate::return_abi::tests::with_locked_return_test(|| {
             static TRACKER: ReturnTracker = ReturnTracker::new_closed();
             TRACKER.reopen_admission().unwrap();
-            let mut transaction = ReturnPublicationTxn::new(TRACKER.try_enter_producer().unwrap());
+            let transaction = ReturnPublicationTxn::new(TRACKER.try_enter_producer().unwrap());
             let block = transaction
                 .prepare(PreparedReturn::error(&crate::XllError::Panic))
                 .into_block();

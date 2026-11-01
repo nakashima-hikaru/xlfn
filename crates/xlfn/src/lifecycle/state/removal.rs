@@ -19,6 +19,23 @@ impl<'issuer, A: crate::Addin, K> IssuedRemovalClaim<'issuer, A, K> {
         }
     }
 
+    /// Consumes the claim without selecting a different recipient. The
+    /// issuer travels with the attempt and module authority.
+    pub(crate) fn into_issuer_parts(
+        self,
+    ) -> (
+        &'issuer LifecycleCoordinator<A>,
+        RemovalAttemptId,
+        crate::module_runtime::ModuleClosing,
+    ) {
+        (
+            self.issuer,
+            self.claim.attempt(),
+            self.claim.into_module_closing(),
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn into_parts(
         self,
         expected: &LifecycleCoordinator<A>,

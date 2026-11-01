@@ -581,17 +581,17 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         // queue's admissions and joins the worker before reclaiming servers.
         let operation = unsafe { server.enter_owned_operation() }?;
         let mut subscriptions = server.subscriptions.lock();
-        if !subscriptions.contains_key(&topic_id) {
+        let std::collections::hash_map::Entry::Occupied(subscription) =
+            subscriptions.entry(topic_id)
+        else {
             return Ok(());
-        }
+        };
         // The admitted owner already holds worker startup and queue capacity;
         // terminal disconnection cannot be rejected by resource admission.
         let Some(retired) = server.publish.disconnect_connection(topic_id)? else {
             return Ok(());
         };
-        let subscription = subscriptions
-            .remove(&topic_id)
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+        let subscription = subscription.remove();
         drop(subscriptions);
         self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);
         {

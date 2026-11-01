@@ -443,36 +443,35 @@ impl<H: SubscriptionHost> PublishCore<H> {
     fn record_pending_insert(&self, shard: &mut TopicShard, shard_index: usize, deliverable: bool) {
         self.pending_updates.fetch_add(1, Ordering::Relaxed);
         if deliverable {
-            self.record_deliverable_increase(shard, shard_index, 1);
+            self.record_deliverable_increase(&mut shard.deliverable_count, shard_index, 1);
         }
     }
 
     #[inline]
     fn record_pending_removal(
         &self,
-        shard: &mut TopicShard,
+        deliverable_count: &mut usize,
         shard_index: usize,
         deliverable: bool,
     ) {
         let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.pending_updates);
         if deliverable {
-            self.record_deliverable_decrease(shard, shard_index, 1);
+            self.record_deliverable_decrease(deliverable_count, shard_index, 1);
         }
     }
 
     #[inline]
     fn record_deliverable_increase(
         &self,
-        shard: &mut TopicShard,
+        deliverable_count: &mut usize,
         shard_index: usize,
         count: usize,
     ) {
         if count == 0 {
             return;
         }
-        let was_empty = shard.deliverable_count == 0;
-        shard.deliverable_count = shard
-            .deliverable_count
+        let was_empty = *deliverable_count == 0;
+        *deliverable_count = (*deliverable_count)
             .checked_add(count)
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
         self.deliverable_pending.fetch_add(count, Ordering::Relaxed);
@@ -485,21 +484,20 @@ impl<H: SubscriptionHost> PublishCore<H> {
     #[inline]
     fn record_deliverable_decrease(
         &self,
-        shard: &mut TopicShard,
+        deliverable_count: &mut usize,
         shard_index: usize,
         count: usize,
     ) {
         if count == 0 {
             return;
         }
-        shard.deliverable_count = shard
-            .deliverable_count
+        *deliverable_count = (*deliverable_count)
             .checked_sub(count)
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
         for _ in 0..count {
             let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.deliverable_pending);
         }
-        if shard.deliverable_count == 0 {
+        if *deliverable_count == 0 {
             self.ready_shards
                 .fetch_and(!(1_u32 << shard_index), Ordering::Release);
         }
@@ -513,29 +511,14 @@ impl<H: SubscriptionHost> PublishCore<H> {
         topic_id: TopicId,
         predicate: impl FnOnce(&QueuedUpdate) -> bool,
     ) -> bool {
-        let pending = &mut shard.pending[buffer];
-        let Some((&last_topic, last_update)) = pending.last() else {
+        if !remove_queued_if(&mut shard.pending[buffer], topic_id, predicate) {
             return false;
-        };
-        if last_topic == topic_id {
-            if !predicate(last_update) {
-                return false;
-            }
-            pending.pop();
-        } else {
-            let indexmap::map::Entry::Occupied(entry) = pending.entry(topic_id) else {
-                return false;
-            };
-            if !predicate(entry.get()) {
-                return false;
-            }
-            entry.swap_remove();
         }
         let deliverable = shard
             .active_by_topic
             .get(&topic_id)
             .is_some_and(|active| active.committed);
-        self.record_pending_removal(shard, shard_index, deliverable);
+        self.record_pending_removal(&mut shard.deliverable_count, shard_index, deliverable);
         true
     }
 
@@ -715,26 +698,28 @@ impl<H: SubscriptionHost> PublishCore<H> {
         let (epoch, has_pending) = {
             let mut shard = self.shards[shard_index].lock();
             self.ensure_open()?;
-            let Some(active) = shard.active_by_topic.get(&topic_id) else {
+            let TopicShard {
+                active_by_topic,
+                pending,
+                deliverable_count,
+                ..
+            } = &mut *shard;
+            let Some(active) = active_by_topic.get_mut(&topic_id) else {
                 return Err(XllError::Closing);
             };
             if active.generation != generation {
                 return Err(XllError::Closing);
             }
             let was_committed = active.committed;
-
             if let Some(obs) = observed_sequence {
-                self.remove_pending_if(&mut shard, shard_index, 0, topic_id, |update| {
-                    update.sequence <= obs
-                });
-                self.remove_pending_if(&mut shard, shard_index, 1, topic_id, |update| {
-                    update.sequence <= obs
-                });
+                for pending in pending.iter_mut() {
+                    if remove_queued_if(pending, topic_id, |update| update.sequence <= obs) {
+                        self.record_pending_removal(deliverable_count, shard_index, was_committed);
+                    }
+                }
             }
-
             let epoch = self.publish_epoch.load(Ordering::Acquire);
-            let pending_count = shard
-                .pending
+            let pending_count = pending
                 .iter()
                 .filter(|pending| {
                     pending.get(&topic_id).is_some_and(|update| {
@@ -743,13 +728,11 @@ impl<H: SubscriptionHost> PublishCore<H> {
                     })
                 })
                 .count();
-            let active = shard
-                .active_by_topic
-                .get_mut(&topic_id)
-                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+            // The exact mutable entry stays borrowed throughout pending updates;
+            // no second lookup or reconstructed presence assertion is required.
             active.committed = true;
             if !was_committed && pending_count != 0 {
-                self.record_deliverable_increase(&mut shard, shard_index, pending_count);
+                self.record_deliverable_increase(deliverable_count, shard_index, pending_count);
             }
             let has_pending = pending_count != 0;
             (epoch, has_pending)
@@ -803,19 +786,25 @@ impl<H: SubscriptionHost> PublishCore<H> {
         let shard_index = shard_index(topic_id);
         let mut shard = self.shards[shard_index].lock();
         self.ensure_open()?;
-        let Some(active) = shard.active_by_topic.get(&topic_id) else {
+        let TopicShard {
+            active_by_topic,
+            topic_by_id,
+            pending,
+            deliverable_count,
+        } = &mut *shard;
+        let std::collections::hash_map::Entry::Occupied(entry) = active_by_topic.entry(topic_id)
+        else {
             return Ok(None);
         };
-        let active_id = active.id;
-        self.remove_pending_if(&mut shard, shard_index, 0, topic_id, |_| true);
-        self.remove_pending_if(&mut shard, shard_index, 1, topic_id, |_| true);
-        let Some((_tid, active)) = shard.active_by_topic.remove_entry(&topic_id) else {
-            xlfn_kernel::invariant::fail_stop();
-        };
-        if active.id != active_id {
-            xlfn_kernel::invariant::fail_stop();
+        let committed = entry.get().committed;
+        for pending in pending.iter_mut() {
+            if remove_queued_if(pending, topic_id, |_| true) {
+                self.record_pending_removal(deliverable_count, shard_index, committed);
+            }
         }
-        shard.topic_by_id.remove(&active.id);
+        // OccupiedEntry retains the selected connection through withdrawal.
+        let (_, active) = entry.remove_entry();
+        topic_by_id.remove(&active.id);
         Ok(Some(RetiredConnection {
             id: active.id,
             generation: active.generation,
@@ -1030,6 +1019,31 @@ impl<H: SubscriptionHost> PublishCore<H> {
     }
 }
 
+fn remove_queued_if(
+    pending: &mut indexmap::IndexMap<TopicId, QueuedUpdate, rustc_hash::FxBuildHasher>,
+    topic_id: TopicId,
+    predicate: impl FnOnce(&QueuedUpdate) -> bool,
+) -> bool {
+    let Some((&last_topic, last_update)) = pending.last() else {
+        return false;
+    };
+    if last_topic == topic_id {
+        if !predicate(last_update) {
+            return false;
+        }
+        pending.pop();
+    } else {
+        let indexmap::map::Entry::Occupied(entry) = pending.entry(topic_id) else {
+            return false;
+        };
+        if !predicate(entry.get()) {
+            return false;
+        }
+        entry.swap_remove();
+    }
+    true
+}
+
 fn push_deliverable(
     active_by_topic: &mut rustc_hash::FxHashMap<TopicId, super::delivery::ActiveSubscription>,
     updates: &mut Vec<RtdUpdate>,
@@ -1043,24 +1057,27 @@ fn push_deliverable(
     if !active.committed || active.generation != queued.connection_generation {
         return;
     }
-    let slot_entry = std::mem::replace(
-        &mut active.values[buffer],
-        ValueSlot::InFlight {
-            generation: queued.connection_generation,
-            sequence: queued.sequence,
-        },
-    );
-    let ValueSlot::Resident(versioned) = slot_entry else {
-        xlfn_kernel::invariant::fail_stop();
+    let slot = &mut active.values[buffer];
+    let ValueSlot::Resident(versioned) = slot else {
+        // The queued index is an observation, not an ownership permission.
+        // A stale/non-resident slot stays untouched and cannot issue an update.
+        return;
     };
-    debug_assert_eq!(versioned.generation, queued.connection_generation);
-    debug_assert_eq!(versioned.sequence, queued.sequence);
+    if versioned.generation != queued.connection_generation || versioned.sequence != queued.sequence
+    {
+        return;
+    }
+    let value = std::mem::replace(&mut versioned.value, StoredRtdValue::Empty);
+    *slot = ValueSlot::InFlight {
+        generation: queued.connection_generation,
+        sequence: queued.sequence,
+    };
     updates.push(RtdUpdate {
         sequence: queued.sequence,
         topic_id: topic_id.0,
         connection_generation: queued.connection_generation,
         buffer: buffer as u8,
-        value: versioned.value,
+        value,
     });
 }
 
@@ -1157,6 +1174,55 @@ mod tests {
     use super::{OperationDropTrace, with_operation_drop_trace};
     use crate::subscription::runtime::SubscriptionRuntime;
     use triomphe::Arc;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn miri_refresh_selection_requires_the_exact_resident_payload() {
+        use super::{TopicShard, push_deliverable};
+        use crate::subscription::delivery::ValueSlot;
+
+        let (_runtime, server, sink) =
+            crate::subscription::tests::connected_sink::<i32>(None, "resident-authority");
+        sink.publish(42).unwrap();
+        let publish = &server.test_server().publish;
+        let mut checked = false;
+        for shard in &publish.shards {
+            let mut shard = shard.lock();
+            let TopicShard {
+                active_by_topic,
+                pending,
+                ..
+            } = &mut *shard;
+            for (buffer, pending) in pending.iter().enumerate() {
+                let Some((&topic, queued)) = pending.first() else {
+                    continue;
+                };
+                let original = active_by_topic[&topic].values[buffer].clone();
+                let ValueSlot::Resident(mut stale) = original.clone() else {
+                    panic!("a fresh publish is resident");
+                };
+                stale.sequence += 1;
+                let stale = ValueSlot::Resident(stale);
+                active_by_topic.get_mut(&topic).unwrap().values[buffer] = stale.clone();
+                let mut updates = Vec::new();
+                push_deliverable(active_by_topic, &mut updates, buffer, topic, queued);
+                assert!(updates.is_empty());
+                assert_eq!(active_by_topic[&topic].values[buffer], stale);
+                active_by_topic.get_mut(&topic).unwrap().values[buffer] = ValueSlot::Empty;
+                push_deliverable(active_by_topic, &mut updates, buffer, topic, queued);
+                assert!(updates.is_empty());
+                assert_eq!(active_by_topic[&topic].values[buffer], ValueSlot::Empty);
+                active_by_topic.get_mut(&topic).unwrap().values[buffer] = original.clone();
+                push_deliverable(active_by_topic, &mut updates, buffer, topic, queued);
+                assert_eq!(updates.len(), 1);
+                push_deliverable(active_by_topic, &mut updates, buffer, topic, queued);
+                assert_eq!(updates.len(), 1);
+                active_by_topic.get_mut(&topic).unwrap().values[buffer] = original;
+                checked = true;
+            }
+        }
+        assert!(checked);
+    }
 
     #[test]
     fn interrupted_termination_wait_preserves_undrained_publish_storage() {

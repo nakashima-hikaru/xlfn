@@ -2,5 +2,6 @@
 use crate::excel_rtd_protocol::RtdModuleState;
 
 fn invalid(module: &RtdModuleState) {
-    module.certify_logical_quiescence(); // error: E0061
+    let _ = module;
+    RtdModuleState::certify_logical_quiescence(); // error: E0061
 }

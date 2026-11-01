@@ -46,11 +46,13 @@ queued counts while preserving debt. Parent orchestration receives an opaque
 `ReclaimBatch::drop` destroys the detached records before discharging debt
 with Release ordering and notifying waiters under the completion lock. The
 shared completion expression models that order; native field histories and
-matching batch identity remain obligations across concurrent reclaimers. The
-completion owner is now the `RetirementAccounting` instance; its embedded
-rotation domain has a separate address. Both batch merging and the reentrant
-destruction guard use the accounting owner's identity. Forgetting a batch
-retains its payload and debt, so terminal completion remains blocked.
+native ownership histories remain obligations across concurrent reclaimers.
+The completion owner is the `RetirementAccounting` instance; its embedded
+rotation domain has a separate address. Batches are detached only by their
+own accounting adapter, without an independent batch/domain join or merge
+operation. The reentrant destruction guard uses the accounting owner's
+identity. Forgetting a batch retains its payload and debt, so terminal
+completion remains blocked.
 
 Published binding slots now retain a non-dropping `PublishedBindingOwner`.
 The private binding transaction performs actual withdrawal before transferring

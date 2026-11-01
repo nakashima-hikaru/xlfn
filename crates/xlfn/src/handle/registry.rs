@@ -11,14 +11,13 @@ use super::binding::BindingTable;
 use super::object::{ObjectArena, ObjectBinding, PendingObjectBinding};
 use super::token::{HandleId, HandleToken, ObjectId, TokenCodec};
 use super::{ExcelHandleObject, Handle};
-use crate::error::DomainErrorCode;
 use crate::panic_boundary::catch_no_unwind;
 #[cfg(any(test, feature = "refinement"))]
 use crate::sync::Mutex;
 use crate::{XllError, XllResult};
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,7 +97,6 @@ pub(crate) struct HandleRegistry {
     >,
     #[cfg(test)]
     pub(super) insert_pause: Mutex<Option<InsertPause>>,
-    next_object_id: AtomicU64,
     #[cfg(any(test, feature = "refinement"))]
     pub(super) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
 }
@@ -154,7 +152,6 @@ impl HandleRegistry {
             after_lookup_live: Mutex::new(None),
             #[cfg(test)]
             insert_pause: Mutex::new(None),
-            next_object_id: AtomicU64::new(1),
             #[cfg(any(test, feature = "refinement"))]
             trace: Mutex::new(None),
         }
@@ -199,23 +196,11 @@ impl HandleRegistry {
         self.phase() == HandleRegistryPhase::Open
     }
 
-    fn allocate_object_id(&self) -> XllResult<ObjectId> {
-        self.next_object_id
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
-                next.checked_add(1)
-            })
-            .map(|sequence| ObjectId::new(self.codec.session, sequence))
-            .map_err(|_| XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })
-    }
-
     pub(crate) fn new_object<'registry, T: Send + Sync + 'static>(
         &'registry self,
         value: T,
     ) -> XllResult<PendingObjectBinding<'registry, T>> {
-        let object_id = self.allocate_object_id()?;
-        PendingObjectBinding::new(self, object_id, value)
+        PendingObjectBinding::new(self, value)
     }
 
     #[inline]

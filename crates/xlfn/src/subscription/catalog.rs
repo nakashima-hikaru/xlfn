@@ -363,12 +363,39 @@ pub(crate) struct SubscriptionCatalog {
     pub(crate) next_subscription_id: u64,
 }
 
-struct PendingInsertPlan {
+struct PendingInsertPlan<'catalog, 'parts, Part: AsRef<str>> {
+    entry: std::collections::hash_map::VacantEntry<'catalog, SubscriptionId, SubscriptionEntry>,
+    identity: super::identity::IdentityInsertion<'catalog>,
+    topic: BorrowedTopicParts<'parts, Part>,
     id: SubscriptionId,
     key: SubscriptionKey,
+    source_id: SourceId,
+    next_id: &'catalog mut u64,
+    pending_bytes: &'catalog mut usize,
+    pending_count: &'catalog mut usize,
     next_subscription_id: u64,
-    identity_key: SubscriptionIdentityKey,
     pending_topic_bytes: usize,
+}
+impl<Part: AsRef<str>> PendingInsertPlan<'_, '_, Part> {
+    fn commit(self) -> (SubscriptionId, SubscriptionKey) {
+        // User-supplied AsRef conversion may unwind. No map/accounting mutation
+        // occurs until this owner has produced its exact canonical topic.
+        let topic = self.topic.into_owned();
+        self.identity.commit();
+        self.entry.insert(SubscriptionEntry {
+            source_id: self.source_id,
+            topic,
+            phase: SubscriptionPhase::Pending {
+                reservations: Some(NonZeroUsize::MIN),
+                server: None,
+                commitment: PendingCommitment::Uncommitted,
+            },
+        });
+        *self.next_id = self.next_subscription_id;
+        *self.pending_bytes = self.pending_topic_bytes;
+        *self.pending_count += 1;
+        (self.id, self.key)
+    }
 }
 
 impl SubscriptionCatalog {
@@ -390,73 +417,50 @@ impl SubscriptionCatalog {
         Ok(None)
     }
 
-    fn plan_pending_insert<Part: AsRef<str>>(
-        &self,
+    fn plan_pending_insert<'catalog, 'parts, Part: AsRef<str>>(
+        &'catalog mut self,
         runtime_id: u64,
         source_id: SourceHandleId,
-        topic: &BorrowedTopicParts<'_, Part>,
+        topic: BorrowedTopicParts<'parts, Part>,
         limits: RtdLimits,
-    ) -> XllResult<PendingInsertPlan> {
-        if self.pending_len() >= limits.max_pending.get() {
+    ) -> XllResult<PendingInsertPlan<'catalog, 'parts, Part>> {
+        if self.pending_count >= limits.max_pending.get() {
             return Err(XllError::Overloaded);
         }
-
         let pending_topic_bytes = self
             .pending_topic_bytes
             .checked_add(topic.byte_len())
             .filter(|&total| total <= limits.max_total_topic_bytes.get())
             .ok_or(XllError::Overloaded)?;
-
         let raw_id = self.next_subscription_id;
         let next_subscription_id = raw_id.checked_add(1).ok_or(XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
         })?;
         let id = SubscriptionId(raw_id);
         let key = SubscriptionKey::from_internal(runtime_id, id);
-        let identity_key = topic.identity_key(SourceId(source_id));
-
+        let source_id = SourceId(source_id);
+        let identity_key = topic.identity_key(source_id);
+        let identity =
+            self.identities
+                .prepare_insert(identity_key, id, limits.max_source_ids.get())?;
+        let std::collections::hash_map::Entry::Vacant(entry) = self.entries.entry(id) else {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_DUPLICATE,
+            });
+        };
         Ok(PendingInsertPlan {
+            entry,
+            identity,
+            topic,
             id,
             key,
+            source_id,
+            next_id: &mut self.next_subscription_id,
+            pending_bytes: &mut self.pending_topic_bytes,
+            pending_count: &mut self.pending_count,
             next_subscription_id,
-            identity_key,
             pending_topic_bytes,
         })
-    }
-
-    fn commit_pending_insert(
-        &mut self,
-        plan: PendingInsertPlan,
-        topic: RtdTopic,
-    ) -> (SubscriptionId, SubscriptionKey) {
-        let PendingInsertPlan {
-            id,
-            key,
-            next_subscription_id,
-            identity_key,
-            pending_topic_bytes,
-        } = plan;
-
-        self.next_subscription_id = next_subscription_id;
-
-        let previous = self.entries.insert(
-            id,
-            SubscriptionEntry {
-                source_id: identity_key.source_id,
-                topic,
-                phase: SubscriptionPhase::Pending {
-                    reservations: Some(NonZeroUsize::new(1).expect("one is non-zero")),
-                    server: None,
-                    commitment: PendingCommitment::Uncommitted,
-                },
-            },
-        );
-        if previous.is_some() {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        self.pending_topic_bytes = pending_topic_bytes;
-        self.pending_count += 1;
-        (id, key)
     }
 
     pub(crate) fn insert_pending<Part: AsRef<str>>(
@@ -466,19 +470,12 @@ impl SubscriptionCatalog {
         topic: BorrowedTopicParts<'_, Part>,
         limits: RtdLimits,
     ) -> XllResult<(SubscriptionId, SubscriptionKey)> {
-        let plan = self.plan_pending_insert(runtime_id, source_id, &topic, limits)?;
-        let source_update =
-            self.identities
-                .plan_insert(plan.identity_key, plan.id, limits.max_source_ids.get())?;
-        // All fallible admission checks precede the copy. The caller retains
-        // the catalog lock from identity lookup through this commit, so an
-        // existing subscription still bypasses new-topic capacity checks.
-        let topic = topic.into_owned();
-        self.identities
-            .commit_insert(plan.identity_key, plan.id, source_update);
-        Ok(self.commit_pending_insert(plan, topic))
+        Ok(self
+            .plan_pending_insert(runtime_id, source_id, topic, limits)?
+            .commit())
     }
 
+    #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
         self.pending_count
     }

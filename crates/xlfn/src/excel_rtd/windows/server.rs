@@ -1,3 +1,6 @@
+mod termination;
+pub(super) use termination::DeferredTerminationWork;
+
 use super::automation::{
     server_get_ids_of_names, server_invoke, topic_key_from_safearray, write_bstr_variant,
 };
@@ -34,7 +37,6 @@ use crate::{RtdSubscription, XllError, XllResult};
 use std::any::TypeId;
 use std::ffi::c_void;
 use std::num::NonZeroU32;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{self, NonNull};
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
@@ -201,13 +203,11 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop for ServerObservati
         // Make retirement atomic with observation admission and ensure_server.
         // STARTING defers disposal until its admitted COM method has exited;
         // NOT_STARTED/START_FAILED normally permit synchronous disposal.
-        let request = retire.then(|| server.operations.request_termination());
+        let request = retire.then(|| server.request_terminal());
         drop(active);
         if let Some(request) = request {
             let status = match request {
-                // SAFETY: ensured retains the server through completion and
-                // the request owns its terminal barrier reservation.
-                Ok(request) => unsafe { finish_termination_request(pointer, request) },
+                Ok(request) => request.finish(),
                 Err(_) => E_FAIL,
             };
             if status != S_OK {
@@ -340,13 +340,13 @@ pub(crate) struct DeferredDisconnectLease {
 
 impl OwnedServerReference {
     unsafe fn acquire<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
-        pointer: *mut RtdServer<E, C>,
+        server: &RtdServer<E, C>,
     ) -> Self {
+        let pointer = NonNull::from(server);
         // SAFETY: the caller guarantees `pointer` is a live server reference.
-        unsafe { server_add_ref(pointer) };
+        unsafe { server_add_ref(pointer.as_ptr()) };
         Self {
-            pointer: std::num::NonZeroUsize::new(pointer as usize)
-                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop()),
+            pointer: pointer.addr(),
         }
     }
 
@@ -583,7 +583,7 @@ pub(super) fn discard_unpublished_server<E: RtdSubscription, C: crate::RtdSource
             .map(|_| {
                 let server = pointer as *mut RtdServer<E, C>;
                 // SAFETY: ACTIVE_SERVER owns a live reference while locked.
-                unsafe { OwnedServerReference::acquire(server) }
+                unsafe { OwnedServerReference::acquire(&*server) }
             })
     };
     let Some(reference) = retained else {
@@ -654,7 +654,7 @@ pub(crate) fn shutdown<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
             .map(|entry| {
                 // SAFETY: the selected entry has the matching concrete type and
                 // ACTIVE_SERVER holds its reference throughout this lock scope.
-                unsafe { OwnedServerReference::acquire(entry.pointer as *mut RtdServer<E, C>) }
+                unsafe { OwnedServerReference::acquire(&*(entry.pointer as *mut RtdServer<E, C>)) }
             })
     };
 
@@ -737,7 +737,7 @@ pub(crate) fn shutdown_subscriptions<E: crate::RtdSubscription, C: crate::RtdSou
             .map(|entry| {
                 // SAFETY: the selected entry has the matching concrete type and
                 // ACTIVE_SERVER holds its reference throughout this lock scope.
-                unsafe { OwnedServerReference::acquire(entry.pointer as *mut RtdServer<E, C>) }
+                unsafe { OwnedServerReference::acquire(&*(entry.pointer as *mut RtdServer<E, C>)) }
             })
     };
 
@@ -838,7 +838,7 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
             if phase != ServerPhase::Open || failed_start {
                 // SAFETY: create a temporary reference that remains valid after the
                 // global mutex is released for the potentially blocking join.
-                let reference = unsafe { OwnedServerReference::acquire(server) };
+                let reference = unsafe { OwnedServerReference::acquire(&*server) };
                 drop(active);
 
                 // A failed ServerStart can still be leaving its admitted method.
@@ -1548,7 +1548,7 @@ unsafe fn disconnect_data_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E
         // wait for either worker here. Revoke its topic now and transfer the
         // final sink-user barrier to a generation-owned cleanup worker.
         // SAFETY: COM owns a live server reference throughout this method.
-        let reference = unsafe { OwnedServerReference::acquire(this) };
+        let reference = unsafe { OwnedServerReference::acquire(&*this) };
         // SAFETY: the lease retains `reference` until after this guard drops.
         let call = match unsafe { (*this).operations.enter_owned() } {
             Some(call) => call,
@@ -1640,156 +1640,8 @@ unsafe fn server_terminate_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<
     // phase now and let a retained coordinator finish after the current call
     // unwinds when the server is not already quiescent.
     // SAFETY: `this` is live for the complete COM method invocation.
-    let request = match unsafe { (*this).operations.request_termination() } {
-        Ok(request) => request,
-        Err(_) => return E_FAIL,
-    };
-
     // SAFETY: COM retains this server through the complete terminal request.
-    unsafe { finish_termination_request(this, request) }
-}
-
-unsafe fn finish_termination_request<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
-    this: *mut RtdServer<E, C>,
-    request: ServerTerminationRequest<'_>,
-) -> i32 {
-    match request {
-        ServerTerminationRequest::Complete | ServerTerminationRequest::InProgress => S_OK,
-        ServerTerminationRequest::Synchronous(termination) => {
-            // SAFETY: COM retains `this` through this synchronous request.
-            let access = QuiescentServerAccess::from_termination(unsafe { &*this }, termination);
-            let joined = match access.join_worker() {
-                Ok(joined) => joined,
-                Err(_) => return E_FAIL,
-            };
-            joined.teardown_and_remove_active(false)
-        }
-        ServerTerminationRequest::Deferred(reservation) => {
-            // The consuming startup owner holds the gate lock through spawn,
-            // handle registration and commit. No detached ticket can be lost
-            // before a separate caller commits the termination phase.
-            // SAFETY: COM retains this server through the complete request.
-            let start = match reservation.start(unsafe { &*this }) {
-                Ok(start) => start,
-                Err(_) => return E_FAIL,
-            };
-            match start.spawn() {
-                Ok(()) => S_OK,
-                Err(_) => E_FAIL,
-            }
-        }
-    }
-}
-
-/// The worker receives the server lifetime and its exact completion ticket as
-/// one private payload; it cannot substitute a target while waiting.
-pub(super) struct DeferredTerminationWork<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> {
-    reference: OwnedServerReference,
-    ticket: DeferredTerminationTicket,
-    _catalog: std::marker::PhantomData<fn() -> (E, C)>,
-}
-
-impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdServer<E, C> {
-    pub(super) fn deferred_termination_work(
-        &self,
-        ticket: DeferredTerminationTicket,
-    ) -> DeferredTerminationWork<E, C> {
-        // This constructor is used only by the gate's startup transaction,
-        // which verifies reservation ownership before issuing the ticket.
-        if !ticket.belongs_to(self.operations.as_ref()) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        // SAFETY: the borrowed server remains retained by the requesting COM
-        // call. The new reference covers its one fixed deferred worker.
-        let reference =
-            unsafe { OwnedServerReference::acquire(std::ptr::from_ref(self).cast_mut()) };
-        DeferredTerminationWork {
-            reference,
-            ticket,
-            _catalog: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> DeferredTerminationWork<E, C> {
-    pub(super) fn spawn(self) -> std::io::Result<std::thread::JoinHandle<()>> {
-        spawn_deferred_termination(self)
-    }
-}
-
-fn spawn_deferred_termination<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
-    work: DeferredTerminationWork<E, C>,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    #[cfg(test)]
-    if FAIL_DEFERRED_TERMINATION_SPAWN.swap(false, Ordering::AcqRel) {
-        return Err(std::io::Error::other(
-            "injected deferred RTD termination spawn failure",
-        ));
-    }
-
-    std::thread::Builder::new()
-        .name("xlfn-rtd-termination".to_owned())
-        .spawn(move || deferred_termination_worker(work))
-}
-
-fn deferred_termination_worker<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
-    work: DeferredTerminationWork<E, C>,
-) {
-    let DeferredTerminationWork {
-        reference, ticket, ..
-    } = work;
-    let this = reference.pointer.get() as *mut RtdServer<E, C>;
-    // Keep the internal reference outside the unwind boundary. It remains live
-    // until all cleanup and phase signaling have completed.
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        let result = ticket.with_completion(|termination| {
-            #[cfg(test)]
-            if PANIC_DEFERRED_TERMINATION_CLEANUP.swap(false, Ordering::AcqRel) {
-                panic!("injected deferred RTD cleanup panic");
-            }
-
-            // Deferred cleanup intentionally retains ACTIVE_SERVER. The next
-            // xlAutoRemove or ensure_server joins this worker before removing that
-            // final module-lifetime reference.
-            // SAFETY: the worker's reference retains this exact server.
-            let access = QuiescentServerAccess::from_termination(unsafe { &*this }, termination);
-            let status = access.teardown_resources();
-            if status != S_OK {
-                crate::diagnostics::report_no_unwind(
-                    "IRtdServer::deferred termination",
-                    &XllError::WindowsApi {
-                        function: "IRtdServer::ServerTerminate",
-                        code: status,
-                    },
-                );
-            }
-            drop(access);
-        });
-        if let Err(error) = result {
-            crate::diagnostics::report_no_unwind(
-                "IRtdServer::deferred termination wait",
-                &XllError::Internal {
-                    diagnostic_id: match error {
-                        ServerCloseError::WaitFailed(status) => {
-                            crate::diagnostics::id::DiagnosticId::RTD_WINDOW_STATUS
-                                .with_low_u32(status as u32)
-                        }
-                        _ => crate::diagnostics::id::DiagnosticId::RTD_WINDOW_FAILURE,
-                    },
-                },
-            );
-            // Reopening after a committed spawn would strand a completed
-            // worker handle on a reusable server. A live event cannot fail.
-            std::process::abort();
-        }
-    }));
-
-    if let Err(payload) = outcome {
-        crate::diagnostics::report_no_unwind("IRtdServer::deferred termination", &XllError::Panic);
-        drop(reference);
-        std::panic::resume_unwind(payload);
-    }
-    drop(reference);
+    unsafe { &*this }.terminate()
 }
 
 /// Authority to dispose resources on one retained, drained COM server.
@@ -1825,8 +1677,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdServer<E, C> {
     pub(super) fn drain_access(&self) -> Result<QuiescentServerAccess<'_, E, C>, ServerCloseError> {
         // SAFETY: this borrowed server is retained by the caller. Take an
         // independent lease before drain can pump arbitrary COM callbacks.
-        let reference =
-            unsafe { OwnedServerReference::acquire(std::ptr::from_ref(self).cast_mut()) };
+        let reference = unsafe { OwnedServerReference::acquire(self) };
         let drained = self.operations.drain()?;
         Ok(QuiescentServerAccess {
             server: self,
@@ -1839,26 +1690,6 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdServer<E, C> {
 impl<'server, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     QuiescentServerAccess<'server, E, C>
 {
-    fn from_termination(
-        server: &'server RtdServer<E, C>,
-        termination: ServerTermination<'server>,
-    ) -> Self {
-        let drained = termination.into_drained();
-        // A lifetime alone cannot establish instance identity. This boundary
-        // also handles guards received from ServerTerminationRequest.
-        if !drained.belongs_to(server.operations.as_ref()) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        // SAFETY: the borrowed server is retained by this call's COM owner.
-        let reference =
-            unsafe { OwnedServerReference::acquire(std::ptr::from_ref(server).cast_mut()) };
-        Self {
-            server,
-            drained,
-            _reference: Some(reference),
-        }
-    }
-
     pub(super) fn join_worker(self) -> Result<JoinedServerAccess<'server, E, C>, ServerCloseError> {
         let worker_panicked = match self.server.termination_worker.seal_and_join() {
             Ok(()) => false,

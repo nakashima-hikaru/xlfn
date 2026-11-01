@@ -53,8 +53,6 @@ struct SlotWaiters {
     // One framework task per source. Public cancellation waiters remain an
     // independent collection; task cancellation never allocates a map entry.
     #[cfg(feature = "async")]
-    task_claimed: bool,
-    #[cfg(feature = "async")]
     task_waker: Option<std::task::Waker>,
 }
 
@@ -143,7 +141,6 @@ impl CancellationRegistry {
             #[cfg(feature = "async")]
             {
                 debug_assert!(waiters.task_waker.is_none());
-                waiters.task_claimed = false;
             }
             waiters.generation = generation;
             waiters.next_id = 1;
@@ -167,8 +164,6 @@ impl CancellationRegistry {
                     generation: 1,
                     next_id: 1,
                     entries: FxHashMap::default(),
-                    #[cfg(feature = "async")]
-                    task_claimed: false,
                     #[cfg(feature = "async")]
                     task_waker: None,
                 }),
@@ -241,29 +236,14 @@ unsafe impl Send for CancellationSource {}
 unsafe impl Sync for CancellationSource {}
 
 impl CancellationSource {
-    /// Claims the source's one framework task without allocating shared state.
-    #[cfg(feature = "async")]
-    fn claim_task(&self) -> TaskCancellationRegistration {
-        // SAFETY: source slot allocations remain process-stable.
-        let slot = unsafe { self.slot.as_ref() };
-        let mut waiters = slot.waiters.lock();
-        if waiters.generation != self.generation || waiters.task_claimed {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        waiters.task_claimed = true;
-        TaskCancellationRegistration {
-            slot: self.slot,
-            generation: self.generation,
-            registered_waker: None,
-        }
-    }
-
+    /// Transfers an unclaimed source into the framework task protocol. The
+    /// cancellation authority cannot issue a second registration.
     #[cfg(all(
         feature = "async",
         any(test, all(feature = "bench-internals", feature = "async-builtin"))
     ))]
-    pub(crate) fn task_registration(&self) -> TaskCancellationRegistration {
-        self.claim_task()
+    pub(crate) fn into_task(self) -> (TaskCancellationAuthority, TaskCancellationRegistration) {
+        TaskCancellationOwner { source: self }.into_parts()
     }
 
     pub(crate) fn new(guarantee: CancellationGuarantee) -> (Self, CancellationToken) {
@@ -310,9 +290,26 @@ impl TaskCancellationOwner {
         (Self { source }, token)
     }
 
-    pub(crate) fn into_parts(self) -> (CancellationSource, TaskCancellationRegistration) {
-        let registration = self.source.claim_task();
-        (self.source, registration)
+    pub(crate) fn into_parts(self) -> (TaskCancellationAuthority, TaskCancellationRegistration) {
+        let source = self.source;
+        let registration = TaskCancellationRegistration {
+            slot: source.slot,
+            generation: source.generation,
+            registered_waker: None,
+        };
+        (TaskCancellationAuthority { source }, registration)
+    }
+}
+
+/// Task cancellation and slot lifetime, without another registration factory.
+#[cfg(feature = "async")]
+pub(crate) struct TaskCancellationAuthority {
+    source: CancellationSource,
+}
+#[cfg(feature = "async")]
+impl TaskCancellationAuthority {
+    pub(crate) fn cancel(&self) {
+        self.source.cancel();
     }
 }
 
@@ -668,6 +665,27 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "async")]
+    struct LocalTaskSource<'registry>(LocalSource<'registry>);
+    #[cfg(feature = "async")]
+    impl std::ops::Deref for LocalTaskSource<'_> {
+        type Target = CancellationSource;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    #[cfg(feature = "async")]
+    impl<'registry> LocalSource<'registry> {
+        fn into_task(self) -> (LocalTaskSource<'registry>, TaskCancellationRegistration) {
+            let registration = TaskCancellationRegistration {
+                slot: self.source.slot,
+                generation: self.source.generation,
+                registered_waker: None,
+            };
+            (LocalTaskSource(self), registration)
+        }
+    }
+
     impl Drop for LocalSource<'_> {
         fn drop(&mut self) {
             self.registry
@@ -857,7 +875,7 @@ mod tests {
     fn miri_task_registration_survives_slot_reuse_between_check_and_register() {
         let registry = CancellationRegistry::new();
         let (source, old_token) = local_source(&registry);
-        let mut old = source.task_registration();
+        let (source, mut old) = source.into_task();
         let noop = noop_waker();
         let mut next_source = None;
         assert!(
@@ -869,7 +887,7 @@ mod tests {
         );
         let (next_source, next_token) = next_source.unwrap();
         assert_eq!(old_token.slot, next_token.slot);
-        let mut next = next_source.task_registration();
+        let (next_source, mut next) = next_source.into_task();
         let count = StdArc::new(WakeCount(AtomicUsize::new(0)));
         let waker = waker(StdArc::clone(&count));
         assert!(
@@ -891,7 +909,7 @@ mod tests {
         let count = StdArc::new(WakeCount(AtomicUsize::new(0)));
         let waker = waker(StdArc::clone(&count));
         let context = Context::from_waker(&waker);
-        let mut old = source.task_registration();
+        let (source, mut old) = source.into_task();
         assert!(old.poll_cancelled(&context).is_pending());
         source.cancel();
         assert_eq!(count.0.load(Ordering::Acquire), 1);
@@ -899,7 +917,7 @@ mod tests {
         drop(source);
         let (source, next_token) = local_source(&registry);
         assert_eq!(old_token.slot, next_token.slot);
-        let mut next = source.task_registration();
+        let (source, mut next) = source.into_task();
         assert!(next.poll_cancelled(&context).is_pending());
         assert!(old.poll_cancelled(&context).is_ready());
         drop(old);
@@ -982,7 +1000,7 @@ mod tests {
     fn miri_task_waker_cache_tracks_the_registered_clone_identity() {
         let registry = CancellationRegistry::new();
         let (source, _) = local_source(&registry);
-        let mut task = source.task_registration();
+        let (source, mut task) = source.into_task();
         check_cache_tracks_the_registered_clone_identity(
             |waker| task.poll_cancelled(&Context::from_waker(waker)),
             || source.cancel(),
@@ -1025,7 +1043,7 @@ mod tests {
                 .poll(&mut Context::from_waker(&public_waker))
                 .is_pending()
         );
-        let mut task = source.task_registration();
+        let (source, mut task) = source.into_task();
         assert!(
             task.poll_cancelled(&Context::from_waker(&task_waker))
                 .is_pending()
@@ -1040,7 +1058,7 @@ mod tests {
     fn miri_task_waker_clone_and_drop_can_cancel_their_source() {
         use std::task::{RawWaker, RawWakerVTable, Waker};
         struct State {
-            source: CancellationSource,
+            source: TaskCancellationAuthority,
             clones: AtomicUsize,
             drops: AtomicUsize,
         }
@@ -1065,7 +1083,7 @@ mod tests {
         }
         static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, release, wake_by_ref, release);
         let (source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
-        let mut task = source.task_registration();
+        let (source, mut task) = source.into_task();
         let state = StdArc::new(State {
             source,
             clones: AtomicUsize::new(0),
@@ -1615,7 +1633,7 @@ mod tests {
             let raw = RawWaker::new(StdArc::into_raw(StdArc::clone(&state)).cast(), &VTABLE);
             // SAFETY: this waker owns one reference balanced by the same vtable.
             let waker = unsafe { Waker::from_raw(raw) };
-            let mut task = source.task_registration();
+            let (_source, mut task) = source.into_task();
             for _ in 0..2 {
                 assert!(
                     task.poll_cancelled(&Context::from_waker(&waker))

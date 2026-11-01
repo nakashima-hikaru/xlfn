@@ -39,10 +39,14 @@ MODULES = {
     "async_udf/boundary": Path("crates/xlfn/src/async_udf/boundary.rs"),
     "cancellation": Path("crates/xlfn/src/cancellation.rs"),
     "excel_rtd/windows/server": Path("crates/xlfn/src/excel_rtd/windows/server.rs"),
+    "excel_rtd/windows/server/termination": Path(
+        "crates/xlfn/src/excel_rtd/windows/server/termination.rs"
+    ),
     "excel_rtd/windows/server_gate": Path("crates/xlfn/src/excel_rtd/windows/server_gate.rs"),
     "async_udf/runtime": Path("crates/xlfn/src/async_udf/runtime.rs"),
     "subscription": Path("crates/xlfn/src/subscription.rs"),
     "subscription/channel": Path("crates/xlfn/src/subscription/channel.rs"),
+    "subscription/multiplex": Path("crates/xlfn/src/subscription/multiplex.rs"),
     "subscription/source": Path("crates/xlfn/src/subscription/source.rs"),
     "subscription/runtime": Path("crates/xlfn/src/subscription/runtime.rs"),
     "runtime/residency": Path("crates/xlfn/src/runtime/residency.rs"),
@@ -88,6 +92,7 @@ MODULES = {
     "excel_rtd/windows": Path("crates/xlfn/src/excel_rtd/windows.rs"),
 }
 WINDOWS_MODULES = {
+    "excel_rtd/windows/server/termination",
     "excel_rtd/windows/server_gate",
     "return_abi/numeric/process/windows",
     "excel_rtd/windows",

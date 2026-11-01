@@ -1,9 +1,16 @@
 use super::calculation::{
     CalculationAdmission, CalculationEpoch, CalculationPin, CalculationState,
 };
-use super::control::{CloseAttempt, ControlPhase, RegistryControl};
+#[path = "control.rs"]
+pub(super) mod control;
+#[cfg(all(test, feature = "async-builtin"))]
+use control::ControlPhase;
+use control::{CloseClaim, RegistryControl};
+mod transition;
 use super::task::{ActiveReservation, AsyncTask, TaskControl, TaskControlBatch, TrackedFuture};
-use crate::cancellation::{CancellationSource, TaskCancellationOwner};
+#[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
+use crate::cancellation::CancellationSource;
+use crate::cancellation::{TaskCancellationAuthority, TaskCancellationOwner};
 use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
 use std::future::Future;
@@ -19,7 +26,7 @@ use xlfn_kernel::published_owner::PublishedOwner;
 /// tail before its unique owner can reclaim the registry.
 pub(crate) struct TaskRegistry {
     pub(super) active_tasks: AtomicUsize,
-    pub(crate) next_id: AtomicU64,
+    next_id: AtomicU64,
     limit: AtomicUsize,
     closing: AtomicBool,
     current: AtomicPtr<CalculationState>,
@@ -67,9 +74,19 @@ unsafe impl Send for RegistryPtr {}
 // SAFETY: shared access is synchronized; capabilities do not own/reclaim the registry.
 unsafe impl Sync for RegistryPtr {}
 
+/// One unregistered identity from this registry's monotonic allocator. Only a
+/// private reservation can carry it to its retained calculation admission.
+/// Numeric observations cannot reconstruct registration authority.
+pub(super) struct TaskRegistrationId(u64);
+impl TaskRegistrationId {
+    pub(super) fn value(&self) -> u64 {
+        self.0
+    }
+}
+
 pub(crate) struct TaskReservation<'a> {
     registry: RegistryPtr,
-    id: u64,
+    id: TaskRegistrationId,
     // Destruction releases admission before the allocation pin and activity.
     admission: CalculationAdmission<'a>,
     calculation: CalculationPin,
@@ -106,7 +123,7 @@ impl TaskReservation<'_> {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let registration = cancellation.task_registration();
+        let (cancellation, registration) = cancellation.into_task();
         self.commit_parts(future, cancellation, registration)
     }
 
@@ -125,15 +142,16 @@ impl TaskReservation<'_> {
     fn commit_parts<F>(
         self,
         future: F,
-        cancellation: CancellationSource,
+        cancellation: TaskCancellationAuthority,
         registration: crate::cancellation::TaskCancellationRegistration,
     ) -> AsyncTask<TrackedFuture<F>>
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        let id = self.id.value();
         self.admission
             .insert_task(self.id, TaskControl { cancellation });
-        let completion = self.active.commit(self.calculation, self.id);
+        let completion = self.active.commit(self.calculation, id);
         // SAFETY: the completion guard now owns registry activity, and the
         // reservation still owns calculation admission during this access.
         let registry = unsafe { self.registry.get() };
@@ -142,27 +160,6 @@ impl TaskReservation<'_> {
             .record(crate::shutdown_trace::ShutdownEvent::StartAsyncTask);
         drop(self.admission);
         AsyncTask::new(TrackedFuture::new(future, registration, completion))
-    }
-}
-
-/// Owns one close attempt without holding a mutex across callbacks or waits.
-struct CloseClaim<'a> {
-    registry: &'a TaskRegistry,
-    attempt: Option<CloseAttempt>,
-}
-
-impl CloseClaim<'_> {
-    fn finish(mut self) {
-        let attempt = self.attempt.take().expect("live close claim");
-        self.registry.control.lock().finish_close(attempt);
-    }
-}
-
-impl Drop for CloseClaim<'_> {
-    fn drop(&mut self) {
-        if let Some(attempt) = self.attempt.take() {
-            self.registry.control.lock().abandon_close(attempt);
-        }
     }
 }
 
@@ -201,7 +198,7 @@ impl<'a> RegistryClose<'a, CancellationPending> {
 
 impl<'a> RegistryClose<'a, TasksCancelled> {
     pub(crate) fn wait(self) -> RegistryClose<'a, TasksDrained> {
-        self.claim.registry.wait_idle();
+        self.claim.registry().wait_idle();
         RegistryClose {
             state: TasksDrained,
             claim: self.claim,
@@ -213,7 +210,7 @@ impl<'a> RegistryClose<'a, TasksCancelled> {
         self,
         timeout: std::time::Duration,
     ) -> XllResult<RegistryClose<'a, TasksDrained>> {
-        if !self.claim.registry.wait_idle_timeout(timeout) {
+        if !self.claim.registry().wait_idle_timeout(timeout) {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_TIME,
             });
@@ -296,42 +293,6 @@ impl TaskRegistry {
         }
     }
 
-    pub(crate) fn start(&self, limit: crate::addin::AsyncTaskLimit) -> XllResult<()> {
-        let _transition = self.transition.lock();
-        let mut control = self.control.lock();
-        if control.phase() != ControlPhase::Stopped {
-            return Err(XllError::Closing);
-        }
-        let _publication = self.publication.lock();
-        // SAFETY: the publication lock protects the current allocation.
-        let current = unsafe { &*self.current.load(Ordering::Acquire) };
-        // An uncommitted preparation snapshot is not an active task. Close
-        // may finish while it retains the closed calculation, but reopening
-        // must not replace that same-epoch owner until its final pin drops.
-        if current.pin_count() != 0 {
-            return Err(XllError::Closing);
-        }
-        let epoch = current.epoch;
-        let state = PublishedOwner::new(CalculationState::new(epoch));
-        let pointer = NonNull::from(state.as_ref());
-        control.calculations.insert(epoch, state);
-        control
-            .calculations
-            .retain(|id, state| *id == epoch || state.pin_count() != 0);
-        self.publish_current(pointer, epoch);
-        self.limit.store(limit.get(), Ordering::Relaxed);
-        self.closing.store(false, Ordering::Release);
-        drop(
-            self.activity
-                .control()
-                .wait_if_sealed()
-                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
-                .reopen(),
-        );
-        control.start();
-        Ok(())
-    }
-
     pub(crate) fn preflight_available(&self) -> XllResult<bool> {
         if self.closing.load(Ordering::Acquire) {
             return Err(XllError::Closing);
@@ -405,7 +366,11 @@ impl TaskRegistry {
     fn admit<'a>(
         &'a self,
         current: &'a CalculationState,
-    ) -> XllResult<(CalculationAdmission<'a>, ActiveReservation<'a>, u64)> {
+    ) -> XllResult<(
+        CalculationAdmission<'a>,
+        ActiveReservation<'a>,
+        TaskRegistrationId,
+    )> {
         if self.closing.load(Ordering::Acquire) {
             return Err(XllError::Closing);
         }
@@ -431,7 +396,7 @@ impl TaskRegistry {
             .next_id
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map_err(|_| XllError::Overloaded)?;
-        Ok((admission, active, id))
+        Ok((admission, active, TaskRegistrationId(id)))
     }
 
     pub(crate) fn cancel_calculation(&self, epoch: CalculationEpoch) -> TaskControlBatch {
@@ -442,84 +407,6 @@ impl TaskRegistry {
         state.close_admission().wait().drain_tasks()
     }
 
-    pub(crate) fn advance(&self) -> bool {
-        #[cfg(test)]
-        {
-            let hook = self.before_transition_hook.lock().clone();
-            if let Some(hook) = hook {
-                hook();
-            }
-        }
-        let _transition = self.transition.lock();
-        let old = {
-            let mut control = self.control.lock();
-            if matches!(
-                control.phase(),
-                ControlPhase::Closing | ControlPhase::Advancing { .. }
-            ) || (control.phase() == ControlPhase::Running
-                && self.closing.load(Ordering::Acquire))
-            {
-                return false;
-            }
-            let _publication = self.publication.lock();
-            // SAFETY: publication excludes state reclamation while pinning.
-            let current = unsafe { &*self.current.load(Ordering::Acquire) };
-            let Some(next) = current.epoch.checked_next() else {
-                return false;
-            };
-            if control.phase() == ControlPhase::Stopped {
-                let state = PublishedOwner::new(CalculationState::new(next));
-                state.seal_admission();
-                let pointer = NonNull::from(state.as_ref());
-                control.calculations.insert(next, state);
-                self.publish_current(pointer, next);
-                control
-                    .calculations
-                    .retain(|id, state| *id == next || state.pin_count() != 0);
-                return true;
-            }
-            current.seal_admission();
-            control.begin_advance(current.epoch, next);
-            // SAFETY: the publication lock retains the owner while pinning.
-            unsafe { CalculationPin::acquire(current) }
-        };
-        let _drained_admission = old.get().close_admission().wait();
-        let mut control = self.control.lock();
-        let ControlPhase::Advancing { from, to } = control.phase() else {
-            return false;
-        };
-        if self.closing.load(Ordering::Acquire) {
-            // Admission was sealed while the old calculation drained. No
-            // replacement was published; leave a stable control state so the
-            // subsequent close can drain the existing calculations.
-            control.finish_advance();
-            return false;
-        }
-        if from != old.get().epoch {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let _publication = self.publication.lock();
-        let state = PublishedOwner::new(CalculationState::new(to));
-        let pointer = NonNull::from(state.as_ref());
-        control.calculations.insert(to, state);
-        self.publish_current(pointer, to);
-        drop(old);
-        control
-            .calculations
-            .retain(|id, state| *id == to || state.pin_count() != 0);
-        control.finish_advance();
-        drop(_publication);
-        drop(control);
-        #[cfg(test)]
-        {
-            let hook = self.after_publish_hook.lock().clone();
-            if let Some(hook) = hook {
-                hook();
-            }
-        }
-        true
-    }
-
     pub(crate) fn close_admission(&self) {
         self.closing.store(true, Ordering::Release);
     }
@@ -527,12 +414,7 @@ impl TaskRegistry {
     pub(crate) fn request_close(&self) -> XllResult<RegistryClose<'_, CancellationPending>> {
         // Declare the claim first so an unwind releases the control lock before
         // abandoning the attempt. No lock is retained across cancellation callbacks.
-        let mut claim = CloseClaim {
-            registry: self,
-            attempt: None,
-        };
-        let mut control = self.control.lock();
-        claim.attempt = Some(control.begin_close()?);
+        let (claim, control) = CloseClaim::acquire(self)?;
         self.closing.store(true, Ordering::Release);
         drop(self.activity.control().seal());
         for state in control.calculations.values() {
@@ -579,6 +461,15 @@ impl TaskRegistry {
         self.closing.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
+    pub(crate) fn next_task_id(&self) -> u64 {
+        self.next_id.load(Ordering::Relaxed)
+    }
+    #[cfg(all(test, feature = "async-builtin"))]
+    pub(crate) fn exhaust_task_ids(&self) {
+        self.next_id.store(u64::MAX, Ordering::Relaxed);
+    }
+
     #[cfg(all(test, feature = "async-builtin"))]
     pub(crate) fn set_stopped_epoch(&self, epoch: CalculationEpoch) {
         let mut control = self.control.lock();
@@ -609,13 +500,16 @@ pub(crate) fn cancelled_calculation_error() -> XllError {
 
 pub(crate) fn cancel_tasks(tasks: TaskControlBatch) {
     for TaskControl { cancellation } in tasks {
-        cancel_source_no_unwind(&cancellation);
+        let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            cancellation.cancel()
+        }));
         let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
             drop(cancellation);
         }));
     }
 }
 
+#[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
 pub(crate) fn cancel_source_no_unwind(source: &CancellationSource) {
     let _ =
         crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| source.cancel()));
@@ -690,3 +584,10 @@ mod epoch_projection_tests {
         registry.request_close().unwrap().cancel().wait().finish();
     }
 }
+
+#[cfg(feature = "bench-internals")]
+mod drain_bench;
+#[cfg(feature = "bench-internals")]
+pub use drain_bench::AsyncTaskDrainBenchmark;
+#[cfg(test)]
+mod registration_tests;

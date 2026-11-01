@@ -19,9 +19,8 @@ mod queue;
 mod retirement;
 mod transition;
 use protocol::protocol_expr;
-pub use retirement::{
-    ClosedRetirement, DisposableBatch, RetirementRegistration, RetirementStorage,
-};
+pub use retirement::{RetirementRegistration, RetirementStorage};
+pub use transition::retirement::{ClosedRetirement, DisposableBatch};
 
 // Share the publication order with the Loom adapter. In particular, a reused
 // generation must not admit a delayed reader before it becomes current.

@@ -123,7 +123,10 @@ macro_rules! enter_reader {
 }
 pub(crate) use enter_reader;
 
-// Both rotating and terminal certificates authorize only their issuing domain.
+// Independent-certificate acceptance used by the verification model and
+// test-only issuer observations. Production retirement instead derives queues
+// inside the operation that issues the scoped drain and retains that owner.
+#[cfg(any(test, verus_only))]
 macro_rules! authorize_domain {
     ($issuer:expr, $owner:expr, $payload:expr) => {{
         let issuer: *const _ = $issuer;
@@ -135,8 +138,10 @@ macro_rules! authorize_domain {
         }
     }};
 }
+#[cfg(any(test, verus_only))]
 pub(crate) use authorize_domain;
 
+#[cfg(verus_only)]
 macro_rules! take_authorized_queue {
     ($index:ident, $guard:ident; $authorize:expr, $lock:expr, $take:expr) => {{
         match $authorize {
@@ -148,8 +153,10 @@ macro_rules! take_authorized_queue {
         }
     }};
 }
+#[cfg(verus_only)]
 pub(crate) use take_authorized_queue;
 
+#[cfg(verus_only)]
 macro_rules! take_authorized_queues {
     ($indices:ident, $first:ident, $second:ident;
      $authorize:expr, $lock_first:expr, $lock_second:expr, $take:expr) => {{
@@ -163,4 +170,5 @@ macro_rules! take_authorized_queues {
         }
     }};
 }
+#[cfg(verus_only)]
 pub(crate) use take_authorized_queues;

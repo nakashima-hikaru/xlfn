@@ -91,7 +91,7 @@ fn assert_cancelled<T>(result: XllResult<T>) {
 
 fn assert_unregistered(runtime: &AsyncRuntime<HoldingExecutor>) {
     assert_eq!(runtime.registry().active_tasks.load(Ordering::Acquire), 0);
-    assert_eq!(runtime.registry().next_id.load(Ordering::Relaxed), 1);
+    assert_eq!(runtime.registry().next_task_id(), 1);
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn stale_snapshot_retains_calculation_until_rejected_reservation_releases_it() {
     assert!(runtime.advance_calculation());
     {
         let control = runtime.registry().control.lock();
-        assert_eq!(control.calculations[&old].pin_count(), 1);
+        assert_eq!(control.calculations()[&old].pin_count(), 1);
     }
     assert_eq!(snapshot.epoch(), old);
     assert_cancelled(runtime.reserve_snapshot(snapshot));
@@ -146,7 +146,7 @@ fn stale_snapshot_retains_calculation_until_rejected_reservation_releases_it() {
     assert_eq!(state.reserves.load(Ordering::Relaxed), 1);
     assert_eq!(state.permit_drops.load(Ordering::Relaxed), 1);
     assert_eq!(
-        runtime.registry().control.lock().calculations[&old].pin_count(),
+        runtime.registry().control.lock().calculations()[&old].pin_count(),
         0
     );
 
@@ -156,7 +156,7 @@ fn stale_snapshot_retains_calculation_until_rejected_reservation_releases_it() {
             .registry()
             .control
             .lock()
-            .calculations
+            .calculations()
             .contains_key(&old)
     );
     assert!(runtime.close().is_ok());
@@ -333,7 +333,7 @@ fn snapshot_saturation_preserves_cancelled_and_closing_error_priority() {
         runtime.reserve_snapshot(closing),
         Err(XllError::Closing)
     ));
-    assert_eq!(runtime.registry().next_id.load(Ordering::Relaxed), 2);
+    assert_eq!(runtime.registry().next_task_id(), 2);
     assert_eq!(runtime.registry().active_tasks.load(Ordering::Acquire), 1);
     assert_eq!(
         state.permit_drops.load(Ordering::Relaxed),
@@ -374,7 +374,7 @@ fn miri_snapshot_final_pin_release_can_race_calculation_retirement() {
                 .registry()
                 .control
                 .lock()
-                .calculations
+                .calculations()
                 .contains_key(&retired_epoch)
         );
     }

@@ -36,6 +36,8 @@ mod rollback;
 mod shutdown;
 #[cfg(not(feature = "async"))]
 pub(crate) use shutdown::AsyncStopped;
+#[cfg(any(feature = "rtd", feature = "handles"))]
+pub(crate) use shutdown::CompletedResourceCertificates;
 pub(crate) use shutdown::{AddinQuiescence, GenerationCallbacksDetached, GenerationReclaimed};
 pub(crate) use shutdown::{
     CanonicalCompletion, CertifiedRetirement, CompletedResources, FinalRemoval, OpenRollback,

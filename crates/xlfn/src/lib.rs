@@ -110,8 +110,6 @@ mod panic_boundary;
 /// Borrowed worksheet references and range coordinates.
 pub mod reference;
 mod registration;
-#[cfg(any(feature = "handles", feature = "cache"))]
-mod retirement_queue;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 #[allow(
     dead_code,

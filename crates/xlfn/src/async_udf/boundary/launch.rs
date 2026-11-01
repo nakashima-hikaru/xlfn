@@ -5,6 +5,36 @@ use crate::async_udf::registry::CalculationSnapshot;
 use crate::async_udf::runtime::RuntimeReservation;
 use crate::cancellation::TaskCancellationOwner;
 
+// Capturing through the admitted guard fixes the issuer before layer callbacks
+// run, without allocating cancellation state until those callbacks succeed.
+pub(super) struct CapturedLaunch<'guard, 'call, A: crate::Addin> {
+    guard: &'guard crate::runtime::AsyncCallGuard<'call, A>,
+    calculation: CalculationSnapshot<'static>,
+}
+
+impl<'guard, 'call, A: crate::Addin> CapturedLaunch<'guard, 'call, A> {
+    pub(super) fn capture(guard: &'guard crate::runtime::AsyncCallGuard<'call, A>) -> Self {
+        Self {
+            guard,
+            calculation: guard.async_runtime().snapshot_calculation(),
+        }
+    }
+
+    pub(super) fn calculation_id(&self) -> crate::execution::CalculationId {
+        self.calculation.epoch().into()
+    }
+
+    pub(super) fn into_launch(self) -> LaunchOwner<'guard, 'call, A> {
+        let (cancellation, token) = TaskCancellationOwner::new(CancellationGuarantee::BestEffort);
+        LaunchOwner {
+            guard: self.guard,
+            calculation: self.calculation,
+            cancellation,
+            token,
+        }
+    }
+}
+
 pub(super) struct LaunchOwner<'guard, 'call, A: crate::Addin> {
     guard: &'guard crate::runtime::AsyncCallGuard<'call, A>,
     calculation: CalculationSnapshot<'static>,
@@ -74,22 +104,6 @@ pub(super) struct Scoped<B> {
 }
 
 impl<'guard, 'call, A: crate::Addin> LaunchOwner<'guard, 'call, A> {
-    pub(super) fn new(
-        guard: &'guard crate::runtime::AsyncCallGuard<'call, A>,
-        calculation: CalculationSnapshot<'static>,
-    ) -> Self {
-        if !calculation.belongs_to(guard.async_runtime().registry()) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let (cancellation, token) = TaskCancellationOwner::new(CancellationGuarantee::BestEffort);
-        Self {
-            guard,
-            calculation,
-            cancellation,
-            token,
-        }
-    }
-
     pub(super) fn token(&self) -> CancellationToken {
         self.token
     }

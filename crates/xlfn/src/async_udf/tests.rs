@@ -1,7 +1,6 @@
 use super::*;
 
 use super::boundary::AFTER_ASYNC_EVALUATION_HOOK;
-use super::calculation::CalculationState;
 use super::runtime::ExecutorSlot;
 use super::transport::ExcelAsyncResponder;
 use crate::{AsyncPollerCount, AsyncTaskLimit, BuiltinExecutorConfig};
@@ -12,7 +11,6 @@ fn builtin(count: usize) -> BuiltinAsyncExecutor {
         BuiltinExecutorConfig::new().with_poller_count(AsyncPollerCount::new(count).unwrap()),
     )
 }
-use super::task::TaskControl;
 use crate::cancellation::{CancellationGuarantee, CancellationSource};
 use crate::execution::{
     CallMetadata, CallOutcome, UdfCompletionOutcome, UdfDeliveryOutcome, UdfErrorKind,
@@ -2131,93 +2129,6 @@ fn rejection_priority_old_calculation_over_max_pending() {
 }
 
 #[test]
-fn test_calculation_state_sharded_removal_and_drain() {
-    let state = CalculationState::new(TEST_CALCULATION);
-    let admission = state.enter_admission().unwrap();
-    for id in 1..=100 {
-        let (cancellation, _) = CancellationSource::new(CancellationGuarantee::BestEffort);
-        admission.insert_task(id, TaskControl { cancellation });
-    }
-    drop(admission);
-
-    // Remove 40 tasks via remove_task
-    for id in 1..=40 {
-        assert!(state.remove_task(id));
-    }
-    // Drain remaining 60 tasks
-    let drained = state.close_admission().wait().drain_tasks();
-    assert_eq!(drained.len(), 60);
-    assert!(state.tasks_are_empty());
-}
-
-#[test]
-fn drained_batches_retain_cancellation_until_consumed_outside_locks() {
-    for count in [0, 1, 4, 5, 33] {
-        let state = CalculationState::new(TEST_CALCULATION);
-        let mut observers = Vec::new();
-        let admission = state.enter_admission().unwrap();
-        for id in 0..count {
-            let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
-            observers.push(token);
-            admission.insert_task(id, TaskControl { cancellation });
-        }
-        drop(admission);
-
-        let controls = state.close_admission().wait().drain_tasks();
-        assert_eq!(controls.len(), count as usize);
-        assert!(state.task_shards_are_unlocked_and_empty());
-        assert!(observers.iter().all(|token| !token.is_cancelled()));
-
-        super::registry::cancel_tasks(controls);
-        assert!(observers.iter().all(|token| token.is_cancelled()));
-    }
-}
-
-#[test]
-fn calculation_drain_racing_completions_claims_every_task_once() {
-    for _ in 0..8 {
-        let state = CalculationState::new(TEST_CALCULATION);
-        let admission = state.enter_admission().unwrap();
-        for id in 0..128 {
-            admission.insert_task(
-                id,
-                TaskControl {
-                    cancellation: test_cancellation_source(),
-                },
-            );
-        }
-        drop(admission);
-        let drained_admission = state.close_admission().wait();
-        // No new controls can be inserted after admission drains. Existing
-        // completions may remove them before or during the capacity scan.
-        let barrier = std::sync::Barrier::new(5);
-        std::thread::scope(|scope| {
-            let removers = (0..4)
-                .map(|worker| {
-                    let state = &state;
-                    let barrier = &barrier;
-                    scope.spawn(move || {
-                        barrier.wait();
-                        (worker..128)
-                            .step_by(4)
-                            .filter(|&id| state.remove_task(id))
-                            .count()
-                    })
-                })
-                .collect::<Vec<_>>();
-            barrier.wait();
-            let drained = drained_admission.drain_tasks();
-            let completed: usize = removers
-                .into_iter()
-                .map(|thread| thread.join().unwrap())
-                .sum();
-            assert_eq!(completed + drained.len(), 128);
-            assert!(state.tasks_are_empty());
-        });
-    }
-}
-
-#[test]
 fn miri_spawn_and_advance_linearization_case_a_advance_closes_before_admission() {
     let lifecycle = Arc::new(TestRuntime::new());
     lifecycle
@@ -2266,7 +2177,7 @@ fn miri_spawn_and_advance_linearization_case_a_advance_closes_before_admission()
         let reader = lifecycle.registry();
         let control = reader.control.lock();
         assert!(
-            control.calculations.contains_key(&TEST_CALCULATION),
+            control.calculations().contains_key(&TEST_CALCULATION),
             "a pre-admission snapshot must keep its generation alive"
         );
     }
@@ -2289,7 +2200,7 @@ fn miri_spawn_and_advance_linearization_case_a_advance_closes_before_admission()
         let reader = lifecycle.registry();
         let control = reader.control.lock();
         assert_eq!(
-            control.calculations.len(),
+            control.calculations().len(),
             1,
             "retired snapshots must be reclaimed on the next transition"
         );
@@ -2322,7 +2233,7 @@ fn miri_canceled_running_task_keeps_its_calculation_until_completion() {
         let reader = lifecycle.registry();
         let control = reader.control.lock();
         let old = control
-            .calculations
+            .calculations()
             .get(&TEST_CALCULATION)
             .expect("canceling controls must not free a running task's generation");
         assert!(old.tasks_are_empty());
@@ -2339,7 +2250,7 @@ fn miri_canceled_running_task_keeps_its_calculation_until_completion() {
     assert!(lifecycle.advance_calculation());
     {
         let reader = lifecycle.registry();
-        assert_eq!(reader.control.lock().calculations.len(), 1);
+        assert_eq!(reader.control.lock().calculations().len(), 1);
     }
     assert!(lifecycle.close().unwrap().issues.is_empty());
 }
@@ -2352,14 +2263,14 @@ fn task_id_exhaustion_releases_reservation_without_reusing_identity() {
         .unwrap();
     {
         let reader = lifecycle.registry();
-        reader.next_id.store(u64::MAX, Ordering::Relaxed);
+        reader.exhaust_task_ids();
         assert!(matches!(
             reader.reserve(TEST_CALCULATION),
             Err(XllError::Overloaded)
         ));
         assert_eq!(reader.active_tasks.load(Ordering::Acquire), 0);
         let control = reader.control.lock();
-        let generation = control.calculations.get(&TEST_CALCULATION).unwrap();
+        let generation = control.calculations().get(&TEST_CALCULATION).unwrap();
         assert_eq!(generation.pin_count(), 0);
         assert_eq!(generation.active_admissions(), 0);
     }
@@ -2407,43 +2318,6 @@ fn calculation_exhaustion_does_not_republish_an_old_identity() {
     assert!(!lifecycle.advance_calculation());
     assert_eq!(lifecycle.current_epoch().get(), u64::MAX);
     assert!(lifecycle.close().unwrap().issues.is_empty());
-}
-
-#[test]
-fn removing_task_releases_cancellation_wakers_outside_task_lock() {
-    struct ReentrantWake(Arc<CalculationState>, Arc<AtomicBool>);
-    impl futures_util::task::ArcWake for ReentrantWake {
-        fn wake_by_ref(this: &Arc<Self>) {
-            let unlocked = this.0.task_shard_is_unlocked(0);
-            this.1.store(unlocked, Ordering::Release);
-            if unlocked {
-                assert!(!this.0.remove_task(0));
-            }
-        }
-    }
-    let generation = Arc::new(CalculationState::new(TEST_CALCULATION));
-    let observed = Arc::new(AtomicBool::new(false));
-    let waker = futures_util::task::waker(Arc::new(ReentrantWake(
-        Arc::clone(&generation),
-        Arc::clone(&observed),
-    )));
-    let (source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
-    let mut waiter = std::pin::pin!(token.cancelled());
-    assert!(
-        waiter
-            .as_mut()
-            .poll(&mut std::task::Context::from_waker(&waker))
-            .is_pending()
-    );
-    generation.enter_admission().unwrap().insert_task(
-        0,
-        TaskControl {
-            cancellation: source,
-        },
-    );
-    assert!(generation.remove_task(0));
-    assert!(observed.load(Ordering::Acquire));
-    assert!(generation.tasks_are_empty());
 }
 
 #[test]

@@ -11,7 +11,7 @@ COUNTERS = Path("crates/xlfn/src/handle/domain/counters.rs")
 
 DEPENDENCIES = (
     Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
-    Path("crates/xlfn/src/retirement_queue.rs"),
+    Path("verification/verus/handle_domain/src/batch_transitions.rs"),
     PROTOCOL,
     COUNTERS,
     Path("crates/xlfn/src/handle/binding/protocol.rs"),
@@ -45,7 +45,7 @@ if __name__ == "__main__":
     )
     check_mutations(
         PROOF,
-        Path("crates/xlfn/src/retirement_queue.rs"),
+        Path("verification/verus/handle_domain/src/batch_transitions.rs"),
         DEPENDENCIES,
         {
             "batch merge accepts a foreign domain": (
@@ -182,16 +182,16 @@ if __name__ == "__main__":
         DEPENDENCIES,
         {
             "call retention loses the first domain permit": (
-                "                        list.push(existing);",
-                "                        let _ = existing;",
+                "                first_pair.push(existing);",
+                "                let _ = existing;",
             ),
             "call retention loses the newly admitted domain": (
-                "                        list.push($permit);",
-                "                        let _ = $permit;",
+                "                first_pair.push($permit);",
+                "                let _ = $permit;",
             ),
             "call retention drops previously retained domains on append": (
-                "Retained::Multiple(list) => list.push($permit),",
-                "Retained::Multiple(list) => { list.clear(); list.push($permit); },",
+                "Retained::Multiple(mut list) => {\n                list.push($permit);",
+                "Retained::Multiple(mut list) => {\n                list.clear(); list.push($permit);",
             ),
         },
     )

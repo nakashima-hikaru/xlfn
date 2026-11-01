@@ -27,6 +27,13 @@ use std::sync::Arc;
 ))]
 mod counted_string;
 
+#[cfg(any(test, all(windows, any(feature = "rtd", feature = "handles"))))]
+#[allow(
+    unsafe_code,
+    reason = "private consuming startup claims authorize one move from caller-owned closure storage"
+)]
+mod drain_wait;
+
 mod host;
 #[cfg(any(test, all(windows, any(feature = "rtd", feature = "handles"))))]
 mod notification;

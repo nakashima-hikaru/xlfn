@@ -2,6 +2,7 @@
 //! once under its own lock; only the resulting consuming authority can drain,
 //! issue a scoped certificate, and clear that same pending generation.
 use super::*;
+pub(super) mod retirement;
 
 /// A drained generation valid only during its transition callback.
 ///
@@ -18,32 +19,19 @@ use super::*;
 #[derive(Debug)]
 pub struct DrainedGeneration<'drain> {
     index: GenerationIndex,
-    domain: &'drain AtomicUsize,
+    _domain: &'drain AtomicUsize,
     transition: std::marker::PhantomData<&'drain mut Option<GenerationIndex>>,
 }
 
 impl DrainedGeneration<'_> {
-    /// Locks and takes a generation queue only after checking the issuing domain.
-    /// The supplied array must be this domain's retirement queues. The
-    /// certificate selects and locks the authorized array element itself;
-    /// `take_queue` receives its guard and runs exactly once.
-    pub(crate) fn take_queue<const N: usize, Q, R>(
-        &self,
-        domain: &RotatingReadDomain<N>,
-        queues: &[Mutex<Q>; 2],
-        take_queue: impl FnOnce(MutexGuard<'_, Q>) -> R,
-    ) -> Option<R> {
-        protocol::take_authorized_queue!(index, guard;
-            self.index_for(domain), queues[index].lock(), take_queue(guard))
-    }
-
     /// Returns the retirement queue index only for the issuing domain.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn index_for<const N: usize>(
         &self,
         domain: &RotatingReadDomain<N>,
     ) -> Option<usize> {
-        protocol::authorize_domain!(self.domain, &domain.current, self.index.index())
+        protocol::authorize_domain!(self._domain, &domain.current, self.index.index())
     }
 }
 
@@ -60,32 +48,7 @@ impl DrainedGeneration<'_> {
 /// ```
 #[derive(Debug)]
 pub struct ClosedDomain<'domain> {
-    domain: &'domain AtomicUsize,
-}
-
-impl ClosedDomain<'_> {
-    /// Locks both supplied retirement queues in index order and transfers both
-    /// guards to the take callback. The supplied array must belong to this
-    /// domain. The callback does not run for a foreign domain certificate.
-    pub(crate) fn take_queues<const N: usize, Q, R>(
-        &self,
-        domain: &RotatingReadDomain<N>,
-        queues: &[Mutex<Q>; 2],
-        take_queues: impl FnOnce(MutexGuard<'_, Q>, MutexGuard<'_, Q>) -> R,
-    ) -> Option<R> {
-        protocol::take_authorized_queues!(indices, first, second;
-            self.indices_for(domain), queues[indices[0]].lock(), queues[indices[1]].lock(),
-            take_queues(first, second))
-    }
-
-    /// Authorizes both retirement queues only for the issuing domain.
-    #[must_use]
-    pub(crate) fn indices_for<const N: usize>(
-        &self,
-        domain: &RotatingReadDomain<N>,
-    ) -> Option<[usize; 2]> {
-        protocol::authorize_domain!(self.domain, &domain.current, [0, 1])
-    }
+    _domain: &'domain AtomicUsize,
 }
 
 pub(super) struct LockedDomain<'domain, const N: usize> {
@@ -266,7 +229,7 @@ impl<'domain, const N: usize> DrainedRotation<'domain, N> {
     fn certificate(&mut self) -> DrainedGeneration<'_> {
         DrainedGeneration {
             index: self.old,
-            domain: &self.authority.domain.current,
+            _domain: &self.authority.domain.current,
             transition: std::marker::PhantomData,
         }
     }
@@ -447,7 +410,7 @@ impl<const N: usize> RotatingReadDomain<N> {
             drop(self.generations[1].control().seal().wait())
         );
         ClosedDomain {
-            domain: &self.current,
+            _domain: &self.current,
         }
     }
 }

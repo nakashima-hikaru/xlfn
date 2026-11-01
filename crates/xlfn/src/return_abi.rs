@@ -152,12 +152,7 @@ impl PreparedReturn {
         }
     }
 
-    fn publish_excel(self, producer: &mut ReturnPublicationTxn) -> ValuePublication {
-        // A committed owned block cannot be replaced by scalar panic fallback.
-        // The outer boundary must stop rather than create a second publication.
-        if !producer.is_armed() {
-            xlfn_kernel::invariant::fail_stop();
-        }
+    fn publish_excel(self, producer: ReturnPublicationTxn) -> ValuePublication {
         if self.storage.is_none()
             && self.array.is_none()
             && matches!(
@@ -172,7 +167,7 @@ impl PreparedReturn {
         ValuePublication::Owned(self.publish_owned_excel(producer))
     }
 
-    fn publish_owned_excel(self, producer: &mut ReturnPublicationTxn) -> *mut XLOPER12 {
+    fn publish_owned_excel(self, producer: ReturnPublicationTxn) -> *mut XLOPER12 {
         producer.prepare(self).commit()
     }
 }
@@ -191,6 +186,10 @@ impl PreparedPublication {
             producer,
         } = self;
         let obligation = producer.transfer_to_block();
+        #[cfg(test)]
+        if PANIC_ON_RETURN_PUBLICATION.swap(false, Ordering::AcqRel) {
+            panic!("injected return publication panic after obligation transfer");
+        }
         prepared.oper.xltype |= XLBIT_DLL_FREE;
 
         let block = ReturnBlock {
@@ -279,14 +278,14 @@ fn enforce_return_limit(bytes: usize) -> XllResult<()> {
 #[cfg(test)]
 fn allocate_excel_owned(
     value: impl crate::call_return::EncodedReturn,
-    producer: &mut ReturnPublicationTxn,
+    producer: ReturnPublicationTxn,
 ) -> XllResult<*mut XLOPER12> {
     let prepared = PreparedReturn::encode(value)?;
     Ok(prepared.publish_owned_excel(producer))
 }
 
 #[cfg(test)]
-fn allocate_excel_error(error: &XllError, producer: &mut ReturnPublicationTxn) -> *mut XLOPER12 {
+fn allocate_excel_error(error: &XllError, producer: ReturnPublicationTxn) -> *mut XLOPER12 {
     PreparedReturn::error(error).publish_owned_excel(producer)
 }
 
@@ -361,21 +360,17 @@ where
     let Some(producer) = runtime.enter_return_producer() else {
         return closing_error_pointer();
     };
-    let mut producer = ReturnPublicationTxn::new(producer);
-    match catch_no_unwind(AssertUnwindSafe(|| {
+    let producer = ReturnPublicationTxn::new(producer);
+    let prepared = match catch_no_unwind(AssertUnwindSafe(|| {
         let mut context = ReturnContext::new();
         let value = T::invoke(&mut context, operation)?;
-        allocate_excel_owned(value, &mut producer)
+        PreparedReturn::encode(value)
     })) {
-        Ok(Ok(pointer)) => pointer,
-        Ok(Err(error)) => allocate_excel_error(&error, &mut producer),
-        Err(_) => {
-            if !producer.is_armed() {
-                std::process::abort();
-            }
-            allocate_excel_error(&XllError::Panic, &mut producer)
-        }
-    }
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(error)) => PreparedReturn::error(&error),
+        Err(_) => PreparedReturn::error(&XllError::Panic),
+    };
+    ownership::commit_publication(|| prepared.publish_owned_excel(producer))
 }
 
 /// Outermost panic boundary for void-returning `extern "system"` entry points.
@@ -406,16 +401,17 @@ pub(crate) fn ffi_boundary_void<A: crate::Addin>(
 /// ABI-specific publication behind the common admission and execution boundary.
 trait SyncReturnAbi {
     type Payload;
+    type Prepared;
     type Pointer: Copy;
     type Publication;
     const INCLUDE_EXCEL_VALUE: bool;
     fn rejected() -> Self::Pointer;
-    fn publish(
+    fn prepare(
         payload: Self::Payload,
-        producer: &mut ReturnPublicationTxn,
         numeric: &numeric::Fp12CallGuard,
-    ) -> XllResult<Self::Publication>;
-    fn error(error: &XllError, producer: &mut ReturnPublicationTxn) -> Self::Publication;
+    ) -> XllResult<Self::Prepared>;
+    fn error(error: &XllError) -> Self::Prepared;
+    fn publish(prepared: Self::Prepared, producer: ReturnPublicationTxn) -> Self::Publication;
     /// Final ABI handoff after all potentially reentrant call cleanup.
     fn finish(publication: Self::Publication) -> Self::Pointer;
 }
@@ -428,21 +424,21 @@ enum ValuePublication {
 struct ValueReturnAbi<P>(std::marker::PhantomData<P>);
 impl<P: crate::call_return::EncodedReturn> SyncReturnAbi for ValueReturnAbi<P> {
     type Payload = P;
+    type Prepared = PreparedReturn;
     type Pointer = *mut XLOPER12;
     type Publication = ValuePublication;
     const INCLUDE_EXCEL_VALUE: bool = false;
     fn rejected() -> Self::Pointer {
         closing_error_pointer()
     }
-    fn publish(
-        payload: P,
-        producer: &mut ReturnPublicationTxn,
-        _: &numeric::Fp12CallGuard,
-    ) -> XllResult<Self::Publication> {
-        Ok(PreparedReturn::encode(payload)?.publish_excel(producer))
+    fn prepare(payload: P, _: &numeric::Fp12CallGuard) -> XllResult<Self::Prepared> {
+        PreparedReturn::encode(payload)
     }
-    fn error(error: &XllError, producer: &mut ReturnPublicationTxn) -> Self::Publication {
-        PreparedReturn::error(error).publish_excel(producer)
+    fn error(error: &XllError) -> Self::Prepared {
+        PreparedReturn::error(error)
+    }
+    fn publish(prepared: Self::Prepared, producer: ReturnPublicationTxn) -> Self::Publication {
+        prepared.publish_excel(producer)
     }
     fn finish(publication: Self::Publication) -> Self::Pointer {
         match publication {
@@ -455,21 +451,24 @@ impl<P: crate::call_return::EncodedReturn> SyncReturnAbi for ValueReturnAbi<P> {
 struct NumericReturnAbi;
 impl SyncReturnAbi for NumericReturnAbi {
     type Payload = numeric::NumericArrayOutput;
+    type Prepared = *mut xlfn_sys::FP12;
     type Pointer = *mut xlfn_sys::FP12;
     type Publication = Self::Pointer;
     const INCLUDE_EXCEL_VALUE: bool = true;
     fn rejected() -> Self::Pointer {
         std::ptr::null_mut()
     }
-    fn publish(
+    fn prepare(
         payload: Self::Payload,
-        _: &mut ReturnPublicationTxn,
         numeric: &numeric::Fp12CallGuard,
     ) -> XllResult<Self::Pointer> {
         payload.publish(numeric)
     }
-    fn error(_: &XllError, _: &mut ReturnPublicationTxn) -> Self::Pointer {
+    fn error(_: &XllError) -> Self::Pointer {
         std::ptr::null_mut()
+    }
+    fn publish(prepared: Self::Prepared, _: ReturnPublicationTxn) -> Self::Publication {
+        prepared
     }
     fn finish(publication: Self::Publication) -> Self::Pointer {
         publication
@@ -585,14 +584,13 @@ where
         report_sync_failure::<A, B>(runtime, udf_id, None, calculation_id, &XllError::Closing);
         return B::rejected();
     };
-    let mut producer = ReturnPublicationTxn::new(producer);
+    let producer = ReturnPublicationTxn::new(producer);
     // Allocate correlation even without a sink, layer, or tracing subscriber.
     let call_id = CallId::new(runtime.next_call_id());
     let result = match crate::panic_boundary::catch_udf_no_unwind(AssertUnwindSafe(|| {
         sync_boundary_inner::<A, B, F>(
             runtime,
             &call,
-            &mut producer,
             &numeric,
             udf_id,
             excel_name,
@@ -603,14 +601,13 @@ where
     })) {
         Ok(pointer) => pointer,
         Err(message) => {
-            if !producer.is_armed() {
-                std::process::abort();
-            }
             report_sync_panic(runtime, udf_id, call_id, calculation_id, &message);
-            B::error(&XllError::Panic, &mut producer)
+            B::error(&XllError::Panic)
         }
     };
-    drop(producer);
+    // No recovery path retains this producer after publication starts. A
+    // publication panic is terminal, rather than a second fallback emission.
+    let result = ownership::commit_publication(|| B::publish(result, producer));
     drop(call);
     drop(_external);
     // Only the ingress counter and numeric nesting guards remain; their
@@ -625,14 +622,13 @@ where
 fn sync_boundary_inner<A, B, F>(
     runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::CallGuard<'_, A>,
-    producer: &mut ReturnPublicationTxn,
     numeric: &numeric::Fp12CallGuard,
     udf_id: &'static str,
     excel_name: &'static str,
     call_id: CallId,
     calculation_id: crate::execution::CalculationId,
     operation: F,
-) -> B::Publication
+) -> B::Prepared
 where
     A: crate::Addin,
     B: SyncReturnAbi,
@@ -644,20 +640,20 @@ where
     let instrumentation = crate::execution::InstrumentationPlan::for_call(guard);
     if !instrumentation.enabled() {
         let caught = crate::panic_boundary::catch_udf_no_unwind(AssertUnwindSafe(|| {
-            B::publish(operation(guard.state(), guard)?, producer, numeric)
+            B::prepare(operation(guard.state(), guard)?, numeric)
         }));
         let result = match caught {
             Ok(result) => result,
             Err(message) => {
                 report_sync_panic(runtime, udf_id, call_id, calculation_id, &message);
-                return B::error(&XllError::Panic, producer);
+                return B::error(&XllError::Panic);
             }
         };
         return match result {
             Ok(pointer) => pointer,
             Err(error) => {
                 report_sync_failure::<A, B>(runtime, udf_id, Some(call_id), calculation_id, &error);
-                B::error(&error, producer)
+                B::error(&error)
             }
         };
     }
@@ -687,14 +683,14 @@ where
                 if instrumentation.trace_enabled() {
                     crate::execution::trace(&trace_metadata, &outcome);
                 }
-                return B::error(&error, producer);
+                return B::error(&error);
             }
         }
     } else {
         None
     };
     let caught = crate::panic_boundary::catch_udf_no_unwind(AssertUnwindSafe(|| {
-        B::publish(operation(guard.state(), guard)?, producer, numeric)
+        B::prepare(operation(guard.state(), guard)?, numeric)
     }));
     let (result, panic_reported) = match caught {
         Ok(result) => (result, false),
@@ -720,7 +716,7 @@ where
     }
     match result {
         Ok(pointer) => pointer,
-        Err(error) => B::error(&error, producer),
+        Err(error) => B::error(&error),
     }
 }
 
@@ -844,6 +840,9 @@ static RETURN_BLOCKS_WITH_ARRAY: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
 static PANIC_ON_RETURN_BLOCK_DROP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static PANIC_ON_RETURN_PUBLICATION: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 #[cfg(test)]
 static PANICKING_RETURN_DROP_PAYLOAD: std::sync::Mutex<
@@ -1314,9 +1313,9 @@ mod tests {
             .into_admitted()
             .map_err(|_| XllError::Closing)?;
         let _call = runtime.enter(&ingress)?;
-        let mut producer =
+        let producer =
             ReturnPublicationTxn::new(runtime.enter_return_producer().ok_or(XllError::Closing)?);
-        allocate_excel_owned(value, &mut producer)
+        allocate_excel_owned(value, producer)
     }
 
     fn backing_of(pointer: *mut XLOPER12) -> ReturnBlockBacking {
@@ -1519,9 +1518,8 @@ mod tests {
                         <Matrix<_> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new())
                             .unwrap()
                     };
-                    let mut producer =
-                        ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
-                    allocate_excel_owned(value, &mut producer).unwrap()
+                    let producer = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
+                    allocate_excel_owned(value, producer).unwrap()
                 };
                 let first = matrix();
                 let second = matrix();
@@ -1590,8 +1588,8 @@ mod tests {
                     // before returning its separate UTF-16 payload owner.
                     ReturnPayload::scalar(source).unwrap()
                 };
-                let mut producer = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
-                allocate_excel_owned(payload, &mut producer).unwrap()
+                let producer = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
+                allocate_excel_owned(payload, producer).unwrap()
             };
             let read = |pointer: *mut XLOPER12, expected: &str| {
                 // SAFETY: each call below precedes this root's single free.
@@ -2196,14 +2194,13 @@ mod tests {
         let tracker: &'static ReturnTracker = Box::leak(Box::new(ReturnTracker::new_closed()));
         tracker.reopen_admission().unwrap();
 
-        let mut producer = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
+        let producer = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
         assert_eq!(tracker.outstanding_obligations(), 1);
 
         let ptr = PreparedReturn::encode(ReturnPayload::scalar(42.0).unwrap())
             .unwrap()
-            .publish_owned_excel(&mut producer);
+            .publish_owned_excel(producer);
         assert_eq!(tracker.outstanding_obligations(), 1);
-        drop(producer);
         assert_eq!(tracker.outstanding_obligations(), 1);
 
         // SAFETY: ptr is a live ReturnBlock produced by publish_excel above.
@@ -2226,13 +2223,10 @@ mod tests {
         static TRACKER: ReturnTracker = ReturnTracker::new_closed();
         let tracker = &TRACKER;
         tracker.reopen_admission().unwrap();
-        let mut transaction = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
+        let transaction = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
         let publication = transaction.prepare(PreparedReturn::error(&XllError::Panic));
-        assert!(!transaction.is_armed());
         assert_eq!(tracker.outstanding_obligations(), 1);
         drop(publication);
-        assert_eq!(tracker.outstanding_obligations(), 0);
-        drop(transaction);
         assert_eq!(tracker.outstanding_obligations(), 0);
         tracker.close_admission();
         tracker.wait_for_quiescence();
@@ -2249,24 +2243,45 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "requires a child process to observe fail-stop")]
-    fn committed_return_cannot_issue_scalar_panic_fallback() {
-        const CHILD: &str = "XLFN_TEST_COMMITTED_RETURN_FALLBACK";
+    fn miri_preparation_panic_retains_one_fallback_admission() {
+        static TRACKER: ReturnTracker = ReturnTracker::new_closed();
+        TRACKER.reopen_admission().unwrap();
+        let producer = ReturnPublicationTxn::new(TRACKER.try_enter_producer().unwrap());
+        let prepared = catch_no_unwind(AssertUnwindSafe(|| -> PreparedReturn {
+            panic!("injected return preparation panic");
+        }))
+        .unwrap_or_else(|_| PreparedReturn::error(&XllError::Panic));
+        assert_eq!(TRACKER.outstanding_obligations(), 1);
+        let publication = prepared.publish_excel(producer);
+        assert!(matches!(publication, ValuePublication::Scalar(_)));
+        assert_eq!(TRACKER.outstanding_obligations(), 0);
+        TRACKER.close_admission();
+        TRACKER.wait_for_quiescence();
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "requires a child process to observe terminal publication panic"
+    )]
+    fn publication_panic_cannot_return_to_a_fallback_boundary() {
+        const CHILD: &str = "XLFN_TEST_COMMITTING_PUBLICATION_PANIC";
         if std::env::var_os(CHILD).is_some() {
-            let tracker: &'static ReturnTracker = Box::leak(Box::new(ReturnTracker::new_closed()));
-            tracker.reopen_admission().unwrap();
-            let mut transaction = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
-            let _owned =
-                PreparedReturn::error(&XllError::Panic).publish_owned_excel(&mut transaction);
-            // Even primitive fallback must stop after the original admission
-            // was transferred to an owned block, rather than issue value #2.
-            let _fallback = PreparedReturn::error(&XllError::Panic).publish_excel(&mut transaction);
-            panic!("a committed return must not issue a second publication");
+            static TRACKER: ReturnTracker = ReturnTracker::new_closed();
+            TRACKER.reopen_admission().unwrap();
+            let producer = ReturnPublicationTxn::new(TRACKER.try_enter_producer().unwrap());
+            PANIC_ON_RETURN_PUBLICATION.store(true, Ordering::Release);
+            let _ = catch_no_unwind(AssertUnwindSafe(|| {
+                ownership::commit_publication(|| {
+                    PreparedReturn::error(&XllError::Panic).publish_owned_excel(producer)
+                });
+            }));
+            panic!("an unfinished publication must not return to fallback");
         }
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "return_abi::tests::committed_return_cannot_issue_scalar_panic_fallback",
+                "return_abi::tests::publication_panic_cannot_return_to_a_fallback_boundary",
             ])
             .env(CHILD, "1")
             .stdout(std::process::Stdio::null())
@@ -2281,7 +2296,11 @@ mod tests {
         #[cfg(not(unix))]
         {
             assert!(!status.success());
-            assert_ne!(status.code(), Some(101), "must fail-stop rather than panic");
+            assert_ne!(
+                status.code(),
+                Some(101),
+                "must fail-stop rather than unwind"
+            );
         }
     }
 
@@ -2308,7 +2327,7 @@ mod tests {
         let tracker: &'static ReturnTracker = Box::leak(Box::new(ReturnTracker::new_closed()));
         tracker.reopen_admission().unwrap();
 
-        let mut producer = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
+        let producer = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
         assert_eq!(tracker.outstanding_obligations(), 1);
 
         let err_res = ReturnPayload::scalar(ExcelCellOutput::Number(f64::NAN));
@@ -2318,7 +2337,7 @@ mod tests {
         };
         assert_eq!(tracker.outstanding_obligations(), 1);
 
-        let ptr = allocate_excel_error(&err, &mut producer);
+        let ptr = allocate_excel_error(&err, producer);
         assert_eq!(tracker.outstanding_obligations(), 1);
 
         // SAFETY: ptr is a live error ReturnBlock produced by allocate_excel_error above.

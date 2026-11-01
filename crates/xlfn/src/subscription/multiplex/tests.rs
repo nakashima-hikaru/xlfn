@@ -16,6 +16,32 @@ use std::time::Instant;
 
 const DEADLINE: Duration = Duration::from_secs(10);
 
+#[test]
+fn miri_dropping_successful_spawn_owner_installs_its_join_barrier() {
+    let budget = Arc::new(ChannelBudget::runtime(RtdLimits::default()));
+    let permit = ChannelBudget::try_worker(&budget).unwrap();
+    let (sent, received) = mpsc::sync_channel(1);
+    let mut worker = Worker::Joining;
+    let starting = UnstartedWorker {
+        worker: Some(&mut worker),
+        producer: Some(move || sent.send(()).unwrap()),
+    }
+    .capture();
+    let running = match starting.spawn(permit, |job| job(), false) {
+        Ok(running) => running,
+        Err(_) => panic!("source thread must start"),
+    };
+    // Abandoning success cannot restore or destroy the producer as unstarted.
+    drop(running);
+    let Worker::Running { handle, permit } = worker else {
+        panic!("successful owner must retain a join barrier");
+    };
+    handle.join().unwrap();
+    received.recv().unwrap();
+    drop(permit);
+    drop(ChannelBudget::try_worker(&budget).unwrap());
+}
+
 crate::rtd_subscriptions! {
     enum MixedAdapterSubscriptions {
         Blocking(super::super::channel::RtdChannelSubscription),

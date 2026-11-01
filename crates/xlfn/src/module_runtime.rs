@@ -208,7 +208,7 @@ impl ModuleOpening {
     /// used by committed removal.
     pub(crate) fn rollback(self, on_closed: impl FnOnce()) -> ModuleClosing {
         let Self { module, id } = self;
-        module.begin_close_effects(id, on_closed);
+        id.begin_close_effects(on_closed);
         ModuleClosing { module, id }
     }
 }
@@ -223,7 +223,7 @@ impl ModuleEpochLease {
         F: FnOnce(),
     {
         let Self { module, id } = self;
-        module.begin_close_effects(id, on_closed);
+        id.begin_close_effects(on_closed);
         ModuleClosing { module, id }
     }
 }
@@ -349,23 +349,21 @@ impl ModuleExportsDrained {
     }
 
     pub(crate) fn certify(
-        self,
         resources: crate::runtime::CompletedResources,
     ) -> (ModuleQuiescent, ExportsDrained) {
-        if self.id != resources.module_epoch() || !self.id.is_current() {
+        let (module, resources) = resources.into_module_parts();
+        if !module.id.is_current() {
             xlfn_kernel::invariant::fail_stop();
         }
-        self.close_callbacks();
+        module.close_callbacks();
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        self.module
-            .rtd
-            .certify_logical_quiescence(LogicalQuiescencePublication {
-                epoch: self.id,
-                _resources: resources,
-            });
+        RtdModuleState::certify_logical_quiescence(LogicalQuiescencePublication {
+            epoch: module.id,
+            _resources: resources,
+        });
         #[cfg(not(any(feature = "rtd", feature = "handles")))]
         let _completed = resources;
-        (ModuleQuiescent { id: self.id }, self.exports)
+        (ModuleQuiescent { id: module.id }, module.exports)
     }
 
     /// Isolated module tests intentionally do not model generation resources.
@@ -382,18 +380,19 @@ impl ModuleExportsDrained {
 #[cfg(any(feature = "rtd", feature = "handles"))]
 pub(crate) struct LogicalQuiescencePublication {
     epoch: ModuleEpochId,
-    _resources: crate::runtime::CompletedResources,
+    _resources: crate::runtime::CompletedResourceCertificates,
 }
 
 #[cfg(any(feature = "rtd", feature = "handles"))]
 impl LogicalQuiescencePublication {
-    pub(crate) fn belongs_to(&self, rtd: &RtdModuleState) -> bool {
-        self.epoch.is_current()
-            && self
-                .epoch
-                .module
-                .rtd()
-                .is_some_and(|owner| std::ptr::eq(owner, rtd))
+    pub(crate) fn target(&self) -> &'static RtdModuleState {
+        // Closing callback admission may wait while another runtime advances
+        // this shared module. Recheck that dynamic epoch immediately before
+        // publication, while the resource certificates remain owned here.
+        if !self.epoch.is_current() {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        &self.epoch.module.rtd
     }
 }
 
@@ -457,23 +456,25 @@ impl ModuleRuntime {
             },
         }
     }
+}
 
-    /// Applies the operational side effects of module close after the caller
-    /// has consumed the unique predecessor authority.  This method never
-    /// constructs or returns a close capability; the predecessor transition
-    /// owns that construction.
-    fn begin_close_effects<F>(&'static self, id: ModuleEpochId, on_closed: F)
+impl ModuleEpochId {
+    /// The consumed predecessor supplies the target; only the epoch can have
+    /// changed while lifecycle callbacks ran outside the module's locks.
+    fn begin_close_effects<F>(self, on_closed: F)
     where
         F: FnOnce(),
     {
-        if !std::ptr::eq(id.module, self) || self.ingress.epoch() != id.epoch {
+        if self.module.ingress.epoch() != self.epoch {
             xlfn_kernel::invariant::fail_stop();
         }
-        self.ingress.begin_close_with(on_closed);
+        self.module.ingress.begin_close_with(on_closed);
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        self.rtd.begin_close();
+        self.module.rtd.begin_close();
     }
+}
 
+impl ModuleRuntime {
     fn close_callbacks_internal(&'static self) {
         self.callback_admission.close();
     }

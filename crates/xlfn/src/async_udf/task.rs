@@ -2,7 +2,7 @@ use super::calculation::CalculationPin;
 use super::future::{NoUnwindFuture, TaskDestruction};
 use super::registry::{RegistryPtr, TaskRegistry};
 
-use crate::cancellation::{CancellationSource, TaskCancellationRegistration};
+use crate::cancellation::{TaskCancellationAuthority, TaskCancellationRegistration};
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
@@ -114,7 +114,7 @@ impl<F: Future<Output = ()>> Future for TrackedFuture<F> {
 }
 
 pub(crate) struct TaskControl {
-    pub(crate) cancellation: CancellationSource,
+    pub(crate) cancellation: TaskCancellationAuthority,
 }
 
 /// Temporary cancellation ownership, consumed after executor locks are released.
@@ -368,6 +368,7 @@ mod loom_tests {
 #[cfg(test)]
 mod release_owner_tests {
     use super::*;
+    use crate::cancellation::CancellationSource;
     use xlfn_kernel::published_owner::PublishedOwner;
 
     #[test]

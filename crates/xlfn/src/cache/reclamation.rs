@@ -1,20 +1,38 @@
 //! Post-grace batches and allocation recovery; raw retirement entries alone
 //! grant no safe destruction API. Kernel-issued batches fix the grace domain.
 use super::*;
-use xlfn_kernel::rotating_read_domain::{ClosedRetirement, DisposableBatch};
+use xlfn_kernel::rotating_read_domain::ClosedRetirement;
 
 #[cfg(test)]
 mod tests;
 
-pub(super) fn reclaim_unpublished<V>(entry: ReclaimEntry<V>) {
-    // SAFETY: final-pin ownership retains this allocation; inspect its actual
-    // publication history rather than trusting a caller-provided boolean.
-    if unsafe { entry.pointer.as_ref() }.published {
-        xlfn_kernel::invariant::fail_stop();
+/// Consumes a live pin and its node's own publication history together.
+/// Only this boundary can issue immediate, never-published recovery.
+pub(super) unsafe fn release_node_pin<V>(node_ptr: NonNull<CacheNode<V>>) {
+    // SAFETY: the caller owns the pin and retains the original domain.
+    let node = unsafe { node_ptr.as_ref() };
+    // SAFETY: transfer that exact live pin into final-release ownership.
+    if let Some(entry) = unsafe { ReclaimEntry::release_pin(node_ptr) } {
+        if !node.published && ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
+            NeverPublished(entry).reclaim();
+        } else {
+            // SAFETY: final-pin ownership retains its original domain through
+            // this maintenance tail. No caller can select another receiver.
+            let domain = unsafe { entry.domain.as_ref() };
+            entry.enqueue();
+            reclaim_cache_entries(domain.quiesce_and_drain());
+        }
     }
-    // SAFETY: this allocation was never observable through the resident index.
-    unsafe {
-        reclaim_cache_node(entry);
+}
+
+struct NeverPublished<V>(ReclaimEntry<V>);
+impl<V> NeverPublished<V> {
+    fn reclaim(self) {
+        // SAFETY: only the final-release decision above constructs this owner,
+        // after observing that the node was never published to the index.
+        unsafe {
+            reclaim_cache_node(self.0);
+        }
     }
 }
 
@@ -61,23 +79,12 @@ pub(super) fn reclaim_cache_entries<V>(entries: ReclaimEntries<'_, V>) {
 /// A batch detached only after a same-domain grace-period certificate.
 /// The owner borrow keeps the allocation's domain alive through reclamation.
 pub(super) struct ReclaimEntries<'domain, V> {
-    domain: &'domain CacheLookupDomain<V>,
+    _domain: &'domain CacheLookupDomain<V>,
     entries: PendingEntries<V>,
 }
 
 impl<'domain, V> ReclaimEntries<'domain, V> {
-    #[cfg(test)]
-    pub(super) fn belongs_to(&self, domain: &CacheLookupDomain<V>) -> bool {
-        std::ptr::eq(self.domain, domain)
-    }
-    fn from_disposable(
-        domain: &'domain CacheLookupDomain<V>,
-        generation: DisposableBatch<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
-    ) -> ReclaimEntries<'domain, V> {
-        if !generation.belongs_to(&domain.domain) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let entries = generation.into_inner();
+    fn account(domain: &'domain CacheLookupDomain<V>, entries: PendingEntries<V>) -> Self {
         // Keep detached entries counted until their weight accounting completes.
         // A concurrent empty-queue observer may reset saturation only after
         // this final pending_nodes subtraction makes the whole domain empty.
@@ -98,21 +105,17 @@ impl<'domain, V> ReclaimEntries<'domain, V> {
                 current.checked_sub(entries.len())
             })
             .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-        ReclaimEntries { domain, entries }
+        ReclaimEntries {
+            _domain: domain,
+            entries,
+        }
     }
 
     fn new(domain: &'domain CacheLookupDomain<V>) -> Self {
         Self {
-            domain,
+            _domain: domain,
             entries: PendingEntries::new(),
         }
-    }
-    fn extend(&mut self, mut other: Self) {
-        crate::retirement_queue::append_owned_batch!(
-            std::ptr::from_ref(self.domain), std::ptr::from_ref(other.domain);
-            xlfn_kernel::invariant::fail_stop(),
-            self.entries.append(&mut other.entries)
-        );
     }
 }
 impl<V> std::ops::Deref for ReclaimEntries<'_, V> {
@@ -122,22 +125,14 @@ impl<V> std::ops::Deref for ReclaimEntries<'_, V> {
     }
 }
 
-fn merge_reclaims<'domain, V>(
-    domain: &'domain CacheLookupDomain<V>,
-    batches: impl IntoIterator<Item = ReclaimEntries<'domain, V>>,
-) -> ReclaimEntries<'domain, V> {
-    let entries = batches
-        .into_iter()
-        .filter(|batch| !batch.is_empty())
-        .reduce(|mut entries, next| {
-            entries.extend(next);
-            entries
-        })
-        .unwrap_or_else(|| ReclaimEntries::new(domain));
-    crate::retirement_queue::append_owned_batch!(
-        std::ptr::from_ref(entries.domain), std::ptr::from_ref(domain);
-        xlfn_kernel::invariant::fail_stop(), entries
-    )
+// Called only while one receiver operation consumes its own kernel batches.
+// This helper moves storage, never proof-bearing batches from another owner.
+fn append_records<V>(entries: &mut PendingEntries<V>, mut next: PendingEntries<V>) {
+    if entries.is_empty() {
+        *entries = next;
+    } else {
+        entries.append(&mut next);
+    }
 }
 
 /// Terminal admission belongs to this cache domain. Closing and detaching stay
@@ -151,11 +146,13 @@ pub(super) struct ClosedCacheDomain<'domain, V> {
 impl<'domain, V> ClosedCacheDomain<'domain, V> {
     pub(super) fn drain(self) -> ReclaimEntries<'domain, V> {
         let Self { domain, closed } = self;
-        let batches = closed.take_queues().map(|batch| ReclaimEntries {
-            domain,
-            entries: batch.into_inner(),
-        });
-        merge_reclaims(domain, batches)
+        let [first, second] = closed.take_queues();
+        let mut entries = first.into_inner();
+        append_records(&mut entries, second.into_inner());
+        ReclaimEntries {
+            _domain: domain,
+            entries,
+        }
     }
 }
 
@@ -172,16 +169,17 @@ impl<V> CacheLookupDomain<V> {
         }
         #[cfg(any(test, feature = "bench-internals"))]
         let start = Instant::now();
-        let batches = self
+        let mut records = PendingEntries::new();
+        for batch in self
             .domain
             .quiesce()
             .unwrap_or_default()
             .into_iter()
             .flatten()
-            .map(|batch| self.drain_generation(batch));
-        // Preserve an existing batch allocation when only one generation has
-        // debt, instead of allocating and copying a new flattened Vec.
-        let entries = merge_reclaims(self, batches);
+        {
+            append_records(&mut records, batch.into_inner());
+        }
+        let entries = ReclaimEntries::account(self, records);
         self.clear_saturated_weight_if_empty();
         #[cfg(any(test, feature = "bench-internals"))]
         self.record_batch(&entries, start);
@@ -205,18 +203,15 @@ impl<V> CacheLookupDomain<V> {
         }
         #[cfg(any(test, feature = "bench-internals"))]
         let start = Instant::now();
-        let mut entries = ReclaimEntries::new(self);
+        let mut records = PendingEntries::new();
         let mut consumed = 1;
         loop {
             while self.pending_nodes.load(Ordering::Relaxed) != 0 {
-                let Some(Ok(batch)) = self
-                    .domain
-                    .poll_quiesce()
-                    .map(|result| result.map(|batch| self.drain_generation(batch)))
-                else {
+                let Some(Ok(batch)) = self.domain.poll_quiesce() else {
                     break;
                 };
-                entries.extend(batch);
+                let batch = ReclaimEntries::account(self, batch.into_inner());
+                append_records(&mut records, batch.entries);
             }
             let requested = self
                 .maintenance_requests
@@ -229,17 +224,24 @@ impl<V> CacheLookupDomain<V> {
             }
             consumed = requested - consumed;
         }
+        let entries = ReclaimEntries {
+            _domain: self,
+            entries: records,
+        };
         self.clear_saturated_weight_if_empty();
         #[cfg(any(test, feature = "bench-internals"))]
         self.record_batch(&entries, start);
         entries
     }
 
-    fn drain_generation(
+    #[cfg(test)]
+    fn poll_and_drain(
         &self,
-        generation: DisposableBatch<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
-    ) -> ReclaimEntries<'_, V> {
-        ReclaimEntries::from_disposable(self, generation)
+    ) -> Option<Result<ReclaimEntries<'_, V>, xlfn_kernel::rotating_read_domain::DomainClosed>>
+    {
+        self.domain
+            .poll_quiesce()
+            .map(|result| result.map(|batch| ReclaimEntries::account(self, batch.into_inner())))
     }
 
     #[cfg(test)]
@@ -249,7 +251,7 @@ impl<V> CacheLookupDomain<V> {
     {
         self.domain
             .try_quiesce_if_idle()
-            .map(|result| result.map(|batch| self.drain_generation(batch)))
+            .map(|result| result.map(|batch| ReclaimEntries::account(self, batch.into_inner())))
     }
 
     pub(super) fn seal(&self) -> ClosedCacheDomain<'_, V> {

@@ -52,8 +52,9 @@ pub fn bind_withdrawal<'domain, P>(owner: &'domain DomainOwner,
     LockedBatch { batch: Batch { owner, records }, source: Ghost(source), index: Ghost(index) }
 }
 
-/// Same identity expression as native ReclaimBatch::extend. Vec ownership
-/// moves each payload once; the emptied source contains no destruction work.
+/// Independent-input acceptance model: reject foreign batches before moving
+/// payloads. Native receivers now collect only their own kernel transfers and
+/// expose no separately supplied owner/batch merge operation.
 pub fn append<P>(left: &mut Batch<'_, P>, right: &mut Batch<'_, P>) -> (accepted: bool)
     ensures final(left).owner() == old(left).owner(), final(right).owner() == old(right).owner(),
         accepted == (old(left).owner().identity.addr() == old(right).owner().identity.addr()),

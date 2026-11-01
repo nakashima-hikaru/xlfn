@@ -26,8 +26,7 @@ enum ReservationOrigin {
 }
 
 pub(crate) struct BindingReservation<'table> {
-    table: &'table BindingTable,
-    state: Option<RwLockWriteGuard<'table, RegistryState>>,
+    state: Option<BindingWriter<'table>>,
     index: usize,
     id: HandleId,
     origin: ReservationOrigin,
@@ -36,7 +35,7 @@ pub(crate) struct BindingReservation<'table> {
 
 impl<'table> BindingReservation<'table> {
     pub(super) fn acquire(table: &'table BindingTable) -> XllResult<Self> {
-        let mut state = table.state.write();
+        let mut state = table.writer();
         // A remover may itself hold a call permit and must not wait for it.
         // Stop new publication at hard debt even in that case. With the live
         // binding cap this bounds total records by maximum_bindings + 256,
@@ -75,7 +74,6 @@ impl<'table> BindingReservation<'table> {
             generation: state.slots[index].next_generation,
         };
         Ok(BindingReservation {
-            table,
             state: Some(state),
             index,
             id,
@@ -99,11 +97,7 @@ impl<'table> BindingReservation<'table> {
         let slot = &mut state.slots[self.index];
         slot.record = Some(record);
         self.active = false;
-        let pointer = BindingPtr::from_ref(slot.record.as_ref().unwrap().as_ref());
-        self.table
-            .publication_writer(state)
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
-            .insert(self.id, pointer);
+        state.publish_slot(self.index);
         state.live_bindings = state
             .live_bindings
             .checked_add(1)
@@ -133,36 +127,37 @@ impl Drop for BindingReservation<'_> {
 }
 
 pub(crate) struct BindingRemoval<'table> {
-    table: &'table BindingTable,
-    state: Option<RwLockWriteGuard<'table, RegistryState>>,
+    state: Option<BindingWriter<'table>>,
     id: HandleId,
-    record: BindingPtr,
     active: bool,
 }
 
 impl<'table> BindingRemoval<'table> {
     pub(super) fn acquire(table: &'table BindingTable, id: HandleId) -> XllResult<Self> {
-        let state = table.state.write();
-        let record = state
+        let state = table.writer();
+        state
             .slots
             .get(id.slot as usize)
             .and_then(|slot| slot.record.as_deref())
             .filter(|record| record.id == id)
-            .map(BindingPtr::from_ref)
             .ok_or(XllError::StaleHandle)?;
         Ok(BindingRemoval {
-            table,
             state: Some(state),
             id,
-            record,
             active: true,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn object(&self) -> &ObjectCell {
-        // SAFETY: self owns the table write lock and the slot holds the live record.
-        unsafe { self.record.0.as_ref() }.object()
+        self.state
+            .as_ref()
+            .expect("removal retains its writer")
+            .slots[self.id.slot as usize]
+            .record
+            .as_ref()
+            .expect("removal retains the live slot owner")
+            .object()
     }
 
     pub(crate) fn commit(mut self) -> bool {
@@ -170,21 +165,7 @@ impl<'table> BindingRemoval<'table> {
             .state
             .as_mut()
             .expect("binding removal owns the table write lock");
-        let slot = state
-            .slots
-            .get_mut(self.id.slot as usize)
-            .expect("binding slot was validated");
-        let retired = slot.record.take().expect("binding record was validated");
-        if BindingPtr::from_ref(retired.as_ref()) != self.record {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        retired
-            .state
-            .store(BindingState::Retired as u8, Ordering::Release);
-        self.table
-            .publication_writer(state)
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
-            .remove(self.id, self.record);
+        let retired = state.withdraw_slot(self.id.slot as usize);
         let slot = &mut state.slots[self.id.slot as usize];
         let reusable = if let Some(next) = slot.next_generation.next() {
             slot.next_generation = next;
@@ -201,12 +182,13 @@ impl<'table> BindingRemoval<'table> {
         }
         // Enqueue before releasing the table lock: seal's retire_all must
         // not pass this removal and drain the domain before it is registered.
-        self.table
-            .read_domain
+        state
+            .domain
             .enqueue_reclaim(UnlinkedBindingOwner::retain(retired.owner));
+        let domain = state.domain;
         drop(self.state.take());
         self.active = false;
-        self.table.read_domain.maintain_after_removal();
+        domain.maintain_after_removal();
         reusable
     }
 }
@@ -233,8 +215,7 @@ impl Drop for BindingTable {
 
 /// Holds withdrawn owners while the exact table's grace period is pending.
 struct BulkRetirement<'table> {
-    table: &'table BindingTable,
-    state: Option<RwLockWriteGuard<'table, RegistryState>>,
+    state: Option<BindingWriter<'table>>,
     records: Vec<PublishedBindingOwner>,
     live_bindings: u32,
 }
@@ -245,7 +226,7 @@ impl<'table> BulkRetirement<'table> {
     }
 
     fn withdraw_with(table: &'table BindingTable, mut after_unlink: impl FnMut()) -> Self {
-        let mut state = table.state.write();
+        let mut state = table.writer();
         let live_bindings = state.live_bindings;
         // Allocate before the first unlink. Every owner already suppresses
         // payload Drop, including partial construction and unwinding.
@@ -253,7 +234,6 @@ impl<'table> BulkRetirement<'table> {
         let additional_free = state.slots.len().saturating_sub(state.free.len());
         state.free.reserve(additional_free);
         let mut transaction = Self {
-            table,
             state: Some(state),
             records,
             live_bindings,
@@ -264,14 +244,8 @@ impl<'table> BulkRetirement<'table> {
             .expect("bulk retirement holds its writer guard");
         state.free.clear();
         for index in 0..state.slots.len() {
-            if let Some(record) = state.slots[index].record.take() {
-                table
-                    .publication_writer(state)
-                    .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
-                    .remove(record.id, BindingPtr::from_ref(&record));
-                record
-                    .state
-                    .store(BindingState::Retired as u8, Ordering::Release);
+            if state.slots[index].record.is_some() {
+                let record = state.withdraw_slot(index);
                 transaction.records.push(record);
                 after_unlink();
             }
@@ -288,8 +262,10 @@ impl<'table> BulkRetirement<'table> {
     }
 
     fn wait(mut self) -> (u32, BulkBindingsDrained) {
-        drop(self.state.take());
-        self.table.read_domain.quiesce();
+        let state = self.state.take().expect("bulk retirement owns its writer");
+        let domain = state.domain;
+        drop(state);
+        domain.quiesce();
         (
             self.live_bindings,
             BulkBindingsDrained {

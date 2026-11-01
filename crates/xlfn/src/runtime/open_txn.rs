@@ -1039,7 +1039,9 @@ fn publish_generation<A: crate::Addin>(
         Ok(()) => Ok(()),
         Err(failure) => {
             let (error, opening, services, module_epoch) = *failure;
-            services.disarm_or_abort();
+            // Publication returned the exclusive, still-unpublished bundle.
+            // Its slot owners drain and destroy even already-Ready services.
+            drop(services);
             if let Some(opening) = opening {
                 let crate::generation::OpeningGeneration {
                     shared_state,

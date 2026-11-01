@@ -177,16 +177,32 @@ impl PublishedBindings {
     }
 }
 
-/// The publication mutator borrows the actual matching write guard for every
-/// empty check/store or removal CAS. Its exclusive borrow prevents both guard
-/// release and a second writer capability until the mutation finishes.
-struct PublicationWriter<'guard, 'table> {
+/// An exclusive writer is issued by one table and retains that exact table's
+/// publication storage with its guard. Callers never re-pair a guard and table.
+struct BindingWriter<'table> {
+    state: RwLockWriteGuard<'table, RegistryState>,
     published: &'table PublishedBindings,
-    _guard: &'guard mut RwLockWriteGuard<'table, RegistryState>,
+    domain: &'table HandleReadDomain,
 }
-
-impl PublicationWriter<'_, '_> {
-    fn insert(&mut self, id: HandleId, record: BindingPtr) {
+impl std::ops::Deref for BindingWriter<'_> {
+    type Target = RegistryState;
+    fn deref(&self) -> &RegistryState {
+        &self.state
+    }
+}
+impl std::ops::DerefMut for BindingWriter<'_> {
+    fn deref_mut(&mut self) -> &mut RegistryState {
+        &mut self.state
+    }
+}
+impl BindingWriter<'_> {
+    fn publish_slot(&mut self, index: usize) {
+        let record = self.state.slots[index]
+            .record
+            .as_ref()
+            .expect("the reservation installed its owner");
+        let id = record.id;
+        let pointer = BindingPtr::from_ref(record.as_ref());
         let slot = id.slot as usize;
         let Some(page) = self.published.pages.get(slot / BINDINGS_PER_PAGE) else {
             xlfn_kernel::invariant::fail_stop();
@@ -198,28 +214,35 @@ impl PublicationWriter<'_, '_> {
         protocol::publish_binding!(
             entry.load(Ordering::Acquire).is_null(),
             xlfn_kernel::invariant::fail_stop(),
-            entry.store(record.0.as_ptr(), Ordering::Release)
+            entry.store(pointer.0.as_ptr(), Ordering::Release)
         );
     }
 
-    fn remove(&mut self, id: HandleId, expected: BindingPtr) {
-        let Some(entry) = self.published.entry(id.slot) else {
+    fn withdraw_slot(&mut self, index: usize) -> PublishedBindingOwner {
+        let record = self.state.slots[index]
+            .record
+            .take()
+            .expect("the removal owns the validated slot");
+        record
+            .state
+            .store(BindingState::Retired as u8, Ordering::Release);
+        let Some(entry) = self.published.entry(record.id.slot) else {
             xlfn_kernel::invariant::fail_stop();
         };
+        // This validation concerns the shared atomic publication itself. The
+        // matching guard, slot owner and expected pointer are derived here.
         if entry
             .compare_exchange(
-                expected.0.as_ptr(),
+                std::ptr::from_ref(record.as_ref()).cast_mut(),
                 std::ptr::null_mut(),
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
             .is_err()
         {
-            // A removal is serialized with the binding table write lock and
-            // must clear the exact pointer it observed. Any mismatch means
-            // the publication invariant has already been violated.
             xlfn_kernel::invariant::fail_stop();
         }
+        record
     }
 }
 
@@ -255,17 +278,12 @@ impl BindingTable {
         }
     }
 
-    fn publication_writer<'guard, 'table>(
-        &'table self,
-        guard: &'guard mut RwLockWriteGuard<'table, RegistryState>,
-    ) -> Option<PublicationWriter<'guard, 'table>> {
-        if !std::ptr::eq(RwLockWriteGuard::rwlock(guard), &self.state) {
-            return None;
-        }
-        Some(PublicationWriter {
+    fn writer(&self) -> BindingWriter<'_> {
+        BindingWriter {
+            state: self.state.write(),
             published: &self.published,
-            _guard: guard,
-        })
+            domain: &self.read_domain,
+        }
     }
 
     pub(crate) fn read_domain(&self) -> &HandleReadDomain {
@@ -345,21 +363,16 @@ mod tests {
     use crate::handle::registry::HandleRegistry;
 
     #[test]
-    fn miri_publication_writer_requires_matching_table_guard() {
+    fn miri_binding_writer_keeps_its_issuing_table_and_guard() {
         let first = BindingTable::new(1);
         let second = BindingTable::new(1);
-        let mut first_guard = first.state.write();
-        {
-            let writer = first.publication_writer(&mut first_guard).unwrap();
-            assert!(std::ptr::eq(writer.published, &first.published));
-            assert!(second.publication_writer(&mut first_guard).is_none());
-            assert!(first.state.try_write().is_none());
-        }
-        drop(first_guard);
+        let writer = first.writer();
+        assert!(std::ptr::eq(writer.published, &first.published));
+        assert!(!std::ptr::eq(writer.published, &second.published));
+        assert!(first.state.try_write().is_none());
+        assert!(second.state.try_write().is_some());
+        drop(writer);
         assert!(first.state.try_write().is_some());
-        let mut second_guard = second.state.write();
-        assert!(first.publication_writer(&mut second_guard).is_none());
-        assert!(second.publication_writer(&mut second_guard).is_some());
     }
 
     #[test]

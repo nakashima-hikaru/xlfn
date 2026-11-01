@@ -8,5 +8,5 @@ fn invalid(
     accounting: &RetirementAccounting,
     batch: DisposableBatch<'_, DEFAULT_STRIPE_COUNT, SmallVec<[UnlinkedBindingOwner; 4]>>,
 ) {
-    let _ = accounting.bind_batch(batch); // error: E0624
+    let _ = accounting.bind_batch(batch); // error: E0599
 }

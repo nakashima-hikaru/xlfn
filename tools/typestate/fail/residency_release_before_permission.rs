@@ -1,4 +1,5 @@
 // module: runtime
 fn cannot_release_unqualified(module: &crate::runtime_components::ModuleResidency) {
-    let _ = module.release_authorized(); // error: E0061
+    let _ = module;
+    let _ = super::ModuleResidency::release_authorized(); // error: E0061
 }

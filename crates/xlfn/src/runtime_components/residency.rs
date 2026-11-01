@@ -141,13 +141,9 @@ impl ModuleResidency {
     /// module residency. A late COM Release must never unmap its own code;
     /// only an explicit lifecycle release retries this self-reference.
     pub(crate) fn release_authorized<A: crate::Addin>(
-        &self,
         authority: &crate::runtime::ResidencyRelease<'_, A>,
     ) -> XllResult<ResidencyReleaseOutcome> {
-        if !authority.belongs_to(self) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        self.release_checked(authority.acquisition())
+        authority.module().release_checked(authority.acquisition())
     }
 
     fn release_checked(

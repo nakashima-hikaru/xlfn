@@ -60,14 +60,9 @@ impl ModuleCallbackAdmission {
         // A closed gate stays unavailable until every stripe has reopened.
         // Repeating reset on an already open, idle gate requires no counter
         // reset and preserves reservations that start after the active check.
-        if self.callbacks.is_sealed() {
-            drop(
-                self.callbacks
-                    .control()
-                    .wait_if_sealed()
-                    .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
-                    .reopen(),
-            );
+        match self.callbacks.control().wait_if_sealed() {
+            Ok(drained) => drop(drained.reopen()),
+            Err(open) => drop(open),
         }
         self.phase
             .store(ModuleCallbackLifecycle::Open as u8, Ordering::Release);

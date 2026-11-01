@@ -1905,25 +1905,22 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     .store(std::ptr::null_mut(), Ordering::Release);
             }
             TransitionEffect::Publish(publication) => {
+                let control = self.publication_readers.control();
                 require_lifecycle_invariant(
-                    self.publication_readers.is_sealed()
-                        && self.publication_readers.active() == 0
+                    self.publication_readers.active() == 0
                         && self.publication.load(Ordering::Acquire).is_null(),
                     "generation publication requires a drained closed projection",
                 );
+                // Classify the actual gate once, before exposing the pointer.
+                // Keep that same exclusive drained authority through reopen.
+                let drained = control.wait_if_sealed().unwrap_or_else(|_| {
+                    lifecycle_invariant_violation(
+                        "generation publication requires sealed admission",
+                    )
+                });
                 self.publication
                     .store(publication.as_ptr(), Ordering::Release);
-                drop(
-                    self.publication_readers
-                        .control()
-                        .wait_if_sealed()
-                        .unwrap_or_else(|_| {
-                            lifecycle_invariant_violation(
-                                "generation publication gate failed to reopen",
-                            )
-                        })
-                        .reopen(),
-                );
+                drop(drained.reopen());
             }
         }
         self.phase.store(access.phase() as u8, Ordering::Release);

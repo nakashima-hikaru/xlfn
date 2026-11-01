@@ -192,7 +192,7 @@
     "reason": "Test-only import; each direct test call is separately inventoried by function, source context, and occurrence count."
   },
   {
-    "path": "crates/xlfn/src/excel_rtd/windows/server.rs",
+    "path": "crates/xlfn/src/excel_rtd/windows/server/termination.rs",
     "context": "fn deferred_termination_worker",
     "code": "let outcome = catch_unwind(AssertUnwindSafe(|| {",
     "count": 1,
@@ -200,7 +200,7 @@
     "reason": "deferred_termination_worker finishes phase/refcount cleanup and resumes the original payload; TerminationWorker::join consumes it before publishing Joined."
   },
   {
-    "path": "crates/xlfn/src/excel_rtd/windows/server.rs",
+    "path": "crates/xlfn/src/excel_rtd/windows/server/termination.rs",
     "context": "module root",
     "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
     "count": 1,
@@ -416,7 +416,7 @@
     "reason": "Captures at most 16 KiB of standard panic text before applying contain_panic to the payload; arbitrary payload destructors never run."
   },
   {
-    "path": "crates/xlfn-kernel/src/rotating_read_domain/retirement.rs",
+    "path": "crates/xlfn-kernel/src/rotating_read_domain/transition/retirement.rs",
     "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn miri_registration_capacity_panic_retains_incoming_owners",
     "code": "let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
     "count": 1,
@@ -424,7 +424,7 @@
     "reason": "Observes the deliberate capacity-overflow panic and verifies append-only admission retains incoming owners before any queue mutation."
   },
   {
-    "path": "crates/xlfn-kernel/src/rotating_read_domain/retirement.rs",
+    "path": "crates/xlfn-kernel/src/rotating_read_domain/transition/retirement.rs",
     "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn miri_registration_panic_retains_all_registered_owners",
     "code": "let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
     "count": 1,

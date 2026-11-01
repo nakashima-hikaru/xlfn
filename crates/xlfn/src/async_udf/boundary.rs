@@ -15,7 +15,7 @@ use crate::runtime::Runtime;
 use crate::sync::Mutex;
 use crate::{XllError, XllResult};
 use futures_util::Future;
-use launch::LaunchOwner;
+use launch::CapturedLaunch;
 use std::panic::AssertUnwindSafe;
 use xlfn_sys::XLOPER12;
 
@@ -206,8 +206,8 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
 {
     let call_id = CallId::new(guard.next_call_id());
     let timer = crate::execution::CallTimer::start();
-    let calculation = guard.async_runtime().snapshot_calculation();
-    let calculation_id = calculation.epoch().into();
+    let captured = CapturedLaunch::capture(guard);
+    let calculation_id = captured.calculation_id();
     let concurrent_calls = crate::module_runtime::ingress().active_udfs();
     let metadata = CallMetadata {
         udf_id,
@@ -237,7 +237,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
     // Excel does not raise CalculationEnded/CalculationCanceled for every
     // programmatic recalculation, so the public token cannot promise complete
     // calculation scoping even though event-driven generations are linearized.
-    let launch = LaunchOwner::new(guard, calculation);
+    let launch = captured.into_launch();
     let token = launch.token();
     let mut observation = AsyncObservation::new(
         &metadata,
@@ -283,8 +283,7 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
-    let calculation = guard.async_runtime().snapshot_calculation();
-    let launch = LaunchOwner::new(guard, calculation);
+    let launch = CapturedLaunch::capture(guard).into_launch();
     // SAFETY: forwarded from this function's raw-handle contract.
     let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
         Ok(responder) => responder,
@@ -416,8 +415,8 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
 {
     let call_id = CallId::new(guard.next_call_id());
     let timer = crate::execution::CallTimer::start();
-    let calculation = guard.async_runtime().snapshot_calculation();
-    let calculation_id = calculation.epoch().into();
+    let captured = CapturedLaunch::capture(guard);
+    let calculation_id = captured.calculation_id();
     let concurrent_calls = crate::module_runtime::ingress().active_udfs();
     let metadata = CallMetadata {
         udf_id,
@@ -446,7 +445,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
     };
     // The public cancellation token remains best effort; the task drain is
     // the stronger lifetime guarantee for raw object pins.
-    let launch = LaunchOwner::new(guard, calculation);
+    let launch = captured.into_launch();
     let token = launch.token();
     let mut observation = AsyncObservation::new(
         &metadata,
@@ -493,8 +492,7 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
     Build: HandleScopedBuilder<T> + Send + 'static,
     T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
-    let calculation = guard.async_runtime().snapshot_calculation();
-    let launch = LaunchOwner::new(guard, calculation);
+    let launch = CapturedLaunch::capture(guard).into_launch();
     // SAFETY: forwarded from this function's raw-handle contract.
     let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
         Ok(responder) => responder,

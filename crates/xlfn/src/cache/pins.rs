@@ -5,11 +5,10 @@ pub(super) struct ResidentPin<V> {
     node: NodePtr<V>,
 }
 impl<V> ResidentPin<V> {
-    /// Caller holds a live creator/lease pin through this acquisition.
-    pub(super) unsafe fn acquire(node: NodePtr<V>) -> Self {
-        // SAFETY: caller retains the allocation during acquisition.
-        unsafe { node.0.as_ref() }.acquire_anchor_pin();
-        Self { node }
+    pub(super) fn acquire(creator: &CreatorPinGuard<'_, V>) -> Self {
+        Self {
+            node: creator.acquire_anchor(),
+        }
     }
     /// Transfer into the index's tagged ownership representation. Losing this
     /// pointer leaks a pin; it does not grant release authority to observers.
@@ -35,11 +34,10 @@ pub(super) struct FlightAnchor<V> {
     node: NodePtr<V>,
 }
 impl<V> FlightAnchor<V> {
-    /// Caller keeps a creator/lease pin alive through this acquisition.
-    pub(super) unsafe fn acquire(node: NodePtr<V>) -> Self {
-        // SAFETY: caller retains the allocation during acquisition.
-        unsafe { node.0.as_ref() }.acquire_anchor_pin();
-        Self { node }
+    pub(super) fn acquire(creator: &CreatorPinGuard<'_, V>) -> Self {
+        Self {
+            node: creator.acquire_anchor(),
+        }
     }
     pub(super) fn observe(&self) -> NodePtr<V> {
         self.node
@@ -62,9 +60,7 @@ fn retire_resident_raw<V>(node_ptr: NodePtr<V>) {
     node.resident.store(false, Ordering::Release);
     // SAFETY: the index transfers its one residency pin exactly once.
     if let Some(entry) = unsafe { ReclaimEntry::release_pin(node_ptr.0) } {
-        // SAFETY: the cache retains its domain until every index entry retires.
-        let domain = unsafe { node.domain.as_ref() };
-        domain.enqueue_reclaim(entry);
+        entry.enqueue();
     }
 }
 

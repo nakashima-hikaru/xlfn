@@ -14,6 +14,41 @@ impl Drop for DropProbe {
 }
 
 #[test]
+fn miri_initialization_claim_excludes_competing_administration_during_callbacks() {
+    let slot = GenerationServiceSlot::<(), u32, ()>::new();
+    slot.arm(()).unwrap();
+    let read = slot
+        .read(
+            |()| {
+                assert!(matches!(slot.arm(()), Err(ServiceSlotError::Closed)));
+                assert!(matches!(slot.disarm(), Err(ServiceSlotError::Closed)));
+                Ok(Box::new(17))
+            },
+            |value| {
+                assert_eq!(*value, 17);
+                assert!(matches!(slot.arm(()), Err(ServiceSlotError::Closed)));
+                assert!(matches!(slot.disarm(), Err(ServiceSlotError::Closed)));
+            },
+        )
+        .unwrap();
+    assert_eq!(*read, 17);
+    drop(read);
+    let sealed = slot
+        .seal(
+            || (),
+            |value| {
+                assert_eq!(*value, 17);
+                assert!(matches!(slot.arm(()), Err(ServiceSlotError::Closed)));
+                assert!(matches!(slot.disarm(), Err(ServiceSlotError::Closed)));
+                Ok(())
+            },
+        )
+        .unwrap();
+    let (owner, ()) = sealed.into_parts();
+    assert_eq!(*owner.unwrap(), 17);
+}
+
+#[test]
 fn miri_initialization_callback_panic_drops_unpublished_candidate_once() {
     let drops = Arc::new(AtomicUsize::new(0));
     let slot = Arc::new(GenerationServiceSlot::<(), DropProbe, ()>::new());

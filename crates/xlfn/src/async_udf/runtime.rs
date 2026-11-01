@@ -51,116 +51,9 @@ pub(super) enum ExecutorSlot<E> {
     Closing(Option<PublishedOwner<E>>),
 }
 
-struct PublicationsSealed;
-
-struct AwaitingTasks<'a> {
-    registry: RegistryClose<'a, TasksCancelled>,
-}
-
-struct ExecutorTasksDrained<'a> {
-    registry: RegistryClose<'a, TasksDrained>,
-}
-
-/// The state drops before the executor owner: a registry close claim must be
-/// released before another closer can acquire the restored executor.
-#[must_use = "finish executor shutdown or retain it for a later close attempt"]
-struct ExecutorClose<'a, E: AsyncExecutor, S> {
-    state: S,
-    owner: ExecutorCloseOwner<'a, E>,
-}
-
-/// Abandonment restores ownership without running executor code or reopening
-/// admission. The runtime borrow keeps the retained allocation's slot alive.
-struct ExecutorCloseOwner<'a, E: AsyncExecutor> {
-    runtime: &'a AsyncRuntime<E>,
-    executor: Option<PublishedOwner<E>>,
-}
-
-impl<E: AsyncExecutor> Drop for ExecutorCloseOwner<'_, E> {
-    fn drop(&mut self) {
-        if let Some(executor) = self.executor.take() {
-            let mut state = self.runtime.state.lock();
-            if !matches!(*state, ExecutorSlot::Closing(None)) {
-                xlfn_kernel::invariant::fail_stop();
-            }
-            *state = ExecutorSlot::Closing(Some(executor));
-            self.runtime.state_changed.notify_all();
-        }
-    }
-}
-
-impl<'a, E: AsyncExecutor> ExecutorClose<'a, E, PublicationsSealed> {
-    fn drain_readers(self) -> XllResult<ExecutorClose<'a, E, AwaitingTasks<'a>>> {
-        let owner = self.owner;
-        let runtime = owner.runtime;
-        // Readers include reserve/submit calls. Keep the executor available
-        // to cancellation wakes until every admitted task has been destroyed.
-        drop(runtime.spawn_admission.control().wait_idle());
-        let registry = runtime.registry().request_close()?.cancel();
-        Ok(ExecutorClose {
-            state: AwaitingTasks { registry },
-            owner,
-        })
-    }
-}
-
-impl<'a, E: AsyncExecutor> ExecutorClose<'a, E, AwaitingTasks<'a>> {
-    fn wait(self) -> ExecutorClose<'a, E, ExecutorTasksDrained<'a>> {
-        let Self { state, owner } = self;
-        let registry = state.registry.wait();
-        ExecutorClose {
-            state: ExecutorTasksDrained { registry },
-            owner,
-        }
-    }
-
-    #[cfg(all(test, feature = "async-builtin"))]
-    fn wait_timeout(
-        self,
-        timeout: std::time::Duration,
-    ) -> XllResult<ExecutorClose<'a, E, ExecutorTasksDrained<'a>>> {
-        let Self { state, owner } = self;
-        let registry = state.registry.wait_timeout(timeout)?;
-        Ok(ExecutorClose {
-            state: ExecutorTasksDrained { registry },
-            owner,
-        })
-    }
-}
-
-impl<E: AsyncExecutor> ExecutorClose<'_, E, ExecutorTasksDrained<'_>> {
-    fn shutdown(self) -> XllResult<crate::shutdown::StopOutcome<AsyncStopped>> {
-        crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-            self.owner
-                .executor
-                .as_ref()
-                .expect("close owns executor")
-                .shutdown()
-        }))
-        .unwrap_or(Err(XllError::Panic))?;
-
-        let Self { state, mut owner } = self;
-        state.registry.finish();
-        let executor = owner.executor.take().expect("close owns executor");
-        let disposal =
-            crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(executor)));
-        *owner.runtime.state.lock() = ExecutorSlot::Stopped;
-        owner.runtime.state_changed.notify_all();
-        let issues = if disposal.is_err() {
-            vec![crate::shutdown::CleanupIssue {
-                component: "async executor",
-                kind: crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                error: XllError::Panic,
-            }]
-        } else {
-            Vec::new()
-        };
-        Ok(crate::shutdown::StopOutcome {
-            certificate: AsyncStopped::new(),
-            issues,
-        })
-    }
-}
+mod closing;
+#[cfg(test)]
+use closing::ExecutorClose;
 
 pub(crate) struct ExecutorRead<'a, E> {
     pointer: NonNull<E>,
@@ -422,38 +315,6 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
             .into_iter()
             .next()
             .map_or(Ok(()), |issue| Err(issue.error))
-    }
-
-    fn take_for_close(&self) -> Option<ExecutorClose<'_, E, PublicationsSealed>> {
-        self.registry().close_admission();
-        let mut state = self.state.lock();
-        loop {
-            match &*state {
-                ExecutorSlot::Stopped => return None,
-                ExecutorSlot::Running(_) | ExecutorSlot::Closing(Some(_)) => {
-                    drop(self.spawn_admission.control().seal());
-                    self.publication
-                        .store(std::ptr::null_mut(), Ordering::Release);
-                    let old = std::mem::replace(&mut *state, ExecutorSlot::Closing(None));
-                    self.state_changed.notify_all();
-                    return match old {
-                        ExecutorSlot::Running(executor) | ExecutorSlot::Closing(Some(executor)) => {
-                            Some(ExecutorClose {
-                                state: PublicationsSealed,
-                                owner: ExecutorCloseOwner {
-                                    runtime: self,
-                                    executor: Some(executor),
-                                },
-                            })
-                        }
-                        _ => unreachable!(),
-                    };
-                }
-                ExecutorSlot::Starting | ExecutorSlot::Closing(None) => {
-                    self.state_changed.wait(&mut state)
-                }
-            }
-        }
     }
 
     #[cfg(any(

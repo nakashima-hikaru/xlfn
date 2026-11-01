@@ -243,7 +243,6 @@ impl<R> Deref for RetiredService<R> {
 struct ReplaceableLane<R> {
     published: AtomicPtr<R>,
     readers: StripedDrainGate<SERVICE_READER_STRIPES>,
-    owner: Mutex<Option<PublishedServiceOwner<R>>>,
     _runtime: PhantomData<R>,
 }
 
@@ -252,7 +251,6 @@ impl<R> ReplaceableLane<R> {
         Self {
             published: AtomicPtr::new(std::ptr::null_mut()),
             readers: StripedDrainGate::new_sealed(),
-            owner: Mutex::new(None),
             _runtime: PhantomData,
         }
     }
@@ -275,7 +273,7 @@ impl<R> Default for ReplaceableLane<R> {
 pub struct ReplaceableServiceSlot<R> {
     lanes: [ReplaceableLane<R>; 2],
     active: AtomicU8,
-    transition: Mutex<()>,
+    transition: Mutex<transaction::ReplaceableOwners<R>>,
     _runtime: PhantomData<R>,
 }
 
@@ -288,7 +286,7 @@ impl<R> ReplaceableServiceSlot<R> {
         Self {
             lanes: [ReplaceableLane::new(), ReplaceableLane::new()],
             active: AtomicU8::new(NO_ACTIVE_LANE),
-            transition: Mutex::new(()),
+            transition: Mutex::new(transaction::ReplaceableOwners::new()),
             _runtime: PhantomData,
         }
     }
@@ -335,15 +333,14 @@ impl<R> ReplaceableServiceSlot<R> {
     /// Validates the reset invariant:
     /// `active == NO_ACTIVE_LANE`, both lanes sealed, both lanes idle, both owners empty.
     pub fn reset(&self) -> Result<(), ResetError> {
-        let _guard = self.transition.lock();
-        if self.active.load(Ordering::Acquire) != NO_ACTIVE_LANE {
+        let owners = self.transition.lock();
+        if self.active.load(Ordering::Acquire) != NO_ACTIVE_LANE || !owners.is_empty() {
             return Err(ResetError);
         }
         for lane in &self.lanes {
             if !lane.readers.is_sealed()
                 || lane.readers.active() != 0
                 || !lane.published.load(Ordering::Acquire).is_null()
-                || lane.owner.lock().is_some()
             {
                 return Err(ResetError);
             }

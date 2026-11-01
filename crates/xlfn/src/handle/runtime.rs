@@ -643,7 +643,7 @@ impl HandlesQuiescent {
 
 impl FormulaHandleServiceSealed {
     fn from_slot(
-        generation: Option<RuntimeGeneration>,
+        generation: RuntimeGeneration,
         slot: &FormulaHandleServiceSlot,
     ) -> XllResult<Self> {
         // Keep sealing and ownership transfer in one constructor. The slot
@@ -654,11 +654,8 @@ impl FormulaHandleServiceSealed {
             .seal(|| (), |service| service.seal().map(|_| ()))
             .map_err(crate::error::map_service_slot_error)?;
         let (service, ()) = sealed.into_parts();
-        if service.is_some() && generation.is_none() {
-            xlfn_kernel::invariant::fail_stop();
-        }
         Ok(Self {
-            generation,
+            generation: Some(generation),
             service,
         })
     }
@@ -735,6 +732,7 @@ impl FormulaHandleServiceSlot {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn disarm(&self) -> XllResult<()> {
         self.service
             .disarm()
@@ -784,7 +782,7 @@ impl FormulaHandleServiceSlot {
 
     pub(crate) fn seal(
         &self,
-        generation: Option<RuntimeGeneration>,
+        generation: RuntimeGeneration,
     ) -> XllResult<crate::shutdown::HandlesSealed> {
         FormulaHandleServiceSealed::from_slot(generation, self)
     }

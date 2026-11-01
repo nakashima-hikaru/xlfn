@@ -122,14 +122,14 @@ impl CalculationState {
             .all(|shard| shard.tasks.lock().is_empty())
     }
 
-    #[cfg(all(test, feature = "async-builtin"))]
+    #[cfg(test)]
     pub(crate) fn task_shards_are_unlocked_and_empty(&self) -> bool {
         self.shards
             .iter()
             .all(|shard| shard.tasks.try_lock().is_some_and(|tasks| tasks.is_empty()))
     }
 
-    #[cfg(all(test, feature = "async-builtin"))]
+    #[cfg(test)]
     pub(crate) fn task_shard_is_unlocked(&self, id: u64) -> bool {
         self.shards[task_shard(id)].tasks.try_lock().is_some()
     }
@@ -144,14 +144,18 @@ pub(crate) struct CalculationAdmission<'a> {
 }
 
 impl CalculationAdmission<'_> {
-    pub(crate) fn insert_task(&self, id: u64, control: TaskControl) {
-        let previous = self.state.shards[task_shard(id)]
+    pub(crate) fn insert_task(
+        &self,
+        id: super::registry::TaskRegistrationId,
+        control: TaskControl,
+    ) {
+        // RegistrationId is affine and its only production constructor is the
+        // registry's checked monotonic allocator. TaskReservation retains both
+        // the ID and matching admission until this consuming transfer.
+        self.state.shards[task_shard(id.value())]
             .tasks
             .lock()
-            .insert(id, control);
-        if previous.is_some() {
-            xlfn_kernel::invariant::fail_stop();
-        }
+            .insert(id.value(), control);
     }
 }
 
@@ -242,91 +246,10 @@ impl Drop for CalculationPin {
 // SAFETY: CalculationState is Sync, and the pin follows its user across threads.
 unsafe impl Send for CalculationPin {}
 
-#[cfg(feature = "bench-internals")]
-/// Benchmark fixture holding task controls in production calculation shards.
-pub struct AsyncTaskDrainBenchmark {
-    state: CalculationState,
-}
-
-#[cfg(feature = "bench-internals")]
-impl AsyncTaskDrainBenchmark {
-    /// Seeds a calculation with the requested task-control count.
-    pub fn new(count: usize) -> Self {
-        let state = CalculationState::new(CalculationEpoch::INITIAL);
-        let admission = state.enter_admission().expect("new calculation is open");
-        for id in 0..count as u64 {
-            let (cancellation, _) = crate::cancellation::CancellationSource::new(
-                crate::cancellation::CancellationGuarantee::BestEffort,
-            );
-            admission.insert_task(id, TaskControl { cancellation });
-        }
-        drop(admission);
-        Self { state }
-    }
-
-    /// Includes draining and dropping controls; excludes fixture construction.
-    pub fn run(&self) -> usize {
-        let controls = self.state.close_admission().wait().drain_tasks();
-        let count = controls.len();
-        std::hint::black_box(controls);
-        count
-    }
-
-    /// Returns the sizes in bytes of one control and an empty drained collection.
-    pub fn sizes() -> (usize, usize) {
-        let state = CalculationState::new(CalculationEpoch::INITIAL);
-        let controls = state.close_admission().wait().drain_tasks();
-        (
-            std::mem::size_of::<TaskControl>(),
-            std::mem::size_of_val(&controls),
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use xlfn_kernel::published_owner::PublishedOwner;
-
-    #[test]
-    fn miri_calculation_close_waits_for_admitted_insert_and_preserves_pins() {
-        let owner = PublishedOwner::new(CalculationState::new(CalculationEpoch::INITIAL));
-        // SAFETY: this private owner remains alive until after the pin drops.
-        let pin = unsafe { CalculationPin::acquire(&owner) };
-        let admission = owner.enter_admission().unwrap();
-        let closing = owner.close_admission();
-        assert!(owner.enter_admission().is_err());
-        let (cancellation, token) = crate::cancellation::CancellationSource::new(
-            crate::cancellation::CancellationGuarantee::BestEffort,
-        );
-        let (waiting_tx, waiting_rx) = std::sync::mpsc::sync_channel(1);
-        let (drained_tx, drained_rx) = std::sync::mpsc::sync_channel(1);
-        std::thread::scope(|scope| {
-            let waiter = scope.spawn(move || {
-                waiting_tx.send(()).unwrap();
-                assert!(drained_tx.send(closing.wait().drain_tasks()).is_ok());
-            });
-            waiting_rx.recv().unwrap();
-            assert!(matches!(
-                drained_rx.try_recv(),
-                Err(std::sync::mpsc::TryRecvError::Empty)
-            ));
-            // An admission acquired before sealing can still publish its task.
-            admission.insert_task(1, TaskControl { cancellation });
-            drop(admission);
-            let controls = drained_rx.recv().unwrap();
-            assert_eq!(controls.len(), 1);
-            assert!(owner.tasks_are_empty());
-            assert!(!token.is_cancelled());
-            assert_eq!(owner.pins.load(Ordering::Acquire), 1);
-            drop(controls);
-            assert!(token.is_cancelled());
-            assert_eq!(owner.pins.load(Ordering::Acquire), 1);
-            waiter.join().unwrap();
-        });
-        drop(pin);
-        assert_eq!(owner.pins.load(Ordering::Acquire), 0);
-    }
 
     #[test]
     fn miri_calculation_final_pin_release_can_race_owner_reclamation() {

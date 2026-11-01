@@ -1,8 +1,8 @@
 // module: runtime
-use crate::lifecycle::{IssuedRemovalClaim, LifecycleCoordinator};
+use crate::lifecycle::IssuedRemovalClaim;
 use super::shutdown::FinalRemoval;
 
-fn invalid<A: crate::Addin>(claim: IssuedRemovalClaim<'_, A, FinalRemoval>, coordinator: &LifecycleCoordinator<A>) {
-    let _ = claim.into_parts(coordinator);
-    let _ = claim.into_parts(coordinator); // error: E0382
+fn invalid<A: crate::Addin>(claim: IssuedRemovalClaim<'_, A, FinalRemoval>) {
+    let _ = claim.into_issuer_parts();
+    let _ = claim.into_issuer_parts(); // error: E0382
 }

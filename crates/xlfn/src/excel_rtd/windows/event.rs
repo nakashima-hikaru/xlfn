@@ -87,69 +87,56 @@ pub(crate) fn drain_with_com_dispatch<F: FnOnce() + Send>(
             ));
         }
     };
-    // Borrow the closure until startup succeeds. spawn_scoped drops its
-    // captured arguments on failure; returning the unused closure keeps any
-    // join handle or other affine owner available to the closing transaction.
-    let waiting = std::sync::Mutex::new(Some(wait));
-    std::thread::scope(|scope| {
-        let completion = &completed;
-        let waiting = &waiting;
-        let worker_fn = move || {
-            let wait = waiting
-                .lock()
-                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
-                .take()
-                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-            // Signal on panic too; otherwise the caller could wait forever
-            // for a failed worker. No application-owned drop follows this
-            // signal: the wait closure has already been consumed.
-            let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(wait));
-            completion
-                .set()
-                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-            result
-        };
-        #[cfg(test)]
-        let injected_spawn_failure = preparation_fails(DrainPreparationStage::Spawn);
-        #[cfg(not(test))]
-        let injected_spawn_failure = false;
-        let spawned = if injected_spawn_failure {
-            Err(std::io::Error::other(
-                "injected COM drain worker spawn failure",
-            ))
-        } else {
-            std::thread::Builder::new()
-                .name("xlfn-sta-drain".into())
-                .spawn_scoped(scope, worker_fn)
-        };
-        let worker = match spawned {
-            Ok(worker) => worker,
-            Err(error) => {
-                let wait = waiting
-                    .lock()
-                    .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
-                    .take()
-                    .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+    super::super::drain_wait::with_drain_wait(wait, |startup| {
+        std::thread::scope(|scope| {
+            #[cfg(test)]
+            if preparation_fails(DrainPreparationStage::Spawn) {
                 return Err((
-                    crate::XllError::Native {
-                        code: error.raw_os_error().unwrap_or(0),
-                        message: format!("failed to start COM drain worker: {error}"),
-                    },
-                    wait,
-                ));
+                crate::XllError::Native {
+                    code: 0,
+                    message: "failed to start COM drain worker: injected COM drain worker spawn failure".into(),
+                },
+                startup.recover(),
+            ));
             }
-        };
-        completed
-            .wait_with_com_pumping()
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-        let result = crate::panic_boundary::contain_panic(worker.join())
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-        if result.is_err() {
-            // No drain certificate may escape a failed wait, and the scoped
-            // gate/event owner remains live until this fail-stop.
-            xlfn_kernel::invariant::fail_stop();
-        }
-        Ok(())
+            let completion = &completed;
+            let worker = match startup.spawn(
+                scope,
+                std::thread::Builder::new().name("xlfn-sta-drain".into()),
+                move |wait| {
+                    // Signal on panic too; otherwise the caller could wait forever
+                    // for a failed worker. The consumed closure has already exited.
+                    let result =
+                        crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(wait));
+                    completion
+                        .set()
+                        .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+                    result
+                },
+            ) {
+                Ok(worker) => worker,
+                Err((error, wait)) => {
+                    return Err((
+                        crate::XllError::Native {
+                            code: error.raw_os_error().unwrap_or(0),
+                            message: format!("failed to start COM drain worker: {error}"),
+                        },
+                        wait,
+                    ));
+                }
+            };
+            completed
+                .wait_with_com_pumping()
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+            let result = crate::panic_boundary::contain_panic(worker.join())
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+            if result.is_err() {
+                // No drain certificate may escape a failed wait, and the scoped
+                // gate/event owner remains live until this fail-stop.
+                xlfn_kernel::invariant::fail_stop();
+            }
+            Ok(())
+        })
     })
 }
 

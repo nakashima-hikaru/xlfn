@@ -82,6 +82,7 @@ pub(super) struct DrainedServerOperations<'a> {
 }
 
 impl DrainedServerOperations<'_> {
+    #[cfg(test)]
     pub(super) fn belongs_to(&self, barrier: &ServerOperationBarrier) -> bool {
         std::ptr::eq(self.barrier, barrier)
     }
@@ -142,7 +143,7 @@ pub(super) enum ServerTerminationRequest<'a> {
 }
 
 pub(super) struct DeferredTerminationReservation<'a> {
-    barrier: &'a ServerOperationBarrier,
+    barrier: &'a triomphe::Arc<ServerOperationBarrier>,
     owner: ThreadId,
     attempt: u64,
     state: MutexGuard<'a, ServerOperationState>,
@@ -165,10 +166,6 @@ pub(super) struct DeferredTerminationTicket {
 }
 
 impl DeferredTerminationTicket {
-    pub(super) fn belongs_to(&self, barrier: &ServerOperationBarrier) -> bool {
-        std::ptr::eq(self.barrier.as_ref(), barrier)
-    }
-
     pub(super) fn with_completion<R>(
         self,
         complete: impl FnOnce(ServerTermination<'_>) -> R,
@@ -304,10 +301,10 @@ impl ServerOperationBarrier {
     }
 
     pub(super) fn request_termination(
-        &self,
+        barrier: &triomphe::Arc<Self>,
     ) -> Result<ServerTerminationRequest<'_>, ServerCloseError> {
         let owner = std::thread::current().id();
-        let mut state = self.state.lock();
+        let mut state = barrier.state.lock();
         match state.phase {
             ServerPhase::Terminated => return Ok(ServerTerminationRequest::Complete),
             ServerPhase::Terminating { .. } => {
@@ -316,8 +313,9 @@ impl ServerOperationBarrier {
             ServerPhase::Open => {}
         }
 
-        self.quiescent.reset().map_err(ServerCloseError::Event)?;
-        self.termination_finished
+        barrier.quiescent.reset().map_err(ServerCloseError::Event)?;
+        barrier
+            .termination_finished
             .reset()
             .map_err(ServerCloseError::Event)?;
         let deferred = state.in_flight != 0 || state.notifications_in_flight != 0;
@@ -334,7 +332,7 @@ impl ServerOperationBarrier {
         if deferred {
             Ok(ServerTerminationRequest::Deferred(
                 DeferredTerminationReservation {
-                    barrier: self,
+                    barrier,
                     owner,
                     attempt,
                     state,
@@ -344,7 +342,7 @@ impl ServerOperationBarrier {
         } else {
             drop(state);
             Ok(ServerTerminationRequest::Synchronous(ServerTermination {
-                barrier: self,
+                barrier,
                 owner,
                 deferred: false,
                 _not_send_or_sync: PhantomData,
@@ -536,6 +534,30 @@ pub(super) struct DeferredTerminationStart<
     work: super::server::DeferredTerminationWork<E, C>,
 }
 
+/// Issued only after the reservation's target is checked, before its ticket
+/// leaves the gate implementation. The worker factory cannot select a target.
+pub(super) struct DeferredServerTicket<
+    'server,
+    E: crate::RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+> {
+    server: &'server super::server::RtdServer<E, C>,
+    ticket: DeferredTerminationTicket,
+}
+
+impl<'server, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    DeferredServerTicket<'server, E, C>
+{
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        &'server super::server::RtdServer<E, C>,
+        DeferredTerminationTicket,
+    ) {
+        (self.server, self.ticket)
+    }
+}
+
 impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
     DeferredTerminationStart<'_, '_, E, C>
 {
@@ -569,12 +591,13 @@ impl<'a> DeferredTerminationReservation<'a> {
         self,
         server: &'server super::server::RtdServer<E, C>,
     ) -> Result<DeferredTerminationStart<'a, 'server, E, C>, ServerCloseError> {
-        if !std::ptr::eq(self.barrier, server.operations.as_ref()) {
+        if !triomphe::Arc::ptr_eq(self.barrier, &server.operations) {
             return Err(ServerCloseError::Reentrant);
         }
         let worker_start = server.termination_worker.reserve_start()?;
-        let (prepared, ticket) = self.prepare(triomphe::Arc::clone(&server.operations))?;
-        let work = server.deferred_termination_work(ticket);
+        let (prepared, ticket) = self.prepare();
+        let work =
+            super::server::DeferredTerminationWork::new(DeferredServerTicket { server, ticket });
         Ok(DeferredTerminationStart {
             worker_start,
             prepared,
@@ -582,14 +605,8 @@ impl<'a> DeferredTerminationReservation<'a> {
         })
     }
 
-    fn prepare(
-        self,
-        barrier: triomphe::Arc<ServerOperationBarrier>,
-    ) -> Result<(PreparedDeferredTermination<'a>, DeferredTerminationTicket), ServerCloseError>
-    {
-        if !std::ptr::eq(self.barrier, barrier.as_ref()) {
-            return Err(ServerCloseError::Reentrant);
-        }
+    fn prepare(self) -> (PreparedDeferredTermination<'a>, DeferredTerminationTicket) {
+        let barrier = triomphe::Arc::clone(self.barrier);
         let committed = triomphe::Arc::new(AtomicBool::new(false));
         let ticket = DeferredTerminationTicket {
             barrier,
@@ -597,13 +614,13 @@ impl<'a> DeferredTerminationReservation<'a> {
             attempt: self.attempt,
             committed: triomphe::Arc::clone(&committed),
         };
-        Ok((
+        (
             PreparedDeferredTermination {
                 reservation: self,
                 committed,
             },
             ticket,
-        ))
+        )
     }
 
     fn commit(mut self) {
@@ -868,30 +885,29 @@ impl TerminationWorker {
                     return Err(ServerCloseError::Reentrant);
                 }
 
-                match &state.phase {
+                match std::mem::replace(&mut state.phase, TerminationWorkerPhase::Joined) {
                     TerminationWorkerPhase::Idle => {
                         if state.sealed {
                             state.phase = TerminationWorkerPhase::Joined;
+                        } else {
+                            state.phase = TerminationWorkerPhase::Idle;
                         }
                         return Ok(());
                     }
                     TerminationWorkerPhase::Joined => return Ok(()),
-                    TerminationWorkerPhase::Starting { .. } => {
+                    starting @ TerminationWorkerPhase::Starting { .. } => {
+                        state.phase = starting;
                         self.changed.wait(&mut state);
                         continue;
                     }
                     TerminationWorkerPhase::Running(handle) => {
-                        let joining = TerminationWorkerPhase::Joining {
+                        state.phase = TerminationWorkerPhase::Joining {
                             worker_thread: handle.thread().id(),
-                        };
-                        let TerminationWorkerPhase::Running(handle) =
-                            std::mem::replace(&mut state.phase, joining)
-                        else {
-                            xlfn_kernel::invariant::fail_stop();
                         };
                         handle
                     }
-                    TerminationWorkerPhase::Joining { .. } => {
+                    joining @ TerminationWorkerPhase::Joining { .. } => {
+                        state.phase = joining;
                         self.changed.wait(&mut state);
                         continue;
                     }
@@ -968,11 +984,11 @@ mod deferred_ticket_tests {
         let barrier = Arc::new(ServerOperationBarrier::default());
         let operation = barrier.enter().unwrap();
         let ServerTerminationRequest::Deferred(reservation) =
-            barrier.request_termination().unwrap()
+            ServerOperationBarrier::request_termination(&barrier).unwrap()
         else {
             panic!("active operation must defer termination");
         };
-        let (prepared, ticket) = reservation.prepare(Arc::clone(&barrier)).unwrap();
+        let (prepared, ticket) = reservation.prepare();
         let owner = std::thread::current().id();
         let attempt = ticket.attempt;
         prepared.commit();
@@ -1005,11 +1021,11 @@ mod deferred_ticket_tests {
         let barrier = Arc::new(ServerOperationBarrier::default());
         let operation = barrier.enter().unwrap();
         let ServerTerminationRequest::Deferred(reservation) =
-            barrier.request_termination().unwrap()
+            ServerOperationBarrier::request_termination(&barrier).unwrap()
         else {
             panic!("active operation must defer termination");
         };
-        let (prepared, ticket) = reservation.prepare(Arc::clone(&barrier)).unwrap();
+        let (prepared, ticket) = reservation.prepare();
         assert!(matches!(
             ticket.with_completion(|_| panic!("startup lock is still owned")),
             Err(ServerCloseError::Reentrant)
@@ -1024,11 +1040,11 @@ mod deferred_ticket_tests {
         let barrier = Arc::new(ServerOperationBarrier::default());
         let operation = barrier.enter().unwrap();
         let ServerTerminationRequest::Deferred(reservation) =
-            barrier.request_termination().unwrap()
+            ServerOperationBarrier::request_termination(&barrier).unwrap()
         else {
             panic!("active operation must defer termination");
         };
-        let (prepared, ticket) = reservation.prepare(Arc::clone(&barrier)).unwrap();
+        let (prepared, ticket) = reservation.prepare();
         let (started, waiting) = std::sync::mpsc::sync_channel(1);
         let worker = std::thread::spawn(move || {
             started.send(()).unwrap();
@@ -1045,16 +1061,19 @@ mod deferred_ticket_tests {
     }
 
     #[test]
-    fn deferred_ticket_preparation_rejects_a_substituted_barrier() {
+    fn deferred_ticket_preparation_keeps_its_issuer() {
         let barrier = Arc::new(ServerOperationBarrier::default());
         let other = Arc::new(ServerOperationBarrier::default());
         let operation = barrier.enter().unwrap();
         let ServerTerminationRequest::Deferred(reservation) =
-            barrier.request_termination().unwrap()
+            ServerOperationBarrier::request_termination(&barrier).unwrap()
         else {
             panic!("active operation must defer termination");
         };
-        assert!(reservation.prepare(Arc::clone(&other)).is_err());
+        let (prepared, ticket) = reservation.prepare();
+        assert!(Arc::ptr_eq(&ticket.barrier, &barrier));
+        assert!(!Arc::ptr_eq(&ticket.barrier, &other));
+        drop(prepared);
         assert_eq!(barrier.phase(), ServerPhase::Open);
         assert_eq!(other.phase(), ServerPhase::Open);
         drop(operation);
@@ -1064,17 +1083,19 @@ mod deferred_ticket_tests {
     fn rolled_back_ticket_cannot_claim_a_later_attempt_on_the_same_thread() {
         let barrier = Arc::new(ServerOperationBarrier::default());
         let operation = barrier.enter().unwrap();
-        let ServerTerminationRequest::Deferred(first) = barrier.request_termination().unwrap()
+        let ServerTerminationRequest::Deferred(first) =
+            ServerOperationBarrier::request_termination(&barrier).unwrap()
         else {
             panic!("active operation must defer termination");
         };
-        let (abandoned, stale) = first.prepare(Arc::clone(&barrier)).unwrap();
+        let (abandoned, stale) = first.prepare();
         drop(abandoned);
-        let ServerTerminationRequest::Deferred(second) = barrier.request_termination().unwrap()
+        let ServerTerminationRequest::Deferred(second) =
+            ServerOperationBarrier::request_termination(&barrier).unwrap()
         else {
             panic!("active operation must defer termination again");
         };
-        let (prepared, current) = second.prepare(Arc::clone(&barrier)).unwrap();
+        let (prepared, current) = second.prepare();
         assert_ne!(stale.attempt, current.attempt);
         prepared.commit();
         drop(operation);
@@ -1096,11 +1117,11 @@ mod deferred_ticket_tests {
         let barrier = Arc::new(ServerOperationBarrier::default());
         let operation = barrier.enter().unwrap();
         let ServerTerminationRequest::Deferred(reservation) =
-            barrier.request_termination().unwrap()
+            ServerOperationBarrier::request_termination(&barrier).unwrap()
         else {
             panic!("active operation must defer termination");
         };
-        let (prepared, ticket) = reservation.prepare(Arc::clone(&barrier)).unwrap();
+        let (prepared, ticket) = reservation.prepare();
         drop(prepared);
         assert_eq!(barrier.phase(), ServerPhase::Open);
         drop(operation);

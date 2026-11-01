@@ -16,6 +16,8 @@ pub(crate) use certificate::{
 #[cfg(test)]
 pub(crate) use owner::RemovalClaimGuard;
 pub(crate) use owner::RemovalOwner;
+#[cfg(any(feature = "rtd", feature = "handles"))]
+pub(crate) use pipeline::CompletedResourceCertificates;
 #[cfg(any(test, feature = "refinement"))]
 pub(crate) use pipeline::QuiescenceProof;
 pub(crate) use pipeline::{CompletedResources, ReclaimFailure, ServiceSealFailure};

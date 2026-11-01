@@ -4,7 +4,6 @@
 use super::*;
 use std::mem::ManuallyDrop;
 use xlfn_kernel::published_owner::PublishedOwner;
-use xlfn_kernel::rotating_read_domain::DisposableBatch;
 
 #[cfg(test)]
 mod tests;
@@ -67,15 +66,57 @@ impl Drop for DrainedTopics {
     }
 }
 
+/// Only matching initialization and provisional-owner validation can issue
+/// this consuming publication authority. It borrows the actual locked topic;
+/// neither a different pointer nor another map can be supplied at commit.
+struct TopicPublication<'topic> {
+    target: &'topic PublishedTopics,
+    topic: &'topic mut Topic,
+    key: HandleTopicKey,
+}
+impl TopicPublication<'_> {
+    fn publish(self) {
+        let pointer = PublishedTopicPtr::from_ref(self.topic.publication.as_ref());
+        self.topic
+            .publication
+            .state
+            .store(PublishedTopicState::Live as u8, Ordering::Release);
+        self.target.entries.pin().insert(self.key, pointer);
+    }
+}
+
+pub(super) fn commit_publication(
+    table: &TopicTable,
+    key: HandleTopicKey,
+    generation: TopicGeneration,
+    initialization: &InitializationPtr,
+    publication: PublishedTopicPtr,
+    on_linearized: impl FnOnce(),
+) -> XllResult<()> {
+    let mut state = table.state.write();
+    if state.closed || state.generation != generation {
+        return Err(XllError::Closing);
+    }
+    if state.initializing.get(&key) != Some(initialization) {
+        return Err(XllError::StaleHandle);
+    }
+    let topic = state.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
+    if PublishedTopicPtr::from_ref(topic.publication.as_ref()) != publication {
+        return Err(XllError::StaleHandle);
+    }
+    TopicPublication {
+        target: &table.published,
+        topic,
+        key,
+    }
+    .publish();
+    state.initializing.remove(&key);
+    on_linearized();
+    Ok(())
+}
+
 impl TopicTable {
-    fn drain_generation(
-        &self,
-        generation: DisposableBatch<'_, DEFAULT_STRIPE_COUNT, RetiredTopics>,
-    ) -> DrainedTopics {
-        if !generation.belongs_to(&self.read_domain) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let retired = generation.into_inner();
+    fn account_retired(&self, retired: RetiredTopics) -> DrainedTopics {
         xlfn_kernel::invariant::checked_atomic_sub_relaxed(&self.queued, retired.len());
         DrainedTopics { topics: retired }
     }
@@ -88,7 +129,7 @@ impl TopicTable {
         let Some(result) = self
             .read_domain
             .poll_quiesce()
-            .map(|result| result.map(|batch| self.drain_generation(batch)))
+            .map(|result| result.map(|batch| self.account_retired(batch.into_inner())))
         else {
             return DrainedTopics::empty();
         };
@@ -125,7 +166,7 @@ impl TopicTable {
                 let Some(Ok(retired)) = self
                     .read_domain
                     .poll_quiesce()
-                    .map(|result| result.map(|batch| self.drain_generation(batch)))
+                    .map(|result| result.map(|batch| self.account_retired(batch.into_inner())))
                 else {
                     break;
                 };
@@ -145,8 +186,8 @@ impl TopicTable {
     pub(in crate::handle) fn seal_and_drain(&self) -> DrainedTopics {
         let closed = self.read_domain.seal_and_wait();
         let [first, second] = closed.take_queues();
-        let mut first = self.drain_generation(first);
-        let mut second = self.drain_generation(second);
+        let mut first = self.account_retired(first.into_inner());
+        let mut second = self.account_retired(second.into_inner());
         first.topics.append(&mut second.topics);
         first
     }

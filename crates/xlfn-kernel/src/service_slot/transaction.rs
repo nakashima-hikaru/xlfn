@@ -50,12 +50,12 @@ struct Initialization<'slot, C, R, E: Clone> {
 }
 
 impl<C, R, E: Clone> Initialization<'_, C, R, E> {
-    fn record_fault(&self, fault: ServiceFault<E>) {
+    fn record_fault(self, fault: ServiceFault<E>) {
         let fault = Arc::new(fault);
         let mut state = self.slot.state.lock();
-        if !matches!(&*state, GenerationServiceState::Initializing) {
-            crate::invariant::fail_stop();
-        }
+        // The unique initialization owner is the only operation allowed to
+        // leave Initializing. Arm/disarm reject it and readers/sealers wait;
+        // unlocked callbacks cannot acquire a competing transition owner.
         *state = GenerationServiceState::InitFaulted { fault };
         self.slot.changed.notify_all();
     }
@@ -86,9 +86,9 @@ impl<'slot, C, R, E: Clone> InitializingTxn<'slot, C, R, E> {
         let pointer = NonNull::from(runtime.as_ref());
         let slot = self.recovery.state().slot;
         let mut state = slot.state.lock();
-        if !matches!(&*state, GenerationServiceState::Initializing) {
-            crate::invariant::fail_stop();
-        }
+        // Consuming this transaction transfers its sole initialization claim.
+        // Reacquiring the mutex synchronizes publication; it does not reacquire
+        // or reconstruct a phase permission from the shared enum.
         *state = GenerationServiceState::Ready {
             runtime: PublishedServiceOwner::publish(runtime),
         };
@@ -116,34 +116,79 @@ impl<'slot, C, R, E: Clone> InitializingTxn<'slot, C, R, E> {
 
     pub(super) fn fail(self, error: E) -> ServiceSlotError<E> {
         // Error cloning can panic; the same guard then records Panicked.
-        self.recovery
-            .state()
-            .record_fault(ServiceFault::Error(error.clone()));
-        self.recovery.complete();
+        let fault = ServiceFault::Error(error.clone());
+        self.recovery.complete().record_fault(fault);
         ServiceSlotError::Fault(ServiceFault::Error(error))
     }
 }
 
 struct Transition<'slot, R> {
     // Unlock before dropping an unpublished candidate in a following field.
-    _guard: MutexGuard<'slot, ()>,
+    owners: MutexGuard<'slot, ReplaceableOwners<R>>,
     slot: &'slot ReplaceableServiceSlot<R>,
-    previous: Option<usize>,
+    previous: Option<PreviousLane<R>>,
     target: usize,
+    recovery: TransitionRecovery,
 }
+
+// The canonical current lane owns its allocation alongside its index. The
+// atomic active index is only the read-side projection, never an owner lookup
+// key. Abandoned retirements retain their allocations until exclusive Drop.
+pub(super) struct ReplaceableOwners<R> {
+    current: Option<PreviousLane<R>>,
+    retained: [Option<PublishedServiceOwner<R>>; 2],
+}
+
+impl<R> ReplaceableOwners<R> {
+    pub(super) const fn new() -> Self {
+        Self {
+            current: None,
+            retained: [None, None],
+        }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.current.is_none() && self.retained.iter().all(Option::is_none)
+    }
+}
+
+enum TransitionRecovery {
+    RestorePublication,
+    RetainWithdrawal,
+}
+
+// Withdrawal transfers the exact allocation into the transition. Reader
+// pointers stay published until drain; no later stage has to fetch an owner
+// from an independently selected lane.
+struct PreviousLane<R> {
+    index: usize,
+    owner: PublishedServiceOwner<R>,
+}
+
 impl<'slot, R> Transition<'slot, R> {
     fn new(slot: &'slot ReplaceableServiceSlot<R>) -> Self {
-        let guard = slot.transition.lock();
-        let previous = match slot.active.load(Ordering::Acquire) {
-            0 => Some(0),
-            1 => Some(1),
-            _ => None,
-        };
+        let mut owners = slot.transition.lock();
+        let previous = owners.current.take();
+        let target = previous.as_ref().map_or(0, |previous| 1 - previous.index);
         Self {
-            _guard: guard,
+            owners,
             slot,
             previous,
-            target: previous.map_or(0, |index| 1 - index),
+            target,
+            recovery: TransitionRecovery::RestorePublication,
+        }
+    }
+}
+
+impl<R> Drop for Transition<'_, R> {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            match self.recovery {
+                TransitionRecovery::RestorePublication => self.owners.current = Some(previous),
+                TransitionRecovery::RetainWithdrawal => {
+                    self.owners.retained[previous.index] = Some(previous.owner);
+                }
+            }
         }
     }
 }
@@ -182,19 +227,15 @@ impl<'slot, R> ReplacementTxn<'slot, R> {
         if !lane.readers.is_sealed()
             || lane.readers.active() != 0
             || !lane.published.load(Ordering::Acquire).is_null()
-            || lane.owner.lock().is_some()
+            || self.transition.owners.retained[self.transition.target].is_some()
         {
             crate::invariant::fail_stop();
         }
-        let old = self.transition.previous.map(|index| {
-            let lane = &self.transition.slot.lanes[index];
-            // The exact lane owner remains retained while this transition lock
-            // excludes replacement and close; no arbitrary pointer is accepted.
-            let pointer = NonNull::new(lane.published.load(Ordering::Acquire))
-                .unwrap_or_else(|| crate::invariant::fail_stop());
-            // SAFETY: this transition retains the exact slot and its lock.
-            unsafe { pointer.as_ref() }
-        });
+        let old = self
+            .transition
+            .previous
+            .as_ref()
+            .map(|previous| previous.owner.as_ref());
         precommit(self.transition.previous.is_some(), old)?;
         Ok(PreparedReplacement {
             transition: self.transition,
@@ -205,13 +246,17 @@ impl<'slot, R> ReplacementTxn<'slot, R> {
 impl<'slot, R> PreparedReplacement<'slot, R> {
     pub(super) fn publish(self) -> RetiringReplacement<'slot, R> {
         let Self {
-            transition,
+            mut transition,
             candidate,
         } = self;
         let lane = &transition.slot.lanes[transition.target];
         let owner = PublishedServiceOwner::publish(PublishedOwner::from_box(candidate));
         let pointer = owner.as_ptr();
-        *lane.owner.lock() = Some(owner);
+        transition.recovery = TransitionRecovery::RetainWithdrawal;
+        transition.owners.current = Some(PreviousLane {
+            index: transition.target,
+            owner,
+        });
         lane.published.store(pointer, Ordering::Release);
         drop(
             lane.readers
@@ -225,8 +270,13 @@ impl<'slot, R> PreparedReplacement<'slot, R> {
             .slot
             .active
             .store(transition.target as u8, Ordering::Release);
-        if let Some(index) = transition.previous {
-            drop(transition.slot.lanes[index].readers.control().seal());
+        if let Some(previous) = &transition.previous {
+            drop(
+                transition.slot.lanes[previous.index]
+                    .readers
+                    .control()
+                    .seal(),
+            );
         }
         RetiringReplacement { transition }
     }
@@ -237,13 +287,19 @@ impl<'slot, R> ClosingTxn<'slot, R> {
             transition: Transition::new(slot),
         }
     }
-    fn withdraw(self) -> RetiringReplacement<'slot, R> {
+    fn withdraw(mut self) -> RetiringReplacement<'slot, R> {
+        self.transition.recovery = TransitionRecovery::RetainWithdrawal;
         self.transition
             .slot
             .active
             .store(NO_ACTIVE_LANE, Ordering::Release);
-        if let Some(index) = self.transition.previous {
-            drop(self.transition.slot.lanes[index].readers.control().seal());
+        if let Some(previous) = &self.transition.previous {
+            drop(
+                self.transition.slot.lanes[previous.index]
+                    .readers
+                    .control()
+                    .seal(),
+            );
         }
         RetiringReplacement {
             transition: self.transition,
@@ -436,13 +492,55 @@ mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         drop(read);
         assert_eq!(
-            slot.lanes[0].owner.lock().as_ref().unwrap().as_ptr(),
+            slot.transition.lock().retained[0]
+                .as_ref()
+                .unwrap()
+                .as_ptr(),
             pointer
         );
         // Abandonment leaves the allocation in its sealed lane. Exclusive
         // slot destruction drains and releases it exactly once.
         drop(slot);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn miri_abandoned_replacement_retains_both_exact_allocations() {
+        for drained in [false, true] {
+            let drops = StdArc::new(AtomicUsize::new(0));
+            let slot = ReplaceableServiceSlot::new();
+            let value = |value| {
+                Box::new(Counted {
+                    value,
+                    drops: StdArc::clone(&drops),
+                })
+            };
+            slot.replace_with(value(1), |_, _| Ok::<_, ()>(())).unwrap();
+            let old = slot.read_if_ready().unwrap();
+            let retirement = ReplacementTxn::new(&slot, value(2))
+                .prepare(|_, _| Ok::<_, ()>(()))
+                .unwrap()
+                .publish();
+            let current = slot.read_if_ready().unwrap();
+            assert_eq!(old.value, 1);
+            assert_eq!(current.value, 2);
+            if drained {
+                drop(old);
+                drop(retirement.wait());
+            } else {
+                drop(retirement);
+                assert_eq!(old.value, 1);
+                drop(old);
+            }
+            assert_eq!(drops.load(Ordering::Relaxed), 0);
+            drop(current);
+            drop(slot.close());
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+            // The abandoned, withdrawn allocation stays retained even after
+            // the new service closes, and is reclaimed only by exclusive Drop.
+            drop(slot);
+            assert_eq!(drops.load(Ordering::Relaxed), 2);
+        }
     }
 }
 
@@ -465,6 +563,45 @@ mod replacement_tests {
             }
             self.drops.fetch_add(1, Ordering::Relaxed);
         }
+    }
+    #[test]
+    fn miri_abandoned_preparation_restores_the_exact_live_previous_owner() {
+        let drops = StdArc::new(AtomicUsize::new(0));
+        let slot = StdArc::new(ReplaceableServiceSlot::new());
+        let value = || {
+            Box::new(Probe {
+                slot: StdArc::downgrade(&slot),
+                drops: StdArc::clone(&drops),
+            })
+        };
+        slot.replace_with(value(), |_, _| Ok::<_, ()>(())).unwrap();
+        let reader = slot.read_if_ready().unwrap();
+        let original = std::ptr::from_ref(&*reader);
+        let prepared = ReplacementTxn::new(&slot, value())
+            .prepare(|had_previous, previous| {
+                assert!(had_previous);
+                assert!(std::ptr::eq(previous.unwrap(), original));
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        // The transition retains the old allocation while its real reader
+        // stays admitted. Abandoning candidate preparation restores it.
+        drop(prepared);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert!(std::ptr::eq(&*reader, original));
+        assert_eq!(
+            slot.transition
+                .lock()
+                .current
+                .as_ref()
+                .unwrap()
+                .owner
+                .as_ptr(),
+            original.cast_mut()
+        );
+        drop(reader);
+        drop(slot.close());
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
     }
     #[test]
     fn miri_prepared_replacement_abandonment_and_precommit_error_release_candidate_unlocked() {

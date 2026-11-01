@@ -65,12 +65,6 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SubscriptionServiceSlot<
             .map_err(crate::error::map_service_slot_error)
     }
 
-    pub(crate) fn disarm(&self) -> crate::XllResult<()> {
-        self.service
-            .disarm()
-            .map_err(crate::error::map_service_slot_error)
-    }
-
     #[inline]
     pub(crate) fn read(
         &self,

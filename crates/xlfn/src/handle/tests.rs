@@ -839,7 +839,7 @@ fn public_handle_identity_changes_after_runtime_regeneration() {
         (token, identity)
     };
 
-    slot.seal(Some(crate::generation::RuntimeGeneration::new(1).unwrap()))
+    slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
         .unwrap();
     slot.arm(crate::HandleConfig::default()).unwrap();
     let runtime = slot.read().unwrap();
@@ -3510,7 +3510,7 @@ fn close_resets_to_closed_for_reopen() {
     let session1 = slot.read().unwrap().store.session();
     assert!(!slot.is_none());
 
-    slot.seal(Some(crate::generation::RuntimeGeneration::new(1).unwrap()))
+    slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
         .map(|_| ())
         .unwrap();
     assert!(slot.is_none());
@@ -3531,7 +3531,7 @@ fn handle_slot_seal_is_local_to_its_generation_bundle() {
     assert!(slot.read().is_ok());
     assert!(matches!(slot.disarm(), Err(XllError::Closing)));
 
-    slot.seal(Some(crate::generation::RuntimeGeneration::new(1).unwrap()))
+    slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
         .unwrap();
     assert!(slot.is_none());
 }

@@ -6,11 +6,6 @@ use smallvec::SmallVec;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(super) enum SourceRefUpdate {
-    Insert,
-    Increment(NonZeroUsize),
-}
-
 pub(crate) static NEXT_RTD_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn allocate_runtime_id() -> XllResult<u64> {
@@ -34,65 +29,36 @@ impl SubscriptionIdentityIndex {
         self.ids_by_key.get(&key).map_or(&[], SmallVec::as_slice)
     }
 
-    pub(super) fn plan_insert(
-        &self,
+    pub(super) fn prepare_insert(
+        &mut self,
         key: SubscriptionIdentityKey,
         id: SubscriptionId,
         max_source_ids: usize,
-    ) -> XllResult<SourceRefUpdate> {
-        if self.candidates(key).contains(&id) {
+    ) -> XllResult<IdentityInsertion<'_>> {
+        let source_count = self.source_refs.len();
+        let bucket = self.ids_by_key.entry(key);
+        if let std::collections::hash_map::Entry::Occupied(existing) = &bucket
+            && existing.get().contains(&id)
+        {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_DUPLICATE,
             });
         }
-
-        let source_id = key.source_id.0;
-        let source_ref_update = match self.source_refs.get(&source_id) {
-            Some(current) => {
-                let next = current.get().checked_add(1).ok_or(XllError::Internal {
+        let source = match self.source_refs.entry(key.source_id.0) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                let next = entry.get().checked_add(1).ok_or(XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
                 })?;
-                SourceRefUpdate::Increment(
-                    NonZeroUsize::new(next).expect("the incremented source refcount is non-zero"),
-                )
+                SourceInsertion::Increment { entry, next }
             }
-            None => {
-                if self.source_refs.len() >= max_source_ids {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                if source_count >= max_source_ids {
                     return Err(XllError::Overloaded);
                 }
-                SourceRefUpdate::Insert
+                SourceInsertion::New(entry)
             }
         };
-        Ok(source_ref_update)
-    }
-
-    pub(super) fn commit_insert(
-        &mut self,
-        key: SubscriptionIdentityKey,
-        id: SubscriptionId,
-        source_ref_update: SourceRefUpdate,
-    ) {
-        let source_id = key.source_id.0;
-        self.ids_by_key.entry(key).or_default().push(id);
-
-        match source_ref_update {
-            SourceRefUpdate::Insert => {
-                if self
-                    .source_refs
-                    .insert(source_id, NonZeroUsize::new(1).expect("one is non-zero"))
-                    .is_some()
-                {
-                    xlfn_kernel::invariant::fail_stop();
-                }
-            }
-            SourceRefUpdate::Increment(next) => {
-                let current = self
-                    .source_refs
-                    .get_mut(&source_id)
-                    .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-                *current = next;
-            }
-        }
+        Ok(IdentityInsertion { bucket, source, id })
     }
 
     #[cfg(test)]
@@ -102,8 +68,7 @@ impl SubscriptionIdentityIndex {
         id: SubscriptionId,
         max_source_ids: usize,
     ) -> XllResult<()> {
-        let source_ref_update = self.plan_insert(key, id, max_source_ids)?;
-        self.commit_insert(key, id, source_ref_update);
+        self.prepare_insert(key, id, max_source_ids)?.commit();
         Ok(())
     }
 
@@ -152,6 +117,39 @@ impl SubscriptionIdentityIndex {
                 self.source_refs.get(&source_id).map(|value| value.get()),
                 Some(refs)
             );
+        }
+    }
+}
+
+enum SourceInsertion<'index> {
+    New(std::collections::hash_map::VacantEntry<'index, SourceHandleId, NonZeroUsize>),
+    Increment {
+        entry: std::collections::hash_map::OccupiedEntry<'index, SourceHandleId, NonZeroUsize>,
+        next: NonZeroUsize,
+    },
+}
+
+/// Native entry borrows retain both exact maps through commit. Callers cannot
+/// substitute a source, reuse an increment plan or commit against another index.
+pub(super) struct IdentityInsertion<'index> {
+    bucket: std::collections::hash_map::Entry<
+        'index,
+        SubscriptionIdentityKey,
+        SmallVec<[SubscriptionId; 1]>,
+    >,
+    source: SourceInsertion<'index>,
+    id: SubscriptionId,
+}
+impl IdentityInsertion<'_> {
+    pub(super) fn commit(self) {
+        self.bucket.or_default().push(self.id);
+        match self.source {
+            SourceInsertion::New(entry) => {
+                entry.insert(NonZeroUsize::MIN);
+            }
+            SourceInsertion::Increment { mut entry, next } => {
+                *entry.get_mut() = next;
+            }
         }
     }
 }

@@ -18,6 +18,9 @@ impl<R> PublishedServiceOwner<R> {
     pub(in crate::service_slot) fn as_ptr(&self) -> *mut R {
         self.0.as_ptr()
     }
+    pub(super) fn as_ref(&self) -> &R {
+        self.0.as_ref()
+    }
     fn withdraw(self) -> WithdrawnServiceOwner<R> {
         WithdrawnServiceOwner(self.0)
     }
@@ -51,9 +54,9 @@ struct Sealing<'slot, C, R, E: Clone> {
 impl<C, R, E: Clone> Sealing<'_, C, R, E> {
     fn retain(self, fault: Arc<ServiceFault<E>>) {
         let mut state = self.slot.state.lock();
-        if !matches!(&*state, GenerationServiceState::Sealing) {
-            crate::invariant::fail_stop();
-        }
+        // Only the consuming Sealing/Quiesced owner can leave this busy state.
+        // Concurrent administration rejects or waits until this owner resolves;
+        // callback/panic recovery therefore cannot select a different issuer.
         *state = GenerationServiceState::TeardownFaulted {
             fault,
             runtime: self.runtime.quarantine(),
@@ -125,9 +128,9 @@ pub(in crate::service_slot) struct DrainedReplacement<'slot, R> {
 }
 impl<'slot, R> RetiringReplacement<'slot, R> {
     pub(in crate::service_slot) fn wait(self) -> super::DrainedReplacement<'slot, R> {
-        if let Some(index) = self.transition.previous {
+        if let Some(previous) = &self.transition.previous {
             drop(
-                self.transition.slot.lanes[index]
+                self.transition.slot.lanes[previous.index]
                     .readers
                     .control()
                     .seal()
@@ -140,18 +143,13 @@ impl<'slot, R> RetiringReplacement<'slot, R> {
     }
 }
 impl<R> DrainedReplacement<'_, R> {
-    pub(in crate::service_slot) fn reclaim(self) -> Option<RetiredService<R>> {
-        self.transition.previous.map(|index| {
-            let lane = &self.transition.slot.lanes[index];
+    pub(in crate::service_slot) fn reclaim(mut self) -> Option<RetiredService<R>> {
+        self.transition.previous.take().map(|previous| {
+            let lane = &self.transition.slot.lanes[previous.index];
             // Delayed admitted readers must see this pointer until drain ends.
             lane.published
                 .store(std::ptr::null_mut(), Ordering::Release);
-            let owner = lane
-                .owner
-                .lock()
-                .take()
-                .unwrap_or_else(|| crate::invariant::fail_stop());
-            RetiredService::new(ManuallyDrop::into_inner(owner.0).into_box())
+            RetiredService::new(ManuallyDrop::into_inner(previous.owner.0).into_box())
         })
     }
 }
@@ -179,13 +177,18 @@ impl<R> Drop for ReplaceableServiceSlot<R> {
     fn drop(&mut self) {
         self.active.store(NO_ACTIVE_LANE, Ordering::Release);
         for lane in &mut self.lanes {
-            let owner = {
-                let _drained = lane.readers.control().seal().wait();
-                lane.published
-                    .store(std::ptr::null_mut(), Ordering::Release);
-                lane.owner.get_mut().take()
-            };
-            if let Some(owner) = owner {
+            let _drained = lane.readers.control().seal().wait();
+            lane.published
+                .store(std::ptr::null_mut(), Ordering::Release);
+        }
+        // Both lanes are drained, and exclusive destruction owns the exact
+        // canonical allocations. No lane/index lookup recovers ownership.
+        let owners = self.transition.get_mut();
+        if let Some(current) = owners.current.take() {
+            drop(ManuallyDrop::into_inner(current.owner.0).into_box());
+        }
+        for retained in &mut owners.retained {
+            if let Some(owner) = retained.take() {
                 drop(ManuallyDrop::into_inner(owner.0).into_box());
             }
         }

@@ -1,7 +1,7 @@
 // module: runtime
 use super::CompletedResources;
-use crate::module_runtime::ModuleEpochId;
+use crate::module_runtime::ModuleExportsDrained;
 
-fn invalid(resources: &mut CompletedResources, other: ModuleEpochId) {
-    resources.module_epoch = other; // error: E0616
+fn invalid(resources: &mut CompletedResources, other: ModuleExportsDrained) {
+    resources.module = other; // error: E0616
 }

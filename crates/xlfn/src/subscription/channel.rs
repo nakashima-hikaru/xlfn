@@ -10,7 +10,7 @@ use super::budget::{
 use super::source::{RtdSink, RtdSource, RtdSubscription};
 use super::topic::RtdTopic;
 use super::value::{IntoRtdValue, StoredRtdValue};
-use crate::sync::{Condvar, Mutex};
+use crate::sync::{Condvar, Mutex, MutexGuard};
 use crate::{ExcelError, XllError, XllResult};
 use std::collections::VecDeque;
 use std::marker::PhantomData;
@@ -657,6 +657,35 @@ pub(super) struct PublisherPool {
     stopped: AtomicBool,
 }
 
+// This pool's locked Dormant claim is moved through worker creation and
+// publication. A caller cannot publish a queue from another startup attempt.
+struct PublisherStartup<'pool> {
+    pool: &'pool PublisherPool,
+    worker: MutexGuard<'pool, PublisherWorker>,
+}
+
+impl PublisherStartup<'_> {
+    fn start(mut self) -> XllResult<Arc<PublisherQueue>> {
+        let queue = Arc::new(PublisherQueue {
+            ready: Mutex::new(Ready {
+                channels: VecDeque::new(),
+                stopping: false,
+            }),
+            changed: Condvar::new(),
+        });
+        let shared = Arc::clone(&queue);
+        let handle = Builder::new()
+            .name("xlfn-rtd-publisher".into())
+            .spawn(move || shared.run())
+            .map_err(spawn_error)?;
+        *self.worker = PublisherWorker::Running(Arc::clone(&queue), handle);
+        // Only this consumed Dormant claim initializes the cell, after the
+        // join owner exists. Failed spawn retains Dormant and no publication.
+        self.pool.queue.get_or_init(|| Arc::clone(&queue));
+        Ok(queue)
+    }
+}
+
 impl PublisherPool {
     pub(super) const fn new() -> Self {
         Self {
@@ -673,30 +702,13 @@ impl PublisherPool {
         if let Some(queue) = self.queue.get() {
             return Ok(Arc::clone(queue));
         }
-        let mut worker = self.worker.lock();
+        let worker = self.worker.lock();
         match &*worker {
             PublisherWorker::Running(queue, _) => return Ok(Arc::clone(queue)),
             PublisherWorker::Stopped => return Err(XllError::Closing),
             PublisherWorker::Dormant => {}
         }
-        let queue = Arc::new(PublisherQueue {
-            ready: Mutex::new(Ready {
-                channels: VecDeque::new(),
-                stopping: false,
-            }),
-            changed: Condvar::new(),
-        });
-        let shared = Arc::clone(&queue);
-        let handle = Builder::new()
-            .name("xlfn-rtd-publisher".into())
-            .spawn(move || shared.run())
-            .map_err(spawn_error)?;
-        *worker = PublisherWorker::Running(Arc::clone(&queue), handle);
-        // Publish only after startup has succeeded and the join owner exists.
-        if self.queue.set(Arc::clone(&queue)).is_err() {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        Ok(queue)
+        PublisherStartup { pool: self, worker }.start()
     }
 
     pub(super) fn stop(&self) {

@@ -160,31 +160,49 @@ impl ReturnProducerGuard<'static> {
     }
 }
 
-/// The panic boundary owns recovery, rather than borrowing a reusable producer.
-/// None means transfer has started: a second publication or fallback must stop.
+/// Retains the one admission until conversion and call postprocessing finish.
+/// Publication consumes this owner; fallback never receives a used producer.
 pub(super) struct ReturnPublicationTxn {
-    producer: Option<ReturnProducerGuard<'static>>,
+    producer: ReturnProducerGuard<'static>,
 }
 
 impl ReturnPublicationTxn {
     pub(super) fn new(producer: ReturnProducerGuard<'static>) -> Self {
-        Self {
-            producer: Some(producer),
+        Self { producer }
+    }
+
+    pub(super) fn prepare(self, value: super::PreparedReturn) -> super::PreparedPublication {
+        super::PreparedPublication {
+            value,
+            producer: self.producer,
         }
     }
+}
 
-    pub(super) fn is_armed(&self) -> bool {
-        self.producer.is_some()
-    }
+/// No fallback owns the producer once publication starts. Completing this
+/// private phase disarms its unwind policy without another catch boundary.
+struct CommittingPublication;
 
-    pub(super) fn prepare(&mut self, value: super::PreparedReturn) -> super::PreparedPublication {
-        // Mark transfer before allocation or other publication effects. A panic
-        // afterward cannot cause the outer boundary to publish a second value.
-        let Some(producer) = self.producer.take() else {
-            xlfn_kernel::invariant::fail_stop();
-        };
-        super::PreparedPublication { value, producer }
+impl CommittingPublication {
+    fn finish(self) {
+        let _completed = std::mem::ManuallyDrop::new(self);
     }
+}
+
+impl Drop for CommittingPublication {
+    fn drop(&mut self) {
+        // Only unwinding through an unfinished publication reaches Drop.
+        // Stop before any enclosing ABI catch could manufacture value #2.
+        xlfn_kernel::invariant::fail_stop();
+    }
+}
+
+#[inline]
+pub(super) fn commit_publication<T>(operation: impl FnOnce() -> T) -> T {
+    let committing = CommittingPublication;
+    let publication = operation();
+    committing.finish();
+    publication
 }
 
 pub(crate) struct ReturnFreeGuard {

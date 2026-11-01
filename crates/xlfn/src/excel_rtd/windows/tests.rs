@@ -287,12 +287,13 @@ fn terminal_close_rejects_same_thread_notification_without_closing() {
 
 #[test]
 fn server_termination_defers_cross_thread_notification_without_waiting() {
+    use triomphe::Arc;
     let barrier = Arc::new(ServerOperationBarrier::default());
     let notification = barrier.enter_notification().unwrap();
     let terminating_barrier = Arc::clone(&barrier);
 
     std::thread::spawn(move || {
-        let request = terminating_barrier.request_termination().unwrap();
+        let request = ServerOperationBarrier::request_termination(&terminating_barrier).unwrap();
         assert!(matches!(request, ServerTerminationRequest::Deferred(_)));
     })
     .join()
@@ -301,7 +302,7 @@ fn server_termination_defers_cross_thread_notification_without_waiting() {
     assert_eq!(barrier.phase(), ServerPhase::Open);
     drop(notification);
 
-    let termination = match barrier.request_termination().unwrap() {
+    let termination = match ServerOperationBarrier::request_termination(&barrier).unwrap() {
         ServerTerminationRequest::Synchronous(termination) => termination,
         _ => panic!("quiescent server termination must stay synchronous"),
     };
@@ -312,7 +313,7 @@ fn server_termination_defers_cross_thread_notification_without_waiting() {
     ));
     drop(termination);
     assert!(matches!(
-        barrier.request_termination().unwrap(),
+        ServerOperationBarrier::request_termination(&barrier).unwrap(),
         ServerTerminationRequest::Complete
     ));
 }
@@ -356,13 +357,15 @@ fn terminal_close_waits_for_notification_quiescence() {
 fn secondary_terminal_close_waits_for_termination_completion() {
     use std::sync::mpsc::{self, TryRecvError};
     use std::time::Duration;
+    use triomphe::Arc;
 
     let barrier = Arc::new(ServerOperationBarrier::default());
     let owner_barrier = Arc::clone(&barrier);
     let (owner_ready_tx, owner_ready_rx) = mpsc::sync_channel(1);
     let (release_owner_tx, release_owner_rx) = mpsc::sync_channel(1);
     let owner = std::thread::spawn(move || {
-        let termination = match owner_barrier.request_termination().unwrap() {
+        let termination = match ServerOperationBarrier::request_termination(&owner_barrier).unwrap()
+        {
             ServerTerminationRequest::Synchronous(termination) => termination,
             _ => panic!("quiescent server termination must stay synchronous"),
         };
@@ -1494,7 +1497,7 @@ fn deferred_start_abandonment_restores_gate_worker_and_reference() {
     let operation = server.operations.enter().unwrap();
     let references = server.references.load(Ordering::Acquire);
     let ServerTerminationRequest::Deferred(reservation) =
-        server.operations.request_termination().unwrap()
+        ServerOperationBarrier::request_termination(&server.operations).unwrap()
     else {
         panic!("admitted operation must defer termination");
     };
@@ -1536,7 +1539,7 @@ fn deferred_start_rejects_another_server_without_changing_its_worker() {
     assert_ne!(retired.pointer(), ensured.pointer());
     let operation = source.operations.enter().unwrap();
     let ServerTerminationRequest::Deferred(reservation) =
-        source.operations.request_termination().unwrap()
+        ServerOperationBarrier::request_termination(&source.operations).unwrap()
     else {
         panic!("admitted operation must defer termination");
     };
@@ -1571,7 +1574,7 @@ fn deferred_start_spawn_registers_worker_before_gate_commit() {
     let operation = server.operations.enter().unwrap();
     let references = server.references.load(Ordering::Acquire);
     let ServerTerminationRequest::Deferred(reservation) =
-        server.operations.request_termination().unwrap()
+        ServerOperationBarrier::request_termination(&server.operations).unwrap()
     else {
         panic!("admitted operation must defer termination");
     };

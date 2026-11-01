@@ -28,7 +28,8 @@ mod boundary;
 mod builtin;
 mod calculation;
 mod completion;
-mod control;
+#[cfg(test)]
+use registry::control;
 mod executor;
 mod future;
 mod instrumentation;
@@ -59,7 +60,7 @@ pub(crate) use task_scope::HandleScopedTaskBuilder;
 pub use task_scope::{AsyncTaskScope, HandleScopedBuilder};
 
 #[cfg(feature = "bench-internals")]
-pub use calculation::AsyncTaskDrainBenchmark;
+pub use registry::AsyncTaskDrainBenchmark;
 
 // Test modules exercise the protocol pieces directly. Keep these imports
 // scoped to tests so the production module has no ambient prelude.

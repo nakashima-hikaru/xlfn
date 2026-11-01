@@ -161,9 +161,6 @@ pub struct RtdMultiplexedSource<T, P, V = NoTopicValidator, D: RtdDeliveryPolicy
 
 enum Worker<P> {
     Unstarted(P),
-    // Visible only while the start guard retains the worker mutex. Its Drop
-    // restores the producer if thread creation fails or setup unwinds.
-    Starting,
     Running {
         handle: JoinHandle<()>,
         permit: WorkerPermit,
@@ -174,36 +171,152 @@ enum Worker<P> {
 
 struct WorkerStart<'a, P> {
     worker: Option<&'a mut Worker<P>>,
-    producer: Arc<Mutex<Option<P>>>,
+    producer: Option<Arc<Mutex<Option<P>>>>,
 }
 
-impl<'a, P> WorkerStart<'a, P> {
-    fn reserve(worker: &'a mut Worker<P>) -> Self {
-        let Worker::Unstarted(producer) = std::mem::replace(worker, Worker::Starting) else {
-            xlfn_kernel::invariant::fail_stop();
-        };
-        Self {
-            worker: Some(worker),
-            producer: Arc::new(Mutex::new(Some(producer))),
+/// A source producer removed from its canonical slot under one lock. Budget
+/// and registration failures return it before any user captures are destroyed.
+struct UnstartedWorker<'a, P> {
+    worker: Option<&'a mut Worker<P>>,
+    producer: Option<P>,
+}
+impl<'a, P> UnstartedWorker<'a, P> {
+    fn capture(mut self) -> WorkerStart<'a, P> {
+        let producer = self
+            .producer
+            .take()
+            .expect("unstarted owner retains producer");
+        WorkerStart {
+            worker: self.worker.take(),
+            producer: Some(Arc::new(Mutex::new(Some(producer)))),
         }
     }
+}
+impl<P> Drop for UnstartedWorker<'_, P> {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            let producer = self
+                .producer
+                .take()
+                .expect("rollback retains unstarted producer");
+            *worker = Worker::Unstarted(producer);
+        }
+    }
+}
 
-    fn commit(mut self, handle: JoinHandle<()>, permit: WorkerPermit) {
-        *self.worker.take().expect("start guard owns worker state") =
+/// During the OS call its outcome is not yet known. Unwind must retain the
+/// captures and keep the canonical slot unavailable, rather than guessing that
+/// no worker started and destroying captures before a join barrier exists.
+struct SpawningWorker<'a, P> {
+    worker: Option<&'a mut Worker<P>>,
+    producer: Option<Arc<Mutex<Option<P>>>>,
+}
+impl<P> Drop for SpawningWorker<'_, P> {
+    fn drop(&mut self) {
+        if let Some(producer) = self.producer.take() {
+            // An unknown OS startup outcome cannot authorize destruction.
+            let _retained = std::mem::ManuallyDrop::new(producer);
+        }
+    }
+}
+struct RunningWorker<'a, P> {
+    worker: Option<&'a mut Worker<P>>,
+    running: Option<StartedWorker>,
+}
+struct StartedWorker {
+    handle: JoinHandle<()>,
+    permit: WorkerPermit,
+}
+impl<P> RunningWorker<'_, P> {
+    fn install(mut self) {
+        let StartedWorker { handle, permit } = self
+            .running
+            .take()
+            .expect("running owner retains join barrier");
+        *self.worker.take().expect("running owner retains slot") =
             Worker::Running { handle, permit };
     }
 }
-
+impl<P> Drop for RunningWorker<'_, P> {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            let StartedWorker { handle, permit } = self
+                .running
+                .take()
+                .expect("running owner retains join barrier");
+            *worker = Worker::Running { handle, permit };
+        }
+    }
+}
+struct FailedWorker<'a, P> {
+    _restore: UnstartedWorker<'a, P>,
+    error: std::io::Error,
+}
+impl<'a, P: Send + 'static> WorkerStart<'a, P> {
+    fn spawn(
+        mut self,
+        permit: WorkerPermit,
+        job: impl FnOnce(P) + Send + 'static,
+        fail_spawn: bool,
+    ) -> Result<RunningWorker<'a, P>, FailedWorker<'a, P>> {
+        let thread_pending = Arc::clone(self.producer.as_ref().expect("unspawned capture"));
+        let run = move || {
+            // This closure is FnOnce and the recovery owner is issued only if
+            // std::thread::spawn reports that the closure was never started.
+            let producer = thread_pending.lock().take().expect("one worker job");
+            job(producer);
+        };
+        let builder = Builder::new().name("xlfn-rtd-source".into());
+        let mut spawning = SpawningWorker {
+            worker: self.worker.take(),
+            producer: self.producer.take(),
+        };
+        let result = if fail_spawn {
+            drop(run);
+            Err(std::io::Error::other("injected RTD source spawn failure"))
+        } else {
+            builder.spawn(run)
+        };
+        match result {
+            Ok(handle) => {
+                let running = RunningWorker {
+                    worker: spawning.worker.take(),
+                    running: Some(StartedWorker { handle, permit }),
+                };
+                // The thread owns the other Arc, including when not yet run.
+                drop(spawning.producer.take());
+                Ok(running)
+            }
+            Err(error) => {
+                // The standard-library Err contract guarantees the closure
+                // never ran; only this failure-specific owner may recover P.
+                let producer = spawning.producer.take().expect("spawning retains capture");
+                let producer = producer
+                    .lock()
+                    .take()
+                    .expect("failed spawn retains producer");
+                Err(FailedWorker {
+                    _restore: UnstartedWorker {
+                        worker: spawning.worker.take(),
+                        producer: Some(producer),
+                    },
+                    error,
+                })
+            }
+        }
+    }
+}
 impl<P> Drop for WorkerStart<'_, P> {
     fn drop(&mut self) {
         if let Some(worker) = self.worker.take() {
-            // OS spawn failure drops only the closure's Arc. The producer is
-            // restored without running user destructors under the worker lock.
-            let Some(producer) = self.producer.lock().take() else {
-                // A started thread must transfer its join handle immediately;
-                // otherwise there is no owner that could establish its barrier.
-                xlfn_kernel::invariant::fail_stop();
-            };
+            // No OS spawn has begun while this preparation owner remains armed.
+            let producer = self
+                .producer
+                .as_ref()
+                .expect("unspawned capture")
+                .lock()
+                .take()
+                .expect("unspawned capture");
             *worker = Worker::Unstarted(producer);
         }
     }
@@ -513,12 +626,20 @@ where
         if self.worker.shared.closed.load(Ordering::Acquire) {
             return Err(XllError::Closing);
         }
-        match &*worker {
-            Worker::Running { .. } => return self.register_channel(topic, channel),
-            Worker::Unstarted(_) => {}
-            Worker::Joining | Worker::Joined(_) => return Err(XllError::Closing),
-            Worker::Starting => xlfn_kernel::invariant::fail_stop(),
-        }
+        let starting = match std::mem::replace(&mut *worker, Worker::Joining) {
+            Worker::Unstarted(producer) => UnstartedWorker {
+                worker: Some(&mut *worker),
+                producer: Some(producer),
+            },
+            running @ Worker::Running { .. } => {
+                *worker = running;
+                return self.register_channel(topic, channel);
+            }
+            closed @ (Worker::Joining | Worker::Joined(_)) => {
+                *worker = closed;
+                return Err(XllError::Closing);
+            }
+        };
         // Reserve before registering control events: a rejected first worker
         // must return the source slot even when no consumer exists yet.
         let permit = ChannelBudget::try_worker(budget)?;
@@ -526,15 +647,10 @@ where
         // Retain ownership outside the spawn closure. Failed OS thread creation
         // drops that closure synchronously; it must not destroy user captures
         // while this source's worker mutex is held.
-        let starting = WorkerStart::reserve(&mut worker);
-        let thread_pending = Arc::clone(&starting.producer);
+        let starting = starting.capture();
         let shared = Arc::clone(&self.worker.shared);
         let policy = self.error_policy;
-        let run = move || {
-            let producer = thread_pending
-                .lock()
-                .take()
-                .expect("one source worker owns the job");
+        let run = move |producer: P| {
             let context = RtdSourceContext {
                 shared: Arc::clone(&shared),
             };
@@ -547,20 +663,15 @@ where
         let fail_spawn = self.fail_spawn.swap(false, Ordering::Relaxed);
         #[cfg(not(test))]
         let fail_spawn = false;
-        let handle = if fail_spawn {
-            drop(run);
-            Err(std::io::Error::other("injected RTD source spawn failure"))
-        } else {
-            Builder::new().name("xlfn-rtd-source".into()).spawn(run)
-        };
-        match handle {
-            Ok(handle) => {
-                starting.commit(handle, permit);
+        match starting.spawn(permit, run, fail_spawn) {
+            Ok(running) => {
+                running.install();
                 self.worker.started.store(true, Ordering::Release);
                 Ok(subscription)
             }
-            Err(error) => {
-                drop(starting);
+            Err(failed) => {
+                let FailedWorker { _restore, error } = failed;
+                drop(_restore);
                 self.worker.shared.stop();
                 Err(XllError::Native {
                     code: error.raw_os_error().unwrap_or(0),
@@ -571,36 +682,45 @@ where
     }
 }
 
+enum RetiringWorker<P> {
+    Unstarted(P),
+    Running {
+        handle: JoinHandle<()>,
+        permit: WorkerPermit,
+    },
+}
+
 impl<T, P, D: RtdDeliveryPolicy> WorkerOwner<T, P, D> {
     fn finish(&self) -> XllResult<()> {
         self.shared.stop();
         let retiring = {
             let mut worker = self.state.lock();
             loop {
-                match &*worker {
+                match std::mem::replace(&mut *worker, Worker::Joining) {
                     Worker::Joining => self.joined.wait(&mut worker),
-                    Worker::Joined(result) => return result.clone(),
-                    Worker::Unstarted(_) | Worker::Running { .. } => break,
-                    Worker::Starting => xlfn_kernel::invariant::fail_stop(),
+                    Worker::Joined(result) => {
+                        *worker = Worker::Joined(result.clone());
+                        return result;
+                    }
+                    Worker::Unstarted(producer) => break RetiringWorker::Unstarted(producer),
+                    Worker::Running { handle, permit } => {
+                        break RetiringWorker::Running { handle, permit };
+                    }
                 }
             }
-            std::mem::replace(&mut *worker, Worker::Joining)
         };
         // No registry or worker lock is held while user captures are destroyed
         // or the shared job is joined. Keep the worker reservation through both.
         let result = match retiring {
-            Worker::Unstarted(producer) => {
+            RetiringWorker::Unstarted(producer) => {
                 crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| drop(producer)))
                     .map_err(|_| XllError::Panic)
             }
-            Worker::Running { handle, permit } => {
+            RetiringWorker::Running { handle, permit } => {
                 let result = crate::panic_boundary::contain_panic(handle.join())
                     .map_err(|_| XllError::Panic);
                 drop(permit);
                 result
-            }
-            Worker::Starting | Worker::Joining | Worker::Joined(_) => {
-                xlfn_kernel::invariant::fail_stop()
             }
         };
         let mut worker = self.state.lock();

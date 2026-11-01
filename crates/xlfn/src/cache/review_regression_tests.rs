@@ -228,7 +228,7 @@ fn stripe_collision_does_not_suppress_blocking_writer_quiescence() {
     ready_rx.recv().unwrap();
     assert!(domain.domain.current_thread_may_be_reading());
     assert!(!domain.current_thread_is_reading());
-    domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, 1));
+    ReclaimEntry::sentinel(&domain, 1).enqueue();
     let batch = domain.quiesce_and_drain();
     reader.join().unwrap();
     assert_eq!(batch.len(), 1);

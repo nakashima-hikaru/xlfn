@@ -16,7 +16,7 @@ use xlfn_kernel::published_owner::PublishedOwner;
 #[cfg(test)]
 use xlfn_kernel::rotating_read_domain::RotatingReadPermit;
 use xlfn_kernel::rotating_read_domain::{
-    DisposableBatch, DomainClosed, RotatingReadOwnedPermit, RotatingRetirementDomain,
+    DomainClosed, RotatingReadOwnedPermit, RotatingRetirementDomain,
 };
 
 // Single-cell deletion and ordinary revision replacement should not allocate
@@ -53,21 +53,6 @@ pub(super) struct ReclaimBatch<'domain> {
 }
 
 impl<'domain> ReclaimBatch<'domain> {
-    fn empty(owner: &'domain RetirementAccounting) -> Self {
-        Self {
-            owner,
-            records: SmallVec::new(),
-        }
-    }
-
-    fn extend(&mut self, mut other: Self) {
-        crate::retirement_queue::append_owned_batch!(
-            std::ptr::from_ref(self.owner), std::ptr::from_ref(other.owner);
-            xlfn_kernel::invariant::fail_stop(),
-            self.records.append(&mut other.records)
-        );
-    }
-
     pub(super) fn reclaim(self) {
         drop(self);
     }
@@ -163,14 +148,7 @@ impl RetirementAccounting {
 
     // No caller supplies a batch, count, or a second accounting owner. Only
     // polling this embedded kernel domain can reach the conversion boundary.
-    fn bind_batch(
-        &self,
-        generation: DisposableBatch<'_, DEFAULT_STRIPE_COUNT, PendingBindings>,
-    ) -> ReclaimBatch<'_> {
-        if !generation.belongs_to(&self.domain) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let records = generation.into_inner();
+    fn account_records(&self, records: PendingBindings) -> ReclaimBatch<'_> {
         update_count(
             &self.queued,
             records.len(),
@@ -184,33 +162,33 @@ impl RetirementAccounting {
     }
 
     pub(super) fn poll_reclaim(&self) -> Option<ReclaimBatch<'_>> {
-        self.domain
-            .poll_quiesce()?
-            .ok()
-            .map(|batch| self.bind_batch(batch))
+        let records = self.domain.poll_quiesce()?.ok()?.into_inner();
+        Some(self.account_records(records))
     }
 
     pub(super) fn quiesce_reclaim(&self) -> ReclaimBatch<'_> {
-        self.domain
+        let records = self
+            .domain
             .quiesce()
             .unwrap_or_default()
             .into_iter()
             .flatten()
-            .map(|batch| self.bind_batch(batch))
-            .filter(|batch| !batch.records.is_empty())
-            .reduce(|mut records, next| {
-                records.extend(next);
-                records
+            .map(|batch| batch.into_inner())
+            .filter(|records| !records.is_empty())
+            .reduce(|mut first, mut second| {
+                first.append(&mut second);
+                first
             })
-            .unwrap_or_else(|| ReclaimBatch::empty(self))
+            .unwrap_or_default();
+        self.account_records(records)
     }
 
     pub(super) fn close_reclaim(&self) -> ReclaimBatch<'_> {
         let closed = self.domain.seal_and_wait();
         let [first, second] = closed.take_queues();
-        let mut records = self.bind_batch(first);
-        records.extend(self.bind_batch(second));
-        records
+        let mut records = first.into_inner();
+        records.append(&mut second.into_inner());
+        self.account_records(records)
     }
 
     pub(super) fn wait_for_completion(&self) {
@@ -459,16 +437,7 @@ mod tests {
         registry.remove::<Reenter>(&token).unwrap();
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         drop(reader);
-        let batches = domain.retirement.domain.quiesce().unwrap();
-        let batch = batches
-            .into_iter()
-            .flatten()
-            .map(|batch| domain.retirement.bind_batch(batch))
-            .reduce(|mut first, second| {
-                first.extend(second);
-                first
-            })
-            .unwrap();
+        let batch = domain.retirement.quiesce_reclaim();
         assert_eq!(domain.retirement.queued(), 0);
         assert_eq!(domain.debt(), 1);
         assert_eq!(drops.load(Ordering::Relaxed), 0);
@@ -499,20 +468,12 @@ mod tests {
         registry.remove::<Counted>(&first).unwrap();
         registry.remove::<Counted>(&second).unwrap();
         drop(permit);
-        let [first, second] = domain.retirement.domain.quiesce().unwrap();
-        let mut batch = domain
-            .retirement
-            .bind_batch(first.expect("previous pending generation"));
-        let next = domain
-            .retirement
-            .bind_batch(second.expect("current generation"));
+        let batch = domain.retirement.quiesce_reclaim();
         assert_eq!(domain.retirement.queued(), 0);
-        assert_eq!(domain.debt(), 2);
-        batch.extend(next);
         assert_eq!(
             domain.debt(),
             2,
-            "the emptied source batch owns no completion debt"
+            "merged generations retain all completion debt"
         );
         assert_eq!(drops.load(Ordering::Acquire), 0);
         // RAII completion must work even without calling reclaim explicitly.
