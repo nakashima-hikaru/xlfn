@@ -22,7 +22,9 @@ test-group = 'windows-rtd'
 slow-timeout = { period = "60s", terminate-after = 3 }
 
 [[profile.default.overrides]]
-filter = 'test(/(trait_driven_function_signatures_compile|invalid_macro_options_fail_to_compile)/)'
+# All trybuild suites share Cargo's fixture build directory. Keep them in
+# one scheduling group so a cold build cannot consume another suite's budget.
+filter = 'test(/(trait_driven_function_signatures_compile|invalid_macro_options_fail_to_compile|distribution_commit_requires_prepared_verification)/)'
 test-group = 'compile-ui'
 slow-timeout = { period = "60s", terminate-after = 4 }
 
