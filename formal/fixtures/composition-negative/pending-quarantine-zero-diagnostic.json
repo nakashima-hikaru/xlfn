@@ -1,0 +1,24 @@
+{
+  "initial": "initial",
+  "events": [
+    {
+      "beginOpen": {
+        "sampledEpoch": 0,
+        "attempt": 1
+      }
+    },
+    {
+      "failOpen": {
+        "attempt": 1
+      }
+    },
+    {
+      "quarantineOpen": {
+        "attempt": 0,
+        "reason": "addinShutdownFailed"
+      }
+    }
+  ],
+  "trace_truncated": false,
+  "outcome": "quarantined"
+}

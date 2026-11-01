@@ -43,15 +43,15 @@ fn terminal_snapshot_observes_host_and_return_obligations() {
                 .unwrap();
             script.assert_calls(&[xlfn_sys::XL_EVENT_REGISTER]);
             let open = runtime.open_deps();
-            open.returns().returns.reopen_admission().unwrap();
-            let producer = open.returns().returns.try_enter_producer().unwrap();
+            open.returns().reopen_admission().unwrap();
+            let producer = open.returns().test_enter_producer().unwrap();
             let control = runtime.lifecycle.access();
             let resources = deps.terminal_resources(&control, proof);
             assert_eq!(resources.resident_event_registrations, 1);
             assert_eq!(resources.return_blocks, 1);
             drop(control);
             drop(producer);
-            open.returns().returns.close_admission();
+            open.returns().close_admission();
             assert!(resources.module_residency_held);
             assert!(!runtime.test_release_module_residency().unwrap());
         },

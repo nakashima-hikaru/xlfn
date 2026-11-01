@@ -527,7 +527,7 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         // The proof has consumed subscription callbacks. Retained host callback
         // reservations must also prevent a falsely clean terminal observation.
         resources.callbacks = callbacks.active() as u64;
-        resources.return_blocks = self.returns.returns.outstanding_obligations() as u64;
+        resources.return_blocks = self.returns.outstanding_obligations() as u64;
         #[cfg(feature = "async")]
         {
             resources.async_executor_running = !self.async_runtime.is_stopped();
@@ -613,12 +613,6 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         }
     }
 
-    pub(in crate::runtime) fn wait_for_return_quiescence(
-        &self,
-    ) -> crate::XllResult<crate::shutdown::ReturnsQuiescent> {
-        crate::shutdown::wait_for_return_quiescence(self.returns)
-    }
-
     pub(in crate::runtime) fn close_subscriptions(
         &self,
     ) -> crate::XllResult<crate::shutdown::SubscriptionsStopped> {
@@ -652,25 +646,10 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         &self,
         subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     ) -> crate::XllResult<crate::runtime_components::SealedGenerationServices> {
-        let generation = self.protocol_generation();
-        let mut subscriptions_stopped = Some(subscriptions_stopped);
-        let sealed = self.lifecycle.with_generation_services(|services| {
-            services.seal(
-                generation,
-                subscriptions_stopped
-                    .take()
-                    .expect("generation services consume the subscription certificate once"),
-            )
-        });
-        let Some(sealed) = sealed else {
-            return Ok(crate::runtime_components::SealedGenerationServices::empty(
-                generation,
-                subscriptions_stopped
-                    .take()
-                    .expect("missing generation services preserve the subscription certificate"),
-            ));
-        };
-        sealed
+        crate::runtime_components::SealedGenerationServices::seal_lifecycle(
+            self.lifecycle,
+            subscriptions_stopped,
+        )
     }
 
     pub(in crate::runtime) fn shutdown_handle_topics(&self) -> crate::XllResult<()> {

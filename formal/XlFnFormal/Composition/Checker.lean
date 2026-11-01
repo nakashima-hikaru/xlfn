@@ -6,6 +6,11 @@ set_option autoImplicit false
 
 namespace XlFnFormal.Composition
 
+private instance openSessionCompatibleDecidable (phase : Shutdown.Phase) :
+    Decidable (State.OpenSessionCompatible phase) := by
+  unfold State.OpenSessionCompatible
+  infer_instance
+
 /-! The executable composition checker delegates lifecycle and Shutdown
     substeps to their existing checkers.  Cleanup completion is guarded by
     the corresponding Lifecycle certificate predicate, so the checker and the
@@ -126,7 +131,7 @@ def apply? (s : State) (event : Event) : Option State :=
               shutdownEvent ≠ .finishClose then
             match Shutdown.apply? session.state shutdownEvent with
             | some shutdown' =>
-                if s.lifecycle.phase = .open ∧ shutdown'.phase ≠ .open then
+                if s.lifecycle.phase = .open ∧ ¬State.OpenSessionCompatible shutdown'.phase then
                   none
                 else
                   some (State.withShutdown s
@@ -304,7 +309,7 @@ theorem apply?_sound
                 cases h
             | some shutdown' =>
                 by_cases hReject :
-                    s.lifecycle.phase = .open ∧ shutdown'.phase ≠ .open
+                    s.lifecycle.phase = .open ∧ ¬State.OpenSessionCompatible shutdown'.phase
                 · simp only [hShutdown] at h
                   rw [if_pos hReject] at h
                   cases h
@@ -312,9 +317,9 @@ theorem apply?_sound
                   rw [if_neg hReject] at h
                   cases h
                   have hOpenTarget :
-                      s.lifecycle.phase = .open → shutdown'.phase = .open := by
+                      s.lifecycle.phase = .open → State.OpenSessionCompatible shutdown'.phase := by
                     intro hOpen
-                    by_cases hNotOpen : shutdown'.phase ≠ .open
+                    by_cases hNotOpen : ¬State.OpenSessionCompatible shutdown'.phase
                     · exact False.elim (hReject ⟨hOpen, hNotOpen⟩)
                     · exact Classical.byContradiction (fun hNotOpen' =>
                         hNotOpen hNotOpen')
@@ -437,7 +442,7 @@ theorem apply?_complete
         Lifecycle.apply?_complete hLifecycleStep]
   | @liftShutdown session event shutdown' hSession hLifecycle hStep
       hNotFinish hOpenTarget =>
-      have hReject : ¬(s.lifecycle.phase = .open ∧ shutdown'.phase ≠ .open) := by
+      have hReject : ¬(s.lifecycle.phase = .open ∧ ¬State.OpenSessionCompatible shutdown'.phase) := by
         intro hReject
         exact hReject.2 (hOpenTarget hReject.1)
       simp [apply?, hSession, hLifecycle, hNotFinish,

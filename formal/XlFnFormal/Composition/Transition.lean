@@ -111,7 +111,8 @@ inductive Step : State → Event → State → Prop where
       (hLifecycle : s.lifecycle.phase = .open ∨ s.lifecycle.phase = .closing)
       (hStep : Shutdown.Step session.state event shutdown')
       (hNotFinish : event ≠ .finishClose)
-      (hOpenTarget : s.lifecycle.phase = .open → shutdown'.phase = .open) :
+      (hOpenTarget : s.lifecycle.phase = .open →
+        State.OpenSessionCompatible shutdown'.phase) :
       Step s (.liftShutdown event)
         { s with currentShutdown := some { session with state := shutdown' } }
 

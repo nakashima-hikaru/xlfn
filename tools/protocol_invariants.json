@@ -1,0 +1,1478 @@
+{
+  "scopes": [
+    "crates/xlfn/src/lifecycle.rs",
+    "crates/xlfn/src/lifecycle/**/*.rs",
+    "crates/xlfn/src/runtime.rs",
+    "crates/xlfn/src/runtime/**/*.rs",
+    "crates/xlfn/src/shutdown.rs",
+    "crates/xlfn/src/runtime_components/return_protocol.rs",
+    "crates/xlfn/src/return_abi/ownership.rs"
+  ],
+  "reviews": [
+    {
+      "id": "LC-RAW",
+      "decision": "low_level",
+      "layer": "atomic representation / terminal failure endpoint",
+      "proposition": "Only declared lifecycle discriminants are decoded; a violated trusted invariant terminates.",
+      "established_by": "Canonical transitions store declared enum discriminants; lifecycle_invariant_violation is the shared endpoint.",
+      "owner": "LifecycleCoordinator and its atomic publication projection.",
+      "reason": "Rust phase owners do not validate corrupt raw atomic representations. The remaining wrappers are endpoints, not independent protocol permissions.",
+      "tests": [
+        "tools/tests/test_check_protocol_invariants.py",
+        "crates/xlfn/src/lifecycle/state/opening/tests.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/lifecycle.rs",
+          "context": "# [ cold ] fn lifecycle_invariant_violation / # [ cfg ( not ( test ) ) ]",
+          "kind": "abort",
+          "code": "# [ cfg ( not ( test ) ) ] std : : process : : abort ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/phase.rs",
+          "context": "fn from_raw",
+          "kind": "abort",
+          "code": "0 = > Self : : Closed , 1 = > Self : : Opening , 2 = > Self : : Open , 3 = > Self : : Closing , 4 = > Self : : OpenRollbackPending , 5 = > Self : : Quarantined , _ = > std : : process : : abort ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "# [ cold ] fn lifecycle_invariant_violation",
+          "kind": "lifecycle_invariant_violation",
+          "code": "super : : lifecycle_invariant_violation ( message )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "# [ inline ] fn require_lifecycle_invariant",
+          "kind": "lifecycle_invariant_violation",
+          "code": "lifecycle_invariant_violation ( message )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "LC-EXHAUST",
+      "decision": "exhaustion",
+      "layer": "identity allocator",
+      "proposition": "Removal epochs and attempt IDs never wrap or become zero.",
+      "established_by": "The retained RemovalAttemptId is nonzero-backed; checked_next rejects exhaustion before issuing a new identity.",
+      "owner": "Canonical coordinator ID allocator.",
+      "reason": "Zero checks are removed because the retained identity is nonzero-backed. Finite integer exhaustion remains a dynamic arithmetic condition; reusing an identity would permit replay.",
+      "tests": [
+        "miri_attempt_exhaustion_preserves_closed_intent_and_canonical_state",
+        "exhaustion_never_wraps_to_an_old_removal_identity"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn advance_removal_epoch",
+          "kind": "lifecycle_invariant_violation",
+          "code": "lifecycle_invariant_violation ( \" lifecycle close epoch exhausted \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn claim_removal",
+          "kind": "lifecycle_invariant_violation",
+          "code": "lifecycle_invariant_violation ( \" lifecycle removal - attempt identity exhausted \" , )",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "id": "LC-OBSERVE",
+      "decision": "observation",
+      "layer": "canonical diagnostic projection",
+      "proposition": "Snapshots describe the locked canonical variant without issuing transition authority.",
+      "established_by": "Pattern matching the current enum under LifecycleAccess.",
+      "owner": "Borrowed LifecycleAccess; no independent owner is issued.",
+      "reason": "These predicates select projections/effects or supply refinement observations. Their results cannot construct OpenStart, a removal claim, or a completion certificate.",
+      "tests": [
+        "tools/typestate/fail/lifecycle_phase_is_not_open_start.rs",
+        "tools/typestate/fail/lifecycle_commit_observation_without_proof.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "# [ cfg ( any ( test , feature = \" refinement \" ) ) ] fn has_current_generation",
+          "kind": "predicate",
+          "code": "self . core . has_current_generation ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "# [ cfg ( any ( test , feature = \" refinement \" ) ) ] fn has_opening_generation",
+          "kind": "predicate",
+          "code": "= > payload . has_opening_generation ( )",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "# [ cfg ( any ( test , feature = \" refinement \" ) ) ] fn has_opening_generation",
+          "kind": "predicate",
+          "code": "= > payload . has_opening_generation ( ) , _ = > self . payload ( ) . is_some_and ( ClosePayload : : has_opening_generation )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "# [ cfg ( any ( test , feature = \" refinement \" ) ) ] fn has_opening_generation",
+          "kind": "predicate",
+          "code": "= > resources . has_opening_generation ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "# [ cfg ( any ( test , feature = \" refinement \" ) ) ] fn has_opening_generation",
+          "kind": "predicate",
+          "code": "= > true , Self : : Closing ( closing ) = > closing . has_opening_generation ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "# [ cfg ( any ( test , feature = \" refinement \" ) ) ] fn has_opening_generation",
+          "kind": "predicate",
+          "code": "resources . has_opening_generation ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "# [ cfg ( any ( test , feature = \" refinement \" ) ) ] fn has_opening_generation",
+          "kind": "predicate",
+          "code": "self . core . state . has_opening_generation ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn has_current_generation",
+          "kind": "predicate",
+          "code": "= > matches ! ( payload , OpeningPayload : : Published ( _ ) ) , Self : : Closing ( closing ) = > closing . has_current_generation ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn has_current_generation",
+          "kind": "predicate",
+          "code": "= > resources . is_published ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn has_current_generation",
+          "kind": "predicate",
+          "code": "resources . is_published ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn has_current_generation",
+          "kind": "predicate",
+          "code": "self . state . has_current_generation ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn is_published",
+          "kind": "predicate",
+          "code": "self . payload ( ) . is_some_and ( ClosePayload : : is_published )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn phase",
+          "kind": "predicate",
+          "code": "self . canonical_state ( ) . phase ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn take_current_bundle",
+          "kind": "predicate",
+          "code": "if generation . is_some ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn take_current_bundle",
+          "kind": "predicate",
+          "code": "let effect = if generation . is_some ( )",
+          "count": 3
+        }
+      ]
+    },
+    {
+      "id": "LC-OPEN-ACQUIRE",
+      "decision": "acquisition",
+      "layer": "locked dynamic opening boundary",
+      "proposition": "The external opening attempt still owns the current Opening slot before publication is staged.",
+      "established_by": "Compare attempt and canonical phase while holding the issuing access lock.",
+      "owner": "OpenStart / OpeningTxn and issuing LifecycleAccess.",
+      "reason": "Host callbacks can request close between opening stages. A borrowed lifetime alone does not prove the canonical attempt remains active.",
+      "tests": [
+        "tools/typestate/pass/lifecycle_open_handoff.rs",
+        "crates/xlfn/src/lifecycle/state/opening/tests.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/lifecycle/authority.rs",
+          "context": "# [ allow ( clippy : : result_large_err , reason = \" Rollback returns the complete affine generation , including RTD limits , without a new allocation \" ) ] fn stage_opening_generation",
+          "kind": "predicate",
+          "code": "if control . open_attempt ( ) ! = Some ( attempt_id ) | | control . phase ( ) ! = crate : : lifecycle : : LifecyclePhase : : Opening",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn publish_opening_generation_locked",
+          "kind": "predicate",
+          "code": "if core . has_current_generation ( )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "LC-PUBLICATION",
+      "decision": "low_level",
+      "layer": "atomic publication / reader admission bridge",
+      "proposition": "Pointer publication starts from a null, sealed, drained projection and reopens only that projection.",
+      "established_by": "commit_transition withdraws/drains the old projection before storing the new pointer and phase.",
+      "owner": "Canonical transition lock and the coordinator publication gate.",
+      "reason": "These checks validate the raw atomic projection used by concurrent readers, rather than rechecking an orchestration stage. Admission algorithms and notification-tail synchronization are unchanged.",
+      "tests": [
+        "controlled_reload_reclaims_old_generation_before_new_open",
+        "tools/typestate/fail/lifecycle_commit_guard_reuse.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn commit_transition",
+          "kind": "lifecycle_invariant_violation",
+          "code": "lifecycle_invariant_violation ( \" generation publication gate failed to reopen \" , )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn commit_transition",
+          "kind": "predicate",
+          "code": "require_lifecycle_invariant ( self . publication_readers . is_sealed ( ) & & self . publication_readers . active ( ) = = 0 & & self . publication . load ( Ordering : : Acquire ) . is_null ( ) , \" generation publication requires a drained closed projection \" , )",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn commit_transition",
+          "kind": "predicate",
+          "code": "self . phase . store ( access . phase ( ) as u8 , Ordering : : Release )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn commit_transition",
+          "kind": "require_lifecycle_invariant",
+          "code": "require_lifecycle_invariant ( self . publication_readers . is_sealed ( ) & & self . publication_readers . active ( ) = = 0 & & self . publication . load ( Ordering : : Acquire ) . is_null ( ) , \" generation publication requires a drained closed projection \" , )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "LC-CERTIFICATE",
+      "decision": "revalidation",
+      "layer": "locked terminal certificate acceptance",
+      "proposition": "A retirement/completion certificate still matches coordinator, removal attempt, generation, module epoch, and return drain.",
+      "established_by": "Reacquire canonical access after cleanup/callbacks and compare the carried proof with current state.",
+      "owner": "CanonicalCompletion / CertifiedRetirement and the same coordinator.",
+      "reason": "Certificates cross unlocked cleanup and host boundaries; another lifecycle action or return reopen can invalidate earlier observations. These are issuer/epoch checks at acceptance.",
+      "tests": [
+        "canonical_retirement_and_completion_reject_substituted_and_replayed_authority",
+        "reopened_returns_invalidate_an_already_certified_completion"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn clear_certified_retirement",
+          "kind": "predicate",
+          "code": "if ! authorization . matches ( self , authorization . attempt ( ) , generation , module_epoch )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn final_removal_ready",
+          "kind": "predicate",
+          "code": ") if * attempt = = expected_attempt & & retirement . services . is_none ( ) & & module_epoch . is_current ( ) = >",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn finish_closed",
+          "kind": "predicate",
+          "code": "if ! authorization . matches ( self , Some ( empty . attempt ) , Some ( empty . module_epoch ) , core . last_committed_generation ( ) , )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "LC-RETURN-CLAIM",
+      "decision": "revalidation",
+      "layer": "canonical claim return/release acquisition",
+      "proposition": "Returning or releasing an unlocked removal owner targets its current Outstanding claim and exact attempt/module epoch.",
+      "established_by": "Reacquire the canonical lock, select the current claim shape, then validate attempt and epoch before moving authority.",
+      "owner": "IssuedRemovalClaim / RemovalClaimGuard and canonical Outstanding/Returned owner.",
+      "reason": "Quarantine may change the containing enum while an owner is outside the lock. Dynamic shared-slot acquisition stays here; after acquisition, Returned and Outstanding payloads are distinct and the authority is moved once.",
+      "tests": [
+        "abandoned_acquisition_returns_authority_to_its_original_issuer",
+        "miri_quarantine_request_waits_for_the_unpublished_opening_owner",
+        "release_unwind_quarantines_atomically_with_claim_return"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn release",
+          "kind": "lifecycle_invariant_violation",
+          "code": "Self : : Claimed ( claimed ) = > claimed . release ( expected_attempt ) , _ = > lifecycle_invariant_violation ( \" removal owner release does not match canonical lifecycle ownership \" , )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn release_removal_claim",
+          "kind": "lifecycle_invariant_violation",
+          "code": "_ = > lifecycle_invariant_violation ( \" removal owner release does not match canonical lifecycle ownership \" , )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn release_removal_claim",
+          "kind": "require_lifecycle_invariant",
+          "code": "require_lifecycle_invariant ( expected = = attempt , \" removal owner identity does not match the finalizing lifecycle owner \" , )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn return_authority",
+          "kind": "require_lifecycle_invariant",
+          "code": "require_lifecycle_invariant ( authority . id ( ) = = self . module_epoch , \" returned module authority belongs to a different epoch \" , )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn return_removal_authority",
+          "kind": "lifecycle_invariant_violation",
+          "code": "_ = > lifecycle_invariant_violation ( \" module return does not own an outstanding canonical claim \" , )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn return_removal_authority",
+          "kind": "lifecycle_invariant_violation",
+          "code": "lifecycle_invariant_violation ( \" module return lacks its canonical removal claim \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn validate_removal_owner",
+          "kind": "require_lifecycle_invariant",
+          "code": "require_lifecycle_invariant ( expected = = actual , \" removal owner identity does not match the canonical lifecycle owner \" , )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "OPEN-RAII",
+      "decision": "local_recovery",
+      "layer": "private opening move/disarm state",
+      "proposition": "An armed private opening/acquisition/rollback owner retains its payload until consuming transfer or Drop.",
+      "established_by": "Private constructors populate Option fields; consuming methods take them and Drop handles only armed fields.",
+      "owner": "OpenStart, OpeningAcquisition, OpeningTxn, and rollback recovery owners.",
+      "reason": "These Option checks implement move-out/disarm required by Drop. They do not certify host cleanup or drain completion. Removing them mechanically would introduce manual moves without a stronger protocol guarantee.",
+      "tests": [
+        "tools/typestate/fail/lifecycle_open_start_twice.rs",
+        "tools/typestate/fail/lifecycle_open_handoff_recovery_private.rs",
+        "miri_unwinding_a_started_owner_quarantines_its_original_coordinator"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/lifecycle/state/opening.rs",
+          "context": "fn access",
+          "kind": "expect",
+          "code": "self . control . as_ref ( ) . expect ( \" open start retains its lock \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state/opening.rs",
+          "context": "fn return_module",
+          "kind": "expect",
+          "code": "let control = self . control . as_mut ( ) . expect ( \" open start retains its lock \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn acquire",
+          "kind": "expect",
+          "code": "let module = acquisition . module . take ( ) . expect ( \" acquisition owns its module \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn acquire",
+          "kind": "unwrap",
+          "code": "deps . observer ( ) . begin_open ( acquisition . start . as_ref ( ) . unwrap ( ) . access ( ) , deps . returns ( ) , expected_removal_epoch . get ( ) , attempt , )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn acquire",
+          "kind": "unwrap",
+          "code": "let transaction = acquisition . start . take ( ) . unwrap ( ) . transfer_to_opening ( transaction ) . map_err ( | failure | { drop ( failure ) ; XllError : : Internal { diagnostic_id : crate : : diagnostics : : id : : DiagnosticId : : OPEN_STATE , } } ) ?",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn attempt_id",
+          "kind": "panic",
+          "code": "Some ( state ) = > state . attempt_id ( ) , None = > panic ! ( \" opening transaction state already consumed \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn callbacks_mut",
+          "kind": "expect",
+          "code": "& mut self . state . as_mut ( ) . expect ( \" opening transaction state already consumed \" ) . host_mut ( ) . callbacks",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn drop",
+          "kind": "expect",
+          "code": "state . abandon ( & self . deps , self . binding . take ( ) . expect ( \" opening owns binding phase \" ) , )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn publish_generation",
+          "kind": "expect",
+          "code": "let module_epoch = module_opening . take ( ) . expect ( \" open transaction owns its module opening authority \" ) . commit ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn retain_journal",
+          "kind": "expect",
+          "code": "self . state . as_mut ( ) . expect ( \" opening transaction state already consumed \" ) . host_mut ( ) . journal . merge ( journal )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn run",
+          "kind": "expect",
+          "code": "let ( mut callbacks , journal ) = self . host . take ( ) . expect ( \" rollback owns host session \" ) . into_parts ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn run",
+          "kind": "unwrap",
+          "code": "let ( _ , module , _service_inputs ) = self . core . take ( ) . unwrap ( ) . into_parts ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn run",
+          "kind": "unwrap",
+          "code": "let attempt = self . core . as_ref ( ) . unwrap ( ) . attempt_id ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn take_state",
+          "kind": "expect",
+          "code": "( self . state . take ( ) . expect ( \" opening transaction state already consumed \" ) , self . binding . take ( ) . expect ( \" opening transaction retains its binding authority \" ) , )",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "id": "OPEN-REVALIDATE",
+      "decision": "revalidation",
+      "layer": "callback / boundary outcome acceptance",
+      "proposition": "Opening and rollback outcomes are accepted only for the same active attempt and actual canonical disposition.",
+      "established_by": "Reacquire access after host/add-in callbacks; classify finalized/cleanup-owned outcomes and current Opening/OpenRollbackPending.",
+      "owner": "OpeningTxn / RollbackRequest and issuing runtime.",
+      "reason": "External callbacks and concurrent close can advance shared state. The successful commit proof is now returned by the locked commit itself; its old post-success phase resnapshot is removed.",
+      "tests": [
+        "tools/typestate/fail/lifecycle_commit_observation_without_proof.rs",
+        "tools/typestate/fail/lifecycle_removal_intent_without_claim.rs",
+        "crates/xlfn/src/runtime/open_txn.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime/open.rs",
+          "context": "fn open_addin_boundary",
+          "kind": "predicate",
+          "code": "if ! outcome . is_finalized ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open.rs",
+          "context": "fn open_addin_boundary",
+          "kind": "predicate",
+          "code": "if runtime . phase ( ) = = crate : : lifecycle : : LifecyclePhase : : OpenRollbackPending",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn commit_inner",
+          "kind": "predicate",
+          "code": "if control . phase ( ) = = crate : : lifecycle : : LifecyclePhase : : Opening",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "fn run",
+          "kind": "predicate",
+          "code": "Ok ( outcome ) if outcome . is_finalized ( ) | | outcome . cleanup_owned_elsewhere ( ) = >",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/orchestration.rs",
+          "context": "fn mark_open_failed",
+          "kind": "predicate",
+          "code": "if control . phase ( ) = = LifecyclePhase : : Opening",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "OPEN-ATOMIC-PUBLICATION",
+      "decision": "low_level",
+      "layer": "cross-domain ingress atomic publication acceptance",
+      "proposition": "The independent ingress publication is still Opening before effects and transitions atomically from Opening to Open afterward.",
+      "established_by": "ingress.complete_open holds its opening mutex, drains export users, checks PHASE_OPENING, executes publication, then performs the phase CAS.",
+      "owner": "Ingress opening lock and phase atomic; canonical opening transaction owns its module/generation.",
+      "reason": "This is a different domain from the canonical lifecycle lock. A failed outer CAS can occur after publication, so it cannot be treated as a reversible earlier stage. The endpoint fails closed; the removed canonical same-lock postcondition is not recreated.",
+      "tests": [
+        "crates/xlfn/src/ingress.rs",
+        "close_reclaims_staged_opening_generation_when_finish_open_loses_race"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime/open_txn.rs",
+          "context": "# [ cold ] fn opening_publication_lost",
+          "kind": "fail_stop_invariant",
+          "code": "crate : : boundary : : fail_stop_invariant ( \" xlAutoOpen opening publication \" , & XllError : : Internal { diagnostic_id : crate : : diagnostics : : id : : DiagnosticId : : OPEN_STATE , } , )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "RETURN-RECOVERY",
+      "decision": "local_recovery",
+      "layer": "panic-boundary publication disarm",
+      "proposition": "Once transfer starts, panic fallback must not publish a second return obligation.",
+      "established_by": "ReturnPublicationTxn privately takes its producer before allocation/publication effects.",
+      "owner": "ReturnPublicationTxn; its non-Copy ReturnProducerGuard moves to PreparedPublication.",
+      "reason": "The Option is the panic recovery arming state. Normal producer transfer is already consuming; fail-stop prevents unsafe reissue after a partially progressed transfer.",
+      "tests": [
+        "tools/typestate/fail/return_producer_transfer_twice.rs",
+        "crates/xlfn/src/return_abi.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/return_abi/ownership.rs",
+          "context": "fn prepare",
+          "kind": "fail_stop",
+          "code": "xlfn_kernel : : invariant : : fail_stop ( )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "RETURN-GATE",
+      "decision": "acquisition",
+      "layer": "return admission management",
+      "proposition": "Reopen is permitted only for a sealed, idle return gate; wait requires closed admission.",
+      "established_by": "ReturnProtocol holds its admission-epoch management lock, then invokes the gate wait/reopen protocol.",
+      "owner": "ReturnProtocol and ReturnTracker internal gate.",
+      "reason": "The shared admission count and final-release notification are dynamic. The debug assertion diagnoses the low-level wait precondition, while proof issuance uses ClosedReturns::wait and epoch revalidation.",
+      "tests": [
+        "miri_return_wait_excludes_reopen_without_blocking_final_release",
+        "miri_forgetting_return_seal_never_reopens_admission"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/return_abi/ownership.rs",
+          "context": "fn reopen_admission",
+          "kind": "predicate",
+          "code": "if ! self . admission_closed ( ) | | ! self . is_quiescent ( )",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/return_abi/ownership.rs",
+          "context": "fn wait_for_quiescence",
+          "kind": "debug_assert",
+          "code": "debug_assert ! ( self . admission_closed ( ) )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/return_abi/ownership.rs",
+          "context": "fn wait_for_quiescence",
+          "kind": "predicate",
+          "code": "debug_assert ! ( self . admission_closed ( ) )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "RETURN-EPOCH",
+      "decision": "revalidation",
+      "layer": "return proof issuer and epoch acceptance",
+      "proposition": "A seal/drain belongs to this exact storage instance and its current non-reused admission epoch, and remains closed and idle.",
+      "established_by": "ClosedReturns::wait locks and checks epoch/seal; ReturnsDrained::matches checks issuer, epoch, seal, and idle when consumed.",
+      "owner": "ClosedReturns borrows ReturnProtocol; ReturnsDrained carries issuer address and globally unique epoch.",
+      "reason": "Reopen, a moved protocol, or reused storage invalidates detached observations. Same Rust lifetime is not instance identity. The management mutex does not block final release notifications.",
+      "tests": [
+        "miri_return_drain_rejects_another_initial_or_opened_protocol",
+        "miri_return_reopen_invalidates_both_old_seals_and_completed_drains",
+        "miri_return_drain_cannot_authorize_reused_storage_or_moved_issuers",
+        "reopened_return_epoch_cannot_become_a_terminal_proof"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime_components/return_protocol.rs",
+          "context": "fn matches",
+          "kind": "predicate",
+          "code": "self . issuer = = std : : ptr : : from_ref ( protocol ) . addr ( ) & & self . epoch = = * epoch & & protocol . returns . admission_closed ( ) & & protocol . returns . is_quiescent ( )",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/runtime_components/return_protocol.rs",
+          "context": "fn wait_locked",
+          "kind": "predicate",
+          "code": "if * epoch ! = self . epoch | | ! self . protocol . returns . admission_closed ( )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "RETURN-EXHAUST",
+      "decision": "exhaustion",
+      "layer": "global return epoch allocator",
+      "proposition": "Return protocol stamps never wrap or repeat across moved/reused storage.",
+      "established_by": "Atomic checked increment before issuing an admission epoch.",
+      "owner": "Global NEXT_RETURN_EPOCH allocator.",
+      "reason": "Finite identity space requires an exhaustion policy; failing closed prevents stale certificates from matching newly reused storage.",
+      "tests": [
+        "miri_return_drain_cannot_authorize_reused_storage_or_moved_issuers"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime_components/return_protocol.rs",
+          "context": "fn next_return_epoch",
+          "kind": "fail_stop",
+          "code": ") . unwrap_or_else ( | _ | xlfn_kernel : : invariant : : fail_stop ( ) )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "OBSERVATIONS",
+      "decision": "observation",
+      "layer": "runtime diagnostics / data classification",
+      "proposition": "Predicate snapshots report current resources, registration metadata, or optional recovery state without creating completion permissions.",
+      "established_by": "Read current fields/state or inspect data descriptors.",
+      "owner": "Borrowed runtime components or local data.",
+      "reason": "These uses select diagnostics, optional data work, refinement traces, or post-result classification. In the AlreadyClosed path, a phase snapshot only selects an attempt at checked empty-binding release; the binding claim validates occupancy. Final success still requires the canonical owner and completion operation.",
+      "tests": [
+        "tools/typestate/fail/lifecycle_commit_observation_without_proof.rs",
+        "tools/tests/test_check_protocol_invariants.py"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/return_abi/ownership.rs",
+          "context": "fn admission_closed",
+          "kind": "predicate",
+          "code": "self . gate . is_sealed ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/return_abi/ownership.rs",
+          "context": "fn is_armed",
+          "kind": "predicate",
+          "code": "self . producer . is_some ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime.rs",
+          "context": "# [ cfg ( any ( test , feature = \" rtd \" , feature = \" handles \" , feature = \" lifecycle - diagnostics \" ) ) ] fn module_residency_held",
+          "kind": "predicate",
+          "code": "self . residency . is_held ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/capabilities.rs",
+          "context": "# [ cfg ( any ( test , feature = \" refinement \" ) ) ] fn terminal_resources",
+          "kind": "predicate",
+          "code": "resources . generation_owned_by_runtime = control . has_current_generation ( ) | | control . has_opening_generation ( )",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/runtime/capabilities.rs",
+          "context": "# [ cfg ( any ( test , feature = \" refinement \" ) ) ] fn terminal_resources",
+          "kind": "predicate",
+          "code": "resources . ingress_open = ingress . phase ( ) = = crate : : ingress : : PHASE_OPEN",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/capabilities.rs",
+          "context": "# [ cfg ( any ( test , feature = \" refinement \" ) ) ] fn terminal_resources",
+          "kind": "predicate",
+          "code": "resources . module_residency_held = self . residency . is_held ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/capabilities.rs",
+          "context": "# [ cfg ( any ( test , feature = \" refinement \" ) ) ] fn terminal_resources / # [ cfg ( feature = \" async \" ) ]",
+          "kind": "predicate",
+          "code": "resources . async_executor_running = ! self . async_runtime . is_stopped ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/finalization.rs",
+          "context": "fn record_return",
+          "kind": "predicate",
+          "code": "if witness . is_committed ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn reclaim",
+          "kind": "predicate",
+          "code": "let rtd = crate : : excel_rtd_protocol : : wait_for_module_quiescence ( deps . residency ( ) . is_held ( ) ) . map_err ( ReclaimFailure : : Rtd ) ?",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn stop_producers / # [ cfg ( feature = \" async \" ) ]",
+          "kind": "predicate",
+          "code": "# [ cfg ( feature = \" async \" ) ] let async_was_running = ! deps . async_runtime ( ) . is_stopped ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/transactions.rs",
+          "context": "# [ must_use ] fn remove_addin",
+          "kind": "predicate",
+          "code": "if runtime . phase ( ) = = crate : : lifecycle : : LifecyclePhase : : Closed & & let Err ( error ) = runtime . release_empty_addin_lifecycle ( lifecycle )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/transactions.rs",
+          "context": "fn open_addin_inner",
+          "kind": "predicate",
+          "code": "if ! prepared_set . as_slice ( ) . is_empty ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/transactions.rs",
+          "context": "fn open_addin_inner",
+          "kind": "predicate",
+          "code": "let has_async_functions = prepared_set . iter ( ) . any ( | descriptor | descriptor . signature . execution . is_async ( ) )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime_components/return_protocol.rs",
+          "context": "fn returns_are_quiescent",
+          "kind": "predicate",
+          "code": "self . returns . is_quiescent ( )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "REFINEMENT",
+      "decision": "local_recovery",
+      "layer": "production refinement observer",
+      "proposition": "The refinement/test backend can construct an observed runtime and requires its trace initialization to match the actual committed-open proof.",
+      "established_by": "Actual commit passes CommittedOpen to the observer; the optional refinement backend initializes traces and snapshots.",
+      "owner": "RuntimeObserver with cfg(any(test, feature=\"refinement\")).",
+      "reason": "These expects remain enrolled because refinement is a production feature. They check the diagnostic/refinement backend; they are not used as a substitute for a canonical production transition.",
+      "tests": [
+        "crates/xlfn/src/runtime/observer/tests.rs",
+        "tools/typestate/fail/lifecycle_commit_proof_forgery.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime.rs",
+          "context": "# [ cfg ( any ( test , feature = \" bench - internals \" ) ) ] fn publish_with_lifecycle",
+          "kind": "expect",
+          "code": "let access = self . bind_addin_lifecycle ( ) . expect ( \" test runtime binds its lifecycle thread \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime.rs",
+          "context": "# [ cfg ( any ( test , feature = \" bench - internals \" ) ) ] fn publish_with_lifecycle",
+          "kind": "panic",
+          "code": "panic ! ( \" test runtime must install its lifecycle state : { reason : ? } \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime.rs",
+          "context": "# [ cfg ( any ( test , feature = \" bench - internals \" ) ) ] fn publish_with_lifecycle",
+          "kind": "panic",
+          "code": "panic ! ( \" test runtime must stage its opening generation \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/observer.rs",
+          "context": "fn commit_open / # [ cfg ( any ( test , feature = \" refinement \" ) ) ]",
+          "kind": "expect",
+          "code": ") . expect ( \" committed open generation publishes its services \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/observer.rs",
+          "context": "fn commit_open / # [ cfg ( any ( test , feature = \" refinement \" ) ) ]",
+          "kind": "expect",
+          "code": ") . expect ( \" diagnostic and RTD trace initialization succeeds \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/observer.rs",
+          "context": "fn commit_open / # [ cfg ( any ( test , feature = \" refinement \" ) ) ]",
+          "kind": "expect",
+          "code": "trace . begin ( attempt . get ( ) , resources . clone ( ) ) . expect ( \" open trace begins before ingress publication \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/observer.rs",
+          "context": "fn commit_open / # [ cfg ( any ( test , feature = \" refinement \" ) ) ]",
+          "kind": "predicate",
+          "code": "let mut resources = crate : : shutdown_trace : : ShutdownResources : : opened ( deps . host ( ) . registrations_snapshot ( ) . len ( ) as u64 , deps . residency ( ) . resident_event_count ( ) as u64 , deps . residency ( ) . is_held ( ) , )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/observer.rs",
+          "context": "fn commit_open / # [ cfg ( any ( test , feature = \" refinement \" ) ) ] / # [ cfg ( feature = \" async \" ) ]",
+          "kind": "predicate",
+          "code": "resources . async_executor_running = ! deps . async_runtime ( ) . is_stopped ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/observer.rs",
+          "context": "fn reject_open_locked / # [ cfg ( any ( test , feature = \" refinement \" ) ) ]",
+          "kind": "predicate",
+          "code": "if _control . phase ( ) = = crate : : lifecycle : : LifecyclePhase : : Quarantined",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "ROLLBACK-IDENTITY",
+      "decision": "revalidation",
+      "layer": "runtime rollback adapter boundary",
+      "proposition": "A rollback request and installed binding belong to the same runtime and latest open attempt before cleanup side effects.",
+      "established_by": "RollbackRequest::matches checks lifecycle pointer, attempt, and binding issuer; inherit/rollback_open_request reject foreign input.",
+      "owner": "Non-decomposable RollbackRequest retaining original dependencies and installed binding.",
+      "reason": "The adapter may be handed independently obtained runtime dependencies. Identity is checked once before combining them; lifetime equivalence is insufficient.",
+      "tests": [
+        "tools/typestate/fail/final_removal_rollback_injection.rs",
+        "crates/xlfn/src/runtime/rollback.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime/capabilities.rs",
+          "context": "fn inherit",
+          "kind": "predicate",
+          "code": "if ! self . matches ( deps )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/capabilities.rs",
+          "context": "fn matches",
+          "kind": "predicate",
+          "code": "std : : ptr : : eq ( self . deps . lifecycle , deps . lifecycle ) & & deps . lifecycle . access ( ) . matches_latest_open_attempt ( self . generation ) & & self . installed . as_ref ( ) . is_none_or ( | installed | installed . binding . belongs_to ( deps . addin_lifecycle ) )",
+          "count": 3
+        },
+        {
+          "path": "crates/xlfn/src/runtime/capabilities.rs",
+          "context": "fn rollback_request",
+          "kind": "predicate",
+          "code": "if self . lifecycle . access ( ) . open_attempt ( ) ! = Some ( attempt ) | | installed . as_ref ( ) . is_some_and ( | binding | ! binding . binding . belongs_to ( self . addin_lifecycle ) )",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/runtime/rollback.rs",
+          "context": "fn rollback_open_request",
+          "kind": "predicate",
+          "code": "if ! request . matches ( runtime . shutdown_deps ( ) )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "LIFECYCLE-BINDING",
+      "decision": "acquisition",
+      "layer": "thread-affine lifecycle boundary",
+      "proposition": "The current thread has a valid, correctly typed lifecycle binding when quiesce/rollback reads it.",
+      "established_by": "ThreadAffineAccess and the binding claim perform dynamic thread/generation/type checks.",
+      "owner": "AddinLifecycleAccess and the issuing ThreadAffineSlot.",
+      "reason": "TLS availability, reentry, thread ownership, and stale external access remain dynamic. Once taken, EmptyLifecycle stays with teardown through boundary finalization.",
+      "tests": [
+        "completion_keeps_binding_and_claim_until_ordered_finalization",
+        "tools/typestate/fail/lifecycle_taken_release_before_disposal.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime/capabilities.rs",
+          "context": "fn has_addin_lifecycle",
+          "kind": "predicate",
+          "code": "self . addin_lifecycle . has_value ( access )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/rollback.rs",
+          "context": "fn rollback_open_inner",
+          "kind": "predicate",
+          "code": "let _lifecycle_present = match shutdown_deps . has_addin_lifecycle ( lifecycle )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn quiesce",
+          "kind": "predicate",
+          "code": "let lifecycle_present = deps . has_addin_lifecycle ( lifecycle ) . map_err ( | error | { AddinQuiesceFailure : : Lifecycle ( crate : : lifecycle : : lifecycle_access_error ( error ) ) } ) ?",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/transactions.rs",
+          "context": "fn remove_addin_inner_unchecked",
+          "kind": "predicate",
+          "code": "let _lifecycle_present = match shutdown_deps . has_addin_lifecycle ( lifecycle )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "SHUT-ACQUIRE",
+      "decision": "acquisition",
+      "layer": "runtime final / rollback cleanup acquisition",
+      "proposition": "Closed-idle no-op is reported only after return/source/host cleanup conditions actually hold; otherwise the locked decision waits or yields its unique claim.",
+      "established_by": "final_close_decision/rollback_decision classify the canonical state while holding the same access; external component observations decide no-op readiness.",
+      "owner": "LifecycleAccess and runtime shutdown dependencies.",
+      "reason": "Other threads and external callbacks can complete outstanding work. These checks acquire a current shared-state decision, not a caller-provided phase snapshot.",
+      "tests": [
+        "tools/typestate/fail/lifecycle_final_claim_twice.rs",
+        "miri_closed_finalization_cannot_be_mistaken_for_idle_before_start"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/owner.rs",
+          "context": "fn acquire_final",
+          "kind": "predicate",
+          "code": "if deps . returns ( ) . returns_are_quiescent ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/owner.rs",
+          "context": "fn acquire_rollback",
+          "kind": "predicate",
+          "code": "let finalized = deps . host ( ) . generation_callbacks_detached ( ) & & ! deps . host ( ) . registration_state_unknown ( ) & & deps . residency ( ) . callbacks_retained_safely ( ) & & crate : : excel_rtd_protocol : : logical_quiescence_certified ( )",
+          "count": 3
+        }
+      ]
+    },
+    {
+      "id": "SHUT-ISSUER-ACQUIRE",
+      "decision": "acquisition",
+      "layer": "single runtime removal-owner construction boundary",
+      "proposition": "Independent shutdown dependencies and an issued purpose-typed claim identify the same runtime before construction.",
+      "established_by": "Private RemovalOwner::new consumes the claim only after its issuer matches ShutdownDeps; rejected construction returns the claim.",
+      "owner": "IssuedRemovalClaim<K>, original ShutdownDeps and RemovalOwner.",
+      "reason": "Purpose type K is not instance identity. The redundant closing.belongs_to recheck is removed; the private factory remains the single checked join for independently obtained inputs. Trusted acquisition callers fail closed if that join is rejected.",
+      "tests": [
+        "abandoned_acquisition_returns_authority_to_its_original_issuer",
+        "tools/typestate/fail/final_removal_rollback_injection.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/owner.rs",
+          "context": "fn acquire_final",
+          "kind": "fail_stop",
+          "code": "let owner = Self : : new ( deps , claim ) . unwrap_or_else ( | _ | xlfn_kernel : : invariant : : fail_stop ( ) )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/owner.rs",
+          "context": "fn acquire_rollback",
+          "kind": "fail_stop",
+          "code": "let owner = Self : : new ( deps , claim ) . unwrap_or_else ( | _ | xlfn_kernel : : invariant : : fail_stop ( ) )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "SHUT-RAII",
+      "decision": "local_recovery",
+      "layer": "private teardown payload move/disarm",
+      "proposition": "Armed teardown/removal/finalization owners retain their current stage, claim, and certified binding until consuming transfer or terminal failure retention.",
+      "established_by": "Private Option payloads are populated by constructors and taken by consuming stage transitions; Drop handles remaining ownership.",
+      "owner": "TeardownTxn, TeardownOwner, RemovalOwner, CompletionPendingBinding, and RemovalTransaction.",
+      "reason": "These local Options prevent double move and disarm Drop. They neither assert a drain nor manufacture cleanup success. Certified and logical failure owners are now separate private types; failure has no finish operation.",
+      "tests": [
+        "abandoned_certified_completion_quarantines_before_returning_claim",
+        "forgotten_completion_cannot_publish_boundary_success_or_release_claim",
+        "release_failure_retains_logical_close_empty_binding_and_removal_claim"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/finalization.rs",
+          "context": "fn drop",
+          "kind": "predicate",
+          "code": "if self . certified . is_some ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/finalization.rs",
+          "context": "fn finish",
+          "kind": "expect",
+          "code": "= self . certified . take ( ) . expect ( \" consuming completion retains its certified binding \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/owner.rs",
+          "context": "fn into_parts",
+          "kind": "expect",
+          "code": "let ( guard , closing ) = self . state . take ( ) . expect ( \" removal owner consumed once \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn claim",
+          "kind": "expect",
+          "code": "self . core . owner . as_ref ( ) . expect ( \" teardown retains its removal claim \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn drain_inner",
+          "kind": "abort",
+          "code": "error , _owner : Box : : new ( owner . abort ( ) )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn drop",
+          "kind": "expect",
+          "code": "self . owner . as_mut ( ) . expect ( \" an armed stage retains its owner \" ) . return_module_authority ( authority )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn drop",
+          "kind": "predicate",
+          "code": "if self . owner . is_some ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn owner",
+          "kind": "expect",
+          "code": "self . owner . as_ref ( ) . expect ( \" teardown transaction retains its owner \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn return_module_authority",
+          "kind": "expect",
+          "code": "self . core . owner . as_mut ( ) . expect ( \" teardown retains its removal claim \" ) . return_module_authority ( authority )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn split",
+          "kind": "expect",
+          "code": "let owner = self . owner . take ( ) . expect ( \" teardown transaction owns one owner \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn split",
+          "kind": "expect",
+          "code": "let stage = self . stage . take ( ) . expect ( \" teardown transaction owns one current stage \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn take",
+          "kind": "expect",
+          "code": "self . owner . take ( ) . expect ( \" teardown transaction owns one removal owner \" )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/transactions.rs",
+          "context": "fn drop",
+          "kind": "predicate",
+          "code": "if self . attempt . is_some ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/transactions.rs",
+          "context": "fn take_attempt",
+          "kind": "expect",
+          "code": "self . attempt . take ( ) . expect ( \" a removal transaction always owns its attempt \" )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "SHUT-PROOF",
+      "decision": "revalidation",
+      "layer": "resource proof to terminal certificate acceptance",
+      "proposition": "Service generation/module epoch, return-drain issuer/attempt, host quiescence, and safe callback residency still match at certification and logical completion.",
+      "established_by": "ResourceProof::into_proof and terminal certificate acceptance recheck the current issuing components after callbacks/waits.",
+      "owner": "ResourceProof, RemovalClaimGuard, CertifiedRemoval/CanonicalCompletion and original ShutdownDeps.",
+      "reason": "Detached proofs cross unlocked cleanup; host/reopen events can change current facts. Acceptance validates dynamic identities and epochs, while constructors remain private to the actual operations.",
+      "tests": [
+        "terminal_certificate_rejects_foreign_dependencies_and_returns_its_owner",
+        "terminal_authority_rejects_stale_or_substituted_module_epoch",
+        "reopened_returns_invalidate_an_already_certified_completion"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/certificate.rs",
+          "context": "fn certify_final_removal",
+          "kind": "predicate",
+          "code": "if ! deps . host ( ) . is_quiescent ( ) | | ! deps . residency ( ) . callbacks_retained_safely ( )",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/certificate.rs",
+          "context": "fn certify_final_removal",
+          "kind": "predicate",
+          "code": "if ! self . belongs_to ( deps . lifecycle ( ) ) | | ! proof . returns_match ( deps . returns ( ) , deps . lifecycle ( ) , Some ( self . attempt ( ) ) )",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/certificate.rs",
+          "context": "fn certify_final_removal",
+          "kind": "predicate",
+          "code": "if proof . services_generation ( ) ! = Some ( generation ) | | proof . module_epoch ( ) ! = module_epoch | | ! deps . host ( ) . is_quiescent ( ) | | ! deps . residency ( ) . callbacks_retained_safely ( )",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/certificate.rs",
+          "context": "fn certify_open_rollback",
+          "kind": "predicate",
+          "code": "if ! self . belongs_to ( deps . lifecycle ( ) ) | | ! proof . returns_match ( deps . returns ( ) , deps . lifecycle ( ) , Some ( self . attempt ( ) ) )",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/certificate.rs",
+          "context": "fn certify_open_rollback",
+          "kind": "predicate",
+          "code": "if ready . is_none ( ) | | ! deps . host ( ) . is_quiescent ( ) | | ! deps . residency ( ) . callbacks_retained_safely ( )",
+          "count": 3
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/certificate.rs",
+          "context": "fn finish",
+          "kind": "predicate",
+          "code": "if ! owner . belongs_to ( deps . lifecycle ( ) ) | | ( expected_generation . is_some ( ) & & proof . services_generation ( ) ! = expected_generation )",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/certificate.rs",
+          "context": "fn finish",
+          "kind": "predicate",
+          "code": "if ! self . owner . belongs_to ( self . deps . lifecycle ( ) )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/certificate.rs",
+          "context": "fn matches",
+          "kind": "predicate",
+          "code": "std : : ptr : : eq ( self . coordinator , coordinator ) & & self . attempt = = attempt & & self . generation = = generation & & self . module_epoch = = module_epoch & & module_epoch . is_current ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/certificate.rs",
+          "context": "fn matches",
+          "kind": "predicate",
+          "code": "std : : ptr : : eq ( self . coordinator , coordinator ) & & self . proof . returns_match ( self . returns , coordinator , attempt ) & & attempt = = Some ( self . attempt ) & & module_epoch = = Some ( self . proof . module_epoch ( ) ) & & self . proof . module_epoch ( ) . is_current ( ) & & last_committed_generation = = self . last_committed_generation",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn into_proof",
+          "kind": "predicate",
+          "code": "if ! returns . matches ( deps . returns ( ) , deps . lifecycle ( ) , Some ( claim . attempt ( ) ) ) | | ! claim . belongs_to ( deps . lifecycle ( ) )",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn matches",
+          "kind": "predicate",
+          "code": "self . coordinator = = std : : ptr : : from_ref ( coordinator ) . addr ( ) & & attempt = = Some ( self . attempt ) & & self . drained . matches ( protocol )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn returns_match",
+          "kind": "predicate",
+          "code": "ReturnCompletion : : Drained ( returns ) = > returns . matches ( protocol , coordinator , attempt )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn wait",
+          "kind": "predicate",
+          "code": "if ! claim . belongs_to ( deps . lifecycle ( ) )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "SHUT-HOST",
+      "decision": "revalidation",
+      "layer": "external host cleanup barrier",
+      "proposition": "Host callback detachment and registration certainty have actually been established before the pipeline advances.",
+      "established_by": "Run host detach, then inspect the shared host ledger/registration results.",
+      "owner": "HostDetached stage and HostLedger cleanup owner.",
+      "reason": "Host outcomes and reentry remain dynamic; typestate cannot make external cleanup succeed. Error/indeterminate states retain obligations instead of issuing a success stage.",
+      "tests": [
+        "service_seal_failures_preserve_authority_and_quarantine_for_both_purposes",
+        "crates/xlfn/src/registration/registrar.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime/rollback.rs",
+          "context": "fn rollback_open_inner",
+          "kind": "predicate",
+          "code": "if registration . cleanup_severity ( ) . is_unload_unsafe ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn detach_host",
+          "kind": "predicate",
+          "code": "if ! deps . host ( ) . generation_callbacks_detached ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn detach_host",
+          "kind": "predicate",
+          "code": "if deps . host ( ) . registration_state_unknown ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/transactions.rs",
+          "context": "fn remove_addin_inner_unchecked",
+          "kind": "predicate",
+          "code": "if registration . cleanup_severity ( ) . is_unload_unsafe ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/transactions.rs",
+          "context": "fn remove_addin_inner_unchecked",
+          "kind": "predicate",
+          "code": "if shutdown_deps . host ( ) . has_metadata_debt ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/transactions.rs",
+          "context": "fn remove_addin_inner_unchecked",
+          "kind": "predicate",
+          "code": "if shutdown_deps . host ( ) . registration_state_unknown ( ) & & unload_failure . is_none ( )",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/runtime/transactions.rs",
+          "context": "fn remove_addin_inner_unchecked",
+          "kind": "predicate",
+          "code": "if unload_failure . is_none ( )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/transactions.rs",
+          "context": "fn retain_transaction_error",
+          "kind": "predicate",
+          "code": "if error . journal . is_unknown ( )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "SHUT-DESTRUCTOR",
+      "decision": "revalidation",
+      "layer": "untrusted add-in cleanup outcome",
+      "proposition": "A successful cleanup/disposal outcome is distinguished from an error or destructor panic.",
+      "established_by": "catch_no_unwind around untrusted cleanup/destruction, then classify the result before choosing the retained failure owner.",
+      "owner": "QuiescedAddin / TakenLifecycle and TeardownOwner.",
+      "reason": "Destructor execution may partially progress before panic. The value is never returned as retryable, and empty binding/claim responsibility remains with terminal failure.",
+      "tests": [
+        "release_unwind_quarantines_atomically_with_claim_return",
+        "crates/xlfn/src/runtime/shutdown/pipeline.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn cleanup",
+          "kind": "predicate",
+          "code": "if cleanup . is_err ( ) | | cleanup . as_ref ( ) . is_ok_and ( | result | result . is_err ( ) )",
+          "count": 3
+        },
+        {
+          "path": "crates/xlfn/src/runtime/shutdown/pipeline.rs",
+          "context": "fn cleanup",
+          "kind": "predicate",
+          "code": "let shared_state_dropped = catch_no_unwind ( AssertUnwindSafe ( | | drop ( shared_state ) ) ) . is_ok ( )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "RECOVERY-HAZARD",
+      "decision": "low_level",
+      "layer": "unsafe unload hazard terminal policy",
+      "proposition": "A close invariant violation cannot return control as successful unload or continue with freed resources.",
+      "established_by": "Hazard classification selects fail-stop; ordinary external cleanup failures instead quarantine.",
+      "owner": "Runtime recovery policy and retained module/resource roots.",
+      "reason": "This endpoint handles an already classified trusted invariant failure. It is not a predicate that grants a protocol stage or a reason to delete external validation.",
+      "tests": [
+        "crates/xlfn/src/runtime/recovery.rs",
+        "release_unwind_quarantines_atomically_with_claim_return"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime/recovery.rs",
+          "context": "# [ cold ] fn handle_unload_hazard",
+          "kind": "fail_stop",
+          "code": "runtime . observer ( ) . fail_stop ( hazard . shutdown_failure ( ) )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/recovery.rs",
+          "context": "# [ cold ] fn handle_unload_hazard",
+          "kind": "fail_stop_invariant",
+          "code": "fail_stop_invariant ( boundary , error )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "RECOVERY-EPOCH",
+      "decision": "revalidation",
+      "layer": "retained-undrained module quarantine",
+      "proposition": "A terminal retained-undrained authority still refers to its current module epoch; recovery never retries its drain.",
+      "established_by": "Acquire ModuleCleanupClaim under canonical access; validate epoch for the RetainedUndrained outcome.",
+      "owner": "UnavailableModuleAuthority retained in canonical quarantine.",
+      "reason": "Global/native module state is external to the local Rust owner and can be observed again at recovery. DeferredOwner returns immediately without stealing or retrying its live authority.",
+      "tests": [
+        "miri_quarantine_request_waits_for_the_unpublished_opening_owner",
+        "miri_quarantine_request_retains_published_opening_until_owner_resolution"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime/recovery.rs",
+          "context": "fn quarantine_runtime_resources",
+          "kind": "fail_stop_invariant",
+          "code": "fail_stop_invariant ( \" retained module epoch changed \" , & XllError : : Closing )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/recovery.rs",
+          "context": "fn quarantine_runtime_resources",
+          "kind": "predicate",
+          "code": "if ! epoch . is_current ( )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "MODULE-CLEANUP-ACQUIRE",
+      "decision": "acquisition",
+      "layer": "canonical and global ingress cleanup acquisition",
+      "proposition": "NoModuleAuthority is issued only if canonical module authority is absent and the independent global ingress is closed; unavailable authority cannot authorize cleanup.",
+      "established_by": "take_module_cleanup_for_quarantine selects the canonical receiver under its lock and qualifies NoModuleAuthority against global ingress. AwaitingOpenAbort defers while ingress is still live and yields no authority only after global closure.",
+      "owner": "Canonical LifecycleAccess, ModuleCleanupClaim and the independent module-runtime ingress.",
+      "reason": "Two domains remain dynamic. Caller-side re-lock and stage assertions are removed; qualified NoModuleAuthority/Unavailable outcomes centralize the check at acquisition. Unavailable keeps the unsafe-invariant failure endpoint and never becomes cleanup success.",
+      "tests": [
+        "miri_quarantine_request_waits_for_the_unpublished_opening_owner",
+        "miri_quarantine_request_retains_published_opening_until_owner_resolution",
+        "finalizing_and_foreign_access_rejection_preserve_the_target"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn take_module_cleanup_for_quarantine",
+          "kind": "predicate",
+          "code": "CleanupSelection : : AwaitingOpenAbort = > ModuleCleanupClaim : : NoModuleAuthority , CleanupSelection : : None if state . module_epoch_id ( ) . is_none ( ) & & crate : : module_runtime : : ingress ( ) . phase ( ) = = crate : : ingress : : PHASE_CLOSED = >",
+          "count": 2
+        },
+        {
+          "path": "crates/xlfn/src/lifecycle/state.rs",
+          "context": "fn take_module_cleanup_for_quarantine",
+          "kind": "predicate",
+          "code": "CleanupSelection : : DeferredOwner = > ModuleCleanupClaim : : DeferredOwner , CleanupSelection : : AwaitingOpenAbort if crate : : module_runtime : : ingress ( ) . phase ( ) ! = crate : : ingress : : PHASE_CLOSED = >",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/recovery.rs",
+          "context": "fn quarantine_runtime_resources",
+          "kind": "fail_stop_invariant",
+          "code": "ModuleCleanupClaim : : NoModuleAuthority = > None , ModuleCleanupClaim : : Unavailable = > fail_stop_invariant ( \" active module epoch lacks affine close authority \" , & XllError : : Internal { diagnostic_id : crate : : diagnostics : : id : : DiagnosticId : : CLOSE_RUNTIME , } , )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "OPEN-HANDOFF-IDENTITY",
+      "decision": "acquisition",
+      "layer": "original opening start to concrete successor join",
+      "proposition": "The successor is for this exact coordinator and opening attempt before recovery ownership leaves OpenStart.",
+      "established_by": "OpenStart::transfer_to_opening consumes both owners, checks successor.matches_start, then unlocks only on success.",
+      "owner": "OpenStart and its concrete OpeningTxn<Begun> successor.",
+      "reason": "A matching phase/lifetime alone cannot establish instance identity. A foreign successor returns one non-decomposable failure retaining both recovery owners, with intentional lock-release order.",
+      "tests": [
+        "tools/typestate/fail/lifecycle_open_start_without_successor.rs",
+        "tools/typestate/fail/lifecycle_open_handoff_recovery_private.rs",
+        "tools/typestate/pass/lifecycle_open_handoff.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/lifecycle/state/opening.rs",
+          "context": "# [ allow ( clippy : : result_large_err , reason = \" a failed handoff retains both affine recovery owners without allocating \" ) ] fn transfer_to_opening",
+          "kind": "predicate",
+          "code": "if ! successor . matches_start ( self . access ( ) . coordinator , self . attempt )",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "RESIDENCY",
+      "decision": "revalidation",
+      "layer": "physical DLL release policy / epoch boundary",
+      "proposition": "Physical release is attempted only for the original runtime boundary, allowed policy, and unchanged failed-open or completed-close attempt.",
+      "established_by": "Consume release authority and revalidate lifecycle sequence, native event slots, and COM state at the release boundary.",
+      "owner": "Closed/failed-open residency release capability and original Runtime.",
+      "reason": "Physical native resources and lifecycle reopen can change after a snapshot; runtime qualification remains necessary. LogicalUnload never gains physical-release authority.",
+      "tests": [
+        "tools/typestate/fail/residency_raw_release.rs",
+        "crates/xlfn/src/runtime/residency.rs"
+      ],
+      "references": [
+        {
+          "path": "crates/xlfn/src/runtime/residency.rs",
+          "context": "fn release_closed_residency",
+          "kind": "predicate",
+          "code": "if ! P : : PHYSICAL | | ! boundary . belongs_to ( self )",
+          "count": 1
+        },
+        {
+          "path": "crates/xlfn/src/runtime/residency.rs",
+          "context": "fn release_failed",
+          "kind": "predicate",
+          "code": "if control . phase ( ) ! = LifecyclePhase : : Closed | | control . open_attempt ( ) . is_some ( ) | | control . removal_attempt ( ) . is_some ( ) | | control . next_open_sequence ( ) ! = expected_sequence",
+          "count": 3
+        }
+      ]
+    }
+  ]
+}

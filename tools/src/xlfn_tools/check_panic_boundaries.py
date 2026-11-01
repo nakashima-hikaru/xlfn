@@ -26,8 +26,8 @@ RAW_STRING = re.compile(r'(?:br|cr|r)(#*)"')
 CHARACTER = re.compile(r"(?:b)?'(?:[^'\\\n]|\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.))'")
 
 
-def rust_code(source: str) -> str:
-    """Blank comments/string/character literals while preserving line offsets."""
+def rust_code(source: str, *, keep_literals: bool = False) -> str:
+    """Blank comments and (by default) literals while preserving line offsets."""
     output = list(source)
     size = len(source)
     index = 0
@@ -39,6 +39,7 @@ def rust_code(source: str) -> str:
 
     while index < size:
         start = index
+        literal = False
         if source.startswith("//", index):
             end = source.find("\n", index)
             index = size if end == -1 else end
@@ -59,12 +60,14 @@ def rust_code(source: str) -> str:
         else:
             raw = RAW_STRING.match(source, index)
             if raw:
+                literal = True
                 closing = '"' + raw.group(1)
                 end = source.find(closing, raw.end())
                 if end == -1:
                     raise ValueError("unterminated raw string")
                 index = end + len(closing)
             elif source[index] == '"' or source[index : index + 2] in {'b"', 'c"'}:
+                literal = True
                 index += 1 if source[index] == '"' else 2
                 while index < size:
                     if source[index] == "\\":
@@ -79,11 +82,13 @@ def rust_code(source: str) -> str:
             else:
                 character = CHARACTER.match(source, index)
                 if character:
+                    literal = True
                     index = character.end()
                 else:
                     index += 1
                     continue
-        blank(start, min(index, size))
+        if not (keep_literals and literal):
+            blank(start, min(index, size))
     return "".join(output)
 
 

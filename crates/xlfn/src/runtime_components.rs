@@ -18,5 +18,8 @@ pub(crate) use quarantine::{QuarantineReason, QuarantineVault};
 pub(crate) use residency::{
     ModuleResidency, ResidencyAcquisition, ResidencyLeaseId, ResidencyReleaseOutcome,
 };
-pub(crate) use return_protocol::ReturnProtocol;
+pub(crate) use return_protocol::{ReturnProtocol, ReturnsDrained};
 pub(crate) use services::{GenerationServiceInputs, GenerationServices, SealedGenerationServices};
+
+#[cfg(not(feature = "handles"))]
+pub(crate) use services::{HandlesQuiescent, HandlesSealed};

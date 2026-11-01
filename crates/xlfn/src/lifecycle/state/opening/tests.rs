@@ -71,7 +71,10 @@ fn miri_closed_finalization_cannot_be_mistaken_for_idle_before_start() {
     let removal = RemovalAttemptId::new(7).unwrap();
     {
         let mut core = coordinator.core.lock();
-        core.state = LifecycleState::Closed(ClosedState::Finalizing { attempt: removal });
+        core.state = LifecycleState::Closed(ClosedState::Finalizing {
+            attempt: removal,
+            quarantine_requested: false,
+        });
         core.host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
         core.removal_epoch = 3;
         core.next_lifecycle_attempt = 17;
@@ -91,6 +94,47 @@ fn miri_closed_finalization_cannot_be_mistaken_for_idle_before_start() {
         }
     ));
     assert_eq!(snapshot(&coordinator), before);
+    assert!(
+        coordinator
+            .access()
+            .into_completed_removal_intent()
+            .is_err()
+    );
+    assert_eq!(snapshot(&coordinator), before);
+}
+
+#[test]
+fn miri_completed_removal_intent_keeps_its_exact_lock_until_clear() {
+    let coordinator = LifecycleCoordinator::<()>::new();
+    coordinator.core.lock().host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
+    let intent = coordinator
+        .access()
+        .into_completed_removal_intent()
+        .unwrap_or_else(|_| panic!("completed idle removal"));
+    assert!(coordinator.core.try_lock().is_none());
+    intent.clear();
+    assert_eq!(
+        snapshot(&coordinator).host_intent,
+        HostLifecycleIntent::None
+    );
+    assert_eq!(
+        snapshot(&coordinator).canonical_phase,
+        LifecyclePhase::Closed
+    );
+}
+
+#[test]
+fn miri_abandoned_removal_intent_keeps_the_pending_host_obligation() {
+    let coordinator = LifecycleCoordinator::<()>::new();
+    coordinator.core.lock().host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
+    let before = snapshot(&coordinator);
+    let intent = coordinator
+        .access()
+        .into_completed_removal_intent()
+        .unwrap_or_else(|_| panic!("completed idle removal"));
+    drop(intent);
+    assert_eq!(snapshot(&coordinator), before);
+    assert!(coordinator.core.try_lock().is_some());
 }
 
 #[test]

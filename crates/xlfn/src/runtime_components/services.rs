@@ -4,6 +4,40 @@ use crate::RtdSubscription;
 
 use crate::generation::RuntimeGeneration;
 
+// No handles feature means no handle owner or external pins exist. These
+// vacuous certificates are separate from the enabled implementation's issuer.
+#[cfg(not(feature = "handles"))]
+pub(crate) struct HandlesSealed {
+    generation: Option<RuntimeGeneration>,
+}
+#[cfg(not(feature = "handles"))]
+#[derive(Debug)]
+pub(crate) struct HandlesQuiescent {
+    generation: Option<RuntimeGeneration>,
+}
+#[cfg(not(feature = "handles"))]
+impl HandlesSealed {
+    fn empty(generation: Option<RuntimeGeneration>) -> Self {
+        Self { generation }
+    }
+    fn absent_services<A: crate::Addin>(
+        control: &crate::lifecycle::LifecycleAccess<'_, A>,
+    ) -> crate::XllResult<Self> {
+        Ok(Self::empty(control.protocol_generation()))
+    }
+    pub(crate) fn finish(self) -> crate::XllResult<HandlesQuiescent> {
+        Ok(HandlesQuiescent {
+            generation: self.generation,
+        })
+    }
+}
+#[cfg(not(feature = "handles"))]
+impl HandlesQuiescent {
+    pub(crate) const fn generation(&self) -> Option<RuntimeGeneration> {
+        self.generation
+    }
+}
+
 /// Resources registered during `Addin::open` and moved into generation
 /// services at commit. The value is affine: no subsystem can retain a second
 /// owner when the opening transaction rolls back or publishes the generation.
@@ -214,7 +248,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
         #[cfg(feature = "handles")]
         let handles = self.formula_handles.seal(generation)?;
         #[cfg(not(feature = "handles"))]
-        let handles = crate::shutdown::HandlesSealed::empty(generation);
+        let handles = HandlesSealed::empty(generation);
         Ok(SealedGenerationServices {
             handles,
             subscriptions_stopped,
@@ -254,14 +288,21 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
 }
 
 impl SealedGenerationServices {
-    pub(crate) fn empty(
-        generation: Option<RuntimeGeneration>,
+    /// Derive a no-services result from canonical state while its lock is
+    /// retained. Callers cannot select an arbitrary empty generation.
+    pub(crate) fn seal_lifecycle<A: crate::Addin>(
+        lifecycle: &crate::lifecycle::LifecycleCoordinator<A>,
         subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
-    ) -> Self {
-        Self {
-            handles: crate::shutdown::HandlesSealed::empty(generation),
-            subscriptions_stopped,
+    ) -> crate::XllResult<Self> {
+        let control = lifecycle.access();
+        let generation = control.protocol_generation();
+        if let Some(services) = control.generation_services() {
+            return services.seal(generation, subscriptions_stopped);
         }
+        Ok(Self {
+            handles: crate::shutdown::HandlesSealed::absent_services(&control)?,
+            subscriptions_stopped,
+        })
     }
 
     pub(crate) fn finish(

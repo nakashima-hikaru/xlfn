@@ -34,6 +34,9 @@ mod residency;
 pub(crate) use residency::{OpenResidency, ResidencyRelease};
 mod rollback;
 mod shutdown;
+#[cfg(not(feature = "async"))]
+pub(crate) use shutdown::AsyncStopped;
+pub(crate) use shutdown::{AddinQuiescence, GenerationCallbacksDetached, GenerationReclaimed};
 pub(crate) use shutdown::{
     CanonicalCompletion, CertifiedRetirement, CompletedResources, FinalRemoval, OpenRollback,
 };
@@ -53,7 +56,7 @@ use capabilities::{OpenDeps, ShutdownDeps};
 use observer::RuntimeObserver;
 #[cfg(any(test, feature = "bench-internals"))]
 use open_txn::LifecycleInstalled;
-use open_txn::{Begun, OpeningTxn};
+pub(crate) use open_txn::{Begun, OpeningTxn};
 use xlfn_kernel::thread_affine::{ThreadAffineAccess, ThreadAffineError, ThreadAffineSlot};
 
 pub struct Runtime<A: crate::Addin, P: UnloadPolicy<A> = LogicalUnload> {
@@ -567,15 +570,9 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     }
 
     #[inline]
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "Method used in test suite and internal diagnostics"
-        )
-    )]
-    pub(crate) const fn return_tracker(&self) -> &crate::return_abi::ReturnTracker {
-        &self.return_protocol.returns
+    #[cfg(test)]
+    pub(crate) fn outstanding_return_obligations(&self) -> usize {
+        self.return_protocol.outstanding_obligations()
     }
 
     #[inline]
@@ -683,25 +680,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         &self,
         subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     ) -> XllResult<SealedGenerationServices> {
-        let generation = self.protocol_generation();
-        let mut subscriptions_stopped = Some(subscriptions_stopped);
-        self.lifecycle
-            .with_generation_services(|services| {
-                services.seal(
-                    generation,
-                    subscriptions_stopped
-                        .take()
-                        .expect("generation services consume one subscription certificate"),
-                )
-            })
-            .unwrap_or_else(|| {
-                Ok(SealedGenerationServices::empty(
-                    generation,
-                    subscriptions_stopped
-                        .take()
-                        .expect("missing services preserve the subscription certificate"),
-                ))
-            })
+        SealedGenerationServices::seal_lifecycle(&self.lifecycle, subscriptions_stopped)
     }
 
     #[cfg(test)]

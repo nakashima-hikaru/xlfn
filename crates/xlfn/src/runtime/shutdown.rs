@@ -19,3 +19,8 @@ pub(crate) use owner::RemovalOwner;
 #[cfg(any(test, feature = "refinement"))]
 pub(crate) use pipeline::QuiescenceProof;
 pub(crate) use pipeline::{CompletedResources, ReclaimFailure, ServiceSealFailure};
+
+// The types are visible to consumers; issuance remains inside the pipeline.
+#[cfg(not(feature = "async"))]
+pub(crate) use pipeline::AsyncStopped;
+pub(crate) use pipeline::{AddinQuiescence, GenerationCallbacksDetached, GenerationReclaimed};

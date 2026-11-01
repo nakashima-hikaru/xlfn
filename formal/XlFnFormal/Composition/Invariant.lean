@@ -38,8 +38,8 @@ theorem Step.valid_preserved
             simp [State.CurrentShutdownCertified]⟩
   | quarantineOpen hNoSession hLifecycle =>
       have hLifecycleValid := Lifecycle.Step.valid_preserved hValid.1 hLifecycle
-      cases hLifecycle
-      exact ⟨hLifecycleValid, by simp [State.SessionConsistent], by
+      cases hLifecycle <;>
+        exact ⟨hLifecycleValid, by simp [State.SessionConsistent], by
         simp [State.CurrentShutdownCertified]⟩
   | requestFinalClose hLifecycle =>
       have hLifecycleValid := Lifecycle.Step.valid_preserved
@@ -53,7 +53,8 @@ theorem Step.valid_preserved
           simp_all [State.SessionConsistent, Lifecycle.phaseAfterFinalClose,
             State.ShutdownSessionPublished, Lifecycle.State.Valid,
             Lifecycle.State.WellFormed, Lifecycle.State.PhaseConsistent,
-            Lifecycle.State.AttemptOwnerDisjoint, Lifecycle.State.OwnerConsistent], by
+            Lifecycle.State.AttemptOwnerDisjoint, Lifecycle.State.OwnerConsistent] <;>
+          exact State.shutdownSessionPublished_all _, by
         simpa [State.CurrentShutdownCertified] using hValid.2.2⟩
   | acquireFinalCloseOwner hLifecycle =>
       have hLifecycleValid := Lifecycle.Step.valid_preserved
@@ -84,7 +85,7 @@ theorem Step.valid_preserved
       have hCertified : (Shutdown.State.opened resources).Certified :=
         Shutdown.State.certified_of_open rfl
       exact ⟨hLifecycleValid, by
-        simp [State.SessionConsistent, Shutdown.State.opened], by
+        simp [State.SessionConsistent, State.OpenSessionCompatible, Shutdown.State.opened], by
         simpa [State.CurrentShutdownCertified] using hCertified⟩
   | @liftShutdown session event shutdown' hSession hLifecycle hShutdown
       hNotFinish hOpenTarget =>

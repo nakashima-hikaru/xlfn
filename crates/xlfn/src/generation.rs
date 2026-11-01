@@ -109,11 +109,35 @@ impl RemovalEpoch {
 pub(crate) struct RemovalAttemptId(NonZeroU64);
 
 impl RemovalAttemptId {
+    pub(crate) const ONE: Self = Self(NonZeroU64::MIN);
+
+    pub(crate) const fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(raw) => Some(Self(raw)),
+            None => None,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) const fn new(raw: u64) -> Option<Self> {
         match NonZeroU64::new(raw) {
             Some(raw) => Some(Self(raw)),
             None => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod removal_attempt_tests {
+    use super::RemovalAttemptId;
+
+    #[test]
+    fn exhaustion_never_wraps_to_an_old_removal_identity() {
+        let penultimate = RemovalAttemptId::new(u64::MAX - 1).unwrap();
+        let last = penultimate.checked_next().unwrap();
+        assert_eq!(last, RemovalAttemptId::new(u64::MAX).unwrap());
+        assert!(last.checked_next().is_none());
+        assert_ne!(last, RemovalAttemptId::ONE);
     }
 }
 

@@ -56,10 +56,9 @@ pub(crate) fn commit_removal_control<A: Addin>(
 pub(crate) fn quarantine_runtime<A: Addin>(
     runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
 ) {
-    runtime.lifecycle_orchestrator().quarantine();
     runtime
-        .observer()
-        .quarantine(crate::shutdown_trace::ShutdownFailure::BoundaryPanic);
+        .lifecycle_orchestrator()
+        .quarantine_for_reason(crate::shutdown_trace::ShutdownFailure::BoundaryPanic);
     quarantine_runtime_resources(runtime);
 }
 
@@ -67,8 +66,9 @@ pub(crate) fn quarantine_for_hazard<A: Addin>(
     runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     hazard: crate::shutdown::UnloadHazard,
 ) {
-    runtime.lifecycle_orchestrator().quarantine();
-    runtime.observer().quarantine(hazard.shutdown_failure());
+    runtime
+        .lifecycle_orchestrator()
+        .quarantine_for_reason(hazard.shutdown_failure());
     quarantine_runtime_resources(runtime);
 }
 
@@ -82,6 +82,12 @@ pub(crate) fn quarantine_runtime_resources<A: Addin>(
     let module_cleanup_authority = match runtime.lifecycle_control().take_module_cleanup_authority()
     {
         ModuleCleanupClaim::Ready(authority) => Some(authority),
+        ModuleCleanupClaim::DeferredOwner => {
+            // A quarantine request does not seize authority from a live
+            // opening/finalization owner or retry its drain. Its resolution
+            // moves the retained canonical resources into quarantine.
+            return;
+        }
         ModuleCleanupClaim::RetainedUndrained(epoch) => {
             // The terminal export drain was not certified. Its capability and
             // generation roots remain in terminal quarantine; never retry it
@@ -91,31 +97,28 @@ pub(crate) fn quarantine_runtime_resources<A: Addin>(
             }
             return;
         }
-        ModuleCleanupClaim::Missing => None,
-    };
-    if module_cleanup_authority.is_none()
-        && (runtime
-            .lifecycle_control()
-            .access()
-            .module_epoch_id()
-            .is_some()
-            || crate::module_runtime::ingress().phase() != crate::ingress::PHASE_CLOSED)
-    {
-        fail_stop_invariant(
+        ModuleCleanupClaim::NoModuleAuthority => None,
+        ModuleCleanupClaim::Unavailable => fail_stop_invariant(
             "active module epoch lacks affine close authority",
             &XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
             },
-        );
-    }
+        ),
+    };
     let _ = catch_no_unwind(AssertUnwindSafe(|| {
         if let Some(module_cleanup_authority) = module_cleanup_authority
             && let Err((error, authority)) = module_cleanup_authority.finish()
         {
             runtime.lifecycle_orchestrator().quarantine();
-            runtime
+            if let Err(rejected) = runtime
                 .lifecycle_control()
-                .retain_failed_module_cleanup(authority);
+                .retain_failed_module_cleanup(authority)
+            {
+                runtime
+                    .open_deps()
+                    .quarantine()
+                    .retain_module_authority(rejected);
+            }
             runtime.observer().quarantine(
                 crate::shutdown::UnloadHazard::ExportDrainPreparationFailed.shutdown_failure(),
             );

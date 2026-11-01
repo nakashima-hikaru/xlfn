@@ -217,7 +217,7 @@ mod tests {
             };
             assert_name(pointer);
             assert_eq!(runtime.phase(), phase);
-            assert_eq!(runtime.return_tracker().outstanding_obligations(), 0);
+            assert_eq!(runtime.outstanding_return_obligations(), 0);
         };
         // A never-opened runtime starts Closed, with ingress epoch zero.
         read(crate::lifecycle::LifecyclePhase::Closed);

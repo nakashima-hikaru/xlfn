@@ -45,8 +45,21 @@ theorem quarantined_open_has_no_close_certificate
     t.logicalQuiescenceCertified = false ∧ ¬t.lifecycle.ReturnSafe := by
   cases hStep with
   | quarantineOpen hNoSession hLifecycle =>
-      cases hLifecycle
-      simp [Lifecycle.State.ReturnSafe]
+      cases hLifecycle <;> simp [Lifecycle.State.ReturnSafe]
+
+theorem terminal_quarantine_not_returnSafe
+    {s : State} (h : s.TerminalQuarantine) : ¬s.lifecycle.ReturnSafe := by
+  rcases h with ⟨_, _, _, hShape⟩
+  rcases hShape with hUncommitted | hCommitted
+  · exact Lifecycle.quarantined_not_returnSafe hUncommitted.1
+  · rcases hCommitted.1 with hOpen | hClosing
+    · simp [Lifecycle.State.ReturnSafe, hOpen]
+    · simp [Lifecycle.State.ReturnSafe, hClosing]
+
+theorem terminal_quarantine_not_logically_certified
+    {s : State} (h : s.TerminalQuarantine) :
+    s.logicalQuiescenceCertified ≠ true := by
+  simp [h.1]
 
 theorem published_closed_session_has_final_close_owner
     {s t : State}

@@ -308,10 +308,16 @@ private def checkTrace (json : Json) : Except String Unit := do
   match trace.outcome with
   | "in_progress" => return ()
   | "quarantined" =>
-      if final.lifecycle.phase = .quarantined ∧
-          final.currentShutdown = none ∧ final.logicalQuiescenceCertified = false then
+      if h : final.logicalQuiescenceCertified = false ∧
+          final.lifecycle.openAttempt = none ∧ final.lifecycle.cleanupOwner = none ∧
+          ((final.lifecycle.phase = .quarantined ∧ final.currentShutdown = none) ∨
+            ((final.lifecycle.phase = .open ∨ final.lifecycle.phase = .closing) ∧
+              final.hasQuarantinedShutdown = true)) then
+        have hTerminal : final.TerminalQuarantine := h
+        let _hNotSuccess := terminal_quarantine_not_returnSafe hTerminal
+        let _hNotCertified := terminal_quarantine_not_logically_certified hTerminal
         return ()
-      else throw "quarantined open trace does not reach uncommitted quarantine"
+      else throw "quarantined trace retains an active owner/attempt or lacks terminal quarantine"
   | "returned_success" | "returnedSuccess" =>
       checkReturnedSuccess rfl hSteps
   | outcome => throw s!"unknown composition trace outcome: {outcome}"

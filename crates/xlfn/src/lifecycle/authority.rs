@@ -10,9 +10,7 @@ use crate::lifecycle::{
     FinalRemovalReady, HostLifecycleIntent, LifecycleAccess, LifecycleCoordinator,
     OpenFailureDisposition, OpenRollbackReady,
 };
-use crate::module_runtime::{
-    ModuleAuthority, ModuleCleanupAuthority, ModuleCleanupClaim, ModuleClosing,
-};
+use crate::module_runtime::{ModuleCleanupAuthority, ModuleCleanupClaim, ModuleClosing};
 use crate::{XllError, XllResult};
 
 /// Lifecycle-only write capability issued by a [`LifecycleCoordinator`].
@@ -88,11 +86,20 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         &self,
         control: &mut LifecycleAccess<'_, A>,
         attempt: RemovalAttemptId,
-        returned: Option<ModuleAuthority>,
         finalization_failed: bool,
     ) {
         self.coordinator
-            .release_removal_claim(control, attempt, returned, finalization_failed);
+            .release_removal_claim(control, attempt, finalization_failed);
+    }
+
+    pub(crate) fn return_removal_authority(
+        &self,
+        control: &mut LifecycleAccess<'_, A>,
+        attempt: RemovalAttemptId,
+        authority: ModuleCleanupAuthority,
+    ) {
+        self.coordinator
+            .return_removal_authority(control, attempt, authority.into_authority());
     }
 
     pub(crate) fn finish_final_removal(
@@ -113,8 +120,13 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
             .finish_open_rollback(control, authorization)
     }
 
-    pub(crate) fn complete_open_abort(&self, closing: ModuleClosing) {
-        self.coordinator.complete_open_abort(closing);
+    pub(crate) fn complete_boundary_finalization(
+        &self,
+        control: &LifecycleAccess<'_, A>,
+        attempt: RemovalAttemptId,
+    ) -> XllResult<()> {
+        self.coordinator
+            .complete_boundary_finalization(control, attempt)
     }
 
     #[allow(
@@ -172,11 +184,11 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
             })
     }
 
-    pub(crate) fn finish_open_state(
+    pub(crate) fn finish_open_state<'access, 'issuer>(
         &self,
-        control: &mut LifecycleAccess<'_, A>,
+        control: &'access mut LifecycleAccess<'issuer, A>,
         generation: crate::generation::RuntimeGeneration,
-    ) -> XllResult<()> {
+    ) -> XllResult<super::CommittedOpen<'access, 'issuer, A>> {
         self.coordinator.commit_open(control, generation)
     }
 
@@ -184,9 +196,9 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         &self,
         control: &mut LifecycleAccess<'_, A>,
         closing: ModuleClosing,
-    ) {
+    ) -> Result<(), crate::module_runtime::ModuleAuthority> {
         self.coordinator
-            .complete_open_abort_locked(control, closing);
+            .complete_open_abort_locked(control, closing)
     }
 
     pub(crate) fn request_explicit_removal(&self) {
@@ -219,8 +231,11 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         self.coordinator.take_module_cleanup_for_quarantine()
     }
 
-    pub(crate) fn retain_failed_module_cleanup(&self, authority: ModuleCleanupAuthority) {
-        self.coordinator.retain_failed_module_cleanup(authority);
+    pub(crate) fn retain_failed_module_cleanup(
+        &self,
+        authority: ModuleCleanupAuthority,
+    ) -> Result<(), crate::module_runtime::ModuleAuthority> {
+        self.coordinator.retain_failed_module_cleanup(authority)
     }
 
     pub(crate) fn take_opening_for_rollback(&self) -> Option<OpeningGeneration<A>> {

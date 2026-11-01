@@ -184,16 +184,42 @@ fn abandon_open<A: crate::Addin, I>(
     core: OpenCore<A, I>,
     lifecycle: LifecycleOwnership<'_, A>,
 ) {
+    deps.returns().close_admission();
     let (_, module_opening, _service_inputs) = core.into_parts();
-    deps.lifecycle_control()
-        .complete_open_abort(module_opening.rollback(|| {}));
+    return_open_module(deps, module_opening.rollback(|| {}));
     let control_api = deps.lifecycle_control();
     let mut control = control_api.access();
+    control_api.record_open_failure(&mut control);
     control_api.quarantine_state(&mut control);
     drop(control);
     control_api.notify_all();
     if let LifecycleOwnership::Owned(state) = lifecycle {
         forget_untrusted_lifecycle_state::<A>(state);
+    }
+}
+
+fn return_open_module<A: crate::Addin>(
+    deps: &OpenDeps<'_, A>,
+    closing: crate::module_runtime::ModuleClosing,
+) {
+    let lifecycle = deps.lifecycle_control();
+    let mut control = lifecycle.access();
+    return_open_module_locked(*deps, &mut control, closing);
+}
+
+fn return_open_module_locked<A: crate::Addin>(
+    deps: OpenDeps<'_, A>,
+    control: &mut LifecycleAccess<'_, A>,
+    closing: crate::module_runtime::ModuleClosing,
+) {
+    if let Err(authority) = deps
+        .lifecycle_control()
+        .complete_open_abort_locked(control, closing)
+    {
+        // The shared target changed or already owns another authority. Keep
+        // both authorities; rejection must not manufacture a successful abort.
+        deps.quarantine().retain_module_authority(authority);
+        deps.lifecycle_control().quarantine_state(control);
     }
 }
 
@@ -422,8 +448,10 @@ impl<A: crate::Addin> Drop for OpenAcquisition<'_, A> {
             return;
         };
         self.deps.returns().close_admission();
-        if let Some(module) = self.module.take() {
-            start.return_module(module.rollback(|| {}));
+        if let Some(module) = self.module.take()
+            && let Err(authority) = start.return_module(module.rollback(|| {}))
+        {
+            self.deps.quarantine().retain_module_authority(authority);
         }
         // OpenStart retains the original lock and performs the canonical
         // quarantine after this return/module recovery has completed.
@@ -512,9 +540,7 @@ impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
         let disposition =
             super::orchestration::LifecycleOrchestrator::new(self.deps).mark_open_failed(attempt);
         let (_, module, _service_inputs) = self.core.take().unwrap().into_parts();
-        self.deps
-            .lifecycle_control()
-            .complete_open_abort(module.rollback(|| {}));
+        return_open_module(&self.deps, module.rollback(|| {}));
         #[cfg(test)]
         check_rollback_fault();
         if disposition.requires_rollback() {
@@ -630,6 +656,16 @@ impl<'runtime, A: crate::Addin, S: OpeningState<A>> OpeningTxn<'runtime, A, S> {
 }
 
 impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
+    /// Read-only identity check used exclusively by the locked handoff boundary.
+    /// This does not manufacture or release either recovery responsibility.
+    pub(crate) fn matches_start(
+        &self,
+        coordinator: &crate::lifecycle::LifecycleCoordinator<A>,
+        attempt: OpenAttemptId,
+    ) -> bool {
+        std::ptr::eq(self.deps.lifecycle(), coordinator) && self.attempt_id() == attempt
+    }
+
     pub(crate) fn acquire(
         deps: OpenDeps<'runtime, A>,
         expected_removal_epoch: RemovalEpoch,
@@ -674,7 +710,21 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
             (),
         );
         // No fallible operation separates responsibility transfer from unlock.
-        acquisition.start.take().unwrap().transfer_to_opening();
+        let transaction = acquisition
+            .start
+            .take()
+            .unwrap()
+            .transfer_to_opening(transaction)
+            .map_err(|failure| {
+                // The failed handoff owns both recoveries, and unlocks the
+                // canonical start before the successor performs rollback.
+                drop(failure);
+                XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
+                }
+            })?;
+        #[cfg(test)]
+        check_open_acquire_fault(3)?;
         Ok(transaction)
     }
 
@@ -703,10 +753,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
                 .mark_open_failed(attempt_id);
         let (Begun { core }, _binding) = transaction.take_state();
         let (_, module_opening, _service_inputs) = core.into_parts();
-        transaction
-            .deps
-            .lifecycle_control()
-            .complete_open_abort(module_opening.rollback(|| {}));
+        return_open_module(&transaction.deps, module_opening.rollback(|| {}));
         disposition
     }
 }
@@ -840,10 +887,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
                 .mark_open_failed(attempt_id);
         let (LifecycleInstalled { core, host: _ }, _binding) = transaction.take_state();
         let (_, module_opening, _service_inputs) = core.into_parts();
-        transaction
-            .deps
-            .lifecycle_control()
-            .complete_open_abort(module_opening.rollback(|| {}));
+        return_open_module(&transaction.deps, module_opening.rollback(|| {}));
         disposition
     }
 
@@ -921,20 +965,10 @@ fn commit_inner<A: crate::Addin>(
                     &mut module_opening,
                     service_inputs,
                 )?;
-                deps.lifecycle_control()
+                let committed = deps
+                    .lifecycle_control()
                     .finish_open_state(&mut control, generation)?;
-                if control.phase() != crate::lifecycle::LifecyclePhase::Open
-                    || control.last_committed_generation() != Some(generation)
-                    || control.open_attempt().is_some()
-                {
-                    crate::boundary::fail_stop_invariant(
-                        "xlAutoOpen commit postcondition",
-                        &XllError::Internal {
-                            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                        },
-                    );
-                }
-                deps.observer().commit_open(&deps, &control, attempt_id);
+                deps.observer().commit_open(&deps, committed);
                 Ok::<(), XllError>(())
             })
             .unwrap_or_else(|_| opening_publication_lost());
@@ -956,9 +990,8 @@ fn commit_inner<A: crate::Addin>(
             }
         }
     } else {
-        let authority = deps.lifecycle_control();
         let closing = module_opening.rollback(|| {});
-        authority.complete_open_abort_locked(&mut control, closing);
+        return_open_module_locked(deps, &mut control, closing);
         // Clearing the open attempt makes final close claimable. Record that
         // transition before a close waiter can acquire the lifecycle lock.
         deps.observer().reject_open_locked(&control, attempt_id);
@@ -1024,8 +1057,7 @@ fn publish_generation<A: crate::Addin>(
                 );
             }
             let closing = module_epoch.begin_close(|| {});
-            deps.lifecycle_control()
-                .complete_open_abort_locked(control, closing);
+            return_open_module_locked(deps, control, closing);
             Err(error)
         }
     }
@@ -1037,8 +1069,7 @@ fn recover_uncommitted_module<A: crate::Addin>(
     control: &mut LifecycleAccess<'_, A>,
 ) {
     if let Some(module_opening) = module_opening.take() {
-        deps.lifecycle_control()
-            .complete_open_abort_locked(control, module_opening.rollback(|| {}));
+        return_open_module_locked(deps, control, module_opening.rollback(|| {}));
     }
 }
 
@@ -1143,7 +1174,7 @@ mod owner_tests {
 
     #[test]
     fn acquisition_failure_retains_responsibility_before_and_after_module_begin() {
-        for point in [1, 2] {
+        for point in [1, 2, 3] {
             let runtime = Runtime::<()>::new();
             let other = Runtime::<()>::new();
             FAIL_OPEN_ACQUIRE.with(|fault| fault.set(point));
@@ -1154,7 +1185,7 @@ mod owner_tests {
             assert!(runtime.return_protocol.returns_closed_and_quiescent());
             let authority = runtime.lifecycle_control().take_module_cleanup_authority();
             if point == 1 {
-                assert!(matches!(authority, ModuleCleanupClaim::Missing));
+                assert!(matches!(authority, ModuleCleanupClaim::NoModuleAuthority));
                 assert!(runtime.lifecycle.access().module_epoch_id().is_none());
             } else {
                 let ModuleCleanupClaim::Ready(ModuleCleanupReady::Closing(closing)) = authority
@@ -1164,9 +1195,88 @@ mod owner_tests {
                 assert!(closing.id().is_current());
                 runtime
                     .lifecycle_control()
-                    .retain_failed_module_cleanup(ModuleCleanupAuthority::Closing(closing));
+                    .retain_failed_module_cleanup(ModuleCleanupAuthority::Closing(closing))
+                    .unwrap_or_else(|_| panic!("canonical authority return refused"));
             }
         }
+    }
+
+    #[test]
+    fn handoff_rejects_a_foreign_successor_and_retains_both_recoveries() {
+        let runtime = Runtime::<()>::new();
+        let other = Runtime::<()>::new();
+        let successor = other.begin_open().unwrap();
+        let start = runtime
+            .lifecycle_control()
+            .begin_open(RemovalEpoch::new(0))
+            .unwrap();
+        // Both runtimes allocate the same local attempt number. Identity must
+        // be checked independently of the number and of the Rust lifetime.
+        assert_eq!(start.attempt(), successor.attempt_id());
+        let failure = match start.transfer_to_opening(successor) {
+            Ok(_) => panic!("foreign successor accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(runtime.phase(), LifecyclePhase::Opening);
+        assert_eq!(other.phase(), LifecyclePhase::Opening);
+        // Failure owns the original locked start, then the unlocked successor.
+        // Dropping it must not run successor rollback under the start lock.
+        drop(failure);
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert_eq!(other.phase(), LifecyclePhase::Quarantined);
+        assert!(runtime.lifecycle.access().module_epoch_id().is_none());
+        let ModuleCleanupClaim::Ready(ModuleCleanupReady::Closing(closing)) =
+            other.lifecycle_control().take_module_cleanup_authority()
+        else {
+            panic!("failed handoff lost successor authority");
+        };
+        other
+            .lifecycle_control()
+            .retain_failed_module_cleanup(ModuleCleanupAuthority::Closing(closing))
+            .unwrap_or_else(|_| panic!("canonical authority return refused"));
+    }
+
+    #[test]
+    fn handoff_successor_owns_recovery_during_unwinding() {
+        let runtime = Runtime::<()>::new();
+        let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            let _successor = runtime.begin_open().unwrap();
+            panic!("after opening responsibility handoff");
+        }));
+        assert!(result.is_err());
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert!(runtime.return_protocol.returns_closed_and_quiescent());
+        let ModuleCleanupClaim::Ready(ModuleCleanupReady::Closing(closing)) =
+            runtime.lifecycle_control().take_module_cleanup_authority()
+        else {
+            panic!("successor unwinding lost authority");
+        };
+        runtime
+            .lifecycle_control()
+            .retain_failed_module_cleanup(ModuleCleanupAuthority::Closing(closing))
+            .unwrap_or_else(|_| panic!("canonical authority return refused"));
+    }
+
+    #[test]
+    #[allow(
+        clippy::mem_forget,
+        reason = "forgetting a successor must not certify or reclaim an unfinished opening"
+    )]
+    fn forgotten_handoff_successor_leaves_the_attempt_incomplete() {
+        // Native-only: the deliberately forgotten module owner and its runtime
+        // remain alive together. This test does not qualify leak-free cleanup.
+        let runtime = Box::leak(Box::new(Runtime::<()>::new()));
+        let successor = runtime.begin_open().unwrap();
+        let attempt = successor.attempt_id();
+        std::mem::forget(successor);
+        let control = runtime.lifecycle.access();
+        assert_eq!(control.phase(), LifecyclePhase::Opening);
+        assert_eq!(control.open_attempt(), Some(attempt));
+        assert!(!control.has_current_generation());
+        assert!(!control.has_opening_generation());
+        drop(control);
+        assert!(runtime.begin_open().is_err());
+        assert_eq!(runtime.phase(), LifecyclePhase::Opening);
     }
 
     fn initialized<'a>(
@@ -1204,7 +1314,8 @@ mod owner_tests {
         assert_eq!(crate::module_runtime::ingress().epoch(), epoch);
         runtime
             .lifecycle_control()
-            .retain_failed_module_cleanup(ModuleCleanupAuthority::Closing(closing));
+            .retain_failed_module_cleanup(ModuleCleanupAuthority::Closing(closing))
+            .unwrap_or_else(|_| panic!("canonical authority return refused"));
     }
 
     #[test]
@@ -1234,7 +1345,8 @@ mod owner_tests {
         assert_eq!(crate::module_runtime::ingress().epoch(), epoch);
         runtime
             .lifecycle_control()
-            .retain_failed_module_cleanup(ModuleCleanupAuthority::Closing(closing));
+            .retain_failed_module_cleanup(ModuleCleanupAuthority::Closing(closing))
+            .unwrap_or_else(|_| panic!("canonical authority return refused"));
     }
 
     #[test]

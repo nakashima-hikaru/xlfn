@@ -43,6 +43,7 @@ pub(crate) struct FinalClosing<'access, 'issuer, A: crate::Addin> {
 }
 
 impl<'access, 'issuer, A: crate::Addin> FinalClosing<'access, 'issuer, A> {
+    #[cfg(test)]
     pub(crate) fn belongs_to(&self, coordinator: &LifecycleCoordinator<A>) -> bool {
         std::ptr::eq(self.access.coordinator, coordinator)
     }
@@ -77,26 +78,13 @@ impl<'issuer, A: crate::Addin> LifecycleAccess<'issuer, A> {
 
     /// Return admission must already be closed before this publishes Closing.
     pub(crate) fn final_close_decision(&mut self) -> FinalCloseDecision<'_, 'issuer, A> {
-        if matches!(
-            self.core.state,
-            LifecycleState::Opening { .. }
-                | LifecycleState::Open { .. }
-                | LifecycleState::OpenRollbackPending(_)
-        ) {
-            self.coordinator.request_closing(self);
-        }
-        match &self.core.state {
-            LifecycleState::Closed(ClosedState::Idle) => FinalCloseDecision::ClosedIdle,
-            LifecycleState::Closed(ClosedState::Finalizing { .. }) => FinalCloseDecision::Wait,
-            LifecycleState::Closing(_) => {
+        match self.coordinator.request_closing(self) {
+            CloseRequestDisposition::ClosedIdle => FinalCloseDecision::ClosedIdle,
+            CloseRequestDisposition::Finalizing => FinalCloseDecision::Wait,
+            CloseRequestDisposition::Closing => {
                 FinalCloseDecision::Closing(FinalClosing { access: self })
             }
-            LifecycleState::Quarantined(_) => FinalCloseDecision::Quarantined,
-            LifecycleState::Opening { .. }
-            | LifecycleState::Open { .. }
-            | LifecycleState::OpenRollbackPending(_) => {
-                lifecycle_invariant_violation("closing transition is canonical")
-            }
+            CloseRequestDisposition::Quarantined => FinalCloseDecision::Quarantined,
         }
     }
 

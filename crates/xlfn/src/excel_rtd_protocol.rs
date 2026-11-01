@@ -14,11 +14,36 @@ pub(crate) fn logical_quiescence_certified() -> bool {
     module_quiescent && crate::module_runtime::ingress().phase() == crate::ingress::PHASE_CLOSED
 }
 
+/// With RTD disabled there are no subscription producers to stop.
+#[cfg(not(feature = "rtd"))]
+#[derive(Debug)]
+pub(crate) struct SubscriptionsStopped {
+    generation: Option<crate::generation::RuntimeGeneration>,
+}
+
+#[cfg(not(feature = "rtd"))]
+impl SubscriptionsStopped {
+    pub(crate) const fn generation(&self) -> Option<crate::generation::RuntimeGeneration> {
+        self.generation
+    }
+}
+
 #[cfg(any(not(feature = "rtd"), test))]
-pub(crate) const fn stopped_subscriptions(
+pub(crate) fn stopped_subscriptions(
     generation: Option<crate::generation::RuntimeGeneration>,
 ) -> crate::shutdown::SubscriptionsStopped {
-    crate::shutdown::SubscriptionsStopped::issue(generation)
+    #[cfg(not(feature = "rtd"))]
+    {
+        SubscriptionsStopped { generation }
+    }
+    #[cfg(all(feature = "rtd", test))]
+    {
+        // Test-only empty generations still pass through the real sealing
+        // implementation rather than exposing a second certificate issuer.
+        crate::excel_rtd::SubscriptionServiceSlot::<()>::new()
+            .seal(generation)
+            .expect("empty subscription slot seals")
+    }
 }
 
 pub(crate) struct RtdModuleState {

@@ -54,7 +54,7 @@ pub(crate) use runtime::FormulaHandleServiceRead;
 pub(crate) use runtime::FormulaHandleServiceResolver;
 #[cfg(feature = "handles")]
 pub(crate) use runtime::FormulaHandleServiceSlot;
-pub(crate) use runtime::{FormulaHandleService, FormulaHandleServiceSealed};
+pub(crate) use runtime::{FormulaHandleService, FormulaHandleServiceSealed, HandlesQuiescent};
 pub(crate) use store::HandleStore;
 #[cfg(any(test, feature = "refinement"))]
 pub(crate) use token::HandleToken;

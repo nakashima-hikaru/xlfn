@@ -44,6 +44,20 @@ def ShutdownSessionPublished : Shutdown.Phase → Prop
   | .quarantined _ => True
   | .failStopped _ => True
 
+theorem shutdownSessionPublished_all (phase : Shutdown.Phase) :
+    ShutdownSessionPublished phase := by
+  cases phase <;> trivial
+
+def shutdownPhaseQuarantined : Shutdown.Phase → Bool
+  | .quarantined _ => true
+  | _ => false
+
+/-- Open records that a committed session was published, not that a later
+    quarantine has completed ordinary cleanup. Only retention quarantine is
+    allowed beside Open; general Closing/Closed shutdown targets stay excluded. -/
+def OpenSessionCompatible (phase : Shutdown.Phase) : Prop :=
+  phase = .open ∨ shutdownPhaseQuarantined phase = true
+
 def SessionConsistent (s : State) : Prop :=
   match s.lifecycle.phase, s.currentShutdown with
   | .closed, none => True
@@ -53,7 +67,7 @@ def SessionConsistent (s : State) : Prop :=
   | .quarantined, none => True
   | .quarantined, some _ => False
   | .open, some session => session.generation = s.lifecycle.generation ∧
-      session.state.phase = .open
+      OpenSessionCompatible session.state.phase
   | .closing, some session =>
       s.lifecycle.openAttempt = none ∧
       session.generation = s.lifecycle.generation ∧
@@ -84,6 +98,20 @@ def Valid (s : State) : Prop :=
 def LogicalCloseCertificationConsistent (s : State) : Prop :=
   s.logicalQuiescenceCertified = true ↔ s.lifecycle.phase = .closed
 
+def hasQuarantinedShutdown (s : State) : Bool :=
+  match s.currentShutdown with
+  | some session => shutdownPhaseQuarantined session.state.phase
+  | none => false
+
+/-- A terminal retention outcome, never a successful-close certificate. Active
+    cleanup owners remain in progress until their release is observed. -/
+def TerminalQuarantine (s : State) : Prop :=
+  s.logicalQuiescenceCertified = false ∧
+  s.lifecycle.openAttempt = none ∧ s.lifecycle.cleanupOwner = none ∧
+  ((s.lifecycle.phase = .quarantined ∧ s.currentShutdown = none) ∨
+    ((s.lifecycle.phase = .open ∨ s.lifecycle.phase = .closing) ∧
+      s.hasQuarantinedShutdown = true))
+
 def initialState : State :=
   { lifecycle := Lifecycle.State.initialState
     currentShutdown := none
@@ -106,12 +134,12 @@ theorem initialState_logicalCloseCertificationConsistent :
 theorem initialState_logicalQuiescenceCertified : initialState.logicalQuiescenceCertified = true := by
   rfl
 
-theorem committed_session_phase_is_open
+theorem committed_session_open_or_quarantined
     {s : State} {session : ShutdownSession}
     (hConsistent : s.SessionConsistent)
     (hOpen : s.lifecycle.phase = .open)
     (hSession : s.currentShutdown = some session) :
-    session.state.phase = .open := by
+    OpenSessionCompatible session.state.phase := by
   have h := hConsistent
   simp [SessionConsistent, hOpen, hSession] at h
   exact h.2

@@ -38,6 +38,7 @@ impl<A: crate::Addin> CertifiedRetirement<'_, A> {
 /// borrowed from the certificate until the locked transition has consumed it.
 pub(crate) struct CanonicalCompletion<'proof, A: crate::Addin, K> {
     coordinator: &'proof crate::lifecycle::LifecycleCoordinator<A>,
+    returns: &'proof crate::runtime_components::ReturnProtocol,
     attempt: crate::generation::RemovalAttemptId,
     proof: &'proof QuiescenceProof,
     last_committed_generation: Option<RuntimeGeneration>,
@@ -53,14 +54,11 @@ impl<A: crate::Addin, K> CanonicalCompletion<'_, A, K> {
         last_committed_generation: Option<RuntimeGeneration>,
     ) -> bool {
         std::ptr::eq(self.coordinator, coordinator)
+            && self.proof.returns_match(self.returns, coordinator, attempt)
             && attempt == Some(self.attempt)
             && module_epoch == Some(self.proof.module_epoch())
             && self.proof.module_epoch().is_current()
             && last_committed_generation == self.last_committed_generation
-    }
-
-    pub(crate) fn attempt(&self) -> crate::generation::RemovalAttemptId {
-        self.attempt
     }
 }
 
@@ -95,7 +93,7 @@ pub(crate) trait TerminalCertificateKind: Sized {
     );
     fn complete_finalization<'runtime, A: crate::Addin>(
         completed: &mut Self::Completed<'runtime, A>,
-    );
+    ) -> crate::XllResult<()>;
     fn mark_finalization_failed<'runtime, A: crate::Addin>(
         completed: &mut Self::Completed<'runtime, A>,
     );
@@ -133,8 +131,8 @@ impl TerminalCertificateKind for FinalRemoval {
     }
     fn complete_finalization<'runtime, A: crate::Addin>(
         completed: &mut Self::Completed<'runtime, A>,
-    ) {
-        completed.1.complete_finalization();
+    ) -> crate::XllResult<()> {
+        completed.1.complete_finalization()
     }
     fn mark_finalization_failed<'runtime, A: crate::Addin>(
         completed: &mut Self::Completed<'runtime, A>,
@@ -175,8 +173,8 @@ impl TerminalCertificateKind for OpenRollback {
     }
     fn complete_finalization<'runtime, A: crate::Addin>(
         completed: &mut Self::Completed<'runtime, A>,
-    ) {
-        completed.complete_finalization();
+    ) -> crate::XllResult<()> {
+        completed.complete_finalization()
     }
     fn mark_finalization_failed<'runtime, A: crate::Addin>(
         completed: &mut Self::Completed<'runtime, A>,
@@ -266,7 +264,9 @@ impl<'runtime, A: crate::Addin> RemovalClaimGuard<'runtime, A> {
         proof: QuiescenceProof,
         deps: ShutdownDeps<'runtime, A>,
     ) -> Result<FinalRemovalCertificate<'runtime, A>, (XllError, Self)> {
-        if !self.belongs_to(deps.lifecycle()) {
+        if !self.belongs_to(deps.lifecycle())
+            || !proof.returns_match(deps.returns(), deps.lifecycle(), Some(self.attempt()))
+        {
             return Err((close_certificate_error(), self));
         }
         let lifecycle = deps.lifecycle_control();
@@ -323,7 +323,9 @@ impl<'runtime, A: crate::Addin> RemovalClaimGuard<'runtime, A> {
         proof: QuiescenceProof,
         deps: ShutdownDeps<'runtime, A>,
     ) -> Result<OpenRollbackCertificate<'runtime, A>, (XllError, Self)> {
-        if !self.belongs_to(deps.lifecycle()) {
+        if !self.belongs_to(deps.lifecycle())
+            || !proof.returns_match(deps.returns(), deps.lifecycle(), Some(self.attempt()))
+        {
             return Err((close_certificate_error(), self));
         }
         let lifecycle = deps.lifecycle_control();
@@ -369,6 +371,7 @@ impl<'runtime, A: crate::Addin> OpenRollbackCertificate<'runtime, A> {
         }
         let authorization = CanonicalCompletion::<A, OpenRollback> {
             coordinator: self.deps.lifecycle(),
+            returns: self.deps.returns(),
             attempt: self.owner.attempt(),
             proof: &self.proof,
             last_committed_generation: self.deps.last_committed_generation(),
@@ -424,6 +427,7 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
         }
         let authorization = CanonicalCompletion::<A, FinalRemoval> {
             coordinator: deps.lifecycle(),
+            returns: deps.returns(),
             attempt: owner.attempt(),
             proof,
             last_committed_generation: expected_generation,
@@ -535,6 +539,7 @@ mod tests {
     ) -> CanonicalCompletion<'a, (), K> {
         CanonicalCompletion {
             coordinator: &runtime.lifecycle,
+            returns: runtime.shutdown_deps().returns(),
             attempt: owner.attempt(),
             proof,
             last_committed_generation: Some(generation),

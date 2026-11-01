@@ -9,9 +9,9 @@ pub(crate) use authority::LifecycleControl;
 pub(crate) use phase::{HostLifecycleIntent, LifecyclePhase};
 pub use state::ExecutionLease;
 pub(crate) use state::{
-    FinalCloseDecision, FinalRemovalReady, GenerationAdmission, IssuedRemovalClaim,
-    LifecycleAccess, LifecycleCoordinator, OpenFailureDisposition, OpenRollbackReady, OpenStart,
-    RollbackDecision,
+    CommittedOpen, CompletedRemovalIntent, FinalCloseDecision, FinalRemovalReady,
+    GenerationAdmission, IssuedRemovalClaim, LifecycleAccess, LifecycleCoordinator,
+    OpenFailureDisposition, OpenRollbackReady, OpenStart, RollbackDecision,
 };
 
 pub(crate) fn lifecycle_access_error(error: ThreadAffineError) -> XllError {

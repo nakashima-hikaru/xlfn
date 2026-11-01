@@ -2341,15 +2341,15 @@ mod tests {
             |_, _| -> XllResult<ReturnPayload> { panic!("injected UDF panic") },
         );
 
-        let tracker = runtime.return_tracker();
-        assert_eq!(tracker.outstanding_obligations(), 0);
+        let outstanding = || runtime.outstanding_return_obligations();
+        assert_eq!(outstanding(), 0);
 
         // SAFETY: ptr is a live process-owned panic error scalar; defensive
         // cleanup is a no-op and must not create a ReturnFree obligation.
         let free_guard = unsafe { free_return_boundary(ptr) };
-        assert_eq!(tracker.outstanding_obligations(), 0);
+        assert_eq!(outstanding(), 0);
         drop(free_guard);
-        assert_eq!(tracker.outstanding_obligations(), 0);
+        assert_eq!(outstanding(), 0);
     }
 
     #[test]

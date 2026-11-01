@@ -84,6 +84,19 @@ inductive Step : State → Event → State → Prop where
       Step s (.quarantineOpen attempt)
         { s with phase := .quarantined, openAttempt := none }
 
+  /-- FailOpen has resolved the live attempt, but its unclaimed rollback roots
+      still require terminal retention. The nonzero attempt is diagnostic
+      metadata from that receiver, not a cleanup or reclamation authority. -/
+  | quarantinePendingOpen
+      {s : State}
+      {attempt : AttemptId}
+      (hPhase : s.phase = .openRollbackPending)
+      (hNoAttempt : s.openAttempt = none)
+      (hNoOwner : s.cleanupOwner = none)
+      (hNonzero : attempt ≠ 0) :
+      Step s (.quarantineOpen attempt)
+        { s with phase := .quarantined, openAttempt := none }
+
   | requestFinalClose
       {s : State} :
       Step s .requestFinalClose

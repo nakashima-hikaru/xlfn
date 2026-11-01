@@ -1,7 +1,22 @@
 use crate::RtdSubscription;
 use crate::generation::RuntimeGeneration;
-use crate::shutdown::SubscriptionsStopped;
 use crate::subscription::{RtdLimits, SubscriptionRuntime};
+
+/// Issued only after the corresponding subscription slot has been sealed.
+#[derive(Debug)]
+pub(crate) struct SubscriptionsStopped {
+    generation: Option<RuntimeGeneration>,
+}
+
+impl SubscriptionsStopped {
+    const fn new(generation: Option<RuntimeGeneration>) -> Self {
+        Self { generation }
+    }
+
+    pub(crate) const fn generation(&self) -> Option<RuntimeGeneration> {
+        self.generation
+    }
+}
 
 pub(crate) struct SubscriptionServiceSlot<
     E: RtdSubscription = (),
@@ -97,10 +112,10 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SubscriptionServiceSlot<
         let sealed = self
             .service
             .seal(
-                move || SubscriptionsStopped::issue(generation),
+                move || SubscriptionsStopped::new(generation),
                 |runtime| {
                     crate::excel_rtd::shutdown_subscriptions(runtime)
-                        .map(|()| SubscriptionsStopped::issue(Some(runtime.generation)))
+                        .map(|()| SubscriptionsStopped::new(Some(runtime.generation)))
                 },
             )
             .map_err(crate::error::map_service_slot_error)?;

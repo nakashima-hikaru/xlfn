@@ -4,40 +4,61 @@ use super::certificate::{FinalRemoval, OpenRollback, TerminalCertificateKind};
 use crate::runtime::capabilities::{EmptyLifecycle, LifecycleFailure, ShutdownDeps};
 use crate::{Addin, XllError};
 
+#[cfg(test)]
+std::thread_local! {
+    static QUARANTINE_AFTER_BINDING_RELEASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[must_use = "finish logical closure and release the retained binding"]
 pub(crate) struct CompletionPendingBinding<'runtime, A: Addin, K: TerminalCertificateKind> {
     deps: ShutdownDeps<'runtime, A>,
-    finished: bool,
-    state: Option<CompletionState<'runtime, A, K>>,
+    // The Option only disarms Drop during a consuming move. A logically
+    // completed value cannot inhabit this receiver or call finish again.
+    certified: Option<CertifiedBinding<'runtime, A, K>>,
+}
+
+struct CertifiedBinding<'runtime, A: Addin, K: TerminalCertificateKind> {
+    certificate: K::Certificate<'runtime, A>,
+    empty: EmptyLifecycle<'runtime, A>,
+}
+
+/// Logical completion already happened. The lifecycle value must never be
+/// retried, and the exact failed empty binding stays owned until quarantine.
+struct LogicalBindingFailure<'runtime, A: Addin, K: TerminalCertificateKind> {
+    completed: K::Completed<'runtime, A>,
+    _binding: TerminalBinding<'runtime, A>,
+}
+
+#[allow(dead_code, reason = "failed release retains its exact empty binding")]
+enum TerminalBinding<'runtime, A: Addin> {
+    ReleaseFailed(LifecycleFailure<'runtime, A>),
+    Released,
+}
+
+impl<A: Addin, K: TerminalCertificateKind> Drop for LogicalBindingFailure<'_, A, K> {
+    fn drop(&mut self) {
+        K::mark_finalization_failed(&mut self.completed);
+    }
 }
 
 #[allow(
     dead_code,
-    reason = "terminal failures retain progressed ownership until quarantine"
+    reason = "failure variants retain their distinct affine recoveries"
 )]
-enum CompletionState<'runtime, A: Addin, K: TerminalCertificateKind> {
-    Certified {
-        certificate: K::Certificate<'runtime, A>,
-        empty: EmptyLifecycle<'runtime, A>,
-    },
-    Logical {
-        completed: K::Completed<'runtime, A>,
-        failure: LifecycleFailure<'runtime, A>,
-    },
+enum FailedFinalization<'runtime, A: Addin, K: TerminalCertificateKind> {
+    Certified(CompletionPendingBinding<'runtime, A, K>),
+    Logical(LogicalBindingFailure<'runtime, A, K>),
 }
 
 #[must_use = "the failure retains the progressed completion and binding responsibilities"]
 pub(crate) struct FinalizationFailure<'runtime, A: Addin, K: TerminalCertificateKind> {
     error: XllError,
-    _pending: CompletionPendingBinding<'runtime, A, K>,
+    recovery: FailedFinalization<'runtime, A, K>,
 }
 impl<A: Addin, K: TerminalCertificateKind> FinalizationFailure<'_, A, K> {
-    pub(crate) fn error(&self) -> &XllError {
-        &self.error
-    }
-    pub(crate) fn quarantine(self: Box<Self>) -> XllError {
-        let error = self.error().clone();
-        drop(self);
+    pub(crate) fn quarantine(self) -> XllError {
+        let Self { error, recovery } = self;
+        drop(recovery);
         error
     }
 }
@@ -57,52 +78,64 @@ impl<'runtime, A: Addin, K: TerminalCertificateKind> CompletionPendingBinding<'r
     ) -> Self {
         Self {
             deps,
-            finished: false,
-            state: Some(CompletionState::Certified { certificate, empty }),
+            certified: Some(CertifiedBinding { certificate, empty }),
         }
     }
     pub(crate) fn finish(
         mut self,
     ) -> Result<Finalized<'runtime, A, K>, Box<FinalizationFailure<'runtime, A, K>>> {
-        let Some(CompletionState::Certified {
+        let CertifiedBinding {
             mut certificate,
             empty,
-        }) = self.state.take()
-        else {
-            xlfn_kernel::invariant::fail_stop();
-        };
+        } = self
+            .certified
+            .take()
+            .expect("consuming completion retains its certified binding");
         // The claim quarantines atomically on any error or unwind until the
         // exact empty binding has been released successfully.
         K::arm_finalization(&mut certificate);
         let mut completed = match K::finish(certificate) {
             Ok(completed) => completed,
             Err((error, certificate)) => {
-                self.state = Some(CompletionState::Certified {
+                self.certified = Some(CertifiedBinding {
                     certificate: *certificate,
                     empty,
                 });
                 return Err(Box::new(FinalizationFailure {
                     error,
-                    _pending: self,
+                    recovery: FailedFinalization::Certified(self),
                 }));
             }
         };
         // The removal claim in completed remains live through this last step.
         match empty.release() {
             Ok(()) => {
-                K::complete_finalization(&mut completed);
-                self.finished = true;
-                Ok(Finalized {
-                    deps: self.deps,
-                    completed,
-                })
+                #[cfg(test)]
+                if QUARANTINE_AFTER_BINDING_RELEASE.with(|request| request.replace(false)) {
+                    self.deps.quarantine_state();
+                }
+                match K::complete_finalization(&mut completed) {
+                    Ok(()) => Ok(Finalized {
+                        deps: self.deps,
+                        completed,
+                    }),
+                    Err(error) => Err(Box::new(FinalizationFailure {
+                        error,
+                        recovery: FailedFinalization::Logical(LogicalBindingFailure {
+                            completed,
+                            _binding: TerminalBinding::Released,
+                        }),
+                    })),
+                }
             }
             Err(failure) => {
                 let error = failure.error().clone();
-                self.state = Some(CompletionState::Logical { completed, failure });
                 Err(Box::new(FinalizationFailure {
                     error,
-                    _pending: self,
+                    recovery: FailedFinalization::Logical(LogicalBindingFailure {
+                        completed,
+                        _binding: TerminalBinding::ReleaseFailed(failure),
+                    }),
                 }))
             }
         }
@@ -110,15 +143,8 @@ impl<'runtime, A: Addin, K: TerminalCertificateKind> CompletionPendingBinding<'r
 }
 impl<A: Addin, K: TerminalCertificateKind> Drop for CompletionPendingBinding<'_, A, K> {
     fn drop(&mut self) {
-        if !self.finished {
-            match self.state.as_mut() {
-                Some(CompletionState::Logical { completed, .. }) => {
-                    // The owning claim atomically publishes terminal failure as
-                    // it returns; Closed/Finalizing cannot be quarantined alone.
-                    K::mark_finalization_failed(completed);
-                }
-                _ => self.deps.quarantine_state(),
-            }
+        if self.certified.is_some() {
+            self.deps.quarantine_state();
         }
     }
 }
@@ -210,10 +236,7 @@ mod tests {
             Err(failure) => failure,
             Ok(_) => panic!("release fault"),
         };
-        assert!(matches!(
-            failure._pending.state,
-            Some(CompletionState::Logical { .. })
-        ));
+        assert!(matches!(failure.recovery, FailedFinalization::Logical(_)));
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
         assert!(runtime.lifecycle.access().removal_attempt().is_some());
         assert_eq!(
@@ -249,6 +272,48 @@ mod tests {
     fn abandoned_certified_completion_quarantines_before_returning_claim() {
         let runtime = Runtime::new();
         drop(pending(&runtime));
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert!(runtime.lifecycle.access().removal_attempt().is_none());
+    }
+
+    #[test]
+    fn quarantine_requested_after_binding_release_prevents_finalized_success() {
+        let runtime = Runtime::new();
+        let pending = pending(&runtime);
+        QUARANTINE_AFTER_BINDING_RELEASE.with(|request| request.set(true));
+        let failure = match pending.finish() {
+            Err(failure) => failure,
+            Ok(_) => panic!("quarantine request must prevent boundary success"),
+        };
+        assert!(matches!(
+            failure.recovery,
+            FailedFinalization::Logical(LogicalBindingFailure {
+                _binding: TerminalBinding::Released,
+                ..
+            })
+        ));
+        // Logical close already committed, while the terminal failure still
+        // owns its claim. No owner with a success operation has been issued.
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+        assert!(runtime.lifecycle.access().removal_attempt().is_some());
+        assert!(runtime.begin_open().is_err());
+        drop(failure);
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert!(runtime.lifecycle.access().removal_attempt().is_none());
+    }
+
+    #[test]
+    fn reopened_returns_invalidate_an_already_certified_completion() {
+        let runtime = Runtime::new();
+        let pending = pending(&runtime);
+        runtime.return_protocol.reopen_admission().unwrap();
+        runtime.return_protocol.close_admission();
+        let failure = match pending.finish() {
+            Err(failure) => failure,
+            Ok(_) => panic!("stale return drain must not complete logical closure"),
+        };
+        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+        drop(failure);
         assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
         assert!(runtime.lifecycle.access().removal_attempt().is_none());
     }

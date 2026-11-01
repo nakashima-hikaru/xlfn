@@ -120,8 +120,16 @@ pub(crate) enum ModuleCleanupAuthority {
 /// affine authority. The retained capability remains in lifecycle state.
 pub(crate) enum ModuleCleanupClaim {
     Ready(ModuleCleanupReady),
+    /// Canonical lifecycle still has a live opening or finalization owner.
+    /// Its resources are retained until that owner resolves the request.
+    DeferredOwner,
     RetainedUndrained(ModuleEpochId),
-    Missing,
+    /// Absence was classified under the canonical lock and module ingress was
+    /// closed. The caller need not reconstruct this fact from another read.
+    NoModuleAuthority,
+    /// No cleanup authority could be acquired although canonical resources or
+    /// the external ingress still require one. This is not absence success.
+    Unavailable,
 }
 
 /// Affine module capability after the module close has been linearized.
@@ -510,6 +518,13 @@ pub(crate) fn certify_quiescence_for_test() {
 /// module runtime.
 pub(crate) fn ingress() -> &'static ExportIngress {
     global().ingress()
+}
+
+#[cfg(test)]
+pub(crate) fn isolated_closing_for_test() -> ModuleClosing {
+    Box::leak(Box::new(ModuleRuntime::new()))
+        .begin_open_internal()
+        .rollback(|| {})
 }
 
 #[cfg(test)]

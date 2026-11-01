@@ -201,7 +201,7 @@ impl RuntimeObserver {
         #[cfg(any(test, feature = "refinement"))]
         {
             let trace = self.trace_handle();
-            returns.returns.set_trace_sink(trace);
+            returns.set_trace_sink(trace);
             self.record_composition_event(
                 crate::composition_refinement::CompositionEvent::BeginOpen {
                     sampled_epoch,
@@ -218,9 +218,10 @@ impl RuntimeObserver {
     pub(crate) fn commit_open<A: crate::Addin>(
         &self,
         deps: &OpenDeps<'_, A>,
-        _control: &crate::lifecycle::LifecycleAccess<'_, A>,
-        attempt: OpenAttemptId,
+        committed: crate::lifecycle::CommittedOpen<'_, '_, A>,
     ) {
+        let attempt = committed.attempt();
+        let _control = committed.access();
         #[cfg(any(test, feature = "refinement"))]
         {
             let trace = self.trace_handle();
@@ -247,7 +248,7 @@ impl RuntimeObserver {
                 })
             })
             .expect("diagnostic and RTD trace initialization succeeds");
-            deps.returns().returns.set_trace_sink(Arc::clone(&trace));
+            deps.returns().set_trace_sink(Arc::clone(&trace));
             #[cfg(any(feature = "handles", feature = "rtd"))]
             _control
                 .generation_services()
@@ -279,6 +280,12 @@ impl RuntimeObserver {
     ) {
         #[cfg(any(test, feature = "refinement"))]
         {
+            // A deferred quarantine request already terminalized this
+            // uncommitted attempt in the abstract trace. Its concrete owner
+            // has resolved it, rather than performing an ordinary rejection.
+            if _control.phase() == crate::lifecycle::LifecyclePhase::Quarantined {
+                return;
+            }
             self.record_composition_event(
                 crate::composition_refinement::CompositionEvent::FinishOpenRejectedByClose {
                     attempt: attempt.get(),

@@ -66,6 +66,24 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
         lifecycle.quarantine_state(&mut control);
     }
 
+    pub(crate) fn quarantine_for_reason(&self, reason: crate::shutdown_trace::ShutdownFailure) {
+        let lifecycle = self.lifecycle();
+        let mut control = lifecycle.access();
+        #[cfg(any(test, feature = "refinement"))]
+        let opening = control.unobserved_quarantine_open_attempt();
+        self.returns.close_admission();
+        lifecycle.quarantine_state(&mut control);
+        // An irreversible request projects to abstract quarantine while the
+        // concrete owner retains resources until its later resolution. There
+        // is no committed shutdown session for this uncommitted open attempt.
+        #[cfg(any(test, feature = "refinement"))]
+        if let Some(attempt) = opening {
+            self.observer.quarantine_open(attempt, reason);
+            return;
+        }
+        self.observer.quarantine(reason);
+    }
+
     pub(crate) fn quarantine_shared_state(
         &self,
         generation: Option<RuntimeGeneration>,

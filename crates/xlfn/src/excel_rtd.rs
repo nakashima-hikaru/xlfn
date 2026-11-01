@@ -37,7 +37,7 @@ pub(crate) use host::RtdSubscriptionHost;
 #[cfg(feature = "rtd")]
 pub(crate) use service::SubscriptionRuntimeRead;
 #[cfg(feature = "rtd")]
-pub(crate) use service::SubscriptionServiceSlot;
+pub(crate) use service::{SubscriptionServiceSlot, SubscriptionsStopped};
 
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
 #[allow(

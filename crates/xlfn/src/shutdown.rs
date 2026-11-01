@@ -1,154 +1,22 @@
 use crate::XllError;
 use crate::error::IntoXllError;
-use crate::generation::RuntimeGeneration;
 
 #[cfg(feature = "async")]
 pub(crate) use crate::async_udf::AsyncStopped;
+#[cfg(feature = "rtd")]
+pub(crate) use crate::excel_rtd::SubscriptionsStopped;
+#[cfg(not(feature = "rtd"))]
+pub(crate) use crate::excel_rtd_protocol::SubscriptionsStopped;
 #[cfg(not(feature = "async"))]
-mod non_async_tokens {
-    macro_rules! shutdown_token {
-        ($name:ident) => {
-            #[derive(Debug)]
-            pub(crate) struct $name {
-                _private: (),
-            }
-
-            impl $name {
-                // Issuance stays in the shutdown domain; callers can only
-                // consume the resulting proof values.
-                pub(crate) const fn issue() -> Self {
-                    Self { _private: () }
-                }
-            }
-        };
-    }
-
-    shutdown_token!(AsyncStopped);
-}
-#[cfg(not(feature = "async"))]
-pub(crate) use non_async_tokens::AsyncStopped;
-
-mod certificate_tokens {
-    macro_rules! shutdown_token {
-        ($name:ident) => {
-            #[derive(Debug)]
-            pub(crate) struct $name {
-                _private: (),
-            }
-
-            impl $name {
-                // Issuance stays in the shutdown domain; callers can only
-                // consume the resulting proof values.
-                pub(crate) const fn issue() -> Self {
-                    Self { _private: () }
-                }
-            }
-        };
-    }
-
-    shutdown_token!(AddinQuiesced);
-    shutdown_token!(GenerationReclaimed);
-    shutdown_token!(GenerationCallbacksDetached);
-}
-pub(crate) use certificate_tokens::{
-    AddinQuiesced, GenerationCallbacksDetached, GenerationReclaimed,
+pub(crate) use crate::runtime::AsyncStopped;
+pub(crate) use crate::runtime::{
+    AddinQuiescence as AddinQuiesced, GenerationCallbacksDetached, GenerationReclaimed,
 };
 
-/// Feature-neutral handle shutdown token used by the generation teardown.
-/// RTD-only builds contain no handle implementation state.
-pub(crate) struct HandlesSealed {
-    generation: Option<RuntimeGeneration>,
-    #[cfg(feature = "handles")]
-    teardown: Option<crate::handle::FormulaHandleServiceSealed>,
-}
-
-impl HandlesSealed {
-    pub(crate) fn empty(generation: Option<RuntimeGeneration>) -> Self {
-        Self {
-            generation,
-            #[cfg(feature = "handles")]
-            teardown: None,
-        }
-    }
-
-    #[cfg(feature = "handles")]
-    pub(crate) fn from_teardown(
-        generation: Option<RuntimeGeneration>,
-        teardown: crate::handle::FormulaHandleServiceSealed,
-    ) -> Self {
-        Self {
-            generation,
-            teardown: Some(teardown),
-        }
-    }
-
-    pub(crate) fn finish(self) -> crate::XllResult<HandlesQuiescent> {
-        #[cfg(feature = "handles")]
-        if let Some(teardown) = self.teardown {
-            return teardown.finish();
-        }
-        Ok(HandlesQuiescent::new(self.generation))
-    }
-}
-
-/// Proof that the handle capability for one runtime generation has completed
-/// its object and lease quiescence check.
-#[derive(Debug)]
-pub(crate) struct HandlesQuiescent {
-    generation: Option<RuntimeGeneration>,
-}
-
-impl HandlesQuiescent {
-    pub(crate) const fn new(generation: Option<RuntimeGeneration>) -> Self {
-        Self { generation }
-    }
-
-    pub(crate) const fn generation(&self) -> Option<RuntimeGeneration> {
-        self.generation
-    }
-}
-
-/// Feature-neutral proof that the generation subscription producers stopped.
-/// The RTD implementation issues this token; the lifecycle core only consumes
-/// it as part of the teardown proof.
-#[derive(Debug)]
-pub(crate) struct SubscriptionsStopped {
-    generation: Option<RuntimeGeneration>,
-}
-
-impl SubscriptionsStopped {
-    pub(crate) const fn issue(generation: Option<RuntimeGeneration>) -> Self {
-        Self { generation }
-    }
-
-    pub(crate) const fn generation(&self) -> Option<RuntimeGeneration> {
-        self.generation
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct ReturnsQuiescent {
-    _private: (),
-}
-
-impl ReturnsQuiescent {
-    fn issue() -> Self {
-        Self { _private: () }
-    }
-}
-
-pub(crate) fn wait_for_return_quiescence(
-    protocol: &crate::runtime_components::ReturnProtocol,
-) -> crate::XllResult<ReturnsQuiescent> {
-    protocol.wait_for_returns();
-    if protocol.returns_closed_and_quiescent() {
-        Ok(ReturnsQuiescent::issue())
-    } else {
-        Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-        })
-    }
-}
+#[cfg(feature = "handles")]
+pub(crate) use crate::handle::{FormulaHandleServiceSealed as HandlesSealed, HandlesQuiescent};
+#[cfg(not(feature = "handles"))]
+pub(crate) use crate::runtime_components::{HandlesQuiescent, HandlesSealed};
 
 /// Classification for a best-effort failure observed after unload safety was
 /// established.

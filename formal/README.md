@@ -397,9 +397,9 @@ this failure prefix, rejects certificates after terminal quarantine, and
 rejects a successful-return outcome for a quarantined trace. Rust regressions
 check that this failure issues no `callsDrained` certificate while retaining
 live owners; the checker does not derive certificate eligibility from the
-activity ledger. The Composition checker does not model terminal quarantine
-of a committed cleanup; its successful-return theorem does not cover this
-failure path.
+activity ledger. The Composition checker separately recognizes terminal
+retention quarantine after the cleanup owner is released; it does not treat
+this failure outcome as successful or logically certified shutdown.
 
 ### Composition trace checker
 
@@ -414,6 +414,34 @@ This terminal transition is distinct from `failOpen`, whose rollback can prove
 quiescence and return the runtime to `closed`. Rust replay tests cover both
 initialization errors and panics, including attempts after successful removal,
 and reject forged success, mismatched attempts, and reopening after quarantine.
+
+After `failOpen` has resolved an attempt, `quarantineOpen` also accepts the exact
+unclaimed `openRollbackPending` shape. Its nonzero attempt is diagnostic metadata
+from the retained canonical receiver. The abstract state no longer stores that
+failed attempt, so this event does not prove historical attempt identity or issue
+cleanup/reclamation authority. Rust is responsible for sourcing that diagnostic
+from the original retained receiver. The transition still requires no live open
+attempt or cleanup owner and clears logical-close certification.
+
+For a committed session, terminal quarantine requires a quarantined shutdown
+session, no active attempt/cleanup owner, and no logical-close certification.
+The lifecycle `open` marker records the committed publication, so its session
+invariant now permits only `open` or retention `quarantined` targets; arbitrary
+`closing` and `closed` lifts remain rejected. The former theorem
+`committed_session_phase_is_open` is correspondingly replaced by
+`committed_session_open_or_quarantined`. `TerminalQuarantine` is proved to exclude
+both `ReturnSafe` and logical-close certification. The ordinary successful-close
+certificate predicates and closed-state requirements are unchanged. Quarantine
+while a cleanup owner is still present is an `in_progress` observation until its
+release, rather than a terminal outcome.
+
+The positive composition fixtures include pending-open, owner-released, and
+unowned committed quarantine. `fixtures/composition-negative` rejects forged
+success for each path, active owners, zero pending diagnostics, a missing
+retention event, and a general close lift from the open publication marker.
+Each negative has a paired `.stderr` file checked exactly by the replay step,
+so an unrelated parse failure cannot satisfy the regression. The forged-success
+cases change only the corresponding valid fixture's outcome.
 
 ### Published-topic trace checker
 

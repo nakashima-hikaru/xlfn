@@ -5,21 +5,28 @@ use super::{Runtime, UnloadPolicy};
 use crate::Addin;
 use crate::XllResult;
 use crate::boundary::host::HostCloseBoundary;
-use crate::lifecycle::{HostLifecycleIntent, LifecycleAccess, LifecyclePhase};
+#[cfg(test)]
+use crate::lifecycle::HostLifecycleIntent;
+use crate::lifecycle::{CompletedRemovalIntent, LifecycleAccess, LifecyclePhase};
 use crate::runtime_components::{
     ModuleResidency, ResidencyAcquisition, ResidencyLeaseId, ResidencyReleaseOutcome,
 };
 
 pub(crate) struct ResidencyRelease<'a, A: Addin> {
     module: &'a ModuleResidency,
-    // Keeping this guard prevents a new opening from invalidating Closed.
-    _lifecycle: LifecycleAccess<'a, A>,
-    reason: ReleaseReason<'a>,
+    reason: ReleaseReason<'a, A>,
 }
 
-enum ReleaseReason<'a> {
-    Closed { _boundary: &'a HostCloseBoundary },
-    FailedOpen(ResidencyLeaseId),
+enum ReleaseReason<'a, A: Addin> {
+    Closed {
+        _boundary: &'a HostCloseBoundary,
+        completed: CompletedRemovalIntent<'a, A>,
+    },
+    FailedOpen {
+        id: ResidencyLeaseId,
+        // Retains the exact failed invocation's locked classification.
+        _lifecycle: LifecycleAccess<'a, A>,
+    },
 }
 
 impl<A: Addin> ResidencyRelease<'_, A> {
@@ -29,13 +36,13 @@ impl<A: Addin> ResidencyRelease<'_, A> {
     pub(crate) fn acquisition(&self) -> Option<&ResidencyLeaseId> {
         match &self.reason {
             ReleaseReason::Closed { .. } => None,
-            ReleaseReason::FailedOpen(id) => Some(id),
+            ReleaseReason::FailedOpen { id, .. } => Some(id),
         }
     }
-    fn release(mut self) -> XllResult<ResidencyReleaseOutcome> {
+    fn release(self) -> XllResult<ResidencyReleaseOutcome> {
         let outcome = self.module.release_authorized(&self)?;
-        if matches!(self.reason, ReleaseReason::Closed { .. }) {
-            self._lifecycle.clear_completed_removal_intent();
+        if let ReleaseReason::Closed { completed, .. } = self.reason {
+            completed.clear();
         }
         Ok(outcome)
     }
@@ -118,8 +125,10 @@ impl<'a, A: Addin, P: UnloadPolicy<A>> OpenResidency<'a, A, P> {
         }
         let permission = ResidencyRelease {
             module: &self.runtime.residency,
-            _lifecycle: control,
-            reason: ReleaseReason::FailedOpen(id),
+            reason: ReleaseReason::FailedOpen {
+                id,
+                _lifecycle: control,
+            },
         };
         if let Err(error) = permission.release() {
             crate::diagnostics::report_no_unwind("xlAutoOpen module residency release", &error);
@@ -137,18 +146,14 @@ impl<A: Addin, P: UnloadPolicy<A>> Runtime<A, P> {
             return Ok(None);
         }
         let control = self.lifecycle.access();
-        if control.phase() != LifecyclePhase::Closed
-            || control.host_intent() != HostLifecycleIntent::ExplicitRemovalComplete
-            || control.open_attempt().is_some()
-            || control.removal_attempt().is_some()
-        {
+        let Ok(completed) = control.into_completed_removal_intent() else {
             return Ok(None);
-        }
+        };
         ResidencyRelease {
             module: &self.residency,
-            _lifecycle: control,
             reason: ReleaseReason::Closed {
                 _boundary: boundary,
+                completed,
             },
         }
         .release()

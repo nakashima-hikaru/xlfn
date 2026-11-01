@@ -21,6 +21,10 @@ pub(crate) enum QuarantineReason {
 /// as a type-level guarantee that dropping the runtime cannot accidentally
 /// execute code whose quiescence was not proven.
 pub(crate) enum QuarantinedResource<A: crate::Addin> {
+    ModuleAuthority {
+        authority: ManuallyDrop<crate::module_runtime::ModuleAuthority>,
+        reason: QuarantineReason,
+    },
     SharedState {
         generation: Option<RuntimeGeneration>,
         shared_state: ManuallyDrop<A::SharedState>,
@@ -48,6 +52,20 @@ impl<A: crate::Addin> QuarantineVault<A> {
         Self {
             resources: Mutex::new(Vec::new()),
         }
+    }
+
+    /// A rejected canonical installation is not cleanup success. Keep its
+    /// affine authority without retrying drain or releasing its module epoch.
+    pub(crate) fn retain_module_authority(
+        &self,
+        authority: crate::module_runtime::ModuleAuthority,
+    ) {
+        self.resources
+            .lock()
+            .push(QuarantinedResource::ModuleAuthority {
+                authority: ManuallyDrop::new(authority),
+                reason: QuarantineReason::OpenStateInvariant,
+            });
     }
 
     pub(crate) fn retain_shared_state(
@@ -102,6 +120,10 @@ impl<A: crate::Addin> QuarantineVault<A> {
             .lock()
             .iter()
             .map(|resource| match resource {
+                QuarantinedResource::ModuleAuthority { authority, reason } => {
+                    let _ = authority;
+                    (None, *reason)
+                }
                 QuarantinedResource::SharedState {
                     generation,
                     shared_state,

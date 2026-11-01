@@ -18,6 +18,7 @@ python-check:
     uv run --project tools --locked ruff format --check tools
     uv run --project tools --locked ty check --project tools --error-on-warning
     uv run --project tools --locked python -B -m unittest discover -s tools/tests -p 'test_*.py'
+    uv run --project tools --locked python -B -m xlfn_tools.check_protocol_invariants
 
 python-format:
     uv run --project tools --locked ruff check --fix tools
@@ -34,6 +35,11 @@ doc:
 panic-boundaries:
     uv run --project tools --locked python -B -m unittest discover -s tools/tests -p test_check_panic_boundaries.py
     uv run --project tools --locked python -B -m xlfn_tools.check_panic_boundaries
+
+# Review new or changed protocol premises; observations are classified too.
+protocol-invariants:
+    uv run --project tools --locked python -B -m unittest discover -s tools/tests -p test_check_protocol_invariants.py
+    uv run --project tools --locked python -B -m xlfn_tools.check_protocol_invariants
 
 # Compile valid and invalid callers against private lifecycle typestates.
 typestate:

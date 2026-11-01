@@ -64,8 +64,7 @@ impl HandleRegistrySealed<'_> {
         self,
         generation: Option<crate::generation::RuntimeGeneration>,
     ) -> XllResult<crate::shutdown::HandlesQuiescent> {
-        self.finish_quiescence()?;
-        Ok(crate::shutdown::HandlesQuiescent::new(generation))
+        super::runtime::HandlesQuiescent::finish_registry(self, generation)
     }
 }
 

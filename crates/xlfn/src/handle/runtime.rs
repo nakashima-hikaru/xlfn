@@ -624,15 +624,35 @@ impl FormulaHandleService {
 /// every live binding. The service keeps the generation alive until async
 /// scoped tasks have drained and object/pin quiescence is certified.
 pub(crate) struct FormulaHandleServiceSealed {
-    generation: RuntimeGeneration,
-    service: Box<FormulaHandleService>,
+    generation: Option<RuntimeGeneration>,
+    service: Option<Box<FormulaHandleService>>,
+}
+
+/// Only registry drain or an actually vacant service slot can issue this fact.
+#[derive(Debug)]
+pub(crate) struct HandlesQuiescent {
+    generation: Option<RuntimeGeneration>,
+}
+
+impl HandlesQuiescent {
+    pub(crate) const fn generation(&self) -> Option<RuntimeGeneration> {
+        self.generation
+    }
+
+    pub(super) fn finish_registry(
+        registry: super::registry::HandleRegistrySealed<'_>,
+        generation: Option<RuntimeGeneration>,
+    ) -> XllResult<Self> {
+        registry.finish_quiescence()?;
+        Ok(Self { generation })
+    }
 }
 
 impl FormulaHandleServiceSealed {
     fn from_slot(
         generation: Option<RuntimeGeneration>,
         slot: &FormulaHandleServiceSlot,
-    ) -> XllResult<Option<Self>> {
+    ) -> XllResult<Self> {
         // Keep sealing and ownership transfer in one constructor. The slot
         // returns the exact service it sealed, and retains it on failure.
         // A borrowed registry proof cannot be paired with a different box.
@@ -641,17 +661,39 @@ impl FormulaHandleServiceSealed {
             .seal(|| (), |service| service.seal().map(|_| ()))
             .map_err(crate::error::map_service_slot_error)?;
         let (service, ()) = sealed.into_parts();
-        Ok(service.map(|service| Self {
-            generation: generation.expect("a published formula handle service has a generation"),
+        if service.is_some() && generation.is_none() {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        Ok(Self {
+            generation,
             service,
-        }))
+        })
     }
 
     pub(crate) fn finish(self) -> XllResult<crate::shutdown::HandlesQuiescent> {
         // `stop_producers` closes and drains the async manager before this
         // service box can be consumed. Raw object pin guards therefore never
         // outlive the arena reached by this teardown path.
-        self.service.store.seal()?.quiescent(Some(self.generation))
+        match self.service {
+            Some(service) => service.store.seal()?.quiescent(self.generation),
+            None => Ok(HandlesQuiescent {
+                generation: self.generation,
+            }),
+        }
+    }
+
+    pub(crate) fn absent_services<A: crate::Addin>(
+        control: &crate::lifecycle::LifecycleAccess<'_, A>,
+    ) -> XllResult<Self> {
+        if control.generation_services().is_some() {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
+            });
+        }
+        Ok(Self {
+            generation: control.protocol_generation(),
+            service: None,
+        })
     }
 }
 
@@ -751,12 +793,7 @@ impl FormulaHandleServiceSlot {
         &self,
         generation: Option<RuntimeGeneration>,
     ) -> XllResult<crate::shutdown::HandlesSealed> {
-        match FormulaHandleServiceSealed::from_slot(generation, self)? {
-            None => Ok(crate::shutdown::HandlesSealed::empty(generation)),
-            Some(teardown) => Ok(crate::shutdown::HandlesSealed::from_teardown(
-                generation, teardown,
-            )),
-        }
+        FormulaHandleServiceSealed::from_slot(generation, self)
     }
 }
 

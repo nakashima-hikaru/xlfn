@@ -580,6 +580,17 @@ jobs:
                   for trace in formal/fixtures/composition/*.json; do
                     formal/.lake/build/bin/composition_trace_checker < "$trace"
                   done
+                  for trace in formal/fixtures/composition-negative/*.json; do
+                    if actual=$(formal/.lake/build/bin/composition_trace_checker < "$trace" 2>&1); then
+                      echo "Invalid composition trace was accepted: $trace" >&2
+                      exit 1
+                    fi
+                    expected=$(cat "${trace%.json}.stderr")
+                    if [[ "$actual" != "$expected" ]]; then
+                      printf 'Unexpected rejection for %s\nExpected: %s\nActual: %s\n' "$trace" "$expected" "$actual" >&2
+                      exit 1
+                    fi
+                  done
 
             - name: Validate shutdown observation fixtures
               shell: bash

@@ -12,6 +12,9 @@ use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 use xlfn_kernel::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit};
 use xlfn_kernel::published_owner::PublishedOwner;
 
+mod authority_slot;
+use authority_slot::PreparedAuthorityInstall;
+
 mod opening;
 pub(crate) use opening::OpenStart;
 
@@ -311,12 +314,14 @@ impl<A: crate::Addin> OpeningPayload<A> {
         match self {
             Self::Empty => ClosingState::OpeningActive {
                 attempt,
+                quarantine_requested: false,
                 resources: ActiveOpeningClose::AwaitingAbort {
                     payload: OpenAbortPayload::Empty,
                 },
             },
             Self::Staged(opening) => ClosingState::OpeningActive {
                 attempt,
+                quarantine_requested: false,
                 resources: ActiveOpeningClose::AwaitingAbort {
                     payload: OpenAbortPayload::Staged(opening),
                 },
@@ -325,6 +330,7 @@ impl<A: crate::Addin> OpeningPayload<A> {
                 let (closing, authority) = bundle.into_closing();
                 ClosingState::OpeningActive {
                     attempt,
+                    quarantine_requested: false,
                     resources: ActiveOpeningClose::Published {
                         payload: PublishedClosePayload::Published(closing),
                         authority,
@@ -422,7 +428,10 @@ impl<A: crate::Addin> ClosePayload<A> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClosedState {
     Idle,
-    Finalizing { attempt: RemovalAttemptId },
+    Finalizing {
+        attempt: RemovalAttemptId,
+        quarantine_requested: bool,
+    },
 }
 
 /// The only payloads that can remain while an open attempt still owns the
@@ -491,13 +500,52 @@ impl<A: crate::Addin> PublishedClosePayload<A> {
     }
 }
 
-/// Module authority retained while a removal owner is active. The returned
-/// authority is optional because teardown may move it back to the lifecycle
-/// after partially progressing the close pipeline.
-pub(crate) struct RemovalClaimState {
+/// A module authority is either held by the pipeline or by canonical state,
+/// never an independent return candidate in both the claim guard and state.
+pub(crate) enum RemovalClaimState {
+    Outstanding(OutstandingModuleClaim),
+    Returned(ReturnedModuleClaim),
+}
+
+pub(crate) struct OutstandingModuleClaim {
     attempt: RemovalAttemptId,
     module_epoch: ModuleEpochId,
-    returned: Option<ModuleAuthority>,
+}
+
+pub(crate) struct ReturnedModuleClaim {
+    attempt: RemovalAttemptId,
+    authority: ModuleAuthority,
+}
+
+impl OutstandingModuleClaim {
+    fn return_authority(self, authority: ModuleAuthority) -> ReturnedModuleClaim {
+        // The authority crossed unlocked cleanup and may originate from an
+        // external recovery path. Its epoch is checked at this acquisition.
+        require_lifecycle_invariant(
+            authority.id() == self.module_epoch,
+            "returned module authority belongs to a different epoch",
+        );
+        ReturnedModuleClaim {
+            attempt: self.attempt,
+            authority,
+        }
+    }
+}
+
+impl RemovalClaimState {
+    fn attempt(&self) -> RemovalAttemptId {
+        match self {
+            Self::Outstanding(claim) => claim.attempt,
+            Self::Returned(claim) => claim.attempt,
+        }
+    }
+
+    fn module_epoch(&self) -> ModuleEpochId {
+        match self {
+            Self::Outstanding(claim) => claim.module_epoch,
+            Self::Returned(claim) => claim.authority.id(),
+        }
+    }
 }
 
 /// Resources eligible for a new removal claim. The authority contains only
@@ -511,6 +559,32 @@ pub(crate) struct AvailableClose<A: crate::Addin> {
 pub(crate) struct ClaimedClose<A: crate::Addin> {
     payload: ClosePayload<A>,
     claim: RemovalClaimState,
+}
+
+/// The terminal receiver contains no generation payload or retained module
+/// authority. It is acquired only while consuming a matching canonical shape.
+struct EmptyClaimedClose {
+    attempt: RemovalAttemptId,
+    module_epoch: ModuleEpochId,
+}
+
+impl EmptyClaimedClose {
+    fn finish_closed(self) -> ClosedState {
+        ClosedState::Finalizing {
+            attempt: self.attempt,
+            quarantine_requested: false,
+        }
+    }
+
+    fn into_resources<A: crate::Addin>(self) -> CloseResources<A> {
+        CloseResources::Claimed(ClaimedClose {
+            payload: ClosePayload::Empty,
+            claim: RemovalClaimState::Outstanding(OutstandingModuleClaim {
+                attempt: self.attempt,
+                module_epoch: self.module_epoch,
+            }),
+        })
+    }
 }
 
 /// Progressed or retained authority can be cleaned up or retained, but cannot
@@ -531,11 +605,10 @@ impl<A: crate::Addin> AvailableClose<A> {
         (
             ClaimedClose {
                 payload,
-                claim: RemovalClaimState {
+                claim: RemovalClaimState::Outstanding(OutstandingModuleClaim {
                     attempt,
                     module_epoch,
-                    returned: None,
-                },
+                }),
             },
             closing,
         )
@@ -543,30 +616,14 @@ impl<A: crate::Addin> AvailableClose<A> {
 }
 
 impl<A: crate::Addin> ClaimedClose<A> {
-    fn release(
-        self,
-        expected_attempt: RemovalAttemptId,
-        returned: Option<ModuleAuthority>,
-    ) -> CloseResources<A> {
-        let Self {
-            payload,
-            claim:
-                RemovalClaimState {
-                    attempt,
-                    module_epoch,
-                    returned: retained,
-                },
-        } = self;
-        validate_removal_owner(attempt, expected_attempt);
-        match combine_returned_authority(retained, returned) {
-            Some(authority) => {
-                require_lifecycle_invariant(
-                    authority.id() == module_epoch,
-                    "released module authority belongs to a different epoch",
-                );
+    fn release(self, expected_attempt: RemovalAttemptId) -> CloseResources<A> {
+        let Self { payload, claim } = self;
+        validate_removal_owner(claim.attempt(), expected_attempt);
+        match claim {
+            RemovalClaimState::Returned(ReturnedModuleClaim { authority, .. }) => {
                 CloseResources::with_authority(payload, authority)
             }
-            None => CloseResources::Unowned { payload },
+            RemovalClaimState::Outstanding(_) => CloseResources::Unowned { payload },
         }
     }
 }
@@ -586,7 +643,23 @@ pub(crate) enum CloseResources<A: crate::Addin> {
     Unavailable(UnavailableClose<A>),
 }
 
+/// Intermediate storage selection; absence becomes a qualified public outcome
+/// only after canonical identity and the module ingress are checked together.
+enum CleanupSelection {
+    Ready(ModuleCleanupReady),
+    RetainedUndrained(ModuleEpochId),
+    None,
+    DeferredOwner,
+    AwaitingOpenAbort,
+}
+
 impl<A: crate::Addin> CloseResources<A> {
+    /// No active opening attempt remains in this resource shape. An outstanding
+    /// module abort or removal owner still defers cleanup acquisition.
+    fn quarantine(self) -> LifecycleState<A> {
+        LifecycleState::Quarantined(self)
+    }
+
     fn with_authority(payload: ClosePayload<A>, authority: ModuleAuthority) -> Self {
         match authority.classify() {
             Ok(authority) => Self::Available(AvailableClose { payload, authority }),
@@ -636,7 +709,7 @@ impl<A: crate::Addin> CloseResources<A> {
     fn module_epoch_id(&self) -> Option<ModuleEpochId> {
         match self {
             Self::Available(available) => Some(available.authority.id()),
-            Self::Claimed(claimed) => Some(claimed.claim.module_epoch),
+            Self::Claimed(claimed) => Some(claimed.claim.module_epoch()),
             Self::Unavailable(unavailable) => Some(unavailable.authority.id()),
             Self::AwaitingOpenAbort { .. } | Self::Unowned { .. } => None,
         }
@@ -644,63 +717,34 @@ impl<A: crate::Addin> CloseResources<A> {
 
     fn removal_attempt(&self) -> Option<RemovalAttemptId> {
         match self {
-            Self::Claimed(claimed) => Some(claimed.claim.attempt),
+            Self::Claimed(claimed) => Some(claimed.claim.attempt()),
             _ => None,
         }
     }
 
-    fn install_authority(self, authority: ModuleAuthority) -> Self {
+    fn take_cleanup(self) -> (CleanupSelection, Self) {
         match self {
-            Self::AwaitingOpenAbort { payload, .. } => {
-                Self::with_authority(payload.into_close_payload(), authority)
-            }
-            Self::Unowned { payload } => Self::with_authority(payload, authority),
-            Self::Claimed(ClaimedClose {
-                payload,
-                claim:
-                    RemovalClaimState {
-                        attempt,
-                        module_epoch,
-                        returned: None,
-                    },
-            }) => {
-                require_lifecycle_invariant(
-                    authority.id() == module_epoch,
-                    "returned module authority belongs to a different epoch",
-                );
-                Self::Claimed(ClaimedClose {
-                    payload,
-                    claim: RemovalClaimState {
-                        attempt,
-                        module_epoch,
-                        returned: Some(authority),
-                    },
-                })
-            }
-            Self::Available(_) | Self::Unavailable(_) | Self::Claimed(_) => {
-                lifecycle_invariant_violation("module close authority was installed twice")
-            }
-        }
-    }
-
-    fn take_cleanup(self) -> (ModuleCleanupClaim, Self) {
-        match self {
+            other @ Self::AwaitingOpenAbort { .. } => (CleanupSelection::AwaitingOpenAbort, other),
+            other @ Self::Claimed(ClaimedClose {
+                claim: RemovalClaimState::Outstanding(_),
+                ..
+            }) => (CleanupSelection::DeferredOwner, other),
             Self::Available(AvailableClose { payload, authority }) => (
-                ModuleCleanupClaim::Ready(ModuleCleanupReady::Closing(authority.into_closing())),
+                CleanupSelection::Ready(ModuleCleanupReady::Closing(authority.into_closing())),
                 Self::Unowned { payload },
             ),
             Self::Unavailable(UnavailableClose {
                 payload,
                 authority: UnavailableModuleAuthority::Drained(drained),
             }) => (
-                ModuleCleanupClaim::Ready(ModuleCleanupReady::Drained(drained)),
+                CleanupSelection::Ready(ModuleCleanupReady::Drained(drained)),
                 Self::Unowned { payload },
             ),
             Self::Unavailable(UnavailableClose {
                 payload,
                 authority: UnavailableModuleAuthority::RetainedUndrained(retained),
             }) => (
-                ModuleCleanupClaim::RetainedUndrained(retained.id()),
+                CleanupSelection::RetainedUndrained(retained.id()),
                 Self::Unavailable(UnavailableClose {
                     payload,
                     authority: UnavailableModuleAuthority::RetainedUndrained(retained),
@@ -708,47 +752,39 @@ impl<A: crate::Addin> CloseResources<A> {
             ),
             Self::Claimed(ClaimedClose {
                 payload,
-                claim:
-                    RemovalClaimState {
-                        attempt,
-                        module_epoch,
-                        returned: Some(authority),
-                    },
-            }) => match authority.into_cleanup() {
-                Ok(authority) => (
-                    ModuleCleanupClaim::Ready(authority),
-                    Self::Claimed(ClaimedClose {
-                        payload,
-                        claim: RemovalClaimState {
-                            attempt,
-                            module_epoch,
-                            returned: None,
-                        },
-                    }),
-                ),
-                Err(retained) => (
-                    ModuleCleanupClaim::RetainedUndrained(retained.id()),
-                    Self::Claimed(ClaimedClose {
-                        payload,
-                        claim: RemovalClaimState {
-                            attempt,
-                            module_epoch,
-                            returned: Some(ModuleAuthority::RetainedUndrained(retained)),
-                        },
-                    }),
-                ),
-            },
-            other => (ModuleCleanupClaim::Missing, other),
+                claim: RemovalClaimState::Returned(ReturnedModuleClaim { attempt, authority }),
+            }) => {
+                let module_epoch = authority.id();
+                match authority.into_cleanup() {
+                    Ok(authority) => (
+                        CleanupSelection::Ready(authority),
+                        Self::Claimed(ClaimedClose {
+                            payload,
+                            claim: RemovalClaimState::Outstanding(OutstandingModuleClaim {
+                                attempt,
+                                module_epoch,
+                            }),
+                        }),
+                    ),
+                    Err(retained) => (
+                        CleanupSelection::RetainedUndrained(retained.id()),
+                        Self::Claimed(ClaimedClose {
+                            payload,
+                            claim: RemovalClaimState::Returned(ReturnedModuleClaim {
+                                attempt,
+                                authority: ModuleAuthority::RetainedUndrained(retained),
+                            }),
+                        }),
+                    ),
+                }
+            }
+            other => (CleanupSelection::None, other),
         }
     }
 
-    fn release(
-        self,
-        expected_attempt: RemovalAttemptId,
-        returned: Option<ModuleAuthority>,
-    ) -> Self {
+    fn release(self, expected_attempt: RemovalAttemptId) -> Self {
         match self {
-            Self::Claimed(claimed) => claimed.release(expected_attempt, returned),
+            Self::Claimed(claimed) => claimed.release(expected_attempt),
             _ => lifecycle_invariant_violation(
                 "removal owner release does not match canonical lifecycle ownership",
             ),
@@ -760,11 +796,10 @@ impl<A: crate::Addin> CloseResources<A> {
             Self::Claimed(ClaimedClose {
                 payload: ClosePayload::Retiring(retirement),
                 claim:
-                    RemovalClaimState {
+                    RemovalClaimState::Outstanding(OutstandingModuleClaim {
                         attempt,
                         module_epoch,
-                        returned: None,
-                    },
+                    }),
             }) if *attempt == expected_attempt
                 && retirement.services.is_none()
                 && module_epoch.is_current() =>
@@ -776,12 +811,7 @@ impl<A: crate::Addin> CloseResources<A> {
             }
             Self::Claimed(ClaimedClose {
                 payload: ClosePayload::Empty,
-                claim:
-                    RemovalClaimState {
-                        attempt,
-                        returned: None,
-                        ..
-                    },
+                claim: RemovalClaimState::Outstanding(OutstandingModuleClaim { attempt, .. }),
             }) if *attempt == expected_attempt => Some(FinalRemovalReady::Uncommitted),
             _ => None,
         }
@@ -791,12 +821,7 @@ impl<A: crate::Addin> CloseResources<A> {
         match self {
             Self::Claimed(ClaimedClose {
                 payload: ClosePayload::Empty,
-                claim:
-                    RemovalClaimState {
-                        attempt,
-                        returned: None,
-                        ..
-                    },
+                claim: RemovalClaimState::Outstanding(OutstandingModuleClaim { attempt, .. }),
             }) if *attempt == expected_attempt => Some(OpenRollbackReady { _private: () }),
             _ => None,
         }
@@ -856,23 +881,6 @@ impl<A: crate::Addin> CloseResources<A> {
         };
         (generation, resources)
     }
-
-    fn finish_closed(self) -> RemovalAttemptId {
-        match self {
-            Self::Claimed(ClaimedClose {
-                payload: ClosePayload::Empty,
-                claim:
-                    RemovalClaimState {
-                        attempt,
-                        returned: None,
-                        ..
-                    },
-            }) => attempt,
-            _ => lifecycle_invariant_violation(
-                "closed publication requires an empty claimed lifecycle payload",
-            ),
-        }
-    }
 }
 
 /// The close payload remains opening-active until the open attempt is either
@@ -881,6 +889,7 @@ impl<A: crate::Addin> CloseResources<A> {
 pub(crate) enum ClosingState<A: crate::Addin> {
     OpeningActive {
         attempt: OpenAttemptId,
+        quarantine_requested: bool,
         resources: ActiveOpeningClose<A>,
     },
     Ready {
@@ -896,6 +905,21 @@ pub(crate) enum ActiveOpeningClose<A: crate::Addin> {
         payload: PublishedClosePayload<A>,
         authority: ClaimableModuleAuthority,
     },
+}
+
+impl<A: crate::Addin> ActiveOpeningClose<A> {
+    fn resolve(self, attempt: OpenAttemptId) -> CloseResources<A> {
+        match self {
+            Self::AwaitingAbort { payload } => CloseResources::AwaitingOpenAbort {
+                _attempt: attempt,
+                payload,
+            },
+            Self::Published { payload, authority } => CloseResources::Available(AvailableClose {
+                payload: payload.into_close_payload(),
+                authority,
+            }),
+        }
+    }
 }
 
 impl<A: crate::Addin> ClosingState<A> {
@@ -983,54 +1007,27 @@ impl<A: crate::Addin> ClosingState<A> {
         }
     }
 
-    fn resolve_open_failure(self) -> Self {
+    fn resolve_open_failure(self) -> LifecycleState<A> {
         match self {
             Self::OpeningActive {
                 attempt,
-                resources: ActiveOpeningClose::AwaitingAbort { payload },
-            } => Self::Ready {
-                resources: CloseResources::AwaitingOpenAbort {
-                    _attempt: attempt,
-                    payload,
-                },
-            },
-            Self::OpeningActive {
-                resources: ActiveOpeningClose::Published { payload, authority },
-                ..
-            } => Self::Ready {
-                resources: CloseResources::Available(AvailableClose {
-                    payload: payload.into_close_payload(),
-                    authority,
-                }),
-            },
-            Self::Ready { resources } => Self::Ready { resources },
-        }
-    }
-
-    fn install_authority(self, authority: ModuleAuthority) -> Self {
-        match self {
-            Self::OpeningActive {
-                attempt,
-                resources: ActiveOpeningClose::AwaitingAbort { payload },
-            } => Self::Ready {
-                resources: CloseResources::AwaitingOpenAbort {
-                    _attempt: attempt,
-                    payload,
+                resources,
+                quarantine_requested,
+            } => {
+                let resources = resources.resolve(attempt);
+                if quarantine_requested {
+                    resources.quarantine()
+                } else {
+                    LifecycleState::Closing(Self::Ready { resources })
                 }
-                .install_authority(authority),
-            },
-            Self::OpeningActive { .. } => lifecycle_invariant_violation(
-                "module authority installed while closing already owns an authority",
-            ),
-            Self::Ready { resources } => Self::Ready {
-                resources: resources.install_authority(authority),
-            },
+            }
+            Self::Ready { resources } => LifecycleState::Closing(Self::Ready { resources }),
         }
     }
 
-    fn take_cleanup(self) -> (ModuleCleanupClaim, Self) {
+    fn take_cleanup(self) -> (CleanupSelection, Self) {
         match self {
-            Self::OpeningActive { .. } => (ModuleCleanupClaim::Missing, self),
+            Self::OpeningActive { .. } => (CleanupSelection::None, self),
             Self::Ready { resources } => {
                 let (authority, resources) = resources.take_cleanup();
                 (authority, Self::Ready { resources })
@@ -1038,12 +1035,16 @@ impl<A: crate::Addin> ClosingState<A> {
         }
     }
 
-    fn into_quarantine_resources(self) -> CloseResources<A> {
+    fn request_quarantine(self) -> LifecycleState<A> {
         match self {
-            Self::Ready { resources } => resources,
-            Self::OpeningActive { .. } => lifecycle_invariant_violation(
-                "opening-active close cannot be quarantined before open failure is resolved",
-            ),
+            Self::OpeningActive {
+                attempt, resources, ..
+            } => LifecycleState::Closing(Self::OpeningActive {
+                attempt,
+                resources,
+                quarantine_requested: true,
+            }),
+            Self::Ready { resources } => resources.quarantine(),
         }
     }
 
@@ -1051,6 +1052,7 @@ impl<A: crate::Addin> ClosingState<A> {
         match self {
             Self::OpeningActive {
                 attempt,
+                quarantine_requested,
                 resources:
                     ActiveOpeningClose::Published {
                         payload: PublishedClosePayload::Published(closing),
@@ -1062,6 +1064,7 @@ impl<A: crate::Addin> ClosingState<A> {
                     Some(generation),
                     Self::OpeningActive {
                         attempt,
+                        quarantine_requested,
                         resources: ActiveOpeningClose::Published {
                             payload: PublishedClosePayload::Retiring(retirement),
                             authority,
@@ -1273,7 +1276,7 @@ impl<A: crate::Addin> LifecycleState<A> {
 
     fn removal_attempt(&self) -> Option<RemovalAttemptId> {
         match self {
-            Self::Closed(ClosedState::Finalizing { attempt }) => Some(*attempt),
+            Self::Closed(ClosedState::Finalizing { attempt, .. }) => Some(*attempt),
             Self::Closing(closing) => closing.removal_attempt(),
             Self::OpenRollbackPending(resources) | Self::Quarantined(resources) => {
                 resources.removal_attempt()
@@ -1318,53 +1321,6 @@ impl<A: crate::Addin> LifecycleState<A> {
             }
         }
     }
-
-    fn install_module_authority(&mut self, authority: ModuleAuthority) {
-        let state = mem::replace(self, Self::Closed(ClosedState::Idle));
-        *self = match state {
-            Self::Closed(ClosedState::Idle) => Self::Closing(ClosingState::Ready {
-                resources: CloseResources::with_authority(ClosePayload::Empty, authority),
-            }),
-            Self::Opening { attempt, payload } => Self::OpenRollbackPending(
-                payload
-                    .into_close_resources(attempt)
-                    .install_authority(authority),
-            ),
-            Self::Closing(closing) => Self::Closing(closing.install_authority(authority)),
-            Self::OpenRollbackPending(resources) => {
-                Self::OpenRollbackPending(resources.install_authority(authority))
-            }
-            Self::Quarantined(resources) => {
-                Self::Quarantined(resources.install_authority(authority))
-            }
-            Self::Open { .. } | Self::Closed(ClosedState::Finalizing { .. }) => {
-                lifecycle_invariant_violation(
-                    "module authority installed in an incompatible lifecycle state",
-                )
-            }
-        };
-    }
-
-    fn into_quarantine_resources(self) -> CloseResources<A> {
-        match self {
-            Self::Closed(ClosedState::Idle) => CloseResources::Unowned {
-                payload: ClosePayload::Empty,
-            },
-            Self::Closed(ClosedState::Finalizing { .. }) => lifecycle_invariant_violation(
-                "finalizing removal cannot be moved to quarantine without its owner",
-            ),
-            Self::Opening { attempt, payload } => payload.into_close_resources(attempt),
-            Self::Open { bundle } => {
-                let (closing, authority) = bundle.into_closing();
-                CloseResources::Available(AvailableClose {
-                    payload: ClosePayload::Published(closing),
-                    authority,
-                })
-            }
-            Self::Closing(closing) => closing.into_quarantine_resources(),
-            Self::OpenRollbackPending(resources) | Self::Quarantined(resources) => resources,
-        }
-    }
 }
 
 /// A terminal-state capability produced only from an exact canonical closing
@@ -1389,7 +1345,7 @@ struct LifecycleCore<A: crate::Addin> {
     state: LifecycleState<A>,
     host_intent: HostLifecycleIntent,
     next_lifecycle_attempt: u64,
-    next_removal_attempt: u64,
+    next_removal_attempt: RemovalAttemptId,
     last_committed_generation: Option<RuntimeGeneration>,
     removal_epoch: u64,
 }
@@ -1412,7 +1368,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
             state: LifecycleState::Closed(ClosedState::Idle),
             host_intent: HostLifecycleIntent::None,
             next_lifecycle_attempt: 1,
-            next_removal_attempt: 1,
+            next_removal_attempt: RemovalAttemptId::ONE,
             last_committed_generation: None,
             removal_epoch: 0,
         }
@@ -1497,7 +1453,39 @@ pub(crate) struct LifecycleAccess<'a, A: crate::Addin> {
     core: MutexGuard<'a, LifecycleCore<A>>,
 }
 
-impl<A: crate::Addin> LifecycleAccess<'_, A> {
+/// One closed, completed removal intent held under its original lifecycle
+/// lock. The residency epilogue cannot clear an arbitrary lifecycle's intent.
+pub(crate) struct CompletedRemovalIntent<'coordinator, A: crate::Addin> {
+    access: LifecycleAccess<'coordinator, A>,
+}
+
+impl<A: crate::Addin> CompletedRemovalIntent<'_, A> {
+    pub(crate) fn clear(mut self) {
+        self.access.transition(|core| {
+            core.host_intent = HostLifecycleIntent::None;
+            ((), TransitionEffect::Keep)
+        });
+    }
+}
+
+/// Successful canonical open commit while the exact mutation guard remains
+/// borrowed. Only the commit operation can issue this observation authority.
+pub(crate) struct CommittedOpen<'access, 'coordinator, A: crate::Addin> {
+    _access: &'access LifecycleAccess<'coordinator, A>,
+    attempt: OpenAttemptId,
+}
+
+impl<A: crate::Addin> CommittedOpen<'_, '_, A> {
+    pub(crate) fn attempt(&self) -> OpenAttemptId {
+        self.attempt
+    }
+
+    pub(crate) fn access(&self) -> &LifecycleAccess<'_, A> {
+        self._access
+    }
+}
+
+impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
     /// Applies one canonical mutation and commits its read-side projection
     /// before returning. Lifecycle writers must use this boundary instead of
     /// mutating the core and committing later: an early return can no longer
@@ -1545,6 +1533,7 @@ impl<A: crate::Addin> LifecycleAccess<'_, A> {
         self.core.open_rollback_ready(expected_attempt)
     }
 
+    #[cfg(test)]
     pub(crate) fn module_epoch_id(&self) -> Option<ModuleEpochId> {
         self.canonical_state().module_epoch_id()
     }
@@ -1558,17 +1547,20 @@ impl<A: crate::Addin> LifecycleAccess<'_, A> {
         self.core.next_lifecycle_attempt
     }
 
-    /// Finish the close epilogue without unlocking between release and intent.
-    pub(crate) fn clear_completed_removal_intent(&mut self) {
-        require_lifecycle_invariant(
-            self.phase() == LifecyclePhase::Closed
-                && self.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete,
-            "residency epilogue requires completed removal",
-        );
-        self.transition(|core| {
-            core.host_intent = HostLifecycleIntent::None;
-            ((), TransitionEffect::Keep)
-        });
+    /// Classify once while locked, then retain that exact guard through the
+    /// physical release and its consuming intent epilogue.
+    pub(crate) fn into_completed_removal_intent(
+        self,
+    ) -> Result<CompletedRemovalIntent<'coordinator, A>, Self> {
+        if matches!(
+            self.canonical_state(),
+            LifecycleState::Closed(ClosedState::Idle)
+        ) && self.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete
+        {
+            Ok(CompletedRemovalIntent { access: self })
+        } else {
+            Err(self)
+        }
     }
 
     pub(crate) fn matches_latest_open_attempt(&self, generation: RuntimeGeneration) -> bool {
@@ -1577,6 +1569,28 @@ impl<A: crate::Addin> LifecycleAccess<'_, A> {
 
     pub(crate) fn open_attempt(&self) -> Option<OpenAttemptId> {
         self.canonical_state().open_attempt()
+    }
+
+    /// Observation metadata for the first irreversible quarantine request.
+    /// This does not authorize cleanup or resolve the active opening owner.
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn unobserved_quarantine_open_attempt(&self) -> Option<OpenAttemptId> {
+        match self.canonical_state() {
+            LifecycleState::Opening { attempt, .. }
+            | LifecycleState::Closing(ClosingState::OpeningActive {
+                attempt,
+                quarantine_requested: false,
+                ..
+            }) => Some(*attempt),
+            // Failure already relinquished the opening phase, but its owner
+            // still owes the module authority. This is diagnostic identity,
+            // never a claim or a permission to reclaim the pending payload.
+            LifecycleState::OpenRollbackPending(CloseResources::AwaitingOpenAbort {
+                _attempt,
+                ..
+            }) => Some(*_attempt),
+            _ => None,
+        }
     }
 
     pub(crate) fn removal_attempt(&self) -> Option<RemovalAttemptId> {
@@ -1646,6 +1660,15 @@ enum TransitionEffect<A: crate::Addin> {
     Publish(NonNull<PublishedGeneration<A>>),
 }
 
+/// Classified together with the canonical mutation, never reconstructed from
+/// the resulting broad lifecycle enum.
+enum CloseRequestDisposition {
+    ClosedIdle,
+    Finalizing,
+    Closing,
+    Quarantined,
+}
+
 impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(crate) const fn new() -> Self {
         Self {
@@ -1684,6 +1707,14 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         access.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
             let (authority, state) = match state {
+                state @ LifecycleState::Closing(ClosingState::OpeningActive {
+                    quarantine_requested: true,
+                    ..
+                })
+                | state @ LifecycleState::Closed(ClosedState::Finalizing {
+                    quarantine_requested: true,
+                    ..
+                }) => (CleanupSelection::DeferredOwner, state),
                 LifecycleState::Closing(closing) => {
                     let (authority, closing) = closing.take_cleanup();
                     (authority, LifecycleState::Closing(closing))
@@ -1696,7 +1727,28 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     let (authority, resources) = resources.take_cleanup();
                     (authority, LifecycleState::Quarantined(resources))
                 }
-                other => (ModuleCleanupClaim::Missing, other),
+                other => (CleanupSelection::None, other),
+            };
+            let authority = match authority {
+                CleanupSelection::Ready(authority) => ModuleCleanupClaim::Ready(authority),
+                CleanupSelection::RetainedUndrained(epoch) => {
+                    ModuleCleanupClaim::RetainedUndrained(epoch)
+                }
+                CleanupSelection::DeferredOwner => ModuleCleanupClaim::DeferredOwner,
+                CleanupSelection::AwaitingOpenAbort
+                    if crate::module_runtime::ingress().phase() != crate::ingress::PHASE_CLOSED =>
+                {
+                    ModuleCleanupClaim::DeferredOwner
+                }
+                CleanupSelection::AwaitingOpenAbort => ModuleCleanupClaim::NoModuleAuthority,
+                CleanupSelection::None
+                    if state.module_epoch_id().is_none()
+                        && crate::module_runtime::ingress().phase()
+                            == crate::ingress::PHASE_CLOSED =>
+                {
+                    ModuleCleanupClaim::NoModuleAuthority
+                }
+                CleanupSelection::None => ModuleCleanupClaim::Unavailable,
             };
             core.state = state;
             (authority, TransitionEffect::Keep)
@@ -1706,33 +1758,47 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(in crate::lifecycle) fn retain_failed_module_cleanup(
         &self,
         authority: ModuleCleanupAuthority,
-    ) {
+    ) -> Result<(), ModuleAuthority> {
         let mut access = self.access();
-        access.transition(|core| {
-            core.state
-                .install_module_authority(authority.into_authority());
-            ((), TransitionEffect::Keep)
-        });
-    }
-
-    pub(in crate::lifecycle) fn complete_open_abort(
-        &self,
-        closing: crate::module_runtime::ModuleClosing,
-    ) {
-        let mut access = self.access();
-        self.complete_open_abort_locked(&mut access, closing);
+        self.install_returned_authority(&mut access, authority.into_authority())
     }
 
     pub(in crate::lifecycle) fn complete_open_abort_locked(
         &self,
         access: &mut LifecycleAccess<'_, A>,
         closing: crate::module_runtime::ModuleClosing,
-    ) {
+    ) -> Result<(), ModuleAuthority> {
+        self.install_returned_authority(access, ModuleAuthority::Closing(closing))
+    }
+
+    fn install_returned_authority(
+        &self,
+        access: &mut LifecycleAccess<'_, A>,
+        authority: ModuleAuthority,
+    ) -> Result<(), ModuleAuthority> {
+        if !std::ptr::eq(access.coordinator, self) {
+            return Err(authority);
+        }
         access.transition(|core| {
-            core.state
-                .install_module_authority(ModuleAuthority::Closing(closing));
-            ((), TransitionEffect::Keep)
-        });
+            // If future code unwinds after detaching the protected receiver,
+            // the canonical fallback must not permit a new opening attempt.
+            let state = mem::replace(
+                &mut core.state,
+                LifecycleState::Quarantined(CloseResources::Unowned {
+                    payload: ClosePayload::Empty,
+                }),
+            );
+            match PreparedAuthorityInstall::acquire(state, authority) {
+                Ok(installation) => {
+                    core.state = installation.install();
+                    (Ok(()), TransitionEffect::Keep)
+                }
+                Err((state, authority)) => {
+                    core.state = state;
+                    (Err(authority), TransitionEffect::Keep)
+                }
+            }
+        })
     }
 
     pub(in crate::lifecycle) fn clear_certified_retirement(
@@ -1822,33 +1888,6 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         });
     }
 
-    fn next_lifecycle_attempt_id(
-        &self,
-        access: &mut LifecycleAccess<'_, A>,
-    ) -> crate::XllResult<OpenAttemptId> {
-        access.transition(|core| {
-            let attempt_id = core.next_lifecycle_attempt;
-            let Some(next) = attempt_id.checked_add(1) else {
-                return (
-                    Err(crate::XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::ATTEMPT_OVERFLOW,
-                    }),
-                    TransitionEffect::Keep,
-                );
-            };
-            let Some(attempt) = OpenAttemptId::new(attempt_id) else {
-                return (
-                    Err(crate::XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::ATTEMPT_ZERO,
-                    }),
-                    TransitionEffect::Keep,
-                );
-            };
-            core.next_lifecycle_attempt = next;
-            (Ok(attempt), TransitionEffect::Keep)
-        })
-    }
-
     /// Commits the read-side projection for a canonical transition.
     ///
     /// The ordering is part of the lifecycle protocol: publication is
@@ -1895,51 +1934,63 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         TransitionEffect::Publish(NonNull::from(bundle.publication.as_ref()))
     }
 
-    /// Clears host intent before the external module-open protocol is started.
-    fn prepare_open(&self, access: &mut LifecycleAccess<'_, A>) {
-        require_lifecycle_invariant(
-            access.phase() == LifecyclePhase::Closed,
-            "open preparation requires the closed lifecycle phase",
-        );
-        access.transition(|core| {
-            core.host_intent = HostLifecycleIntent::None;
-            ((), TransitionEffect::Keep)
-        });
-    }
-
-    fn allocate_open_attempt(
+    /// One locked acquisition: classify ClosedIdle, allocate an attempt, and
+    /// install Opening together. Failed acquisition leaves host intent intact.
+    fn begin_opening_if_closed(
         &self,
         access: &mut LifecycleAccess<'_, A>,
+        expected_removal_epoch: crate::generation::RemovalEpoch,
     ) -> crate::XllResult<OpenAttemptId> {
-        self.next_lifecycle_attempt_id(access)
-    }
-
-    fn begin_opening(&self, access: &mut LifecycleAccess<'_, A>, attempt: OpenAttemptId) {
-        require_lifecycle_invariant(
-            access.phase() == LifecyclePhase::Closed,
-            "opening requires the closed lifecycle phase",
-        );
-        require_lifecycle_invariant(
-            access.removal_attempt().is_none(),
-            "opening cannot begin while removal owns the lifecycle",
-        );
         access.transition(|core| {
+            match (
+                &core.state,
+                core.removal_epoch == expected_removal_epoch.get(),
+            ) {
+                (LifecycleState::Closed(ClosedState::Idle), true) => {}
+                _ => {
+                    return (
+                        Err(crate::XllError::Internal {
+                            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_PHASE,
+                        }),
+                        TransitionEffect::Keep,
+                    );
+                }
+            }
+            let attempt_id = core.next_lifecycle_attempt;
+            let Some(next) = attempt_id.checked_add(1) else {
+                return (
+                    Err(crate::XllError::Internal {
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::ATTEMPT_OVERFLOW,
+                    }),
+                    TransitionEffect::Keep,
+                );
+            };
+            let Some(attempt) = OpenAttemptId::new(attempt_id) else {
+                return (
+                    Err(crate::XllError::Internal {
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::ATTEMPT_ZERO,
+                    }),
+                    TransitionEffect::Keep,
+                );
+            };
+            core.next_lifecycle_attempt = next;
+            core.host_intent = HostLifecycleIntent::None;
             core.state = LifecycleState::Opening {
                 attempt,
                 payload: OpeningPayload::Empty,
             };
-            ((), TransitionEffect::Keep)
-        });
+            (Ok(attempt), TransitionEffect::Keep)
+        })
     }
 
     /// Publishes a successfully assembled generation while retaining the
     /// opening attempt until `commit_open` completes the lifecycle transition.
-    pub(in crate::lifecycle) fn commit_open(
+    pub(in crate::lifecycle) fn commit_open<'access, 'coordinator>(
         &self,
-        core: &mut LifecycleAccess<'_, A>,
+        core: &'access mut LifecycleAccess<'coordinator, A>,
         generation: RuntimeGeneration,
-    ) -> crate::XllResult<()> {
-        core.transition(|core| {
+    ) -> crate::XllResult<CommittedOpen<'access, 'coordinator, A>> {
+        let attempt = core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
             match state {
                 LifecycleState::Opening {
@@ -1961,13 +2012,9 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                         );
                     }
                     core.last_committed_generation = Some(generation);
+                    let effect = Self::publish_effect(&bundle);
                     core.state = LifecycleState::Open { bundle };
-                    let effect = if let LifecycleState::Open { bundle } = core.canonical_state() {
-                        Self::publish_effect(bundle)
-                    } else {
-                        unreachable!("open bundle was just installed");
-                    };
-                    (Ok(()), effect)
+                    (Ok(attempt), effect)
                 }
                 other => {
                     core.state = other;
@@ -1979,6 +2026,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     )
                 }
             }
+        })?;
+        Ok(CommittedOpen {
+            _access: core,
+            attempt,
         })
     }
 
@@ -2000,7 +2051,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     OpenFailureDisposition::RollbackRequired,
                 ),
                 LifecycleState::Closing(closing) => (
-                    LifecycleState::Closing(closing.resolve_open_failure()),
+                    closing.resolve_open_failure(),
                     OpenFailureDisposition::ClosingOwnsCleanup,
                 ),
                 other => (other, OpenFailureDisposition::ClosingOwnsCleanup),
@@ -2012,46 +2063,57 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
 
     /// Requests closing while moving the active generation payload under the
     /// closing phase. No payload remains in a separate core field.
-    fn request_closing(&self, core: &mut LifecycleAccess<'_, A>) {
+    fn request_closing(&self, core: &mut LifecycleAccess<'_, A>) -> CloseRequestDisposition {
         core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
-            let next = match state {
-                LifecycleState::Closed(ClosedState::Idle) => {
-                    LifecycleState::Closing(ClosingState::Ready {
-                        resources: CloseResources::Unowned {
-                            payload: ClosePayload::Empty,
-                        },
-                    })
-                }
-                LifecycleState::Opening { attempt, payload } => {
-                    LifecycleState::Closing(payload.into_closing_state(attempt))
-                }
+            let (next, disposition, effect) = match state {
+                LifecycleState::Closed(ClosedState::Idle) => (
+                    LifecycleState::Closed(ClosedState::Idle),
+                    CloseRequestDisposition::ClosedIdle,
+                    TransitionEffect::Keep,
+                ),
+                LifecycleState::Opening { attempt, payload } => (
+                    LifecycleState::Closing(payload.into_closing_state(attempt)),
+                    CloseRequestDisposition::Closing,
+                    TransitionEffect::ClearPublication,
+                ),
                 LifecycleState::Open { bundle } => {
                     let (closing, authority) = bundle.into_closing();
-                    LifecycleState::Closing(ClosingState::Ready {
-                        resources: CloseResources::Available(AvailableClose {
-                            payload: ClosePayload::Published(closing),
-                            authority,
+                    (
+                        LifecycleState::Closing(ClosingState::Ready {
+                            resources: CloseResources::Available(AvailableClose {
+                                payload: ClosePayload::Published(closing),
+                                authority,
+                            }),
                         }),
-                    })
+                        CloseRequestDisposition::Closing,
+                        TransitionEffect::ClearPublication,
+                    )
                 }
-                LifecycleState::Closing(closing) => LifecycleState::Closing(closing),
-                LifecycleState::OpenRollbackPending(resources) => {
-                    LifecycleState::Closing(ClosingState::Ready { resources })
-                }
-                LifecycleState::Quarantined(resources) => LifecycleState::Quarantined(resources),
-                LifecycleState::Closed(ClosedState::Finalizing { attempt }) => {
-                    LifecycleState::Closed(ClosedState::Finalizing { attempt })
-                }
+                LifecycleState::Closing(closing) => (
+                    LifecycleState::Closing(closing),
+                    CloseRequestDisposition::Closing,
+                    TransitionEffect::Keep,
+                ),
+                LifecycleState::OpenRollbackPending(resources) => (
+                    LifecycleState::Closing(ClosingState::Ready { resources }),
+                    CloseRequestDisposition::Closing,
+                    TransitionEffect::ClearPublication,
+                ),
+                LifecycleState::Quarantined(resources) => (
+                    LifecycleState::Quarantined(resources),
+                    CloseRequestDisposition::Quarantined,
+                    TransitionEffect::Keep,
+                ),
+                LifecycleState::Closed(finalizing @ ClosedState::Finalizing { .. }) => (
+                    LifecycleState::Closed(finalizing),
+                    CloseRequestDisposition::Finalizing,
+                    TransitionEffect::Keep,
+                ),
             };
             core.state = next;
-            let effect = if matches!(core.canonical_state(), LifecycleState::Closing(_)) {
-                TransitionEffect::ClearPublication
-            } else {
-                TransitionEffect::Keep
-            };
-            ((), effect)
-        });
+            (disposition, effect)
+        })
     }
 
     fn begin_removal_request(&self, core: &mut LifecycleAccess<'_, A>) {
@@ -2065,14 +2127,9 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 LifecycleState::Closing(ClosingState::Ready {
                     resources: CloseResources::Available(available),
                 }) => {
-                    let attempt =
-                        RemovalAttemptId::new(core.next_removal_attempt).unwrap_or_else(|| {
-                            lifecycle_invariant_violation(
-                                "lifecycle removal-attempt identity reached zero",
-                            )
-                        });
+                    let attempt = core.next_removal_attempt;
                     core.next_removal_attempt =
-                        core.next_removal_attempt.checked_add(1).unwrap_or_else(|| {
+                        core.next_removal_attempt.checked_next().unwrap_or_else(|| {
                             lifecycle_invariant_violation(
                                 "lifecycle removal-attempt identity exhausted",
                             )
@@ -2089,14 +2146,9 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     )
                 }
                 LifecycleState::OpenRollbackPending(CloseResources::Available(available)) => {
-                    let attempt =
-                        RemovalAttemptId::new(core.next_removal_attempt).unwrap_or_else(|| {
-                            lifecycle_invariant_violation(
-                                "lifecycle removal-attempt identity reached zero",
-                            )
-                        });
+                    let attempt = core.next_removal_attempt;
                     core.next_removal_attempt =
-                        core.next_removal_attempt.checked_add(1).unwrap_or_else(|| {
+                        core.next_removal_attempt.checked_next().unwrap_or_else(|| {
                             lifecycle_invariant_violation(
                                 "lifecycle removal-attempt identity exhausted",
                             )
@@ -2117,28 +2169,68 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         })
     }
 
+    pub(in crate::lifecycle) fn return_removal_authority(
+        &self,
+        access: &mut LifecycleAccess<'_, A>,
+        expected_attempt: RemovalAttemptId,
+        authority: ModuleAuthority,
+    ) {
+        access.transition(|core| {
+            // Shared state can change through quarantine. Acquiring this slot
+            // validates the owner; only the outstanding receiver can return.
+            let resources = match &mut core.state {
+                LifecycleState::Closing(ClosingState::Ready { resources })
+                | LifecycleState::OpenRollbackPending(resources)
+                | LifecycleState::Quarantined(resources) => resources,
+                _ => {
+                    lifecycle_invariant_violation("module return lacks its canonical removal claim")
+                }
+            };
+            let old = mem::replace(
+                resources,
+                CloseResources::Unowned {
+                    payload: ClosePayload::Empty,
+                },
+            );
+            *resources = match old {
+                CloseResources::Claimed(ClaimedClose {
+                    payload,
+                    claim: RemovalClaimState::Outstanding(claim),
+                }) => {
+                    validate_removal_owner(claim.attempt, expected_attempt);
+                    CloseResources::Claimed(ClaimedClose {
+                        payload,
+                        claim: RemovalClaimState::Returned(claim.return_authority(authority)),
+                    })
+                }
+                _ => lifecycle_invariant_violation(
+                    "module return does not own an outstanding canonical claim",
+                ),
+            };
+            ((), TransitionEffect::Keep)
+        });
+    }
+
     pub(in crate::lifecycle) fn release_removal_claim(
         &self,
         core: &mut LifecycleAccess<'_, A>,
         attempt: RemovalAttemptId,
-        returned: Option<ModuleAuthority>,
         finalization_failed: bool,
     ) {
         core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
             core.state = match state {
-                LifecycleState::Closed(ClosedState::Finalizing { attempt: expected }) => {
+                LifecycleState::Closed(ClosedState::Finalizing {
+                    attempt: expected,
+                    quarantine_requested,
+                }) => {
                     require_lifecycle_invariant(
                         expected == attempt,
                         "removal owner identity does not match the finalizing lifecycle owner",
                     );
-                    require_lifecycle_invariant(
-                        returned.is_none(),
-                        "finalizing removal owner returned module authority",
-                    );
                     // Commit terminal failure and claim return atomically: no
                     // unclaimed Closed state is observable on release failure.
-                    if finalization_failed {
+                    if finalization_failed || quarantine_requested {
                         LifecycleState::Quarantined(CloseResources::Unowned {
                             payload: ClosePayload::Empty,
                         })
@@ -2147,7 +2239,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     }
                 }
                 LifecycleState::Closing(ClosingState::Ready { resources }) => {
-                    let resources = resources.release(attempt, returned);
+                    let resources = resources.release(attempt);
                     if finalization_failed {
                         LifecycleState::Quarantined(resources)
                     } else {
@@ -2155,7 +2247,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     }
                 }
                 LifecycleState::OpenRollbackPending(resources) => {
-                    let resources = resources.release(attempt, returned);
+                    let resources = resources.release(attempt);
                     if finalization_failed {
                         LifecycleState::Quarantined(resources)
                     } else {
@@ -2163,7 +2255,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     }
                 }
                 LifecycleState::Quarantined(resources) => {
-                    LifecycleState::Quarantined(resources.release(attempt, returned))
+                    LifecycleState::Quarantined(resources.release(attempt))
                 }
                 _ => lifecycle_invariant_violation(
                     "removal owner release does not match canonical lifecycle ownership",
@@ -2206,35 +2298,45 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         allow_open_rollback: bool,
         diagnostic_id: crate::diagnostics::id::DiagnosticId,
     ) -> crate::XllResult<()> {
-        if !std::ptr::eq(core.coordinator, self)
-            || !authorization.matches(
-                self,
-                core.removal_attempt(),
-                core.module_epoch_id(),
-                core.last_committed_generation(),
-            )
-        {
-            return Err(crate::XllError::Internal { diagnostic_id });
-        }
-        let expected_attempt = authorization.attempt();
-        let ready = if allow_open_rollback {
-            core.open_rollback_ready(expected_attempt).is_some()
-        } else {
-            matches!(
-                core.final_removal_ready(expected_attempt),
-                Some(FinalRemovalReady::Uncommitted)
-            )
-        };
-        if !ready {
+        if !std::ptr::eq(core.coordinator, self) {
             return Err(crate::XllError::Internal { diagnostic_id });
         }
         core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
-            let (resources, open_rollback_state) = match state {
-                LifecycleState::Closing(ClosingState::Ready { resources }) => (resources, false),
-                LifecycleState::OpenRollbackPending(resources) if allow_open_rollback => {
-                    (resources, true)
-                }
+            // This is a dynamic acquisition after callbacks and unlocked work.
+            // Once acquired, no broad payload is handed to terminalization.
+            let (empty, open_rollback_state) = match state {
+                LifecycleState::Closing(ClosingState::Ready {
+                    resources:
+                        CloseResources::Claimed(ClaimedClose {
+                            payload: ClosePayload::Empty,
+                            claim:
+                                RemovalClaimState::Outstanding(OutstandingModuleClaim {
+                                    attempt,
+                                    module_epoch,
+                                }),
+                        }),
+                }) => (
+                    EmptyClaimedClose {
+                        attempt,
+                        module_epoch,
+                    },
+                    false,
+                ),
+                LifecycleState::OpenRollbackPending(CloseResources::Claimed(ClaimedClose {
+                    payload: ClosePayload::Empty,
+                    claim:
+                        RemovalClaimState::Outstanding(OutstandingModuleClaim {
+                            attempt,
+                            module_epoch,
+                        }),
+                })) if allow_open_rollback => (
+                    EmptyClaimedClose {
+                        attempt,
+                        module_epoch,
+                    },
+                    true,
+                ),
                 other => {
                     core.state = other;
                     return (
@@ -2243,7 +2345,13 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     );
                 }
             };
-            if resources.removal_attempt() != Some(expected_attempt) {
+            if !authorization.matches(
+                self,
+                Some(empty.attempt),
+                Some(empty.module_epoch),
+                core.last_committed_generation(),
+            ) {
+                let resources = empty.into_resources();
                 core.state = if open_rollback_state {
                     LifecycleState::OpenRollbackPending(resources)
                 } else {
@@ -2254,8 +2362,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     TransitionEffect::Keep,
                 );
             }
-            let attempt = resources.finish_closed();
-            core.state = LifecycleState::Closed(ClosedState::Finalizing { attempt });
+            core.state = LifecycleState::Closed(empty.finish_closed());
             (Ok(()), TransitionEffect::ClearPublication)
         })
     }
@@ -2263,9 +2370,64 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(in crate::lifecycle) fn quarantine_core(&self, core: &mut LifecycleAccess<'_, A>) {
         core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
-            core.state = LifecycleState::Quarantined(state.into_quarantine_resources());
-            ((), TransitionEffect::ClearPublication)
+            let (state, effect) = match state {
+                LifecycleState::Closed(ClosedState::Idle) => (
+                    CloseResources::Unowned {
+                        payload: ClosePayload::Empty,
+                    }
+                    .quarantine(),
+                    TransitionEffect::ClearPublication,
+                ),
+                LifecycleState::Closed(ClosedState::Finalizing { attempt, .. }) => (
+                    LifecycleState::Closed(ClosedState::Finalizing {
+                        attempt,
+                        quarantine_requested: true,
+                    }),
+                    TransitionEffect::Keep,
+                ),
+                LifecycleState::Opening { attempt, payload } => (
+                    payload.into_closing_state(attempt).request_quarantine(),
+                    TransitionEffect::ClearPublication,
+                ),
+                LifecycleState::Open { bundle } => {
+                    let (closing, authority) = bundle.into_closing();
+                    (
+                        CloseResources::Available(AvailableClose {
+                            payload: ClosePayload::Published(closing),
+                            authority,
+                        })
+                        .quarantine(),
+                        TransitionEffect::ClearPublication,
+                    )
+                }
+                LifecycleState::Closing(closing) => (
+                    closing.request_quarantine(),
+                    TransitionEffect::ClearPublication,
+                ),
+                LifecycleState::OpenRollbackPending(resources)
+                | LifecycleState::Quarantined(resources) => {
+                    (resources.quarantine(), TransitionEffect::ClearPublication)
+                }
+            };
+            core.state = state;
+            ((), effect)
         });
+    }
+
+    pub(in crate::lifecycle) fn complete_boundary_finalization(
+        &self,
+        access: &LifecycleAccess<'_, A>,
+        attempt: RemovalAttemptId,
+    ) -> crate::XllResult<()> {
+        if std::ptr::eq(access.coordinator, self)
+            && matches!(access.core.state, LifecycleState::Closed(ClosedState::Finalizing {
+                attempt: expected, quarantine_requested: false,
+            }) if expected == attempt)
+        {
+            Ok(())
+        } else {
+            Err(crate::XllError::Closing)
+        }
     }
 
     #[allow(
@@ -2506,16 +2668,4 @@ fn validate_removal_owner(
         "removal owner identity does not match the canonical lifecycle owner",
     );
     expected
-}
-
-fn combine_returned_authority(
-    retained: Option<ModuleAuthority>,
-    returned: Option<ModuleAuthority>,
-) -> Option<ModuleAuthority> {
-    match (retained, returned) {
-        (None, returned) | (returned, None) => returned,
-        (Some(_), Some(_)) => {
-            lifecycle_invariant_violation("removal owner returned module authority twice")
-        }
-    }
 }
