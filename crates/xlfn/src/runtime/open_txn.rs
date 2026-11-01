@@ -1266,8 +1266,11 @@ mod owner_tests {
     )]
     fn forgotten_handoff_successor_leaves_the_attempt_incomplete() {
         // Native-only: the deliberately forgotten module owner and its runtime
-        // remain alive together. This test does not qualify leak-free cleanup.
-        let runtime = Box::leak(Box::new(Runtime::<()>::new()));
+        // remain alive together. The fixture releases only test infrastructure
+        // so the leaked module test lease cannot block the next libtest thread.
+        // This test does not qualify leak-free cleanup.
+        let fixture = crate::runtime::StaticTestRuntime::<()>::new();
+        let runtime = fixture.runtime();
         let successor = runtime.begin_open().unwrap();
         let attempt = successor.attempt_id();
         std::mem::forget(successor);
@@ -1278,6 +1281,8 @@ mod owner_tests {
         assert!(!control.has_opening_generation());
         drop(control);
         assert!(runtime.begin_open().is_err());
+        assert_eq!(runtime.phase(), LifecyclePhase::Opening);
+        drop(fixture);
         assert_eq!(runtime.phase(), LifecyclePhase::Opening);
     }
 

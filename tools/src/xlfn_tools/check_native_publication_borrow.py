@@ -51,17 +51,16 @@ def main():
         command.append("--offline")
         path = tree / BINDING
         source = path.read_text()
-        # Reservation transactions retain their guard internally. Exercise the
-        # actual writer API with an owned guard rather than relying on that
-        # orchestration's layout (or accidentally dropping only an &mut guard).
+        # BindingWriter now owns its issuing table's guard. Exercise the actual
+        # publication API through an exclusive borrow of that writer, including
+        # release of the owned guard (not merely an &mut reference).
         probe = """
 #[allow(dead_code, reason = "Compile-only publication capability probe")]
-fn publication_guard_probe(table: &BindingTable, id: HandleId, pointer: BindingPtr) {
-    let mut state = table.state.write();
-    let mut writer = table.publication_writer(&mut state)
-        .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-    writer.insert(id, pointer);
-    drop(state);
+fn publication_guard_probe(table: &BindingTable, index: usize) {
+    let mut writer = table.writer();
+    let publication = &mut writer;
+    publication.publish_slot(index);
+    drop(writer.state);
 }
 """
         path.write_text(source + probe)
@@ -73,20 +72,21 @@ fn publication_guard_probe(table: &BindingTable, id: HandleId, pointer: BindingP
                 + accepted.stderr
             )
         after = probe.replace(
-            "    writer.insert(id, pointer);\n    drop(state);",
-            "    drop(state);\n    writer.insert(id, pointer);",
+            "    publication.publish_slot(index);\n    drop(writer.state);",
+            "    drop(writer.state);\n    publication.publish_slot(index);",
         )
         duplicate = probe.replace(
-            "    writer.insert(id, pointer);",
-            "    let _other_writer = table.publication_writer(&mut state);\n"
-            "    writer.insert(id, pointer);",
+            "    publication.publish_slot(index);",
+            "    let other_publication = &mut writer;\n"
+            "    publication.publish_slot(index);\n"
+            "    other_publication.publish_slot(index);",
         )
         cases = [
             (
                 "guard release before publication",
                 after,
                 (
-                    "error[E0505]: cannot move out of `state` because it is borrowed",
+                    "error[E0505]: cannot move out of `writer.state` because it is borrowed",
                     "borrow later used here",
                 ),
             ),
@@ -94,7 +94,7 @@ fn publication_guard_probe(table: &BindingTable, id: HandleId, pointer: BindingP
                 "simultaneous writer capabilities",
                 duplicate,
                 (
-                    "error[E0499]: cannot borrow `state` as mutable more than once at a time",
+                    "error[E0499]: cannot borrow `writer` as mutable more than once at a time",
                     "first borrow later used here",
                 ),
             ),
