@@ -25,7 +25,6 @@ fn main() {
     xlfn::__private::v1::open_generated_addin(
         &OTHER_RUNTIME,
         "callback-authority",
-        "Callback Authority",
         "Test",
         "0.0.0",
         "test",

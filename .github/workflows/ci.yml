@@ -422,11 +422,11 @@ jobs:
                   echo "${RUNNER_TEMP}/xlfn-verus" >> "$GITHUB_PATH"
 
             - name: Test verification runner
-              run: uv run --project tools --locked python -B -m unittest discover -s tools -p 'test*refinement*.py'
+              run: uv run --project tools --locked python -B -m unittest discover -s tools/tests -p 'test*refinement*.py'
 
             - name: Run disjoint Verus mutation shard
               run: >
-                  uv run --project tools --locked python -B tools/check_verus_refinement.py
+                  uv run --project tools --locked python -B -m xlfn_tools.check_verus_refinement
                   --shard-index ${{ matrix.shard }} --shard-count 4
                   --jobs 2 --threads 2
                   --report verus-timings-${{ matrix.shard }}.json
@@ -469,8 +469,8 @@ jobs:
 
             - name: Check Verus and native borrow rejection
               run: |
-                  uv run --project tools --locked python -B tools/check_transition_borrows.py
-                  uv run --project tools --locked python -B tools/check_native_publication_borrow.py
+                  uv run --project tools --locked python -B -m xlfn_tools.check_transition_borrows
+                  uv run --project tools --locked python -B -m xlfn_tools.check_native_publication_borrow
 
             - name: Check shared Cache release ordering with Loom mutations
               run: just cache-release-ordering
@@ -508,7 +508,7 @@ jobs:
                   merge-multiple: true
 
             - name: Require every mutation case exactly once
-              run: uv run --project tools --locked python -B tools/check_verus_reports.py verus-timings --shard-count 4
+              run: uv run --project tools --locked python -B -m xlfn_tools.check_verus_reports verus-timings --shard-count 4
 
     lean:
         name: Lean formal models

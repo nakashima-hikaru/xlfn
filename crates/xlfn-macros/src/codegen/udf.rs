@@ -80,17 +80,19 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     let generated_context_expression = match execution {
         model::ExecutionSpec::ThreadSafe {
             context_ty: Some(_),
-        } => Some(quote!(#krate::__private::v1::thread_safe_context(__frame, __state))),
+        } => {
+            Some(quote!(#krate::__private::v1::thread_safe_context(__frame.environment(), __state)))
+        }
         model::ExecutionSpec::MainThread {
             context_ty: Some(_),
         } => Some(quote!(#krate::__private::v1::main_thread_context(
-            __frame,
+            __frame.environment(),
             __state,
         ))),
         model::ExecutionSpec::MacroSheet {
             context_ty: Some(_),
         } => Some(quote!(#krate::__private::v1::macro_sheet_context(
-            __frame,
+            __frame.environment(),
             __state,
         ))),
         model::ExecutionSpec::Async {
@@ -176,13 +178,13 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             let default_method = if is_async { quote!(default_argument) } else { quote!(prepare_default) };
             let conversion = match &argument.conversion {
                 model::ArgumentConversion::Reference if !is_async => quote! {
-                    unsafe { #krate::__private::v1::convert_reference(__frame, #argument_name, #raw) }
+                    unsafe { #krate::__private::v1::convert_reference(&mut __frame, #argument_name, #raw) }
                         .map(#krate::__private::v1::PreparedArgument::Ready)
                 },
                 model::ArgumentConversion::Reference => quote! {
                     // SAFETY: Excel supplies the live reference pointer for this ABI call.
                     unsafe {
-                        #krate::__private::v1::convert_reference(__frame, #argument_name, #raw)
+                        #krate::__private::v1::convert_reference(&mut __frame, #argument_name, #raw)
                     }
                 },
                 model::ArgumentConversion::NumericMatrix => quote! {
@@ -214,14 +216,14 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     quote! {
                         {
                             #async_assertion
-                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty, _, _, _>(__frame);
+                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty, _, _, _>(&__frame);
                             #convert
                         }
                     }
                 }
                 model::ArgumentConversion::Value(_) => {
                     let convert = if is_async {
-                        quote!(#krate::__private::v1::convert_argument::<#return_type, #ty, _, _, _>(__frame, #index, #argument_name, #raw))
+                        quote!(#krate::__private::v1::convert_argument::<#return_type, #ty, _, _, _>(&mut __frame, #index, #argument_name, #raw))
                     } else {
                         quote!(__frame.prepare_argument::<#ty>(#index, #argument_name, #raw))
                     };
@@ -231,7 +233,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     quote! {
                         {
                             #async_assertion
-                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty, _, _, _>(__frame);
+                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty, _, _, _>(&__frame);
                             // SAFETY: Excel supplies the live XLOPER12 pointer for this ABI call.
                             unsafe {
                                 #convert
@@ -273,7 +275,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     model::PresenceAction::Default(default) => quote!(
                         #krate::__private::v1::CellPresence::Blank => {
                             #krate::__private::v1::CallFrame::#default_method(
-                                __frame,
+                                &mut __frame,
                                 #index,
                                 #argument_name,
                                 #default,
@@ -294,7 +296,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     model::PresenceAction::Default(default) => quote!(
                         #krate::__private::v1::CellPresence::Missing => {
                             #krate::__private::v1::CallFrame::#default_method(
-                                __frame,
+                                &mut __frame,
                                 #index,
                                 #argument_name,
                                 #default,
@@ -306,7 +308,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     // SAFETY: the raw argument belongs to the current Excel
                     // call and is validated by the conversion boundary.
                     let #converted: #binding_type = match unsafe {
-                        #krate::__private::v1::argument_presence(__frame, #argument_name, #raw)
+                        #krate::__private::v1::argument_presence(&__frame, #argument_name, #raw)
                     }? {
                         #blank_arm
                         #missing_arm
@@ -462,9 +464,10 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                             #excel_name,
                             #argument_count,
                             __async_handle,
-                            |__call, __lease, __cancellation, __frame| {
+                            |__call, __lease, __cancellation, mut __frame| {
                                 #builder_definition
                                 #(#conversions)*
+                                let _ = __frame.finish_arguments()?;
                                 ::core::result::Result::Ok(#builder_ident {
                                     #(#builder_initializers)*
                                 })
@@ -486,8 +489,9 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                             #excel_name,
                             #argument_count,
                             __async_handle,
-                            |__call, __lease, __cancellation, __frame| {
+                            |__call, __lease, __cancellation, mut __frame| {
                                 #(#conversions)*
+                                let _ = __frame.finish_arguments()?;
                                 ::core::result::Result::Ok(async move {
                                     #context_setup
                                     #return_assertion
@@ -509,7 +513,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                 #udf_id,
                 #excel_name,
                 #argument_count,
-                |__state, __frame| {
+                |__state, mut __frame| {
                     #return_assertion
                     #context_setup
                     #(#conversions)*

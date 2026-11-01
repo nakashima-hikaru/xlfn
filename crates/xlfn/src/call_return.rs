@@ -12,6 +12,8 @@ mod traits;
 
 #[cfg(feature = "handles")]
 pub use context::FormulaPublisher;
+#[cfg(feature = "handles")]
+pub use context::PlainReturnState;
 pub use context::{ReturnContext, ReturnFrameAccess};
 pub use numeric::NumericReturn;
 pub use payload::{EncodedReturn, ReturnPayload};

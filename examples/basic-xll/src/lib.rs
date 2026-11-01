@@ -27,8 +27,8 @@ pub fn add(
     Ok(x + y)
 }
 
-#[excel_function(name = "EXAMPLE.GREET")]
-pub fn greet(_context: ThreadSafeContext<'_, ExampleAddin>, name: String) -> XllResult<String> {
+#[excel_function(name = "EXAMPLE.GREET", thread_safe)]
+pub fn greet(name: String) -> XllResult<String> {
     Ok(format!("Hello, {name}!"))
 }
 
@@ -37,9 +37,8 @@ pub fn one() -> i32 {
     1
 }
 
-#[excel_function(name = "EXAMPLE.REF.AREAS")]
+#[excel_function(name = "EXAMPLE.REF.AREAS", macro_sheet)]
 pub fn reference_area_count(
-    _context: MacroSheetContext<'_, ExampleAddin>,
     #[excel_arg(reference, description = "Cell or range reference.")] reference: ExcelReference<'_>,
 ) -> XllResult<i32> {
     i32::try_from(reference.areas().len()).map_err(|_| XllError::Domain {

@@ -2065,10 +2065,9 @@ mod tests {
             &call,
             &callbacks,
             |call, scope, callbacks| {
-                let mut frame =
-                    crate::__private::v1::CallFrame::<crate::value::PlainInputMode>::new(
-                        call, scope, callbacks, 0,
-                    );
+                let frame = crate::__private::v1::CallFrame::<crate::value::PlainInputMode>::new(
+                    call, scope, callbacks, 0,
+                );
                 let mut context = frame.return_context("scalar").unwrap();
                 let value =
                     <f64 as crate::call_return::ExcelReturn>::invoke(&mut context, || Ok(4.5))

@@ -71,9 +71,9 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SubscriptionServiceSlot<
                         config.sources,
                     )))
                 },
-                |_runtime| {
+                |runtime| {
                     if let Some(trace) = self.observer.trace_handle() {
-                        _runtime.set_trace_sink(trace);
+                        runtime.set_trace_sink(trace);
                     }
                 },
             )

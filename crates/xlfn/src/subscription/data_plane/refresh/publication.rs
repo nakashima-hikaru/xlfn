@@ -353,8 +353,8 @@ mod windows {
             // SAFETY: only an unlocked, untransferred owner reaches destruction.
             unsafe { Self::destroy(array) }
         }
-        fn retained(array: Self::Array, status: i32) {
-            Self::retained(array, status);
+        fn retained(_array: Self::Array, status: i32) {
+            Self::retained(status);
         }
     }
 

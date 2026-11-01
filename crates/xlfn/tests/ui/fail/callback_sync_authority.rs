@@ -8,7 +8,7 @@ fn main() {
         "MINT",
         0,
         |state, frame| {
-            let _context = xlfn::__private::v1::main_thread_context::<(), _>(frame, state);
+            let _context = xlfn::__private::v1::main_thread_context::<()>(frame.environment(), state);
             unreachable!()
         },
     );

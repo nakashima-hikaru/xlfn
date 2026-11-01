@@ -16,7 +16,7 @@ use std::panic::AssertUnwindSafe;
 
 #[cold]
 pub(crate) fn handle_unload_hazard<A: Addin>(
-    _runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     hazard: crate::shutdown::UnloadHazard,
     boundary: &'static str,
     error: &XllError,
@@ -25,7 +25,7 @@ pub(crate) fn handle_unload_hazard<A: Addin>(
         tracing::error!(?hazard, %error, "unload safety could not be established");
     }));
     if hazard == crate::shutdown::UnloadHazard::CloseInvariantViolation {
-        _runtime.observer().fail_stop(hazard.shutdown_failure());
+        runtime.observer().fail_stop(hazard.shutdown_failure());
         fail_stop_invariant(boundary, error);
     }
 
@@ -65,10 +65,10 @@ pub(crate) fn quarantine_runtime<A: Addin>(
 
 pub(crate) fn quarantine_for_hazard<A: Addin>(
     runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
-    _hazard: crate::shutdown::UnloadHazard,
+    hazard: crate::shutdown::UnloadHazard,
 ) {
     runtime.lifecycle_orchestrator().quarantine();
-    runtime.observer().quarantine(_hazard.shutdown_failure());
+    runtime.observer().quarantine(hazard.shutdown_failure());
     quarantine_runtime_resources(runtime);
 }
 

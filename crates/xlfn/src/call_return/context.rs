@@ -17,6 +17,27 @@ pub struct ReturnFrameAccess<'call> {
     pub(crate) callbacks: &'call crate::host_callback::HostCallbackSession,
 }
 
+/// Retains plain-input call services until the return owner finishes. Plain
+/// UDFs may decode handles without producing a formula handle themselves.
+#[cfg(feature = "handles")]
+#[doc(hidden)]
+pub struct PlainReturnState<'call> {
+    _handles: Option<crate::handle::FormulaHandleServiceRead<'call>>,
+}
+
+#[cfg(feature = "handles")]
+impl<'call> PlainReturnState<'call> {
+    const fn empty() -> Self {
+        Self { _handles: None }
+    }
+
+    pub(crate) fn with_call(call: crate::value::input::CallContext<'call>) -> Self {
+        Self {
+            _handles: call.into_plain_return_guard(),
+        }
+    }
+}
+
 /// Return capabilities selected by the UDF's input identity mode.
 #[doc(hidden)]
 pub struct ReturnContext<
@@ -50,6 +71,9 @@ impl ReturnContext<'_, '_> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            #[cfg(feature = "handles")]
+            state: PlainReturnState::empty(),
+            #[cfg(not(feature = "handles"))]
             state: (),
             lifetime: PhantomData,
         }

@@ -1,7 +1,7 @@
 # Private lifecycle compile checks
 
 From the repository root, run
-`uv run --project tools --locked python -B tools/check_typestate.py`.
+`uv run --project tools --locked python -B -m xlfn_tools.check_typestate`.
 The checker copies the
 current tracked and nonignored working files into a temporary workspace, injects
 each fixture as an internal module, and runs an offline, locked `cargo check`

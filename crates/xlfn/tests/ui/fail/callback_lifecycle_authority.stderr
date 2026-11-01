@@ -28,26 +28,26 @@ error[E0133]: call to unsafe function `xlfn::__private::v1::open_generated_addin
 25 | /     xlfn::__private::v1::open_generated_addin(
 26 | |         &OTHER_RUNTIME,
 27 | |         "callback-authority",
-28 | |         "Callback Authority",
+28 | |         "Test",
 ...  |
-32 | |         std::ptr::null(),
-33 | |     );
+31 | |         std::ptr::null(),
+32 | |     );
    | |_____^ call to unsafe function
    |
    = note: consult the function's documentation for information on how to avoid undefined behavior
 
 error[E0133]: call to unsafe function `xlfn::__private::v1::auto_close_generated_addin` is unsafe and requires unsafe block
-  --> tests/ui/fail/callback_lifecycle_authority.rs:34:5
+  --> tests/ui/fail/callback_lifecycle_authority.rs:33:5
    |
-34 |     xlfn::__private::v1::auto_close_generated_addin(&OTHER_RUNTIME);
+33 |     xlfn::__private::v1::auto_close_generated_addin(&OTHER_RUNTIME);
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
    |
    = note: consult the function's documentation for information on how to avoid undefined behavior
 
 error[E0133]: call to unsafe function `xlfn::__private::v1::auto_remove_generated_addin` is unsafe and requires unsafe block
-  --> tests/ui/fail/callback_lifecycle_authority.rs:35:5
+  --> tests/ui/fail/callback_lifecycle_authority.rs:34:5
    |
-35 |     xlfn::__private::v1::auto_remove_generated_addin(&OTHER_RUNTIME);
+34 |     xlfn::__private::v1::auto_remove_generated_addin(&OTHER_RUNTIME);
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
    |
    = note: consult the function's documentation for information on how to avoid undefined behavior

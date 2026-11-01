@@ -798,7 +798,7 @@ impl WindowsRefreshArrayApi {
         }
     }
 
-    pub(crate) fn retained(_array: NonNull<SAFEARRAY>, status: i32) {
+    pub(crate) fn retained(status: i32) {
         // Unlike the old fail-stop unlock guard, an unsuccessful unlock now
         // retains the allocation without a second unlock or destruction attempt.
         crate::diagnostics::report_no_unwind(

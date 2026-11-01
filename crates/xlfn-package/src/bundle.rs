@@ -180,7 +180,7 @@ pub(crate) fn resolve_bundle_files_with_policy_impl(
         let unresolved_source = canonical_root.join(configured_path);
         let mut opened_source = open_bundle_source_for_snapshot(&unresolved_source)
             .map_err(|error| map_snapshot_open_error(target, &unresolved_source, error))?;
-        observer.after_open(&unresolved_source);
+        observer.after_open();
         let source = fs::canonicalize(&unresolved_source).map_err(|error| {
             PackageError::Message(format!(
                 "{target}: failed to resolve {}: {error}",

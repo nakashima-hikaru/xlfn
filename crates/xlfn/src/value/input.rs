@@ -13,8 +13,22 @@ use super::{XlValueRef, XlValueType};
 
 pub(crate) mod sealed {
     pub trait InputModeSealed: Sized {
+        // Only the consuming ArgumentContext boundary borrows a recorder to
+        // compute its result. These observations never return recording access.
+        fn finish_typed_ref(
+            fingerprint: &<Self as super::InputMode>::Fingerprint,
+        ) -> crate::XllResult<<Self as super::InputMode>::FinishedFingerprint>
+        where
+            Self: super::InputMode;
+
+        fn finish_ref(
+            fingerprint: &<Self as super::InputMode>::Fingerprint,
+        ) -> crate::XllResult<Option<[u8; 32]>>
+        where
+            Self: super::InputMode;
+
         fn finish_return<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
-            arguments: &mut super::ArgumentContext<'call, Self>,
+            arguments: super::FinishedArguments<'call, Self>,
             access: crate::call_return::ReturnFrameAccess<'call>,
         ) -> crate::XllResult<crate::call_return::ReturnContext<'call, 'call, Self, E, C>>
         where
@@ -100,32 +114,64 @@ pub struct PlainInputMode;
 pub struct FormulaInputMode;
 
 impl sealed::InputModeSealed for PlainInputMode {
+    fn finish_typed_ref(_: &()) -> XllResult<()> {
+        Ok(())
+    }
+
+    fn finish_ref(_: &()) -> XllResult<Option<[u8; 32]>> {
+        Ok(None)
+    }
+
     fn finish_return<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
-        arguments: &mut ArgumentContext<'call, Self>,
+        arguments: FinishedArguments<'call, Self>,
         access: crate::call_return::ReturnFrameAccess<'call>,
     ) -> XllResult<crate::call_return::ReturnContext<'call, 'call, Self, E, C>> {
         let _ = (access.udf_id, access.callbacks);
-        arguments.finish_typed()?;
-        Ok(crate::call_return::ReturnContext::from_state(()))
+        #[cfg(feature = "handles")]
+        let context = crate::call_return::ReturnContext::from_state(
+            crate::call_return::PlainReturnState::with_call(arguments.call),
+        );
+        #[cfg(not(feature = "handles"))]
+        let context = {
+            let _ = (arguments.call, arguments.inputs);
+            crate::call_return::ReturnContext::from_state(())
+        };
+        Ok(context)
     }
 }
 #[cfg(any(feature = "handles", test))]
 impl sealed::InputModeSealed for FormulaInputMode {
+    #[inline]
+    fn finish_typed_ref(fingerprint: &InputFingerprintBuilder) -> XllResult<[u8; 32]> {
+        fingerprint.finish_ref().map(|value| *value.as_bytes())
+    }
+
+    #[inline]
+    fn finish_ref(fingerprint: &InputFingerprintBuilder) -> XllResult<Option<[u8; 32]>> {
+        fingerprint
+            .finish_ref()
+            .map(|fingerprint| Some(*fingerprint.as_bytes()))
+    }
+
     fn finish_return<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
-        arguments: &mut ArgumentContext<'call, Self>,
+        arguments: FinishedArguments<'call, Self>,
         access: crate::call_return::ReturnFrameAccess<'call>,
     ) -> XllResult<crate::call_return::ReturnContext<'call, 'call, Self, E, C>> {
-        let inputs = arguments.finish_typed()?;
+        let FinishedArguments { call, inputs } = arguments;
         #[cfg(feature = "handles")]
-        let state = crate::call_return::FormulaPublisher::new(
-            arguments.take_handle_access(),
-            access.udf_id,
-            inputs,
-            access.callbacks,
-        );
+        let state = {
+            let mut call = call;
+            crate::call_return::FormulaPublisher::new(
+                call.take_handle_access()
+                    .expect("formula arguments retain their handle access"),
+                access.udf_id,
+                inputs,
+                access.callbacks,
+            )
+        };
         #[cfg(not(feature = "handles"))]
         let state = {
-            let _ = (inputs, access);
+            let _ = (call, inputs, access);
         };
         Ok(crate::call_return::ReturnContext::from_state(state))
     }
@@ -136,6 +182,10 @@ impl InputMode for PlainInputMode {
     type Identity = ();
     type Fingerprint = ();
     type FinishedFingerprint = ();
+    #[cfg(feature = "handles")]
+    type ReturnState<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> =
+        crate::call_return::PlainReturnState<'call>;
+    #[cfg(not(feature = "handles"))]
     type ReturnState<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> = ();
     fn finish_typed(_: ()) -> XllResult<()> {
         Ok(())
@@ -143,6 +193,7 @@ impl InputMode for PlainInputMode {
 
     fn new_fingerprint(_: usize) -> Self::Fingerprint {}
 
+    #[inline]
     fn with_argument<R>(
         _: &mut Self::Fingerprint,
         _: usize,
@@ -201,6 +252,7 @@ impl InputMode for FormulaInputMode {
         crate::call_return::FormulaPublisher<'call, 'scope, E, C>;
     #[cfg(not(feature = "handles"))]
     type ReturnState<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> = ();
+    #[inline]
     fn finish_typed(fingerprint: Self::Fingerprint) -> XllResult<[u8; 32]> {
         fingerprint.finish().map(|value| *value.as_bytes())
     }
@@ -218,6 +270,7 @@ impl InputMode for FormulaInputMode {
         fingerprint.with_argument(index, argument, encode)
     }
 
+    #[inline]
     fn finish(fingerprint: Self::Fingerprint) -> XllResult<Option<[u8; 32]>> {
         fingerprint
             .finish()
@@ -920,6 +973,9 @@ impl<'call> CallContext<'call> {
     }
 
     #[cfg(all(test, feature = "handles"))]
+    /// Standalone fixtures keep the service owner alive through CallScope
+    /// destruction, including the domain permit's maintenance tail. Normal
+    /// calls obtain that enclosing owner from the admitted CallGuard.
     pub(crate) fn from_handle_access(
         scope: &'call CallScope<'call>,
         handles: crate::handle::FormulaHandleServiceResolver<'call>,
@@ -968,6 +1024,18 @@ impl<'call> CallContext<'call> {
     }
 
     #[cfg(feature = "handles")]
+    pub(crate) fn into_plain_return_guard(
+        self,
+    ) -> Option<crate::handle::FormulaHandleServiceRead<'call>> {
+        match self.access {
+            CallAccess::Plain(_) => None,
+            CallAccess::Runtime(access) => access.handles.into_read_guard(),
+            #[cfg(test)]
+            CallAccess::HandleOnly { handles, .. } => handles.into_read_guard(),
+        }
+    }
+
+    #[cfg(feature = "handles")]
     pub(crate) fn resolve_handle<T: crate::handle::ExcelHandleObject>(
         &self,
         token: &str,
@@ -1002,8 +1070,31 @@ impl<'call> CallContext<'call> {
 /// Call-scoped argument conversion and formula-revision identity collection.
 #[doc(hidden)]
 pub struct ArgumentContext<'call, M: InputMode> {
-    pub(crate) call: CallContext<'call>,
-    pub(crate) inputs: Option<M::Fingerprint>,
+    call: CallContext<'call>,
+    inputs: M::Fingerprint,
+}
+
+/// Finalized input identity and its original call access. This owner has no
+/// conversion or recording operations; formula return preparation consumes it.
+#[doc(hidden)]
+#[must_use = "consume the finalized arguments when preparing the return"]
+pub struct FinishedArguments<'call, M: InputMode> {
+    call: CallContext<'call>,
+    inputs: M::FinishedFingerprint,
+}
+
+impl<'call, M: InputMode> FinishedArguments<'call, M> {
+    /// Observation of the completed identity grants no recording authority.
+    pub fn fingerprint(&self) -> &M::FinishedFingerprint {
+        &self.inputs
+    }
+
+    pub(crate) fn return_context<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+        self,
+        access: crate::call_return::ReturnFrameAccess<'call>,
+    ) -> XllResult<crate::call_return::ReturnContext<'call, 'call, M, E, C>> {
+        M::finish_return(self, access)
+    }
 }
 
 impl<'call, M: InputMode> ArgumentContext<'call, M> {
@@ -1014,7 +1105,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
     ) -> Self {
         Self {
             call: CallContext::with_call(call, scope),
-            inputs: Some(M::new_fingerprint(argument_count)),
+            inputs: M::new_fingerprint(argument_count),
         }
     }
 
@@ -1022,7 +1113,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
     pub(crate) fn from_scope(scope: &'call CallScope<'call>, argument_count: usize) -> Self {
         Self {
             call: CallContext::from_scope(scope),
-            inputs: Some(M::new_fingerprint(argument_count)),
+            inputs: M::new_fingerprint(argument_count),
         }
     }
 
@@ -1034,26 +1125,30 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
     ) -> Self {
         Self {
             call: CallContext::from_handle_access(scope, handles),
-            inputs: Some(M::new_fingerprint(argument_count)),
+            inputs: M::new_fingerprint(argument_count),
         }
     }
 
-    #[cfg(feature = "handles")]
-    pub(crate) fn take_handle_access(&mut self) -> HandleCallAccess<'call> {
-        self.call
-            .take_handle_access()
-            .expect("formula argument context must retain handle access")
+    #[inline(always)]
+    pub(crate) fn finish_typed(self) -> XllResult<FinishedArguments<'call, M>> {
+        let Self { call, inputs } = self;
+        let finished = M::finish_typed_ref(&inputs)?;
+        drop(inputs);
+        Ok(FinishedArguments {
+            call,
+            inputs: finished,
+        })
     }
 
-    fn finish_typed(&mut self) -> XllResult<M::FinishedFingerprint> {
-        let fingerprint = self.inputs.take().ok_or(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
-        })?;
-        M::finish_typed(fingerprint)
-    }
-
-    pub fn finish(&mut self) -> XllResult<Option<[u8; 32]>> {
-        self.inputs.take().map_or(Ok(None), M::finish)
+    #[inline(always)]
+    pub fn finish(self) -> XllResult<Option<[u8; 32]>> {
+        let Self {
+            call: _call,
+            inputs,
+        } = self;
+        let result = M::finish_ref(&inputs);
+        drop(inputs);
+        result
     }
 
     pub(crate) fn prepare<T: ExcelParameter<'call, M>>(
@@ -1062,13 +1157,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         argument: &'static str,
         value: XlValueRef<'call>,
     ) -> XllResult<PreparedParameter<'call, T, M>> {
-        // Construct the drop-bearing error only on failure. An eager `ok_or`
-        // leaves an unnecessary XllError destructor call on each valid input.
-        let Some(fingerprint) = self.inputs.as_mut() else {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
-            });
-        };
+        let fingerprint = &mut self.inputs;
         M::with_argument(fingerprint, index, argument, |identity| {
             T::prepare(value, argument, &self.call, identity)
         })
@@ -1083,11 +1172,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
     where
         T: ExcelParameter<'call, M>,
     {
-        let Some(fingerprint) = self.inputs.as_mut() else {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
-            });
-        };
+        let fingerprint = &mut self.inputs;
         let call = &self.call;
         M::with_argument(fingerprint, index, argument, |identity| {
             T::decode(value, argument, call, identity)
@@ -1102,11 +1187,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         value: XlValueRef<'call>,
         generation: crate::generation::RuntimeGeneration,
     ) -> XllResult<crate::handle::PendingHandleLease<T>> {
-        let Some(fingerprint) = self.inputs.as_mut() else {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
-            });
-        };
+        let fingerprint = &mut self.inputs;
         let call = &self.call;
         M::with_argument(fingerprint, index, argument, |identity| {
             let pending = crate::handle::with_utf16_handle_token(
@@ -1129,11 +1210,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
     where
         T: ExcelParameter<'call, M>,
     {
-        let Some(fingerprint) = self.inputs.as_mut() else {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
-            });
-        };
+        let fingerprint = &mut self.inputs;
         M::with_argument(fingerprint, index, argument, |identity| {
             T::encode_decoded(value, identity);
             Ok(())
@@ -1146,11 +1223,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         argument: &'static str,
         convert: impl FnOnce(&mut M::Identity) -> XllResult<T>,
     ) -> XllResult<T> {
-        let Some(fingerprint) = self.inputs.as_mut() else {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
-            });
-        };
+        let fingerprint = &mut self.inputs;
         M::with_argument(fingerprint, index, argument, convert)
     }
 
@@ -1279,11 +1352,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         argument: &'static str,
         value: super::NumericMatrixRef<'call>,
     ) -> XllResult<()> {
-        let Some(fingerprint) = self.inputs.as_mut() else {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
-            });
-        };
+        let fingerprint = &mut self.inputs;
         M::with_argument(fingerprint, index, argument, |identity| {
             M::u64(identity, value.rows() as u64);
             M::u64(identity, value.columns() as u64);
@@ -2515,3 +2584,6 @@ mod eager_derive_tests {
         assert_eq!(CONVERSIONS.load(Ordering::Relaxed), 2);
     }
 }
+
+#[cfg(test)]
+mod finalization_tests;

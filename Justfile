@@ -17,7 +17,7 @@ python-check:
     uv run --project tools --locked ruff check tools
     uv run --project tools --locked ruff format --check tools
     uv run --project tools --locked ty check --project tools --error-on-warning
-    uv run --project tools --locked python -B -m unittest discover -s tools -p 'test_*.py'
+    uv run --project tools --locked python -B -m unittest discover -s tools/tests -p 'test_*.py'
 
 python-format:
     uv run --project tools --locked ruff check --fix tools
@@ -32,13 +32,13 @@ doc:
 
 # Audit every direct catch reference, including test and macro token streams.
 panic-boundaries:
-    uv run --project tools --locked python -B -m unittest discover -s tools -p test_check_panic_boundaries.py
-    uv run --project tools --locked python -B tools/check_panic_boundaries.py
+    uv run --project tools --locked python -B -m unittest discover -s tools/tests -p test_check_panic_boundaries.py
+    uv run --project tools --locked python -B -m xlfn_tools.check_panic_boundaries
 
 # Compile valid and invalid callers against private lifecycle typestates.
 typestate:
-    uv run --project tools --locked python -B -m unittest discover -s tools -p test_check_typestate.py
-    uv run --project tools --locked python -B tools/check_typestate.py
+    uv run --project tools --locked python -B -m unittest discover -s tools/tests -p test_check_typestate.py
+    uv run --project tools --locked python -B -m xlfn_tools.check_typestate
 
 clippy:
     cargo clippy \
@@ -124,22 +124,22 @@ miri-cache-endpoints:
 # Verus formal verification of concurrent kernel primitives.
 verus:
     just verus-refinement
-    uv run --project tools --locked python -B tools/check_transition_borrows.py
-    uv run --project tools --locked python -B tools/check_native_publication_borrow.py
+    uv run --project tools --locked python -B -m xlfn_tools.check_transition_borrows
+    uv run --project tools --locked python -B -m xlfn_tools.check_native_publication_borrow
 
 # One invocation-local baseline per exact input; all mutation cases remain enabled.
 verus-refinement shard-index="0" shard-count="1":
-    uv run --project tools --locked python -B -m unittest discover -s tools -p 'test*refinement*.py'
-    uv run --project tools --locked python -B tools/check_verus_refinement.py --shard-index {{shard-index}} --shard-count {{shard-count}}
+    uv run --project tools --locked python -B -m unittest discover -s tools/tests -p 'test*refinement*.py'
+    uv run --project tools --locked python -B -m xlfn_tools.check_verus_refinement --shard-index {{shard-index}} --shard-count {{shard-count}}
 
 # Weak-memory mutation gate for the shared final-pin release tail.
 cache-release-ordering:
-    uv run --project tools --locked python -B tools/check_cache_release_ordering.py
+    uv run --project tools --locked python -B -m xlfn_tools.check_cache_release_ordering
 
 # Audit Verus verification TCB compliance (enforces 0 assumes and approved external_bodies).
 verus-audit:
-    uv run --project tools --locked python -B -m unittest discover -s tools -p test_check_verus_tcb.py
-    uv run --project tools --locked python -B tools/check_verus_tcb.py
+    uv run --project tools --locked python -B -m unittest discover -s tools/tests -p test_check_verus_tcb.py
+    uv run --project tools --locked python -B -m xlfn_tools.check_verus_tcb
 
 test-core:
     cargo test \
@@ -226,8 +226,8 @@ package-check: release-metadata
 
 # Keep distributable files and internal dependency pins aligned with the source.
 release-metadata:
-    uv run --project tools --locked python -B -m unittest discover -s tools -p test_check_release_metadata.py
-    uv run --project tools --locked python -B tools/check_release_metadata.py
+    uv run --project tools --locked python -B -m unittest discover -s tools/tests -p test_check_release_metadata.py
+    uv run --project tools --locked python -B -m xlfn_tools.check_release_metadata
 
 # Retain the existing check name without calling `cargo publish`.
 publish-check: package-check

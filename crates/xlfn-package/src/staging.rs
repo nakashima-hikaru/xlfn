@@ -114,7 +114,7 @@ pub(crate) fn path_is_within(root: &Path, candidate: &Path) -> bool {
 }
 
 pub(crate) trait SnapshotObserver {
-    fn after_open(&self, _path: &Path) {}
+    fn after_open(&self) {}
 
     fn after_first_chunk(&self, _path: &Path) {}
 }

@@ -404,7 +404,6 @@ fn expand_excel_addin(
                     #krate::__private::v1::open_generated_addin::<#ident>(
                         &crate::__XLFN_RUNTIME,
                         #id,
-                        #display_name,
                         #category,
                         ::core::env!("CARGO_PKG_VERSION"),
                         #krate::__private::v1::BUILD_TARGET,

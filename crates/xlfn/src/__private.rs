@@ -71,9 +71,9 @@ pub mod v1 {
     #[cfg(any(feature = "handles", test))]
     pub use crate::value::input::FormulaInputMode;
     pub use crate::value::input::{
-        ArgumentContext, ArgumentMaterializer, ExcelInputIdentity, ExcelParameter, InputMode,
-        PlainInputMode, PreparedArgument, PreparedElement, PreparedParameter,
-        PreparedParameterSequence, ReadyArgument, argument_from_raw,
+        ArgumentContext, ArgumentMaterializer, ExcelInputIdentity, ExcelParameter,
+        FinishedArguments, InputMode, PlainInputMode, PreparedArgument, PreparedElement,
+        PreparedParameter, PreparedParameterSequence, ReadyArgument, argument_from_raw,
         argument_from_raw_with_arguments, cell_presence_from_raw,
     };
     #[doc(hidden)]
@@ -104,6 +104,8 @@ pub mod v1 {
     #[doc(hidden)]
     pub use inventory::submit as submit_registration;
 
+    #[cfg(feature = "handles")]
+    pub use crate::call_return::PlainReturnState;
     #[doc(hidden)]
     pub use crate::call_return::{NumericReturn, ReturnContext};
     #[doc(hidden)]
@@ -224,11 +226,10 @@ pub mod v1 {
     pub fn thread_safe_context<
         'call,
         A: Addin,
-        M: InputMode,
         E: crate::RtdSubscription,
         C: crate::RtdSourceCatalog<E>,
     >(
-        frame: &CallFrame<'call, M, E, C, ThreadSafeMode>,
+        frame: &CallEnvironment<'call, E, C, ThreadSafeMode>,
         state: &'call A::SharedState,
     ) -> crate::addin::ThreadSafeContext<'call, A> {
         crate::addin::ThreadSafeContext::new(state, frame.diagnostics)
@@ -236,10 +237,9 @@ pub mod v1 {
 
     /// Instantiates a [`MainThreadContext`](crate::addin::MainThreadContext) for generated UDFs.
     #[doc(hidden)]
-    pub fn main_thread_context<'call, A: Addin, M: InputMode>(
-        _frame: &CallFrame<
+    pub fn main_thread_context<'call, A: Addin>(
+        frame: &CallEnvironment<
             'call,
-            M,
             crate::addin::AddinSubscription<A>,
             crate::addin::AddinSources<A>,
         >,
@@ -249,15 +249,15 @@ pub mod v1 {
         {
             crate::addin::MainThreadContext::new(
                 state,
-                _frame.diagnostics,
+                frame.diagnostics,
                 crate::rtd::RtdCallContext::new(
-                    _frame.rtd_access(),
-                    crate::host_api::ExcelHost::new(_frame.callbacks),
+                    frame.rtd_access(),
+                    crate::host_api::ExcelHost::new(frame.callbacks),
                 ),
             )
         }
         #[cfg(not(feature = "rtd"))]
-        crate::addin::MainThreadContext::new(state, _frame.diagnostics)
+        crate::addin::MainThreadContext::new(state, frame.diagnostics)
     }
 
     /// Instantiates a [`MacroSheetContext`](crate::addin::MacroSheetContext) for generated UDFs.
@@ -265,11 +265,10 @@ pub mod v1 {
     pub fn macro_sheet_context<
         'call,
         A: Addin,
-        M: InputMode,
         E: crate::RtdSubscription,
         C: crate::RtdSourceCatalog<E>,
     >(
-        frame: &CallFrame<'call, M, E, C, MacroSheetMode>,
+        frame: &CallEnvironment<'call, E, C, MacroSheetMode>,
         state: &'call A::SharedState,
     ) -> crate::addin::MacroSheetContext<'call, A> {
         crate::addin::MacroSheetContext::new(
@@ -450,7 +449,6 @@ pub mod v1 {
     pub unsafe fn open_generated_addin<A: Addin>(
         runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
         addin_id: &'static str,
-        _display_name: &'static str,
         default_category: &'static str,
         version: &'static str,
         target: &'static str,
@@ -590,7 +588,32 @@ pub mod v1 {
 
     type CallFrameTypes<E, C, X> = fn() -> (E, C, X);
 
-    /// Calculation call frame for converted arguments and identity recording.
+    /// Reusable call services and execution permission, with no input recorder.
+    #[doc(hidden)]
+    pub struct CallEnvironment<
+        'call,
+        E: crate::RtdSubscription = (),
+        C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+        X: ExecutionMode = MainThreadMode,
+    > {
+        marker: std::marker::PhantomData<CallFrameTypes<E, C, X>>,
+        #[cfg(feature = "rtd")]
+        rtd: Option<crate::rtd::RtdGenerationAccess<'call, E, C>>,
+        callbacks: &'call crate::host_callback::HostCallbackSession,
+        diagnostics: &'call crate::diagnostics::DiagnosticHistory,
+    }
+
+    impl<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>, X: ExecutionMode>
+        CallEnvironment<'call, E, C, X>
+    {
+        #[cfg(feature = "rtd")]
+        pub(crate) fn rtd_access(&self) -> crate::rtd::RtdGenerationAccess<'call, E, C> {
+            self.rtd
+                .expect("an admitted call has RTD generation access")
+        }
+    }
+
+    /// Input preparation owns its recording authority until consumed by finish.
     #[doc(hidden)]
     pub struct CallFrame<
         'call,
@@ -599,13 +622,16 @@ pub mod v1 {
         C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
         X: ExecutionMode = MainThreadMode,
     > {
-        marker: std::marker::PhantomData<CallFrameTypes<E, C, X>>,
-        #[cfg(feature = "rtd")]
-        rtd: Option<crate::rtd::RtdGenerationAccess<'call, E, C>>,
+        environment: CallEnvironment<'call, E, C, X>,
         arguments: ArgumentContext<'call, M>,
-        callbacks: &'call crate::host_callback::HostCallbackSession,
-        diagnostics: &'call crate::diagnostics::DiagnosticHistory,
     }
+
+    /// The reusable call environment paired with its finalized return authority.
+    #[doc(hidden)]
+    pub type FinishedCall<'call, M, E, C, X> = (
+        CallEnvironment<'call, E, C, X>,
+        ReturnContext<'call, 'call, M, E, C>,
+    );
 
     impl<
         'call,
@@ -623,33 +649,49 @@ pub mod v1 {
             argument_count: usize,
         ) -> Self {
             Self {
-                marker: std::marker::PhantomData,
-                #[cfg(feature = "rtd")]
-                rtd: Some(call.rtd_call_access()),
+                environment: CallEnvironment {
+                    marker: std::marker::PhantomData,
+                    #[cfg(feature = "rtd")]
+                    rtd: Some(call.rtd_call_access()),
+                    callbacks,
+                    diagnostics: call.diagnostics(),
+                },
                 arguments: ArgumentContext::new(call, scope, argument_count),
-                callbacks,
-                diagnostics: call.diagnostics(),
             }
         }
 
-        #[cfg(feature = "rtd")]
-        pub(crate) fn rtd_access(&self) -> crate::rtd::RtdGenerationAccess<'call, E, C> {
-            self.rtd
-                .expect("an admitted call has RTD generation access")
+        #[doc(hidden)]
+        pub fn environment(&self) -> &CallEnvironment<'call, E, C, X> {
+            &self.environment
+        }
+
+        #[doc(hidden)]
+        pub fn finish_arguments(
+            self,
+        ) -> XllResult<(CallEnvironment<'call, E, C, X>, FinishedArguments<'call, M>)> {
+            let Self {
+                environment,
+                arguments,
+            } = self;
+            Ok((environment, arguments.finish_typed()?))
+        }
+
+        #[doc(hidden)]
+        pub fn finish(self, udf_id: &'static str) -> XllResult<FinishedCall<'call, M, E, C, X>> {
+            let (environment, arguments) = self.finish_arguments()?;
+            let context = arguments.return_context(ReturnFrameAccess {
+                udf_id,
+                callbacks: environment.callbacks,
+            })?;
+            Ok((environment, context))
         }
 
         #[doc(hidden)]
         pub fn return_context(
-            &mut self,
+            self,
             udf_id: &'static str,
         ) -> XllResult<ReturnContext<'call, 'call, M, E, C>> {
-            M::finish_return(
-                &mut self.arguments,
-                ReturnFrameAccess {
-                    udf_id,
-                    callbacks: self.callbacks,
-                },
-            )
+            self.finish(udf_id).map(|(_, context)| context)
         }
 
         #[doc(hidden)]
@@ -1011,7 +1053,7 @@ pub mod v1 {
     where
         F: for<'call> FnOnce(
             &'call A::SharedState,
-            &mut CallFrame<
+            CallFrame<
                 'call,
                 R::InputMode,
                 crate::addin::AddinSubscription<A>,
@@ -1050,7 +1092,7 @@ pub mod v1 {
     where
         F: for<'call> FnOnce(
             &'call A::SharedState,
-            &mut CallFrame<
+            CallFrame<
                 'call,
                 R::InputMode,
                 crate::addin::AddinSubscription<A>,
@@ -1065,14 +1107,13 @@ pub mod v1 {
                 call,
                 &callbacks,
                 |call, scope, callbacks| {
-                    let mut frame =
-                        CallFrame::<
-                            R::InputMode,
-                            crate::addin::AddinSubscription<A>,
-                            crate::addin::AddinSources<A>,
-                            X,
-                        >::new(call, scope, callbacks, argument_count);
-                    execute(call.state(), &mut frame)
+                    let frame = CallFrame::<
+                        R::InputMode,
+                        crate::addin::AddinSubscription<A>,
+                        crate::addin::AddinSources<A>,
+                        X,
+                    >::new(call, scope, callbacks, argument_count);
+                    execute(call.state(), frame)
                 },
             )
         })
@@ -1094,7 +1135,7 @@ pub mod v1 {
     where
         F: for<'call> FnOnce(
             &'call A::SharedState,
-            &mut CallFrame<
+            CallFrame<
                 'call,
                 R::InputMode,
                 crate::addin::AddinSubscription<A>,
@@ -1113,7 +1154,7 @@ pub mod v1 {
                     call,
                     &callbacks,
                     |call, scope, callbacks| {
-                        let mut frame = CallFrame::<
+                        let frame = CallFrame::<
                             R::InputMode,
                             crate::addin::AddinSubscription<A>,
                             crate::addin::AddinSources<A>,
@@ -1121,7 +1162,7 @@ pub mod v1 {
                         >::new(
                             call, scope, callbacks, argument_count
                         );
-                        execute(call.state(), &mut frame)
+                        execute(call.state(), frame)
                     },
                 )
             },
@@ -1152,7 +1193,7 @@ pub mod v1 {
             &'call crate::runtime::CallGuard<'call, A>,
             crate::generation::ExecutionLease<A>,
             CancellationToken,
-            &mut CallFrame<
+            CallFrame<
                 'call,
                 R::InputMode,
                 crate::addin::AddinSubscription<A>,
@@ -1175,7 +1216,7 @@ pub mod v1 {
                         call,
                         &callbacks,
                         |call, scope, callbacks| {
-                            let mut frame = CallFrame::<
+                            let frame = CallFrame::<
                                 R::InputMode,
                                 crate::addin::AddinSubscription<A>,
                                 crate::addin::AddinSources<A>,
@@ -1183,8 +1224,7 @@ pub mod v1 {
                             >::new(
                                 call, scope, callbacks, argument_count
                             );
-                            let future = execute(call, lease, cancellation, &mut frame)?;
-                            frame.arguments.finish()?;
+                            let future = execute(call, lease, cancellation, frame)?;
                             Ok(future)
                         },
                     )
@@ -1218,7 +1258,7 @@ pub mod v1 {
             &'call crate::runtime::CallGuard<'call, A>,
             crate::generation::ExecutionLease<A>,
             CancellationToken,
-            &mut CallFrame<
+            CallFrame<
                 'call,
                 R::InputMode,
                 crate::addin::AddinSubscription<A>,
@@ -1241,7 +1281,7 @@ pub mod v1 {
                         call,
                         &callbacks,
                         |call, scope, callbacks| {
-                            let mut frame = CallFrame::<
+                            let frame = CallFrame::<
                                 R::InputMode,
                                 crate::addin::AddinSubscription<A>,
                                 crate::addin::AddinSources<A>,
@@ -1249,8 +1289,7 @@ pub mod v1 {
                             >::new(
                                 call, scope, callbacks, argument_count
                             );
-                            let build = execute(call, lease, cancellation, &mut frame)?;
-                            frame.arguments.finish()?;
+                            let build = execute(call, lease, cancellation, frame)?;
                             Ok(build)
                         },
                     )
@@ -1368,18 +1407,20 @@ pub mod v1 {
                 );
                 with_excel_call_scope_and_state(&state, |state, scope| {
                     let mut frame = CallFrame::<M> {
-                        marker: std::marker::PhantomData,
-                        #[cfg(feature = "rtd")]
-                        rtd: None,
+                        environment: CallEnvironment {
+                            marker: std::marker::PhantomData,
+                            #[cfg(feature = "rtd")]
+                            rtd: None,
+                            callbacks: &state.1,
+                            diagnostics: &state.2,
+                        },
                         arguments: ArgumentContext::from_scope(scope, 1),
-                        callbacks: &state.1,
-                        diagnostics: &state.2,
                     };
                     // SAFETY: state owns the complete immutable counted input
                     // while admission copies it into the returned String.
                     let value =
                         unsafe { frame.native_string(0, "label", state.0.as_ptr()) }.unwrap();
-                    frame.arguments.finish().unwrap();
+                    let _ = frame.finish_arguments().unwrap();
                     value
                 })
             }

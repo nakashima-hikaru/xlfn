@@ -5,7 +5,7 @@
 //! the build configuration here prevents production and refinement builds
 //! from carrying separate state-transition implementations.
 
-use crate::generation::{OpenAttemptId, RuntimeGeneration};
+use crate::generation::OpenAttemptId;
 use crate::lifecycle::LifecycleAccess;
 use crate::runtime::capabilities::OpenDeps;
 use crate::runtime_components::ReturnProtocol;
@@ -220,7 +220,6 @@ impl RuntimeObserver {
         deps: &OpenDeps<'_, A>,
         _control: &crate::lifecycle::LifecycleAccess<'_, A>,
         attempt: OpenAttemptId,
-        _generation: RuntimeGeneration,
     ) {
         #[cfg(any(test, feature = "refinement"))]
         {
@@ -267,10 +266,9 @@ impl RuntimeObserver {
                     resources,
                 },
             );
-            let _ = _generation;
         }
         #[cfg(not(any(test, feature = "refinement")))]
-        let _ = (deps, attempt, _generation);
+        let _ = (deps, attempt);
     }
 
     /// Records open rejection while its lifecycle transition is still locked.

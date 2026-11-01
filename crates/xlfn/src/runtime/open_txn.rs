@@ -935,8 +935,7 @@ fn commit_inner<A: crate::Addin>(
                         },
                     );
                 }
-                deps.observer()
-                    .commit_open(&deps, &control, attempt_id, generation);
+                deps.observer().commit_open(&deps, &control, attempt_id);
                 Ok::<(), XllError>(())
             })
             .unwrap_or_else(|_| opening_publication_lost());

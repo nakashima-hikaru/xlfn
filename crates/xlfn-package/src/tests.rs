@@ -1500,7 +1500,7 @@ struct BlockingAfterOpenObserver {
 
 #[cfg(target_os = "windows")]
 impl SnapshotObserver for BlockingAfterOpenObserver {
-    fn after_open(&self, _path: &Path) {
+    fn after_open(&self) {
         self.entered.wait();
         self.release.wait();
     }

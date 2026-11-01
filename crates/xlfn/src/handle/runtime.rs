@@ -776,6 +776,11 @@ impl<'call> FormulaHandleServiceResolver<'call> {
         }
     }
 
+    /// Transfers an existing admission without resolving an unused service.
+    pub(crate) fn into_read_guard(self) -> Option<FormulaHandleServiceRead<'call>> {
+        self.resolved.into_inner().and_then(Result::ok)
+    }
+
     /// Returns a shared reference to the `FormulaHandleService` valid for `'call`.
     ///
     /// The first call acquires a read permit; subsequent calls within the same
@@ -793,8 +798,10 @@ impl<'call> FormulaHandleServiceResolver<'call> {
                 // SAFETY: `self.slot` is borrowed for `'call`. The acquired
                 // `GenerationServiceRead<'call>` is retained in `self.resolved` for the
                 // lifetime of this resolver, keeping the read permit active. Extending
-                // the reference to `'call` is sound because the slot outlives `'call` and
-                // the permit prevents draining or sealing the service during the call.
+                // the reference to `'call` also relies on the enclosing admitted
+                // generation/service owner outliving the CallScope and its
+                // permit-release tail. CallContext::with_call borrows that
+                // CallGuard; standalone fixtures retain an equivalent owner.
                 Ok(unsafe { ptr.as_ref() })
             }
             Err(error) => Err(error.clone()),

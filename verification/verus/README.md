@@ -99,10 +99,10 @@ not cached between invocations or machines.
 
 ```bash
 # Inspect exact inputs and rejection criteria without invoking Verus.
-uv run --project tools --locked python -B tools/check_verus_refinement.py --list
+uv run --project tools --locked python -B -m xlfn_tools.check_verus_refinement --list
 
 # Save timings locally when diagnosing verification throughput.
-uv run --project tools --locked python -B tools/check_verus_refinement.py --jobs 2 --report /tmp/verus-timings.json
+uv run --project tools --locked python -B -m xlfn_tools.check_verus_refinement --jobs 2 --report /tmp/verus-timings.json
 ```
 
 CI shards mutation inputs and checks that reports cover every current case

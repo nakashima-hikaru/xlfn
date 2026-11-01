@@ -1,10 +1,10 @@
 // module: macro_abi
 use crate::__private::v1::*;
 fn threadsafe<'call, A: crate::Addin>(
-    frame: &CallFrame<'call, crate::value::PlainInputMode, (), crate::DynamicRtdSources<()>, ThreadSafeMode>,
+    environment: &CallEnvironment<'call, (), crate::DynamicRtdSources<()>, ThreadSafeMode>,
     state: &'call A::SharedState,
-) { let _ = thread_safe_context::<A, _, _, _>(frame, state); }
+) { let _ = thread_safe_context::<A, _, _>(environment, state); }
 fn macro_sheet<'call, A: crate::Addin>(
-    frame: &CallFrame<'call, crate::value::PlainInputMode, (), crate::DynamicRtdSources<()>, MacroSheetMode>,
+    environment: &CallEnvironment<'call, (), crate::DynamicRtdSources<()>, MacroSheetMode>,
     state: &'call A::SharedState,
-) { let _ = macro_sheet_context::<A, _, _, _>(frame, state); }
+) { let _ = macro_sheet_context::<A, _, _>(environment, state); }

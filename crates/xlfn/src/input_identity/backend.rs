@@ -440,6 +440,11 @@ impl InputFingerprintBuilder {
 
     #[inline]
     pub(crate) fn finish(self) -> XllResult<InputFingerprint> {
+        self.finish_ref()
+    }
+
+    #[inline]
+    pub(crate) fn finish_ref(&self) -> XllResult<InputFingerprint> {
         if self.next_argument != self.expected_arguments {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
