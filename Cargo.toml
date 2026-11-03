@@ -60,7 +60,7 @@ ghost-cell = "0.2.6"
 home = "0.5.12"
 inventory = "0.3.25"
 indexmap = { version = "2.14.2", default-features = false }
-jiff = { version = "0.2.38", default-features = false, features = ["std"] }
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 libc = { version = "0.2.191", default-features = false }
 loom = "0.7.2"
 object = { version = "0.40.0", default-features = false, features = [
