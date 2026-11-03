@@ -11,8 +11,6 @@ use crate::host_callback::HostCallbackSession;
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase, lifecycle_access_error};
 use crate::registration::RegistrationDescriptor;
 use crate::runtime::Runtime;
-#[cfg(test)]
-use std::cell::RefCell;
 use std::{cell::Cell, marker::PhantomPinned, pin::pin, ptr};
 
 thread_local! {
@@ -532,6 +530,7 @@ mod tests {
         use super::*;
         use crate::addin::PhysicallyUnloadableAddin;
         use crate::registration::RegistrationSignature;
+        use std::cell::RefCell;
         use xlfn_common::{ExecutionKind, FunctionVisibility};
         use xlfn_sys::{
             XL_EVENT_REGISTER, XL_FREE, XL_GET_NAME, XLERR_NAME, XLF_EVALUATE, XLF_REGISTER,
