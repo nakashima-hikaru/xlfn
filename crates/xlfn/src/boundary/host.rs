@@ -11,71 +11,96 @@ use crate::host_callback::HostCallbackSession;
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase, lifecycle_access_error};
 use crate::registration::RegistrationDescriptor;
 use crate::runtime::Runtime;
+#[cfg(test)]
 use std::cell::RefCell;
+use std::{cell::Cell, marker::PhantomPinned, pin::pin, ptr};
 
 thread_local! {
-    static ACTIVE_LIFECYCLES: RefCell<Vec<*const ()>> = const { RefCell::new(Vec::new()) };
+    static ACTIVE_HEAD: Cell<*const LifecycleFrame> = const { Cell::new(ptr::null()) };
 }
 
-/// Excel callbacks made by open/cleanup can reenter a lifecycle export. The
-/// outer boundary already owns the transition; waiting for it on this thread
-/// would deadlock. Coalesce deactivation while closing, but remember it while
-/// opening so that the outer transaction rolls back instead of publishing.
-/// Track runtime identity so another add-in is still handled.
-struct HostLifecycleGuard {
+/// Stack nodes remain pinned until the private registration is popped. Foreign
+/// nonlocal jumps across Rust frames are not supported: they bypass Drop and
+/// would leave dangling TLS links. Ordinary returns and Rust unwinds are safe.
+struct LifecycleFrame {
     runtime: *const (),
+    previous: *const LifecycleFrame,
+    _pin: PhantomPinned,
 }
 
-impl HostLifecycleGuard {
-    fn belongs_to<A: Addin>(
-        &self,
-        runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
-    ) -> bool {
-        self.runtime == std::ptr::from_ref(runtime).cast::<()>()
-    }
-
-    fn enter<A: Addin>(runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>) -> Option<Self> {
-        let runtime = std::ptr::from_ref(runtime).cast::<()>();
-        ACTIVE_LIFECYCLES.with_borrow_mut(|active| {
-            if active.contains(&runtime) {
-                None
-            } else {
-                active.push(runtime);
-                Some(Self { runtime })
-            }
-        })
-    }
+struct LifecycleRegistration<'a> {
+    frame: &'a LifecycleFrame,
 }
-
-impl Drop for HostLifecycleGuard {
+impl Drop for LifecycleRegistration<'_> {
     fn drop(&mut self) {
-        ACTIVE_LIFECYCLES.with_borrow_mut(|active| {
-            assert_eq!(active.pop(), Some(self.runtime));
+        ACTIVE_HEAD.with(|head| {
+            if !ptr::eq(head.get(), ptr::from_ref(self.frame)) {
+                // Restoring an unexpected head would conceal a broken chain.
+                std::process::abort();
+            }
+            head.set(self.frame.previous);
         });
     }
 }
 
-/// Issued only by xlAutoClose, distinct from opening/removal reentry tracking.
-pub(crate) struct HostCloseBoundary {
-    _guard: HostLifecycleGuard,
+/// Search links only while all enclosing scoped registrations are alive.
+#[allow(
+    unsafe_code,
+    reason = "Pinned stack nodes are scoped and popped in strict LIFO order"
+)]
+fn with_host_lifecycle<R>(
+    runtime: *const (),
+    operation: impl for<'scope> FnOnce(&'scope LifecycleFrame) -> R,
+) -> Option<R> {
+    let previous = ACTIVE_HEAD.with(|head| {
+        let mut cursor = head.get();
+        while !cursor.is_null() {
+            // SAFETY: only this function publishes pinned local frames, and
+            // its private registration removes each one before the frame dies.
+            // All previous pointers refer to live outer invocations on this thread.
+            let frame = unsafe { &*cursor };
+            if frame.runtime == runtime {
+                return None;
+            }
+            cursor = frame.previous;
+        }
+        Some(head.get())
+    })?;
+    let pinned = pin!(LifecycleFrame {
+        runtime,
+        previous,
+        _pin: PhantomPinned
+    });
+    let frame = pinned.as_ref().get_ref();
+    ACTIVE_HEAD.with(|head| head.set(ptr::from_ref(frame)));
+    // No user code or fallible operation may run between publication and
+    // construction. Registration is private and never given to the callback.
+    let _registration = LifecycleRegistration { frame };
+    Some(operation(frame))
 }
 
-impl HostCloseBoundary {
+/// Close authority is borrowed from this exact active host invocation.
+pub(crate) struct HostCloseBoundary<'scope> {
+    frame: &'scope LifecycleFrame,
+}
+impl HostCloseBoundary<'_> {
     pub(crate) fn belongs_to<A: Addin>(
         &self,
         runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     ) -> bool {
-        self._guard.belongs_to(runtime)
+        self.frame.runtime == ptr::from_ref(runtime).cast::<()>()
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn for_test<A: Addin>(
-        runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
-    ) -> Self {
-        Self {
-            _guard: HostLifecycleGuard::enter(runtime).expect("test owns its close boundary"),
-        }
-    }
+#[cfg(test)]
+pub(crate) fn with_test_close_boundary<A: Addin, R>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    operation: impl for<'scope> FnOnce(HostCloseBoundary<'scope>) -> R,
+) -> R {
+    with_host_lifecycle(ptr::from_ref(runtime).cast::<()>(), |frame| {
+        operation(HostCloseBoundary { frame })
+    })
+    .expect("test owns its close boundary")
 }
 
 fn defer_opening_deactivation<A: Addin>(
@@ -149,80 +174,81 @@ fn host_auto_open_inner<A: Addin>(
     descriptors: &[RegistrationDescriptor],
     attempted: &mut Option<crate::generation::OpenAttemptId>,
 ) -> i32 {
-    let Some(_boundary) = HostLifecycleGuard::enter(runtime) else {
-        return 0;
-    };
-    // One Excel invocation owns one terminal callback state, including a
-    // controlled removal and its replacement open transaction.
-    let mut callbacks = HostCallbackSession::new();
-    if runtime.phase() == LifecyclePhase::Quarantined {
-        return 0;
-    }
-    let mut lifecycle = match runtime.bind_addin_lifecycle() {
-        Ok(access) => access,
-        Err(error) => {
-            let error = lifecycle_access_error(error);
-            report_boundary_error("xlAutoOpen lifecycle thread", &error);
-            runtime.quarantine_runtime();
+    with_host_lifecycle(ptr::from_ref(runtime).cast::<()>(), |_| {
+        // One Excel invocation owns one terminal callback state, including a
+        // controlled removal and its replacement open transaction.
+        let mut callbacks = HostCallbackSession::new();
+        if runtime.phase() == LifecyclePhase::Quarantined {
             return 0;
         }
-    };
-    let controlled_reload = runtime.phase() == crate::lifecycle::LifecyclePhase::Open;
-    let removal_completed_before_open = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
-        && runtime.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete;
-    if controlled_reload {
-        let result = runtime.remove_addin(&lifecycle, &mut callbacks);
-        if result == 0 || runtime.phase() != crate::lifecycle::LifecyclePhase::Closed {
-            return 0;
-        }
-        if !callbacks.permits_callbacks() {
-            // Detaching the old generation may succeed despite metadata or
-            // xlFree failures. Abort/Uncalced still require returning to Excel
-            // before any replacement callbacks. Preserve the completed-removal
-            // marker for a later close or a new Excel open invocation.
-            runtime.complete_explicit_removal();
-            return 0;
-        }
-        lifecycle = match runtime.bind_addin_lifecycle() {
+        let mut lifecycle = match runtime.bind_addin_lifecycle() {
             Ok(access) => access,
             Err(error) => {
                 let error = lifecycle_access_error(error);
-                report_boundary_error("xlAutoOpen lifecycle rebind", &error);
+                report_boundary_error("xlAutoOpen lifecycle thread", &error);
                 runtime.quarantine_runtime();
                 return 0;
             }
         };
-        runtime.clear_host_intent();
-    }
-    let result = runtime.open_addin_boundary(
-        &lifecycle,
-        callbacks,
-        crate::runtime::OpenBoundaryRequest {
-            addin_id,
-            version,
-            target,
-            descriptors,
-        },
-        attempted,
-    );
-    if controlled_reload
-        && result == 0
-        && runtime.phase() != crate::lifecycle::LifecyclePhase::Quarantined
-    {
-        // A reload has already destroyed the previous generation. A failed
-        // replacement must therefore not leave a closed runtime with the old
-        // residency lease and no generation owner.
-        runtime.quarantine_runtime();
-    } else if result == 0
-        && removal_completed_before_open
-        && runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
-    {
-        // The old generation was already removed successfully, but Excel
-        // attempted a new open before delivering xlAutoClose. Preserve the
-        // release marker so that the later close can release the lease.
-        runtime.complete_explicit_removal();
-    }
-    result
+        let controlled_reload = runtime.phase() == crate::lifecycle::LifecyclePhase::Open;
+        let removal_completed_before_open = runtime.phase()
+            == crate::lifecycle::LifecyclePhase::Closed
+            && runtime.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete;
+        if controlled_reload {
+            let result = runtime.remove_addin(&lifecycle, &mut callbacks);
+            if result == 0 || runtime.phase() != crate::lifecycle::LifecyclePhase::Closed {
+                return 0;
+            }
+            if !callbacks.permits_callbacks() {
+                // Detaching the old generation may succeed despite metadata or
+                // xlFree failures. Abort/Uncalced still require returning to Excel
+                // before any replacement callbacks. Preserve the completed-removal
+                // marker for a later close or a new Excel open invocation.
+                runtime.complete_explicit_removal();
+                return 0;
+            }
+            lifecycle = match runtime.bind_addin_lifecycle() {
+                Ok(access) => access,
+                Err(error) => {
+                    let error = lifecycle_access_error(error);
+                    report_boundary_error("xlAutoOpen lifecycle rebind", &error);
+                    runtime.quarantine_runtime();
+                    return 0;
+                }
+            };
+            runtime.clear_host_intent();
+        }
+        let result = runtime.open_addin_boundary(
+            &lifecycle,
+            callbacks,
+            crate::runtime::OpenBoundaryRequest {
+                addin_id,
+                version,
+                target,
+                descriptors,
+            },
+            attempted,
+        );
+        if controlled_reload
+            && result == 0
+            && runtime.phase() != crate::lifecycle::LifecyclePhase::Quarantined
+        {
+            // A reload has already destroyed the previous generation. A failed
+            // replacement must therefore not leave a closed runtime with the old
+            // residency lease and no generation owner.
+            runtime.quarantine_runtime();
+        } else if result == 0
+            && removal_completed_before_open
+            && runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
+        {
+            // The old generation was already removed successfully, but Excel
+            // attempted a new open before delivering xlAutoClose. Preserve the
+            // release marker so that the later close can release the lease.
+            runtime.complete_explicit_removal();
+        }
+        result
+    })
+    .unwrap_or(0)
 }
 
 /// Deactivates the add-in, including host paths that do not call xlAutoRemove.
@@ -230,29 +256,31 @@ pub(crate) fn host_auto_close<A>(runtime: &Runtime<A, impl crate::runtime::Unloa
 where
     A: Addin,
 {
-    let Some(boundary) = HostLifecycleGuard::enter(runtime) else {
-        defer_opening_deactivation(runtime);
-        return 1;
-    };
-    let boundary = HostCloseBoundary { _guard: boundary };
-    let mut callbacks = HostCallbackSession::new();
-    deactivate_addin(runtime, &mut callbacks, "xlAutoClose lifecycle thread");
-    if runtime.phase() == LifecyclePhase::Closed
-        && runtime.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete
-    {
-        if runtime.physical_unload_enabled() {
-            if let Err(error) = runtime.release_closed_residency(&boundary) {
-                report_boundary_error("xlAutoClose module residency release", &error);
-                runtime.quarantine_runtime();
+    with_host_lifecycle(ptr::from_ref(runtime).cast::<()>(), |frame| {
+        let boundary = HostCloseBoundary { frame };
+        let mut callbacks = HostCallbackSession::new();
+        deactivate_addin(runtime, &mut callbacks, "xlAutoClose lifecycle thread");
+        if runtime.phase() == LifecyclePhase::Closed
+            && runtime.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete
+        {
+            if runtime.physical_unload_enabled() {
+                if let Err(error) = runtime.release_closed_residency(&boundary) {
+                    report_boundary_error("xlAutoClose module residency release", &error);
+                    runtime.quarantine_runtime();
+                }
+            } else {
+                // A safe Addin may own executable sources outside framework
+                // accounting. Keep the DLL resident unless the Addin explicitly
+                // accepted the physical-unload contract.
+                runtime.clear_host_intent();
             }
-        } else {
-            // A safe Addin may own executable sources outside framework
-            // accounting. Keep the DLL resident unless the Addin explicitly
-            // accepted the physical-unload contract.
-            runtime.clear_host_intent();
         }
-    }
-    1
+        1
+    })
+    .unwrap_or_else(|| {
+        defer_opening_deactivation(runtime);
+        1
+    })
 }
 
 /// Handles the explicit terminal-removal boundary.
@@ -260,13 +288,15 @@ pub(crate) fn host_auto_remove<A>(runtime: &Runtime<A, impl crate::runtime::Unlo
 where
     A: Addin,
 {
-    let Some(_boundary) = HostLifecycleGuard::enter(runtime) else {
+    with_host_lifecycle(ptr::from_ref(runtime).cast::<()>(), |_| {
+        let mut callbacks = HostCallbackSession::new();
+        deactivate_addin(runtime, &mut callbacks, "xlAutoRemove lifecycle thread");
+        1
+    })
+    .unwrap_or_else(|| {
         defer_opening_deactivation(runtime);
-        return 1;
-    };
-    let mut callbacks = HostCallbackSession::new();
-    deactivate_addin(runtime, &mut callbacks, "xlAutoRemove lifecycle thread");
-    1
+        1
+    })
 }
 
 fn deactivate_addin<A: Addin>(
@@ -404,16 +434,81 @@ mod tests {
         let outer = Runtime::<()>::new();
         let inner = Runtime::<()>::new();
         let epoch = outer.removal_epoch();
-        let outer_guard = HostLifecycleGuard::enter(&outer).unwrap();
-        let inner_guard = HostLifecycleGuard::enter(&inner).unwrap();
-        assert_eq!(host_auto_close(&outer), 1);
-        assert_eq!(host_auto_remove(&outer), 1);
-        assert_eq!(outer.removal_epoch(), epoch);
-        drop(inner_guard);
-        drop(outer_guard);
+        with_host_lifecycle(ptr::from_ref(&outer).cast(), |_| {
+            with_host_lifecycle(ptr::from_ref(&inner).cast(), |_| {
+                assert_eq!(host_auto_close(&outer), 1);
+                assert_eq!(host_auto_remove(&outer), 1);
+                assert_eq!(outer.removal_epoch(), epoch);
+            })
+            .unwrap();
+        })
+        .unwrap();
 
         assert_eq!(host_auto_close(&outer), 1);
         assert!(outer.begin_open_if_epoch(epoch).is_err());
+    }
+
+    #[test]
+    fn intrusive_close_boundary_is_thread_bound() {
+        static_assertions::assert_not_impl_any!(HostCloseBoundary<'static>: Send, Sync);
+    }
+
+    #[test]
+    fn miri_intrusive_deep_reentry_restores_lifo() {
+        let (a, b, c) = (0_u8, 1_u8, 2_u8);
+        let a = ptr::from_ref(&a).cast();
+        let b = ptr::from_ref(&b).cast();
+        let c = ptr::from_ref(&c).cast();
+        assert_eq!(
+            with_host_lifecycle(a, |_| {
+                assert_eq!(
+                    with_host_lifecycle(b, |_| {
+                        assert_eq!(
+                            with_host_lifecycle(c, |_| {
+                                assert!(with_host_lifecycle(a, |_| ()).is_none());
+                            }),
+                            Some(())
+                        );
+                        assert!(with_host_lifecycle(b, |_| ()).is_none());
+                    }),
+                    Some(())
+                );
+                assert_eq!(with_host_lifecycle(b, |_| 2), Some(2));
+                assert!(with_host_lifecycle(a, |_| ()).is_none());
+            }),
+            Some(())
+        );
+        assert_eq!(with_host_lifecycle(a, |_| 3), Some(3));
+    }
+
+    #[test]
+    #[allow(
+        clippy::mem_forget,
+        reason = "Verify forgetting a borrowed capability cannot forget its private registration"
+    )]
+    fn miri_intrusive_forgotten_capability_cannot_keep_registration() {
+        let runtime = 0_u8;
+        let runtime = ptr::from_ref(&runtime).cast();
+        assert_eq!(
+            with_host_lifecycle(runtime, |frame| {
+                std::mem::forget(HostCloseBoundary { frame });
+            }),
+            Some(())
+        );
+        assert_eq!(with_host_lifecycle(runtime, |_| 7), Some(7));
+    }
+
+    #[test]
+    fn miri_intrusive_same_identity_is_independent_across_threads() {
+        static ID: u8 = 0;
+        let identity = ptr::from_ref(&ID).cast();
+        with_host_lifecycle(identity, |_| {
+            let other =
+                std::thread::spawn(|| with_host_lifecycle(ptr::from_ref(&ID).cast(), |_| 9));
+            assert_eq!(other.join().unwrap(), Some(9));
+            assert!(with_host_lifecycle(identity, |_| ()).is_none());
+        })
+        .unwrap();
     }
 
     #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]

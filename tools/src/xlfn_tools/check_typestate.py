@@ -24,6 +24,7 @@ from pathlib import Path
 from ._repository import ROOT
 
 MODULES = {
+    "boundary/host": Path("crates/xlfn/src/boundary/host.rs"),
     "kernel/lib": Path("crates/xlfn-kernel/src/lib.rs"),
     "kernel/drain_gate": Path("crates/xlfn-kernel/src/drain_gate.rs"),
     "kernel/operation_gate": Path("crates/xlfn-kernel/src/operation_gate.rs"),

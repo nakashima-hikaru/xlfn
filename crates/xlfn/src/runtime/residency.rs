@@ -19,7 +19,7 @@ pub(crate) struct ResidencyRelease<'a, A: Addin> {
 
 enum ReleaseReason<'a, A: Addin> {
     Closed {
-        _boundary: &'a HostCloseBoundary,
+        _boundary: &'a HostCloseBoundary<'a>,
         completed: CompletedRemovalIntent<'a, A>,
     },
     FailedOpen {
@@ -140,7 +140,7 @@ impl<'a, A: Addin, P: UnloadPolicy<A>> OpenResidency<'a, A, P> {
 impl<A: Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     pub(crate) fn release_closed_residency(
         &self,
-        boundary: &HostCloseBoundary,
+        boundary: &HostCloseBoundary<'_>,
     ) -> XllResult<Option<ResidencyReleaseOutcome>> {
         if !P::PHYSICAL || !boundary.belongs_to(self) {
             return Ok(None);
@@ -252,40 +252,42 @@ mod tests {
             .preparation_failed();
         let retained = OpenResidency::acquire(&target, anchor as *const ()).unwrap();
         target.complete_explicit_removal();
-        let boundary = HostCloseBoundary::for_test(&issuer);
-        assert_eq!(target.release_closed_residency(&boundary).unwrap(), None);
-        assert!(target.module_residency_held());
-        drop(boundary);
+        crate::boundary::host::with_test_close_boundary(&issuer, |boundary| {
+            assert_eq!(target.release_closed_residency(&boundary).unwrap(), None);
+            assert!(target.module_residency_held());
+        });
         drop(retained);
         let logical = Runtime::<Probe>::new();
         drop(OpenResidency::acquire(&logical, anchor as *const ()).unwrap());
         logical.complete_explicit_removal();
-        let boundary = HostCloseBoundary::for_test(&logical);
-        assert_eq!(logical.release_closed_residency(&boundary).unwrap(), None);
-        assert!(logical.module_residency_held());
+        crate::boundary::host::with_test_close_boundary(&logical, |boundary| {
+            assert_eq!(logical.release_closed_residency(&boundary).unwrap(), None);
+            assert!(logical.module_residency_held());
+        });
     }
 
     #[test]
     fn close_release_consumes_current_locked_state_and_rechecks_native_barriers() {
         let runtime = physical();
         drop(OpenResidency::acquire(&runtime, anchor as *const ()).unwrap());
-        let boundary = HostCloseBoundary::for_test(&runtime);
-        runtime.request_explicit_removal();
-        assert_eq!(runtime.release_closed_residency(&boundary).unwrap(), None);
-        assert_eq!(
-            runtime.host_intent(),
-            HostLifecycleIntent::ExplicitRemovalRequested
-        );
-        runtime.complete_explicit_removal();
-        assert_eq!(
-            runtime.release_closed_residency(&boundary).unwrap(),
-            Some(ResidencyReleaseOutcome::Released)
-        );
-        assert_eq!(runtime.release_closed_residency(&boundary).unwrap(), None);
-        runtime.complete_explicit_removal();
-        assert_eq!(
-            runtime.release_closed_residency(&boundary).unwrap(),
-            Some(ResidencyReleaseOutcome::AlreadyReleased)
-        );
+        crate::boundary::host::with_test_close_boundary(&runtime, |boundary| {
+            runtime.request_explicit_removal();
+            assert_eq!(runtime.release_closed_residency(&boundary).unwrap(), None);
+            assert_eq!(
+                runtime.host_intent(),
+                HostLifecycleIntent::ExplicitRemovalRequested
+            );
+            runtime.complete_explicit_removal();
+            assert_eq!(
+                runtime.release_closed_residency(&boundary).unwrap(),
+                Some(ResidencyReleaseOutcome::Released)
+            );
+            assert_eq!(runtime.release_closed_residency(&boundary).unwrap(), None);
+            runtime.complete_explicit_removal();
+            assert_eq!(
+                runtime.release_closed_residency(&boundary).unwrap(),
+                Some(ResidencyReleaseOutcome::AlreadyReleased)
+            );
+        });
     }
 }
