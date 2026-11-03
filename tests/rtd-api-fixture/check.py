@@ -41,6 +41,14 @@ def main() -> int:
         (project / "src").mkdir()
         (project / "Cargo.toml").write_text(manifest_source)
         shutil.copyfile(ROOT / "Cargo.lock", project / "Cargo.lock")
+        # This consumer has its own lockfile. Workspace builds need not cache
+        # its exact versions, so fetch them before the offline feature checks.
+        shutil.copyfile(ROOT / "src/lib.rs", project / "src/lib.rs")
+        subprocess.run(
+            ["cargo", "fetch", "--manifest-path", str(project / "Cargo.toml"), "--locked"],
+            env=env,
+            check=True,
+        )
         for name, source in cases:
             shutil.copyfile(source, project / "src/lib.rs")
             for features in combos:
@@ -76,6 +84,8 @@ def main() -> int:
                 log.write_text((run.stderr + "\n" + "\n".join(error.get("rendered", error["message"]) for error in errors)).rstrip() + "\n")
                 report["checks"].append({"case": name, "consumer_features": list(features), "expected_success": expected_success, "exit_code": run.returncode, "passed": passed, "command": command, "diagnostics": [{"message": error["message"], "code": (error.get("code") or {}).get("code")} for error in errors], "log": log.name, "log_sha256": digest(log)})
                 print(f"{'PASS' if passed else 'FAIL'} {label}", flush=True)
+                if not passed:
+                    print(log.read_text(), end="", flush=True)
                 (evidence / "verification.json").write_text(json.dumps(report, indent=2) + "\n")
     report["passed"] = all(check["passed"] for check in report["checks"])
     report["passed_checks"] = sum(check["passed"] for check in report["checks"])
