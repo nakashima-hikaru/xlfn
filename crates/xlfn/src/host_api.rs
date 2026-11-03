@@ -267,13 +267,13 @@ impl<'call> ExcelHost<'call> {
                 CallerLocation::External { row, column } => {
                     // The caller result remains live while Excel resolves its
                     // external sheet identity.
-                    let caller_arguments = [caller.raw_pointer()?];
+                    let caller_arguments = [caller.raw_pointer()];
                     let sheet_id = self.invoke(
                         XL_SHEET_NM,
                         ExcelApiFunction::SheetName,
                         &caller_arguments,
                         |sheet| {
-                            let sheet_name_arguments = [sheet.raw_pointer()?];
+                            let sheet_name_arguments = [sheet.raw_pointer()];
                             self.invoke(
                                 XL_SHEET_ID,
                                 ExcelApiFunction::SheetId,
@@ -441,6 +441,22 @@ mod date_tests {
             }
             script.assert_calls(&[xlfn_sys::XLF_EVALUATE]);
         }
+    }
+
+    #[test]
+    fn miri_decoder_panic_still_frees_host_result_once() {
+        let script = CallbackScript::install([Reply::success(
+            xlfn_sys::XLF_EVALUATE,
+            XLOPER12::number(7.0),
+        )]);
+        let callbacks = HostCallbackSession::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: HostInvocation<()> =
+                ExcelHost::new(&callbacks)
+                    .invoke_protocol(xlfn_sys::XLF_EVALUATE, &[], |_| panic!("decoder panic"));
+        }));
+        assert!(result.is_err());
+        script.assert_calls(&[xlfn_sys::XLF_EVALUATE]);
     }
 
     #[test]
