@@ -43,9 +43,10 @@ impl NumericMatrixIngressBenchmark {
             .runtime
             .enter(&ingress)
             .expect("benchmark runtime must be open");
-        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
-            let mut arguments =
-                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, 1);
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
             // SAFETY: storage has the FP12 header and initialized contiguous
             // doubles and is not mutated during this benchmark call.
             let value = unsafe {
@@ -65,10 +66,10 @@ impl NumericMatrixIngressBenchmark {
             .runtime
             .enter(&ingress)
             .expect("benchmark runtime must be open");
-        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
             let mut arguments =
                 crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
-                    call, scope, 1,
+                    call, scope, token, 1,
                 );
             // SAFETY: storage owns the FP12 header and initialized contiguous
             // doubles and remains immutable throughout this call.

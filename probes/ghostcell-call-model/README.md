@@ -44,3 +44,8 @@ Five unit tests cover simultaneous handles across decoding finalization,
 repeated-domain deduplication, multiple-domain append-only growth, panic teardown,
 fresh invocation registration, and token/cell layouts. Three compile-fail examples
 reject handle escape, operation-local domain registration, and mixed fresh brands.
+
+Restoration verification on 2026-11-03: Rust 1.99.1 ordinary tests and Clippy
+(`--all-targets -- -D warnings`) passed. Nightly-2026-09-02 Miri passed all five
+unit tests under both Stacked Borrows and Tree Borrows; all three compile-fail
+doctests passed. This is evidence for the bounded model only.

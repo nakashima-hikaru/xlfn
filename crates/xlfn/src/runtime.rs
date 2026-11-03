@@ -1342,11 +1342,13 @@ pub(crate) mod tests {
                     .unwrap()
                     .into_token();
                 assert_eq!(
-                    crate::call::with_excel_call_scope_and_state(
+                    crate::call::with_branded_call_scope_and_state(
                         new_handles,
-                        |new_handles, scope| {
+                        |new_handles, storage, brand| {
+                            let mut context =
+                                crate::value::DecodeCallContext::with_storage(storage, brand);
                             new_handles
-                                .lookup::<TestHandle>(scope, &new_token)
+                                .lookup::<TestHandle>(&mut context, &new_token)
                                 .map(|value| value.0)
                         }
                     )
@@ -1354,11 +1356,13 @@ pub(crate) mod tests {
                     2
                 );
                 assert!(matches!(
-                    crate::call::with_excel_call_scope_and_state(
+                    crate::call::with_branded_call_scope_and_state(
                         new_handles,
-                        |new_handles, scope| {
+                        |new_handles, storage, brand| {
+                            let mut context =
+                                crate::value::DecodeCallContext::with_storage(storage, brand);
                             new_handles
-                                .lookup::<TestHandle>(scope, &old_token)
+                                .lookup::<TestHandle>(&mut context, &old_token)
                                 .map(|_| ())
                         }
                     ),

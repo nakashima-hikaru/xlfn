@@ -204,7 +204,9 @@ pub fn optional_value<'call, T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value::{DecodeCallContext, ExcelParameter, FromExcel, MAX_ARRAY_BYTES, PlainInputMode};
+    use crate::value::{
+        DecodeCallContext, ExcelParameter, FromExcel, MAX_ARRAY_BYTES, PlainInputMode,
+    };
     use std::fmt::Debug;
     use xlfn_sys::{XLOPER12, XLOPER12Array, XLOPER12Value, XLTYPE_MULTI};
 
@@ -215,7 +217,12 @@ mod tests {
         crate::call::with_excel_call_scope_and_state(raw, |raw, scope| {
             let value = XlValueRef::from_array_cell(raw).unwrap();
             let actual = convert(value);
-            let expected = T::decode(value, "values", &mut DecodeCallContext::plain(scope), &mut ());
+            let expected = T::decode(
+                value,
+                "values",
+                &mut DecodeCallContext::plain(scope),
+                &mut (),
+            );
             match (actual, expected) {
                 (Ok(actual), Ok(expected)) => assert_eq!(actual, expected),
                 (Err(actual), Err(expected)) => {

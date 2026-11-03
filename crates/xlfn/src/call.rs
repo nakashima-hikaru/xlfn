@@ -1,16 +1,16 @@
 //! State owned by one Excel-visible call.
 //!
-//! A call scope is the single root for resources that may be borrowed by
-//! synchronous input conversion. The scope is generative, so values that
-//! contain its lifetime cannot escape the generated Excel call. The scratch
+//! Invocation storage owns permits and the scratch scope borrowed by
+//! synchronous input conversion. Its call lifetime is generative, so values
+//! containing that lifetime cannot escape the generated Excel call. The scratch
 //! allocator deliberately exposes only operations whose results are either
 //! borrowed strings or `Copy` slices; arbitrary destructor-bearing values do
 //! not belong in this call-local storage.
 
 use crate::XllResult;
-use ghost_cell::GhostToken;
 #[cfg(feature = "handles")]
 use ghost_cell::GhostCell;
+use ghost_cell::GhostToken;
 use std::cell::{Cell, OnceCell};
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
@@ -157,9 +157,14 @@ pub struct CallScope<'call> {
 
 impl<'call> CallScope<'call> {
     fn new() -> Self {
-        Self { scratch: CallScratch::new(), lifetime: PhantomData }
+        Self {
+            scratch: CallScratch::new(),
+            lifetime: PhantomData,
+        }
     }
-    pub(crate) fn scratch(&'call self) -> &'call CallScratch { &self.scratch }
+    pub(crate) fn scratch(&'call self) -> &'call CallScratch {
+        &self.scratch
+    }
 }
 
 /// Invocation-owned permits and scratch, with private construction and fields.
@@ -183,7 +188,9 @@ impl<'brand, 'call> CallStorage<'brand, 'call> {
             scope: CallScope::new(),
         }
     }
-    pub(crate) fn scope(&'call self) -> &'call CallScope<'call> { &self.scope }
+    pub(crate) fn scope(&'call self) -> &'call CallScope<'call> {
+        &self.scope
+    }
     /// The result borrows storage, never the short mutable token borrow.
     #[inline]
     #[cfg(feature = "handles")]
@@ -211,27 +218,43 @@ impl<'brand, 'call> CallStorage<'brand, 'call> {
         }
         // The only production scope-witness construction. Borrowing the scope
         // field through this storage borrow keeps the entire owner alive.
-        Ok(HandleDomainWitness { source: HandleWitnessSource::Scope {
-            _scope: &self.scope, domain: domain_ptr,
-        } })
+        Ok(HandleDomainWitness {
+            source: HandleWitnessSource::Scope {
+                _scope: &self.scope,
+                domain: domain_ptr,
+            },
+        })
     }
 }
 
 /// Runs decoding under fresh independent GhostCell and call lifetime brands.
 #[doc(hidden)]
 pub fn with_branded_call_scope<R>(
-    operation: impl for<'brand, 'call> FnOnce(&'call CallStorage<'brand, 'call>, GhostToken<'brand>) -> R,
+    operation: impl for<'brand, 'call> FnOnce(
+        &'call CallStorage<'brand, 'call>,
+        GhostToken<'brand>,
+    ) -> R,
 ) -> R {
-    GhostToken::new(|token| { let storage = CallStorage::new(); operation(&storage, token) })
+    GhostToken::new(|token| {
+        let storage = CallStorage::new();
+        operation(&storage, token)
+    })
 }
 
 /// Reborrows an enclosing owner for the invariant lifetime of call storage.
 #[doc(hidden)]
 pub fn with_branded_call_scope_and_state<S, R>(
     state: &S,
-    operation: impl for<'brand, 'call> FnOnce(&'call S, &'call CallStorage<'brand, 'call>, GhostToken<'brand>) -> R,
+    operation: impl for<'brand, 'call> FnOnce(
+        &'call S,
+        &'call CallStorage<'brand, 'call>,
+        GhostToken<'brand>,
+    ) -> R,
 ) -> R {
-    GhostToken::new(|token| { let storage = CallStorage::new(); operation(state, &storage, token) })
+    GhostToken::new(|token| {
+        let storage = CallStorage::new();
+        operation(state, &storage, token)
+    })
 }
 
 /// Runs an operation under a fresh lifetime that cannot escape in its result.
@@ -268,7 +291,10 @@ pub(crate) fn with_excel_call_scope_and_call<A: crate::Addin, R>(
         GhostToken<'brand>,
     ) -> R,
 ) -> R {
-    GhostToken::new(|token| { let storage = CallStorage::new(); operation(call, &storage, token) })
+    GhostToken::new(|token| {
+        let storage = CallStorage::new();
+        operation(call, &storage, token)
+    })
 }
 
 /// Reborrows entrypoint authority alongside a fresh invocation-owned token.
@@ -283,12 +309,45 @@ pub(crate) fn with_excel_callback_scope_and_call<A: crate::Addin, R>(
         &'call crate::host_callback::HostCallbackSession,
     ) -> R,
 ) -> R {
-    GhostToken::new(|token| { let storage = CallStorage::new(); operation(call, &storage, token, callbacks) })
+    GhostToken::new(|token| {
+        let storage = CallStorage::new();
+        operation(call, &storage, token, callbacks)
+    })
 }
 
 #[cfg(test)]
 mod scratch_tests {
     use super::{CallScratch, LARGE_TYPED_COLLECTION_BYTES};
+
+    #[cfg(feature = "handles")]
+    #[test]
+    fn miri_ghostcell_repeated_domain_registration_retains_one_permit() {
+        let domain = crate::handle::HandleReadDomain::new();
+        super::with_branded_call_scope_and_state(&domain, |domain, storage, mut token| {
+            let first = storage.enter_handle_domain(&mut token, domain).unwrap();
+            let second = storage.enter_handle_domain(&mut token, domain).unwrap();
+            assert_eq!(first.domain(), second.domain());
+            assert!(matches!(
+                storage.handle_permits.borrow(&token),
+                super::HandlePermits::Single(_)
+            ));
+        });
+    }
+
+    #[cfg(all(feature = "handles", target_pointer_width = "64"))]
+    #[test]
+    fn ghostcell_storage_preserves_layout_budget() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<super::CallStorage<'_, '_>>(), 96);
+        assert_eq!(size_of::<ghost_cell::GhostToken<'_>>(), 0);
+        assert_eq!(size_of::<super::HandleDomainWitness<'_>>(), 16);
+        assert!(size_of::<crate::value::DecodeCallContext<'_, '_>>() <= 80);
+        assert!(
+            size_of::<crate::value::ArgumentContext<'_, '_, crate::value::PlainInputMode>>() <= 80
+        );
+        static_assertions::assert_not_impl_any!(super::CallStorage<'static, 'static>: Send, Sync);
+        static_assertions::assert_not_impl_any!(crate::value::DecodeCallContext<'static, 'static>: Send, Sync);
+    }
 
     #[test]
     fn miri_inline_text_preserves_earlier_borrows_across_later_decodes() {

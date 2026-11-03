@@ -56,7 +56,10 @@ pub mod v1 {
 
     use crate::addin::{Addin, PhysicallyUnloadableAddin};
     use crate::boundary::host::{host_auto_close, host_auto_remove};
-    pub use crate::call::{CallScope, CallStorage, with_branded_call_scope, with_branded_call_scope_and_state, with_excel_call_scope, with_excel_call_scope_and_state};
+    pub use crate::call::{
+        CallScope, CallStorage, with_branded_call_scope, with_branded_call_scope_and_state,
+        with_excel_call_scope, with_excel_call_scope_and_state,
+    };
     #[cfg(feature = "async")]
     pub use crate::cancellation::CancellationToken;
     use crate::error::{XllError, XllResult};
@@ -71,10 +74,10 @@ pub mod v1 {
     #[cfg(any(feature = "handles", test))]
     pub use crate::value::input::FormulaInputMode;
     pub use crate::value::input::{
-        ArgumentContext, ArgumentMaterializer, DecodeCallContext, ExcelInputIdentity, ExcelParameter,
-        FinishedArguments, InputMode, PlainInputMode, PreparedArgument, PreparedElement,
-        PreparedParameter, PreparedParameterSequence, ReadyArgument, argument_from_raw,
-        argument_from_raw_with_arguments, cell_presence_from_raw,
+        ArgumentContext, ArgumentMaterializer, DecodeCallContext, ExcelInputIdentity,
+        ExcelParameter, FinishedArguments, InputMode, PlainInputMode, PreparedArgument,
+        PreparedElement, PreparedParameter, PreparedParameterSequence, ReadyArgument,
+        argument_from_raw, argument_from_raw_with_arguments, cell_presence_from_raw,
     };
     #[doc(hidden)]
     pub use crate::value::output::ExcelCellSink;
@@ -1116,7 +1119,9 @@ pub mod v1 {
                         crate::addin::AddinSubscription<A>,
                         crate::addin::AddinSources<A>,
                         X,
-                    >::new(call, storage, token, callbacks, argument_count);
+                    >::new(
+                        call, storage, token, callbacks, argument_count
+                    );
                     execute(call.state(), frame)
                 },
             )
@@ -1348,7 +1353,6 @@ pub mod v1 {
     #[cfg(all(feature = "handles", feature = "bench-internals"))]
     #[doc(hidden)]
     pub mod handle_test {
-        use crate::call::CallScope;
         use crate::error::XllResult;
         use crate::handle::{ExcelHandleObject, Handle};
 
@@ -1389,7 +1393,14 @@ pub mod v1 {
             macro_rules! frame_bytes {
                 ($mode:ty) => {
                     std::mem::size_of::<
-                        CallFrame<'static, 'static, PlainInputMode, (), crate::DynamicRtdSources<()>, $mode>,
+                        CallFrame<
+                            'static,
+                            'static,
+                            PlainInputMode,
+                            (),
+                            crate::DynamicRtdSources<()>,
+                            $mode,
+                        >,
                     >()
                 };
             }

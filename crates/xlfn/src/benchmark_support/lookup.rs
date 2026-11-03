@@ -86,11 +86,13 @@ impl HandleLookupBenchmark {
             start_tx.push(worker_tx);
             workers.push(std::thread::spawn(move || {
                 let lookup = |token: &str| {
-                    let result = crate::call::with_excel_call_scope_and_state(
+                    let result = crate::call::with_branded_call_scope_and_state(
                         &worker_runtime,
-                        |worker_runtime, scope| {
+                        |worker_runtime, storage, brand| {
+                            let mut context =
+                                crate::value::DecodeCallContext::with_storage(storage, brand);
                             worker_runtime
-                                .lookup::<BenchHandleObject>(scope, token)
+                                .lookup::<BenchHandleObject>(&mut context, token)
                                 .map(|handle| {
                                     std::hint::black_box(&*handle);
                                 })

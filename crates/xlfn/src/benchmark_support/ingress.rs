@@ -301,8 +301,9 @@ impl RawArgumentIngressBenchmark {
             .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
-            let mut arguments =
-                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, token, 1);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
                 crate::value::argument_from_raw_with_arguments::<crate::value::PlainInputMode, T>(
@@ -384,8 +385,9 @@ impl RawArgumentIngressBenchmark {
             .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
-            let mut arguments =
-                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, token, 1);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value =
                 unsafe {
@@ -408,8 +410,9 @@ impl RawArgumentIngressBenchmark {
             .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
-            let mut arguments =
-                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, token, 2);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 2,
+            );
             // SAFETY: both fixtures own live, distinct raw string arguments.
             let first =
                 unsafe {
@@ -473,8 +476,9 @@ impl RawArgumentIngressBenchmark {
             .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
-            let mut arguments =
-                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, token, 1);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
             // SAFETY: the fixture owns the root and cells for the complete call.
             let matrix = unsafe {
                 crate::value::argument_from_raw_with_arguments::<
@@ -541,8 +545,9 @@ impl RawArgumentIngressBenchmark {
             .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
-            let mut arguments =
-                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, token, 1);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
                 crate::value::argument_from_raw_with_arguments::<
@@ -563,8 +568,9 @@ impl RawArgumentIngressBenchmark {
             .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
-            let mut arguments =
-                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, token, 1);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
                 crate::value::argument_from_raw_with_arguments::<
@@ -583,8 +589,9 @@ impl RawArgumentIngressBenchmark {
         let ingress = benchmark_ingress();
         let call = self.runtime.enter(&ingress).unwrap();
         crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
-            let mut arguments =
-                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, token, 1);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
             // SAFETY: the fixture retains its root, cells and text for the entire call.
             let value = unsafe {
                 crate::value::argument_from_raw_with_arguments::<
@@ -636,8 +643,9 @@ impl RawArgumentIngressBenchmark {
             .enter(&ingress)
             .expect("benchmark runtime must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
-            let mut arguments =
-                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, token, 1);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe {
                 crate::value::argument_from_raw_with_arguments::<
@@ -665,8 +673,9 @@ impl RawArgumentIngressBenchmark {
             .try_execution_lease()
             .expect("benchmark execution generation must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
-            let mut arguments =
-                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, token, 1);
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
             // SAFETY: self.raw points to valid benchmark storage that remains live.
             let value = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }
                 .expect("benchmark handle value must be well formed");

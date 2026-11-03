@@ -71,7 +71,7 @@ pub(crate) use input::argument_from_raw;
 pub(crate) use input::argument_from_raw_with_context;
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use input::{ArgumentContext, argument_from_raw_with_arguments};
-pub(crate) use input::{CallContext, DecodeCallContext, ExcelParameter};
+pub(crate) use input::{DecodeCallContext, ExcelParameter};
 pub(crate) use input::{ExcelInputCells, PreparedExcelSequence};
 pub use input::{ExcelInputIdentity, FromExcel, PrepareExcel};
 pub(crate) use input::{InputMode, PlainInputMode};
@@ -4186,10 +4186,12 @@ mod tests {
             .unwrap()
             .into_token();
 
-        let token_b =
-            crate::call::with_excel_call_scope_and_state(&handle_rt, |handle_rt, scope| {
+        let token_b = crate::call::with_branded_call_scope_and_state(
+            &handle_rt,
+            |handle_rt, storage, brand| {
+                let mut context = DecodeCallContext::with_storage(storage, brand);
                 let resolved: crate::handle::Handle<'_, SemanticHandleTestObj> =
-                    handle_rt.lookup(scope, &token_a).unwrap();
+                    handle_rt.lookup(&mut context, &token_a).unwrap();
                 handle_rt
                     .prepare_observed_alias::<SemanticHandleTestObj, _>(
                         topic_b,
@@ -4198,7 +4200,8 @@ mod tests {
                     )
                     .unwrap()
                     .into_token()
-            });
+            },
+        );
 
         assert_ne!(token_a, token_b);
 
@@ -4222,41 +4225,45 @@ mod tests {
             xltype: XLTYPE_STR,
         };
 
-        let (handle_data_a, id_a, object_id_a) = crate::call::with_excel_call_scope(|scope| {
-            let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
-                scope,
-                crate::handle::FormulaHandleServiceResolver::new(slot),
-                1,
-            );
-            // SAFETY: raw_a is live for this conversion.
-            let handle = unsafe {
-                argument_from_raw_with_arguments::<
-                    FormulaInputMode,
-                    crate::handle::Handle<'_, SemanticHandleTestObj>,
-                >(&mut arguments, 0, "arg", &mut raw_a)
-            }
-            .unwrap();
-            let id = arguments.finish().unwrap().unwrap();
-            (handle.data, id, handle.object_id())
-        });
+        let (handle_data_a, id_a, object_id_a) =
+            crate::call::with_branded_call_scope(|storage, brand| {
+                let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
+                    storage,
+                    brand,
+                    crate::handle::FormulaHandleServiceResolver::new(slot),
+                    1,
+                );
+                // SAFETY: raw_a is live for this conversion.
+                let handle = unsafe {
+                    argument_from_raw_with_arguments::<
+                        FormulaInputMode,
+                        crate::handle::Handle<'_, SemanticHandleTestObj>,
+                    >(&mut arguments, 0, "arg", &mut raw_a)
+                }
+                .unwrap();
+                let id = arguments.finish().unwrap().unwrap();
+                (handle.data, id, handle.object_id())
+            });
 
-        let (handle_data_b, id_b, object_id_b) = crate::call::with_excel_call_scope(|scope| {
-            let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
-                scope,
-                crate::handle::FormulaHandleServiceResolver::new(slot),
-                1,
-            );
-            // SAFETY: raw_b is live for this conversion.
-            let handle = unsafe {
-                argument_from_raw_with_arguments::<
-                    FormulaInputMode,
-                    crate::handle::Handle<'_, SemanticHandleTestObj>,
-                >(&mut arguments, 0, "arg", &mut raw_b)
-            }
-            .unwrap();
-            let id = arguments.finish().unwrap().unwrap();
-            (handle.data, id, handle.object_id())
-        });
+        let (handle_data_b, id_b, object_id_b) =
+            crate::call::with_branded_call_scope(|storage, brand| {
+                let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
+                    storage,
+                    brand,
+                    crate::handle::FormulaHandleServiceResolver::new(slot),
+                    1,
+                );
+                // SAFETY: raw_b is live for this conversion.
+                let handle = unsafe {
+                    argument_from_raw_with_arguments::<
+                        FormulaInputMode,
+                        crate::handle::Handle<'_, SemanticHandleTestObj>,
+                    >(&mut arguments, 0, "arg", &mut raw_b)
+                }
+                .unwrap();
+                let id = arguments.finish().unwrap().unwrap();
+                (handle.data, id, handle.object_id())
+            });
 
         assert_eq!(handle_data_a, 99);
         assert_eq!(handle_data_b, 99);

@@ -8,7 +8,6 @@ use crate::{XllError, XllResult};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-
 fn with_decode_scope_and_state<S, R>(
     state: &S,
     operation: impl for<'brand, 'call> FnOnce(
@@ -94,7 +93,8 @@ fn input_identity<T: ExcelHandleObject>(
     };
     crate::call::with_branded_call_scope(|storage, brand| {
         let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
-            storage, brand,
+            storage,
+            brand,
             FormulaHandleServiceResolver::new(slot),
             1,
         );
@@ -695,26 +695,25 @@ fn close_rejects_new_borrows_but_retires_after_existing_call_release() {
     let registry = Arc::new(HandleRegistry::new(2));
     let token = insert_production(&registry, Arc::new(TestObj("live"))).unwrap();
 
-    let (seal_handle, finished_rx) =
-        with_decode_scope_and_state(&registry, |registry, scope| {
-            let borrowed = registry.lookup_handle::<TestObj>(scope, &token).unwrap();
-            assert_eq!(borrowed.0, "live");
+    let (seal_handle, finished_rx) = with_decode_scope_and_state(&registry, |registry, scope| {
+        let borrowed = registry.lookup_handle::<TestObj>(scope, &token).unwrap();
+        assert_eq!(borrowed.0, "live");
 
-            let reg_clone = Arc::clone(registry);
-            let (started_tx, started_rx) = mpsc::channel();
-            let (finished_tx, finished_rx) = mpsc::channel();
-            let seal_handle = std::thread::spawn(move || {
-                started_tx.send(()).unwrap();
-                let res = reg_clone.seal().map(|_| ());
-                finished_tx.send(res).unwrap();
-            });
-            started_rx.recv().unwrap();
-
-            // While call scope is active, seal cannot complete because readers are active.
-            assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
-            assert_eq!(borrowed.0, "live");
-            (seal_handle, finished_rx)
+        let reg_clone = Arc::clone(registry);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let seal_handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let res = reg_clone.seal().map(|_| ());
+            finished_tx.send(res).unwrap();
         });
+        started_rx.recv().unwrap();
+
+        // While call scope is active, seal cannot complete because readers are active.
+        assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        assert_eq!(borrowed.0, "live");
+        (seal_handle, finished_rx)
+    });
 
     finished_rx
         .recv_timeout(Duration::from_secs(1))
@@ -880,15 +879,14 @@ fn handle_lease_as_ref_and_identity_match_the_synchronous_handle() {
         })
         .unwrap()
         .into_token();
-    let (identity, pending) =
-        with_decode_scope_and_state(&runtime, |runtime, scope| {
-            let handle = runtime.lookup::<DataRecord>(scope, &token).unwrap();
-            let identity = handle.object_id();
-            let pending = handle
-                .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
-                .unwrap();
-            (identity, pending)
-        });
+    let (identity, pending) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle = runtime.lookup::<DataRecord>(scope, &token).unwrap();
+        let identity = handle.object_id();
+        let pending = handle
+            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+            .unwrap();
+        (identity, pending)
+    });
     let brand = GenerationLeaseBrand;
     let scope = crate::async_udf::AsyncTaskScope::new(
         crate::generation::RuntimeGeneration::new(1).unwrap(),
@@ -1274,7 +1272,8 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
         // SAFETY: `wrong_raw` remains live for the duration of this conversion.
         let wrong = unsafe {
             crate::value::argument_from_raw_with_context::<Handle<'_, SimpleResource>>(
-                storage, brand,
+                storage,
+                brand,
                 slot,
                 "curve",
                 &mut wrong_raw,
@@ -1290,7 +1289,8 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
         // SAFETY: `foreign_raw` remains live for the duration of this conversion.
         let foreign = unsafe {
             crate::value::argument_from_raw_with_context::<Handle<'_, DataRecord>>(
-                storage, brand,
+                storage,
+                brand,
                 foreign_slot,
                 "dataset",
                 &mut foreign_raw,
@@ -1308,7 +1308,8 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
         // SAFETY: `tampered_raw` remains live for the duration of this conversion.
         let tampered = unsafe {
             crate::value::argument_from_raw_with_context::<Handle<'_, DataRecord>>(
-                storage, brand,
+                storage,
+                brand,
                 slot,
                 "dataset",
                 &mut tampered_raw,
@@ -1324,7 +1325,8 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
         // SAFETY: `stale_raw` remains live for the duration of this conversion.
         let stale = unsafe {
             crate::value::argument_from_raw_with_context::<Handle<'_, DataRecord>>(
-                storage, brand,
+                storage,
+                brand,
                 slot,
                 "dataset",
                 &mut stale_raw,
@@ -1355,7 +1357,8 @@ fn optional_handle_conversion_preserves_blank_and_missing_policy() {
         // SAFETY: `missing` remains live for the duration of this conversion.
         let missing_value = unsafe {
             crate::value::argument_from_raw_with_context::<Option<Handle<'_, DataRecord>>>(
-                storage, brand,
+                storage,
+                brand,
                 slot,
                 "dataset",
                 &mut missing,
@@ -1392,16 +1395,15 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
 
     let alias_key = test_topic_key("alias");
     let alias_lifetime_key = alias_key.format_lifetime_key();
-    let (alias_token, object_id) =
-        with_decode_scope_and_state(&runtime, |runtime, scope| {
-            let resolved: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
-            let object_id = resolved.object_id();
-            let alias = runtime
-                .prepare_observed_alias::<DataRecord, _>(alias_key, resolved.alias(), |_, _| Ok(()))
-                .unwrap()
-                .into_token();
-            (alias, object_id)
-        });
+    let (alias_token, object_id) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let resolved: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
+        let object_id = resolved.object_id();
+        let alias = runtime
+            .prepare_observed_alias::<DataRecord, _>(alias_key, resolved.alias(), |_, _| Ok(()))
+            .unwrap()
+            .into_token();
+        (alias, object_id)
+    });
     runtime
         .connect(lifetime_generation(1), 2, &alias_lifetime_key)
         .unwrap();
@@ -2118,25 +2120,24 @@ fn binding_snapshot_blocks_object_quiescence_until_call_ends() {
         .unwrap()
         .into_token();
 
-    let (seal_handle, finished_rx) =
-        with_decode_scope_and_state(&runtime, |runtime, scope| {
-            let handle = runtime.lookup::<DataRecord>(scope, &token).unwrap();
-            assert_eq!(handle.0, 42);
+    let (seal_handle, finished_rx) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle = runtime.lookup::<DataRecord>(scope, &token).unwrap();
+        assert_eq!(handle.0, 42);
 
-            let rt_clone = Arc::clone(runtime);
-            let (started_tx, started_rx) = mpsc::channel();
-            let (finished_tx, finished_rx) = mpsc::channel();
-            let seal_handle = std::thread::spawn(move || {
-                started_tx.send(()).unwrap();
-                let sealed = rt_clone.seal().map(|sealed| sealed.finish_quiescence());
-                finished_tx.send(sealed).unwrap();
-            });
-            started_rx.recv().unwrap();
-
-            // While handle is live in call scope, seal is waiting for readers to drain.
-            assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
-            (seal_handle, finished_rx)
+        let rt_clone = Arc::clone(runtime);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let seal_handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let sealed = rt_clone.seal().map(|sealed| sealed.finish_quiescence());
+            finished_tx.send(sealed).unwrap();
         });
+        started_rx.recv().unwrap();
+
+        // While handle is live in call scope, seal is waiting for readers to drain.
+        assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        (seal_handle, finished_rx)
+    });
 
     finished_rx
         .recv_timeout(Duration::from_secs(1))
@@ -3140,19 +3141,18 @@ fn alias_preserves_pointer_and_object_identity() {
         .unwrap()
         .into_token();
 
-    let (token2, object_id1, ptr1) =
-        with_decode_scope_and_state(&runtime, |runtime, scope| {
-            let handle1 = runtime.lookup::<TrackedObj>(scope, &token1).unwrap();
-            let object_id = handle1.object_id();
-            let ptr = handle1.projection_addr();
-            let alias = handle1.alias();
-            let key2 = test_topic_key("alias_identity_2");
-            let token2 = runtime
-                .prepare_observed_alias::<TrackedObj, _>(key2, alias, |_, _| Ok(()))
-                .unwrap()
-                .into_token();
-            (token2, object_id, ptr)
-        });
+    let (token2, object_id1, ptr1) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle1 = runtime.lookup::<TrackedObj>(scope, &token1).unwrap();
+        let object_id = handle1.object_id();
+        let ptr = handle1.projection_addr();
+        let alias = handle1.alias();
+        let key2 = test_topic_key("alias_identity_2");
+        let token2 = runtime
+            .prepare_observed_alias::<TrackedObj, _>(key2, alias, |_, _| Ok(()))
+            .unwrap()
+            .into_token();
+        (token2, object_id, ptr)
+    });
 
     assert_ne!(token1, token2);
 
@@ -3198,31 +3198,30 @@ fn call_borrow_keeps_value_alive_across_binding_retirement() {
         .unwrap()
         .into_token();
 
-    let (removal_handle, _finished_rx) =
-        with_decode_scope_and_state(&runtime, |runtime, scope| {
-            let handle = runtime.lookup::<DropCounter>(scope, &token).unwrap();
-            assert_eq!(handle.val, 777);
+    let (removal_handle, _finished_rx) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle = runtime.lookup::<DropCounter>(scope, &token).unwrap();
+        assert_eq!(handle.val, 777);
 
-            let rt_clone = Arc::clone(runtime);
-            let token_clone = token.clone();
-            let (started_tx, started_rx) = mpsc::channel();
-            let (finished_tx, finished_rx) = mpsc::channel();
-            let removal_handle = std::thread::spawn(move || {
-                started_tx.send(()).unwrap();
-                rt_clone
-                    .store
-                    .registry
-                    .remove_and_drop(&token_clone, "test remove");
-                finished_tx.send(()).unwrap();
-            });
-            started_rx.recv().unwrap();
-
-            // Withdrawal completes while the scope retains the payload.
-            finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-            assert_eq!(drops.load(Ordering::SeqCst), 0);
-            assert_eq!(handle.val, 777);
-            (removal_handle, finished_rx)
+        let rt_clone = Arc::clone(runtime);
+        let token_clone = token.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let removal_handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            rt_clone
+                .store
+                .registry
+                .remove_and_drop(&token_clone, "test remove");
+            finished_tx.send(()).unwrap();
         });
+        started_rx.recv().unwrap();
+
+        // Withdrawal completes while the scope retains the payload.
+        finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(handle.val, 777);
+        (removal_handle, finished_rx)
+    });
 
     removal_handle.join().unwrap();
     runtime
@@ -3318,19 +3317,18 @@ fn zero_sized_type_handle_lifecycle() {
         .unwrap()
         .into_token();
 
-    let (token2, object_id) =
-        with_decode_scope_and_state(&runtime, |runtime, scope| {
-            let handle1 = runtime.lookup::<ZeroSized>(scope, &token1).unwrap();
-            assert_eq!(*handle1, ZeroSized);
-            let object_id = handle1.object_id();
-            let alias = handle1.alias();
-            let key2 = test_topic_key("zst_test_2");
-            let token2 = runtime
-                .prepare_observed_alias::<ZeroSized, _>(key2, alias, |_, _| Ok(()))
-                .unwrap()
-                .into_token();
-            (token2, object_id)
-        });
+    let (token2, object_id) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle1 = runtime.lookup::<ZeroSized>(scope, &token1).unwrap();
+        assert_eq!(*handle1, ZeroSized);
+        let object_id = handle1.object_id();
+        let alias = handle1.alias();
+        let key2 = test_topic_key("zst_test_2");
+        let token2 = runtime
+            .prepare_observed_alias::<ZeroSized, _>(key2, alias, |_, _| Ok(()))
+            .unwrap()
+            .into_token();
+        (token2, object_id)
+    });
 
     with_decode_scope_and_state(&runtime, |runtime, scope| {
         let handle2 = runtime.lookup::<ZeroSized>(scope, &token2).unwrap();
@@ -3388,31 +3386,30 @@ fn alias_read_capability_delays_binding_retirement_until_scope_exit() {
         .unwrap()
         .into_token();
 
-    let (removal, _finished_rx) =
-        with_decode_scope_and_state(&runtime, |runtime, scope| {
-            let handle = runtime.lookup::<TrackedValue>(scope, &token).unwrap();
-            let alias = handle.alias();
+    let (removal, _finished_rx) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle = runtime.lookup::<TrackedValue>(scope, &token).unwrap();
+        let alias = handle.alias();
 
-            let removal_runtime = Arc::clone(runtime);
-            let (started_tx, started_rx) = mpsc::channel();
-            let (finished_tx, finished_rx) = mpsc::channel();
-            let removal = std::thread::spawn(move || {
-                started_tx.send(()).unwrap();
-                removal_runtime
-                    .store
-                    .registry
-                    .remove_and_drop(&token, "remove original");
-                finished_tx.send(()).unwrap();
-            });
-            started_rx.recv().unwrap();
-
-            // Retirement withdraws the binding immediately but cannot reclaim its
-            // object capability until the alias's read permit leaves the scope.
-            finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-            assert_eq!(drops.load(Ordering::SeqCst), 0);
-            assert_eq!(alias.object_id().sequence(), 1);
-            (removal, finished_rx)
+        let removal_runtime = Arc::clone(runtime);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let removal = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            removal_runtime
+                .store
+                .registry
+                .remove_and_drop(&token, "remove original");
+            finished_tx.send(()).unwrap();
         });
+        started_rx.recv().unwrap();
+
+        // Retirement withdraws the binding immediately but cannot reclaim its
+        // object capability until the alias's read permit leaves the scope.
+        finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(alias.object_id().sequence(), 1);
+        (removal, finished_rx)
+    });
     removal.join().unwrap();
     runtime
         .store
@@ -3453,7 +3450,8 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
     let callbacks = crate::host_callback::HostCallbackSession::new();
     crate::call::with_branded_call_scope_and_state(&callbacks, |callbacks, storage, brand| {
         let resolver = FormulaHandleServiceResolver::new(slot);
-        let mut call_ctx = crate::value::DecodeCallContext::from_handle_access(storage, brand, resolver);
+        let mut call_ctx =
+            crate::value::DecodeCallContext::from_handle_access(storage, brand, resolver);
 
         // First handle resolution initializes resolver OnceCell
         let h1: Handle<'_, TestObj> = call_ctx.resolve_handle(&token).unwrap();
@@ -3464,8 +3462,9 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
         assert_eq!(h2.0, 123);
 
         // Take resolver and move to ReturnContext
-        let moved_access = call_ctx.finish().take_handle_access();
-        assert!(call_ctx.finish().take_handle_access().is_none());
+        let mut return_access = call_ctx.finish();
+        let moved_access = return_access.take_handle_access();
+        assert!(return_access.take_handle_access().is_none());
 
         let res_ref = &moved_access.as_ref().unwrap().runtime;
         assert!(std::ptr::eq(res_ref.get().unwrap(), &*handle_rt));
@@ -4142,4 +4141,76 @@ fn miri_pending_handle_lease_rejects_foreign_generation_before_exposing_value() 
         assert_eq!(drops.load(Ordering::Acquire), 1);
         handles.seal().unwrap();
     }
+}
+
+#[test]
+fn miri_ghostcell_handles_outlive_decode_context() {
+    struct Tracked {
+        drops: Arc<AtomicUsize>,
+        value: u32,
+    }
+    impl ExcelHandleObject for Tracked {}
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let registry = HandleRegistry::from_entropy(8, [7; 40]);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let token = insert_production(
+        &registry,
+        Arc::new(Tracked {
+            drops: Arc::clone(&drops),
+            value: 21,
+        }),
+    )
+    .unwrap();
+    crate::call::with_branded_call_scope_and_state(&registry, |registry, storage, brand| {
+        let mut context = crate::value::DecodeCallContext::with_storage(storage, brand);
+        let first = registry
+            .lookup_handle::<Tracked>(&mut context, &token)
+            .unwrap();
+        let second = registry
+            .lookup_handle::<Tracked>(&mut context, &token)
+            .unwrap();
+        let _return_context = context.finish();
+        registry.remove::<Tracked>(&token).unwrap();
+        assert_eq!(first.value + second.value, 42);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+    });
+    registry.bindings.read_domain().flush_for_test();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn miri_ghostcell_scope_releases_permits_during_unwind() {
+    let registry = HandleRegistry::from_entropy(8, [7; 40]);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let token =
+        insert_production(&registry, Arc::new(CountedDataRecord(Arc::clone(&drops)))).unwrap();
+    let unwound = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::call::with_branded_call_scope_and_state(&registry, |registry, storage, brand| {
+            let mut context = crate::value::DecodeCallContext::with_storage(storage, brand);
+            let first = registry
+                .lookup_handle::<CountedDataRecord>(&mut context, &token)
+                .unwrap();
+            let second = registry
+                .lookup_handle::<CountedDataRecord>(&mut context, &token)
+                .unwrap();
+            registry.remove::<CountedDataRecord>(&token).unwrap();
+            assert_eq!(first.0.load(Ordering::SeqCst), 0);
+            assert_eq!(second.0.load(Ordering::SeqCst), 0);
+            panic!("exercise call teardown");
+        });
+    }));
+    assert!(unwound.is_err());
+    registry.bindings.read_domain().flush_for_test();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn ghostcell_handle_authority_stays_thread_bound() {
+    static_assertions::assert_not_impl_any!(Handle<'static, DataRecord>: Send, Sync);
+    static_assertions::assert_not_impl_any!(crate::call::CallStorage<'static, 'static>: Send, Sync);
+    static_assertions::assert_not_impl_any!(crate::value::DecodeCallContext<'static, 'static>: Send, Sync);
 }

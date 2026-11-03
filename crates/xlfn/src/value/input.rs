@@ -983,12 +983,16 @@ impl<'call> CallContext<'call> {
     pub(crate) fn take_handle_access(&mut self) -> Option<HandleCallAccess<'call>> {
         let scope = self.scope();
         match std::mem::replace(&mut self.access, CallAccess::Plain(scope)) {
-            CallAccess::Runtime(access) => Some(HandleCallAccess { runtime: access.handles }),
+            CallAccess::Runtime(access) => Some(HandleCallAccess {
+                runtime: access.handles,
+            }),
             CallAccess::Plain(_) => None,
         }
     }
     #[cfg(feature = "handles")]
-    pub(crate) fn into_plain_return_guard(self) -> Option<crate::handle::FormulaHandleServiceRead<'call>> {
+    pub(crate) fn into_plain_return_guard(
+        self,
+    ) -> Option<crate::handle::FormulaHandleServiceRead<'call>> {
         match self.access {
             CallAccess::Plain(_) => None,
             CallAccess::Runtime(access) => access.handles.into_read_guard(),
@@ -1018,24 +1022,56 @@ enum DecodeCallAccess<'brand, 'call> {
 }
 impl<'brand, 'call> DecodeCallContext<'brand, 'call> {
     pub(crate) fn plain(scope: &'call CallScope<'call>) -> Self {
-        Self { access: DecodeCallAccess::Plain(scope) }
+        Self {
+            access: DecodeCallAccess::Plain(scope),
+        }
     }
     #[cfg(any(test, feature = "bench-internals"))]
-    pub fn with_storage(storage: &'call crate::call::CallStorage<'brand, 'call>, token: ghost_cell::GhostToken<'brand>) -> Self {
-        Self { access: DecodeCallAccess::Storage { storage, token } }
+    pub fn with_storage(
+        storage: &'call crate::call::CallStorage<'brand, 'call>,
+        token: ghost_cell::GhostToken<'brand>,
+    ) -> Self {
+        Self {
+            access: DecodeCallAccess::Storage { storage, token },
+        }
     }
-    pub(crate) fn with_call<A: crate::Addin>(call: &'call crate::runtime::CallGuard<'_, A>, storage: &'call crate::call::CallStorage<'brand, 'call>, token: ghost_cell::GhostToken<'brand>) -> Self {
+    pub(crate) fn with_call<A: crate::Addin>(
+        call: &'call crate::runtime::CallGuard<'_, A>,
+        storage: &'call crate::call::CallStorage<'brand, 'call>,
+        token: ghost_cell::GhostToken<'brand>,
+    ) -> Self {
         #[cfg(not(feature = "handles"))]
         let _ = call;
-        Self { access: DecodeCallAccess::Runtime { storage, token, #[cfg(feature = "handles")] handles: call.handle_call_access() } }
+        Self {
+            access: DecodeCallAccess::Runtime {
+                storage,
+                token,
+                #[cfg(feature = "handles")]
+                handles: call.handle_call_access(),
+            },
+        }
     }
     #[cfg(all(test, feature = "handles"))]
-    pub(crate) fn from_handle_access(storage: &'call crate::call::CallStorage<'brand, 'call>, token: ghost_cell::GhostToken<'brand>, handles: crate::handle::FormulaHandleServiceResolver<'call>) -> Self {
-        Self { access: DecodeCallAccess::Runtime { storage, token, handles } }
+    pub(crate) fn from_handle_access(
+        storage: &'call crate::call::CallStorage<'brand, 'call>,
+        token: ghost_cell::GhostToken<'brand>,
+        handles: crate::handle::FormulaHandleServiceResolver<'call>,
+    ) -> Self {
+        Self {
+            access: DecodeCallAccess::Runtime {
+                storage,
+                token,
+                handles,
+            },
+        }
     }
     #[cfg(test)]
-    pub(crate) fn from_scope(scope: &'call CallScope<'call>) -> Self { Self::plain(scope) }
-    pub(crate) fn scratch(&self) -> &'call crate::call::CallScratch { self.scope().scratch() }
+    pub(crate) fn from_scope(scope: &'call CallScope<'call>) -> Self {
+        Self::plain(scope)
+    }
+    pub(crate) fn scratch(&self) -> &'call crate::call::CallScratch {
+        self.scope().scratch()
+    }
     pub(crate) fn scope(&self) -> &'call CallScope<'call> {
         match &self.access {
             DecodeCallAccess::Plain(scope) => scope,
@@ -1045,12 +1081,21 @@ impl<'brand, 'call> DecodeCallContext<'brand, 'call> {
         }
     }
     #[cfg(feature = "handles")]
-    pub(crate) fn enter_handle_domain(&mut self, domain: &'call crate::handle::HandleReadDomain) -> XllResult<crate::handle::HandleDomainWitness<'call>> {
+    pub(crate) fn enter_handle_domain(
+        &mut self,
+        domain: &'call crate::handle::HandleReadDomain,
+    ) -> XllResult<crate::handle::HandleDomainWitness<'call>> {
         match &mut self.access {
             #[cfg(any(test, feature = "bench-internals"))]
-            DecodeCallAccess::Storage { storage, token } => storage.enter_handle_domain(token, domain),
-            DecodeCallAccess::Runtime { storage, token, .. } => storage.enter_handle_domain(token, domain),
-            DecodeCallAccess::Plain(_) => Err(XllError::Internal { diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_NO_CONTEXT }),
+            DecodeCallAccess::Storage { storage, token } => {
+                storage.enter_handle_domain(token, domain)
+            }
+            DecodeCallAccess::Runtime { storage, token, .. } => {
+                storage.enter_handle_domain(token, domain)
+            }
+            DecodeCallAccess::Plain(_) => Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_NO_CONTEXT,
+            }),
         }
     }
     /// Erases the brand after decoding without releasing the storage's permits.
@@ -1062,25 +1107,45 @@ impl<'brand, 'call> DecodeCallContext<'brand, 'call> {
                 let _ = token;
                 CallAccess::Plain(storage.scope())
             }
-            DecodeCallAccess::Runtime { storage, token, #[cfg(feature = "handles")] handles } => {
+            DecodeCallAccess::Runtime {
+                storage,
+                token,
+                #[cfg(feature = "handles")]
+                handles,
+            } => {
                 let _ = token;
-                CallAccess::Runtime(RuntimeCallAccess { scope: storage.scope(), #[cfg(feature = "handles")] handles })
+                CallAccess::Runtime(RuntimeCallAccess {
+                    scope: storage.scope(),
+                    #[cfg(feature = "handles")]
+                    handles,
+                })
             }
         };
         CallContext { access }
     }
     #[cfg(feature = "handles")]
-    pub(crate) fn resolve_handle<T: crate::handle::ExcelHandleObject>(&mut self, token: &str) -> XllResult<crate::handle::Handle<'call, T>> {
+    pub(crate) fn resolve_handle<T: crate::handle::ExcelHandleObject>(
+        &mut self,
+        token: &str,
+    ) -> XllResult<crate::handle::Handle<'call, T>> {
         // get() returns a borrow anchored in the enclosing generation owner,
         // not in this short mutable borrow of decoding authority.
         let handles = match &self.access {
             DecodeCallAccess::Runtime { handles, .. } => handles.get()?,
-            _ => return Err(XllError::Internal { diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_NO_CONTEXT }),
+            _ => {
+                return Err(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_NO_CONTEXT,
+                });
+            }
         };
         handles.lookup(self, token)
     }
     #[cfg(all(feature = "async", feature = "handles"))]
-    pub(crate) fn resolve_pending_handle<T: crate::handle::ExcelHandleObject>(&mut self, token: &str, generation: crate::generation::RuntimeGeneration) -> XllResult<crate::handle::PendingHandleLease<T>> {
+    pub(crate) fn resolve_pending_handle<T: crate::handle::ExcelHandleObject>(
+        &mut self,
+        token: &str,
+        generation: crate::generation::RuntimeGeneration,
+    ) -> XllResult<crate::handle::PendingHandleLease<T>> {
         self.resolve_handle::<T>(token)?.into_pending(generation)
     }
 }
@@ -1402,7 +1467,12 @@ where
         XllError::Input { reason, .. } => XllError::Input { argument, reason },
         other => other,
     })?;
-    T::decode(borrowed, argument, &mut DecodeCallContext::plain(scope), &mut ())
+    T::decode(
+        borrowed,
+        argument,
+        &mut DecodeCallContext::plain(scope),
+        &mut (),
+    )
 }
 
 #[doc(hidden)]

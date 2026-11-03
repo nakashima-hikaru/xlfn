@@ -198,43 +198,47 @@ fn finalized_inputs_transfer_service_permit<M: InputMode>() {
     slot.arm(crate::HandleConfig::default()).unwrap();
     slot.initialize().unwrap();
     let callbacks = crate::host_callback::HostCallbackSession::new();
-    crate::call::with_excel_call_scope_and_state(&(slot, callbacks), |(slot, callbacks), scope| {
-        let resolver = crate::handle::FormulaHandleServiceResolver::new(slot);
-        resolver.get().unwrap(); // acquire the single service permit before finish
-        let mut arguments = ArgumentContext::<M>::from_handle_access(scope, resolver, 1);
-        arguments.native_f64(0, "value", 5.0).unwrap();
-        let finished = arguments.finish_typed().unwrap();
-        std::thread::scope(|threads| {
-            let (started_tx, started_rx) = std::sync::mpsc::channel();
-            let (done_tx, done_rx) = std::sync::mpsc::channel();
-            threads.spawn(move || {
-                started_tx.send(()).unwrap();
-                slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
-                    .unwrap()
-                    .finish()
+    crate::call::with_branded_call_scope_and_state(
+        &(slot, callbacks),
+        |(slot, callbacks), storage, brand| {
+            let resolver = crate::handle::FormulaHandleServiceResolver::new(slot);
+            resolver.get().unwrap(); // acquire the single service permit before finish
+            let mut arguments =
+                ArgumentContext::<M>::from_handle_access(storage, brand, resolver, 1);
+            arguments.native_f64(0, "value", 5.0).unwrap();
+            let finished = arguments.finish_typed().unwrap();
+            std::thread::scope(|threads| {
+                let (started_tx, started_rx) = std::sync::mpsc::channel();
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                threads.spawn(move || {
+                    started_tx.send(()).unwrap();
+                    slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
+                        .unwrap()
+                        .finish()
+                        .unwrap();
+                    done_tx.send(()).unwrap();
+                });
+                started_rx.recv().unwrap();
+                // Wait until sealing has withdrawn publication, so completion is
+                // blocked on the retained permit rather than thread scheduling.
+                while slot.read_if_ready().is_some() {
+                    std::thread::yield_now();
+                }
+                assert!(done_rx.try_recv().is_err());
+                let returns = finished
+                    .return_context::<(), crate::DynamicRtdSources<()>>(
+                        crate::call_return::ReturnFrameAccess {
+                            udf_id: "permit-transfer",
+                            callbacks,
+                        },
+                    )
                     .unwrap();
-                done_tx.send(()).unwrap();
+                assert!(done_rx.try_recv().is_err());
+                drop(returns);
+                done_rx.recv().unwrap();
             });
-            started_rx.recv().unwrap();
-            // Wait until sealing has withdrawn publication, so completion is
-            // blocked on the retained permit rather than thread scheduling.
-            while slot.read_if_ready().is_some() {
-                std::thread::yield_now();
-            }
-            assert!(done_rx.try_recv().is_err());
-            let returns = finished
-                .return_context::<(), crate::DynamicRtdSources<()>>(
-                    crate::call_return::ReturnFrameAccess {
-                        udf_id: "permit-transfer",
-                        callbacks,
-                    },
-                )
-                .unwrap();
-            assert!(done_rx.try_recv().is_err());
-            drop(returns);
-            done_rx.recv().unwrap();
-        });
-    });
+        },
+    );
 }
 
 #[test]
@@ -291,39 +295,49 @@ fn miri_failed_finalization_keeps_decoded_handles_safe_through_scope_exit() {
             let _sealed = service.seal().unwrap();
             done_tx.send(()).unwrap();
         });
-        crate::call::with_excel_call_scope_and_state(&input, |(slot, service, raw), scope| {
-            let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
-                scope,
-                crate::handle::FormulaHandleServiceResolver::new(slot),
-                2,
-            );
-            let handle = arguments
-                .decode::<crate::handle::Handle<'_, TrackedValue>>(
-                    0,
-                    "handle",
-                    XlValueRef::from_array_cell(raw).unwrap(),
-                )
-                .unwrap();
-            assert_eq!(handle.0, 42);
-            // The second input was never recorded, so consuming finalization
-            // fails rather than minting a return publication owner.
-            assert!(arguments.finish_typed().is_err());
-            begin_tx.send(()).unwrap();
-            // Observe the close's admission withdrawal, not just scheduling
-            // of the worker. The already admitted Handle remains readable.
-            while service.lookup::<TrackedValue>(scope, &token).is_ok() {
-                std::thread::yield_now();
-            }
-            assert!(done_rx.try_recv().is_err());
-            assert_eq!(drops.load(Ordering::SeqCst), 0);
-            assert_eq!(handle.0, 42);
-            drop(handle);
-            // Scope admission still protects the withdrawn binding even after
-            // the last Handle local drops. The external service owner remains
-            // alive through both permit release and its maintenance tail.
-            assert!(done_rx.try_recv().is_err());
-            assert_eq!(drops.load(Ordering::SeqCst), 0);
-        });
+        crate::call::with_branded_call_scope_and_state(
+            &input,
+            |(slot, service, raw), storage, brand| {
+                let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
+                    storage,
+                    brand,
+                    crate::handle::FormulaHandleServiceResolver::new(slot),
+                    2,
+                );
+                let handle = arguments
+                    .decode::<crate::handle::Handle<'_, TrackedValue>>(
+                        0,
+                        "handle",
+                        XlValueRef::from_array_cell(raw).unwrap(),
+                    )
+                    .unwrap();
+                assert_eq!(handle.0, 42);
+                // The second input was never recorded, so consuming finalization
+                // fails rather than minting a return publication owner.
+                assert!(arguments.finish_typed().is_err());
+                begin_tx.send(()).unwrap();
+                // Observe the close's admission withdrawal, not just scheduling
+                // of the worker. The already admitted Handle remains readable.
+                while crate::call::with_branded_call_scope_and_state(
+                    service,
+                    |service, storage, brand| {
+                        let mut context = super::DecodeCallContext::with_storage(storage, brand);
+                        service.lookup::<TrackedValue>(&mut context, &token).is_ok()
+                    },
+                ) {
+                    std::thread::yield_now();
+                }
+                assert!(done_rx.try_recv().is_err());
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+                assert_eq!(handle.0, 42);
+                drop(handle);
+                // Scope admission still protects the withdrawn binding even after
+                // the last Handle local drops. The external service owner remains
+                // alive through both permit release and its maintenance tail.
+                assert!(done_rx.try_recv().is_err());
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+            },
+        );
         done_rx
             .recv_timeout(std::time::Duration::from_secs(30))
             .unwrap();

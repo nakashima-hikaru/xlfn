@@ -198,13 +198,15 @@ fn pending(
         )
         .unwrap()
         .into_token();
-    let pending = crate::call::with_excel_call_scope_and_state(handles, |handles, scope| {
-        handles
-            .lookup::<Payload>(scope, &token)
-            .unwrap()
-            .into_pending(RuntimeGeneration::new(1).unwrap())
-            .unwrap()
-    });
+    let pending =
+        crate::call::with_branded_call_scope_and_state(handles, |handles, storage, brand| {
+            let mut context = crate::value::DecodeCallContext::with_storage(storage, brand);
+            handles
+                .lookup::<Payload>(&mut context, &token)
+                .unwrap()
+                .into_pending(RuntimeGeneration::new(1).unwrap())
+                .unwrap()
+        });
     handles.terminate_all_topics();
     assert_eq!(drops.load(Ordering::Relaxed), 0);
     pending
