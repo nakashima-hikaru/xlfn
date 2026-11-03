@@ -1,4 +1,3 @@
-use super::object::PendingObjectBinding;
 use super::publication::{ObjectAllocation, PublicationReservation};
 use super::registry::HandleRegistrySealed;
 use super::{
@@ -17,35 +16,12 @@ use std::cell::OnceCell;
 use std::cell::RefCell;
 use std::sync::atomic::AtomicBool;
 
-pub(crate) struct NewObject<'registry, T: ExcelHandleObject>(PendingObjectBinding<'registry, T>);
-
-impl<'registry, T: ExcelHandleObject> NewObject<'registry, T> {
-    fn new(value: PendingObjectBinding<'registry, T>) -> Self {
-        Self(value)
-    }
-
-    pub(super) fn into_pending(self) -> PendingObjectBinding<'registry, T> {
-        self.0
-    }
-}
-
-pub(crate) struct ExistingObject<'registry, T: ExcelHandleObject>(
-    PendingObjectBinding<'registry, T>,
-);
-
-impl<'registry, T: ExcelHandleObject> ExistingObject<'registry, T> {
-    fn new(object: PendingObjectBinding<'registry, T>) -> Self {
-        Self(object)
-    }
-
-    pub(super) fn into_pending(self) -> PendingObjectBinding<'registry, T> {
-        self.0
-    }
-}
-
-pub(crate) enum PreparedHandleObject<'registry, T: ExcelHandleObject> {
-    New(NewObject<'registry, T>),
-    Existing(ExistingObject<'registry, T>),
+/// Unpublished inputs carry no destination registry. The reservation alone
+/// chooses the destination, preventing a pending binding from one runtime
+/// being combined with another runtime's publication and rollback.
+pub(super) enum PreparedHandleObject<'scope, T: ExcelHandleObject> {
+    New(T),
+    Existing(HandleAlias<'scope, T>),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -211,13 +187,7 @@ impl FormulaHandleService {
     {
         self.prepare_observed_object::<T, K>(
             key,
-            || {
-                create().map(|value| {
-                    self.store
-                        .erase(value)
-                        .map(|value| PreparedHandleObject::New(NewObject::new(value)))
-                })?
-            },
+            || create().map(PreparedHandleObject::New),
             observe,
         )
     }
@@ -234,19 +204,15 @@ impl FormulaHandleService {
     {
         self.prepare_observed_object::<T, K>(
             key,
-            || {
-                Ok(PreparedHandleObject::Existing(ExistingObject::new(
-                    object.into_pending_object_binding(&self.store)?,
-                )))
-            },
+            || Ok(PreparedHandleObject::Existing(object)),
             observe,
         )
     }
 
-    fn prepare_observed_object<'runtime, T, K>(
-        &'runtime self,
+    fn prepare_observed_object<'scope, T, K>(
+        &self,
         key: K,
-        create: impl FnOnce() -> XllResult<PreparedHandleObject<'runtime, T>>,
+        create: impl FnOnce() -> XllResult<PreparedHandleObject<'scope, T>>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<HandlePreparation>
     where

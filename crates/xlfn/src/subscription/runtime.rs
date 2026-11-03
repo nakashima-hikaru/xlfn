@@ -333,22 +333,20 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         }
     }
 
-    pub(crate) fn connect_transaction(
-        &self,
+    pub(crate) fn connect_from_handle(
         server_handle: &SubscriptionServerHandle<H, E, C>,
         topic_id: TopicId,
         id: SubscriptionId,
     ) -> XllResult<SubscriptionConnection<H, E, C>> {
-        if !server_handle.belongs_to(self) {
-            return Err(XllError::StaleHandle);
-        }
+        let runtime = server_handle.runtime();
         let server = server_handle.server()?;
-        // SAFETY: the exact handle/runtime identity was checked above; the
+        // SAFETY: the runtime is derived from this handle; the
         // runtime and its server arena remain allocated for this owned
         // connection operation under the register/close lifecycle contract.
         let operation = unsafe { server.enter_owned_operation()? };
         let conn_gen = ConnectionGeneration::new(
-            self.next_connection_generation
+            runtime
+                .next_connection_generation
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     current.checked_add(1)
                 })
@@ -361,12 +359,12 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         })?;
 
         let (source, topic, ticket) = {
-            let mut catalog = self.catalog.lock();
+            let mut catalog = runtime.catalog.lock();
             let Some(result) = catalog.with_entry(id, |entry| -> XllResult<_> {
                 // Resolve the immutable arena entry before acquiring any
                 // catalog connection obligation. A rejected source must leave
                 // the pending subscription available for rollback or retry.
-                let source = self
+                let source = runtime
                     .sources
                     .resolve(entry.source_id.0)
                     .ok_or(XllError::StaleHandle)?;
@@ -380,7 +378,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         };
         let transaction = ConnectionTransaction {
             reservation: Some(ConnectionReservation {
-                runtime: NonNull::from(self),
+                runtime: NonNull::from(runtime),
                 operation,
                 topic_id,
                 id,
@@ -393,7 +391,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         // Prepare worker startup and terminal cleanup capacity before any
         // source receives a sink. Existing owners keep this capacity until
         // their sink-user barrier finishes, including deferred disconnection.
-        let cleanup = self.disconnects.reserve()?;
+        let cleanup = runtime.disconnects.reserve()?;
 
         let publish_sink = H::publish_sink(server.publish.as_ref(), topic_id, conn_gen);
 
@@ -410,7 +408,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             Ok(Err(err)) => return Err(err),
             Err(panic_payload) => {
                 let _ = transaction.rollback_with_result();
-                self.record_cleanup_result(Err(XllError::Internal {
+                runtime.record_cleanup_result(Err(XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_SUBSCRIPTION,
                 }));
                 std::panic::resume_unwind(panic_payload);
@@ -509,19 +507,16 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             reason = "synchronous backend disconnection retains its sink-user barrier contract; COM uses the deferred entry point"
         )
     )]
-    pub(crate) fn disconnect(
-        &self,
+    pub(crate) fn disconnect_from_handle(
         server_handle: &SubscriptionServerHandle<H, E, C>,
         topic_id: TopicId,
     ) -> XllResult<()> {
-        if !server_handle.belongs_to(self) {
-            return Err(XllError::StaleHandle);
-        }
+        let runtime = server_handle.runtime();
         let server = server_handle.server()?;
         let _operation = server.enter_operation()?;
         #[cfg(test)]
         {
-            let hook = self.test_enter_hook.lock().clone();
+            let hook = runtime.test_enter_hook.lock().clone();
             if let Some(hook) = hook {
                 hook();
             }
@@ -533,7 +528,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             };
             let subscription = subscriptions.remove(&topic_id);
             if subscription.is_some() {
-                self.record_shutdown_event(
+                runtime.record_shutdown_event(
                     crate::shutdown_trace::ShutdownEvent::RemoveSubscription,
                 );
             }
@@ -543,7 +538,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         let conn_gen = retired.generation;
 
         {
-            let mut catalog = self.catalog.lock();
+            let mut catalog = runtime.catalog.lock();
             cleanup_catalog_binding_and_pending(
                 &mut catalog,
                 id_to_clean,
@@ -556,7 +551,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         let first_error = disconnect_result.and_then(|res| res.err());
 
         if let Some(ref err) = first_error {
-            self.record_cleanup_result(Err(err.clone()));
+            runtime.record_cleanup_result(Err(err.clone()));
         }
 
         first_error.map_or(Ok(()), Err)
@@ -566,15 +561,12 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     /// join its sink users on an owned worker so the caller's STA can dispatch
     /// an outstanding UpdateNotify or a producer's COM call. Synchronous
     /// backend disconnection keeps its existing barrier contract.
-    pub(crate) fn disconnect_deferred(
-        &self,
+    pub(crate) fn disconnect_deferred_from_handle(
         server_handle: &SubscriptionServerHandle<H, E, C>,
         topic_id: TopicId,
         completion: H::DisconnectCompletion,
     ) -> XllResult<()> {
-        if !server_handle.belongs_to(self) {
-            return Err(XllError::StaleHandle);
-        }
+        let runtime = server_handle.runtime();
         let server = server_handle.server()?;
         // SAFETY: the COM caller owns runtime admission while transferring
         // this operation to the generation-owned queue. Close drains that
@@ -593,9 +585,9 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         };
         let subscription = subscription.remove();
         drop(subscriptions);
-        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);
+        runtime.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);
         {
-            let mut catalog = self.catalog.lock();
+            let mut catalog = runtime.catalog.lock();
             cleanup_catalog_binding_and_pending(
                 &mut catalog,
                 retired.id,
@@ -607,6 +599,31 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         Ok(())
     }
 
+    // Test-only compatibility preserves cross-runtime rejection tests while
+    // production callers cannot pass an unrelated runtime and handle pair.
+    #[cfg(test)]
+    pub(crate) fn connect_transaction(
+        &self,
+        handle: &SubscriptionServerHandle<H, E, C>,
+        topic: TopicId,
+        id: SubscriptionId,
+    ) -> XllResult<SubscriptionConnection<H, E, C>> {
+        if !handle.belongs_to(self) {
+            return Err(XllError::StaleHandle);
+        }
+        Self::connect_from_handle(handle, topic, id)
+    }
+    #[cfg(test)]
+    pub(crate) fn disconnect(
+        &self,
+        handle: &SubscriptionServerHandle<H, E, C>,
+        topic: TopicId,
+    ) -> XllResult<()> {
+        if !handle.belongs_to(self) {
+            return Err(XllError::StaleHandle);
+        }
+        Self::disconnect_from_handle(handle, topic)
+    }
     pub(crate) fn close(&self) -> XllResult<()> {
         match RuntimeTermination::begin(self) {
             RuntimeTerminationAdmission::Owner(owner) => owner

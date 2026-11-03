@@ -60,7 +60,8 @@ pub(crate) use store::HandleStore;
 pub(crate) use token::HandleToken;
 #[cfg(feature = "handles")]
 pub(crate) use token::with_utf16_handle_token;
-pub(crate) use token::{HandleId, ObjectId};
+#[cfg(test)]
+pub(crate) use token::ObjectId;
 pub(crate) use topic::{
     Initialization, InitializationPtr, PrepareDecision, PublishedTopic, PublishedTopicPtr,
     PublishedTopicState, TopicRemoval, TopicTable,

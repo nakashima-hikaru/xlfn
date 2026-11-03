@@ -13,7 +13,7 @@ mod notification;
 pub(crate) use notification::NotificationAttempt;
 
 use super::delivery::{
-    DeliveryPhase, QueuedUpdate, RefreshOutcome, RefreshPlan, RefreshState, RtdUpdate,
+    BufferIndex, DeliveryPhase, QueuedUpdate, RefreshOutcome, RefreshPlan, RefreshState, RtdUpdate,
     SERVER_LIFECYCLE_OPEN, SignalState, TopicShard, ValueSlot, VersionedRtdValue, shard_index,
 };
 use super::host::SubscriptionHost;
@@ -507,11 +507,11 @@ impl<H: SubscriptionHost> PublishCore<H> {
         &self,
         shard: &mut TopicShard,
         shard_index: usize,
-        buffer: usize,
+        buffer: BufferIndex,
         topic_id: TopicId,
         predicate: impl FnOnce(&QueuedUpdate) -> bool,
     ) -> bool {
-        if !remove_queued_if(&mut shard.pending[buffer], topic_id, predicate) {
+        if !remove_queued_if(&mut shard.pending[buffer.index()], topic_id, predicate) {
             return false;
         }
         let deliverable = shard
@@ -530,22 +530,22 @@ impl<H: SubscriptionHost> PublishCore<H> {
         generation: ConnectionGeneration,
         delivered_sequence: u64,
     ) {
-        for buffer in [0, 1] {
+        for buffer in BufferIndex::ALL {
             self.remove_pending_if(shard, shard_index, buffer, topic_id, |queued| {
                 queued.connection_generation == generation && queued.sequence <= delivered_sequence
             });
         }
 
         if let Some(active) = shard.active_by_topic.get_mut(&topic_id) {
-            for buffer in [0, 1] {
-                if let ValueSlot::Resident(versioned) = &active.values[buffer]
+            for buffer in BufferIndex::ALL {
+                if let ValueSlot::Resident(versioned) = &active.values[buffer.index()]
                     && versioned.generation == generation
                     && versioned.sequence <= delivered_sequence
                 {
-                    let is_latest = active.latest_slot == Some(buffer as u8);
-                    let has_pending = shard.pending[buffer].contains_key(&topic_id);
+                    let is_latest = active.latest_slot == Some(buffer);
+                    let has_pending = shard.pending[buffer.index()].contains_key(&topic_id);
                     if !is_latest && !has_pending {
-                        active.values[buffer] = ValueSlot::Empty;
+                        active.values[buffer.index()] = ValueSlot::Empty;
                     }
                 }
             }
@@ -754,12 +754,20 @@ impl<H: SubscriptionHost> PublishCore<H> {
         let shard_index = shard_index(topic_id);
         let mut shard = self.shards[shard_index].lock();
 
-        self.remove_pending_if(&mut shard, shard_index, 0, topic_id, |update| {
-            update.connection_generation == generation
-        });
-        self.remove_pending_if(&mut shard, shard_index, 1, topic_id, |update| {
-            update.connection_generation == generation
-        });
+        self.remove_pending_if(
+            &mut shard,
+            shard_index,
+            BufferIndex::First,
+            topic_id,
+            |update| update.connection_generation == generation,
+        );
+        self.remove_pending_if(
+            &mut shard,
+            shard_index,
+            BufferIndex::Second,
+            topic_id,
+            |update| update.connection_generation == generation,
+        );
 
         let removed = shard
             .active_by_topic
@@ -825,7 +833,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             self.ensure_open()?;
 
             let epoch = self.publish_epoch.load(Ordering::Acquire);
-            let buffer = (epoch & 1) as usize;
+            let buffer = BufferIndex::from_epoch(epoch);
 
             let mut shard = self.shards[shard_index].lock();
 
@@ -851,7 +859,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
     fn commit_value(
         &self,
         shard: &mut TopicShard,
-        buffer: usize,
+        buffer: BufferIndex,
         topic_id: TopicId,
         generation: ConnectionGeneration,
         value: StoredRtdValue,
@@ -874,7 +882,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             let conn_gen = active.generation;
             let committed = active.committed;
             let sequence = active.allocate_sequence()?;
-            let pending = &mut pending_buffers[buffer];
+            let pending = &mut pending_buffers[buffer.index()];
             let pending_entry = pending.entry(topic_id);
             let inserted = match pending_entry {
                 indexmap::map::Entry::Occupied(mut entry) => {
@@ -896,12 +904,12 @@ impl<H: SubscriptionHost> PublishCore<H> {
                     true
                 }
             };
-            active.values[buffer] = ValueSlot::Resident(VersionedRtdValue {
+            active.values[buffer.index()] = ValueSlot::Resident(VersionedRtdValue {
                 generation: conn_gen,
                 sequence,
                 value,
             });
-            active.latest_slot = Some(buffer as u8);
+            active.latest_slot = Some(buffer);
             (committed, inserted)
         };
         if inserted {
@@ -941,7 +949,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
                     self.ensure_open()?;
                     let committed = self.commit_value(
                         &mut shard,
-                        (epoch & 1) as usize,
+                        BufferIndex::from_epoch(epoch),
                         topic_id,
                         generation,
                         value,
@@ -1047,7 +1055,7 @@ fn remove_queued_if(
 fn push_deliverable(
     active_by_topic: &mut rustc_hash::FxHashMap<TopicId, super::delivery::ActiveSubscription>,
     updates: &mut Vec<RtdUpdate>,
-    buffer: usize,
+    buffer: BufferIndex,
     topic_id: TopicId,
     queued: &QueuedUpdate,
 ) {
@@ -1057,7 +1065,7 @@ fn push_deliverable(
     if !active.committed || active.generation != queued.connection_generation {
         return;
     }
-    let slot = &mut active.values[buffer];
+    let slot = &mut active.values[buffer.index()];
     let ValueSlot::Resident(versioned) = slot else {
         // The queued index is an observation, not an ownership permission.
         // A stale/non-resident slot stays untouched and cannot issue an update.
@@ -1076,7 +1084,7 @@ fn push_deliverable(
         sequence: queued.sequence,
         topic_id: topic_id.0,
         connection_generation: queued.connection_generation,
-        buffer: buffer as u8,
+        buffer,
         value,
     });
 }
@@ -1096,11 +1104,23 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
         if p1.is_empty() {
             for (&topic_id, queued) in p0.iter() {
-                push_deliverable(active_by_topic, updates, 0, topic_id, queued);
+                push_deliverable(
+                    active_by_topic,
+                    updates,
+                    BufferIndex::First,
+                    topic_id,
+                    queued,
+                );
             }
         } else if p0.is_empty() {
             for (&topic_id, queued) in p1.iter() {
-                push_deliverable(active_by_topic, updates, 1, topic_id, queued);
+                push_deliverable(
+                    active_by_topic,
+                    updates,
+                    BufferIndex::Second,
+                    topic_id,
+                    queued,
+                );
             }
         } else {
             for (&topic_id, queued_0) in p0.iter() {
@@ -1118,13 +1138,13 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 let selected = match (d0, deliverable_1) {
                     (true, Some(q1)) => {
                         if q1.sequence > queued_0.sequence {
-                            (1, q1)
+                            (BufferIndex::Second, q1)
                         } else {
-                            (0, queued_0)
+                            (BufferIndex::First, queued_0)
                         }
                     }
-                    (true, None) => (0, queued_0),
-                    (false, Some(q1)) => (1, q1),
+                    (true, None) => (BufferIndex::First, queued_0),
+                    (false, Some(q1)) => (BufferIndex::Second, q1),
                     (false, None) => continue,
                 };
 
@@ -1134,7 +1154,13 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
             for (&topic_id, queued_1) in p1.iter() {
                 if !p0.contains_key(&topic_id) {
-                    push_deliverable(active_by_topic, updates, 1, topic_id, queued_1);
+                    push_deliverable(
+                        active_by_topic,
+                        updates,
+                        BufferIndex::Second,
+                        topic_id,
+                        queued_1,
+                    );
                 }
             }
         }
@@ -1179,7 +1205,7 @@ mod tests {
     #[test]
     fn miri_refresh_selection_requires_the_exact_resident_payload() {
         use super::{TopicShard, push_deliverable};
-        use crate::subscription::delivery::ValueSlot;
+        use crate::subscription::delivery::{BufferIndex, ValueSlot};
 
         let (_runtime, server, sink) =
             crate::subscription::tests::connected_sink::<i32>(None, "resident-authority");
@@ -1193,31 +1219,34 @@ mod tests {
                 pending,
                 ..
             } = &mut *shard;
-            for (buffer, pending) in pending.iter().enumerate() {
+            for (buffer, pending) in BufferIndex::ALL.into_iter().zip(pending.iter()) {
                 let Some((&topic, queued)) = pending.first() else {
                     continue;
                 };
-                let original = active_by_topic[&topic].values[buffer].clone();
+                let original = active_by_topic[&topic].values[buffer.index()].clone();
                 let ValueSlot::Resident(mut stale) = original.clone() else {
                     panic!("a fresh publish is resident");
                 };
                 stale.sequence += 1;
                 let stale = ValueSlot::Resident(stale);
-                active_by_topic.get_mut(&topic).unwrap().values[buffer] = stale.clone();
+                active_by_topic.get_mut(&topic).unwrap().values[buffer.index()] = stale.clone();
                 let mut updates = Vec::new();
                 push_deliverable(active_by_topic, &mut updates, buffer, topic, queued);
                 assert!(updates.is_empty());
-                assert_eq!(active_by_topic[&topic].values[buffer], stale);
-                active_by_topic.get_mut(&topic).unwrap().values[buffer] = ValueSlot::Empty;
+                assert_eq!(active_by_topic[&topic].values[buffer.index()], stale);
+                active_by_topic.get_mut(&topic).unwrap().values[buffer.index()] = ValueSlot::Empty;
                 push_deliverable(active_by_topic, &mut updates, buffer, topic, queued);
                 assert!(updates.is_empty());
-                assert_eq!(active_by_topic[&topic].values[buffer], ValueSlot::Empty);
-                active_by_topic.get_mut(&topic).unwrap().values[buffer] = original.clone();
+                assert_eq!(
+                    active_by_topic[&topic].values[buffer.index()],
+                    ValueSlot::Empty
+                );
+                active_by_topic.get_mut(&topic).unwrap().values[buffer.index()] = original.clone();
                 push_deliverable(active_by_topic, &mut updates, buffer, topic, queued);
                 assert_eq!(updates.len(), 1);
                 push_deliverable(active_by_topic, &mut updates, buffer, topic, queued);
                 assert_eq!(updates.len(), 1);
-                active_by_topic.get_mut(&topic).unwrap().values[buffer] = original;
+                active_by_topic.get_mut(&topic).unwrap().values[buffer.index()] = original;
                 checked = true;
             }
         }

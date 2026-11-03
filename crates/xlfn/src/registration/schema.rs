@@ -44,36 +44,76 @@ impl RegistrationSignature {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn encode(self) -> XllResult<String> {
-        self.validate()?;
-        let mut text = String::with_capacity(self.arguments.len() + 4);
-        if self.execution.is_async() {
+        Ok(ValidatedSignature::try_from(self)?.encode())
+    }
+}
+
+/// A registration signature whose ABI restrictions have already been checked.
+/// The wrapped value is immutable and fields remain private to this module.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ValidatedSignature(RegistrationSignature);
+
+impl TryFrom<RegistrationSignature> for ValidatedSignature {
+    type Error = XllError;
+
+    fn try_from(signature: RegistrationSignature) -> XllResult<Self> {
+        signature.validate()?;
+        Ok(Self(signature))
+    }
+}
+
+impl ValidatedSignature {
+    pub(crate) fn execution(self) -> ExecutionKind {
+        self.0.execution
+    }
+
+    pub(crate) fn encode(self) -> String {
+        let Self(signature) = self;
+        let mut text = String::with_capacity(signature.arguments.len() + 4);
+        if signature.execution.is_async() {
             text.push('>');
         } else {
-            text.push_str(self.return_abi.registration_code());
+            text.push_str(signature.return_abi.registration_code());
         }
-        for argument in self.arguments {
+        for argument in signature.arguments {
             text.push_str(argument.registration_code());
         }
-        if self.execution.is_async() {
+        if signature.execution.is_async() {
             text.push('X');
         }
-        if matches!(self.execution, ExecutionKind::MacroSheet) {
+        if matches!(signature.execution, ExecutionKind::MacroSheet) {
             text.push('#');
         }
-        if self.execution.is_thread_safe() {
+        if signature.execution.is_thread_safe() {
             text.push('$');
         }
-        if self.volatile {
+        if signature.volatile {
             text.push('!');
         }
-        Ok(text)
+        text
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validated_signature_is_an_immutable_snapshot_of_checked_abi() {
+        let mut raw = RegistrationSignature {
+            execution: ExecutionKind::ThreadSafe,
+            arguments: &[ArgumentAbi::NumericArray12],
+            return_abi: ReturnAbi::Value12,
+            volatile: false,
+        };
+        let validated = ValidatedSignature::try_from(raw).unwrap();
+        raw.execution = ExecutionKind::Async;
+        assert_eq!(validated.encode(), "QK%$");
+        assert!(ValidatedSignature::try_from(raw).is_err());
+        assert!(raw.encode().is_err());
+    }
 
     #[test]
     fn native_scalars_share_the_canonical_registration_codes() {

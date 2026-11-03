@@ -3527,7 +3527,7 @@ fn non_latest_delivered_slot_is_reclaimed() {
         let active = shard.active_by_topic.get(&topic_id).unwrap();
         assert!(matches!(active.values[0], ValueSlot::Resident(_)));
         assert!(matches!(active.values[1], ValueSlot::Resident(_)));
-        assert_eq!(active.latest_slot, Some(1));
+        assert_eq!(active.latest_slot, Some(super::delivery::BufferIndex::Second));
     }
 
     let batch = planned.collect();
@@ -3544,7 +3544,7 @@ fn non_latest_delivered_slot_is_reclaimed() {
             matches!(active.values[1], ValueSlot::Resident(_)),
             "latest slot must be retained for dedup"
         );
-        assert_eq!(active.latest_slot, Some(1));
+        assert_eq!(active.latest_slot, Some(super::delivery::BufferIndex::Second));
     }
 }
 
@@ -3609,7 +3609,7 @@ fn publish_during_inflight_refresh_treats_same_value_conservatively() {
         let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
         let active = shard.active_by_topic.get(&topic_id).unwrap();
         assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
-        assert_eq!(active.latest_slot, Some(0));
+        assert_eq!(active.latest_slot, Some(super::delivery::BufferIndex::First));
     }
 
     // While slot 0 is InFlight, publishing the EXACT same value does NOT dedup:
@@ -3621,7 +3621,7 @@ fn publish_during_inflight_refresh_treats_same_value_conservatively() {
         let active = shard.active_by_topic.get(&topic_id).unwrap();
         assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
         assert!(matches!(active.values[1], ValueSlot::Resident(_)));
-        assert_eq!(active.latest_slot, Some(1));
+        assert_eq!(active.latest_slot, Some(super::delivery::BufferIndex::Second));
     }
 
     // Complete first batch
@@ -3667,7 +3667,7 @@ fn delivered_refresh_restores_resident_value_for_subsequent_dedup() {
             &active.values[0],
             ValueSlot::Resident(v) if v.value == StoredRtdValue::String("target-value".into())
         ));
-        assert_eq!(active.latest_slot, Some(0));
+        assert_eq!(active.latest_slot, Some(super::delivery::BufferIndex::First));
     }
 
     // Since it was restored to Resident, subsequent publish of same value dedups!
@@ -4054,7 +4054,7 @@ fn newer_different_publish_supersedes_inflight_slot() {
         let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
         let active = shard.active_by_topic.get(&topic_id).unwrap();
         assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
-        assert_eq!(active.latest_slot, Some(0));
+        assert_eq!(active.latest_slot, Some(super::delivery::BufferIndex::First));
     }
 
     // Publish different value while InFlight is latest
@@ -4068,7 +4068,7 @@ fn newer_different_publish_supersedes_inflight_slot() {
             &active.values[1],
             ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
         ));
-        assert_eq!(active.latest_slot, Some(1));
+        assert_eq!(active.latest_slot, Some(super::delivery::BufferIndex::Second));
     }
 
     // Complete the first batch
@@ -4083,7 +4083,7 @@ fn newer_different_publish_supersedes_inflight_slot() {
             &active.values[1],
             ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
         ));
-        assert_eq!(active.latest_slot, Some(1));
+        assert_eq!(active.latest_slot, Some(super::delivery::BufferIndex::Second));
     }
 
     let next_batch = server.begin_refresh().unwrap();
@@ -4126,7 +4126,7 @@ fn older_publish_is_ignored_when_slot_is_inflight() {
             &active.values[1],
             ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v3".into())
         ));
-        assert_eq!(active.latest_slot, Some(1));
+        assert_eq!(active.latest_slot, Some(super::delivery::BufferIndex::Second));
     }
 
     batch.complete(RefreshOutcome::Delivered).unwrap();
@@ -4175,7 +4175,7 @@ fn failed_refresh_does_not_overwrite_newer_published_value() {
             ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
         ));
         // latest_slot is 1
-        assert_eq!(active.latest_slot, Some(1));
+        assert_eq!(active.latest_slot, Some(super::delivery::BufferIndex::Second));
         // Both updates are pending
         assert!(shard.pending[0].contains_key(&topic_id));
         assert!(shard.pending[1].contains_key(&topic_id));
@@ -4199,7 +4199,7 @@ fn failed_refresh_does_not_overwrite_newer_published_value() {
             &active.values[1],
             ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
         ));
-        assert_eq!(active.latest_slot, Some(1));
+        assert_eq!(active.latest_slot, Some(super::delivery::BufferIndex::Second));
         assert!(!shard.pending[0].contains_key(&topic_id));
         assert!(!shard.pending[1].contains_key(&topic_id));
     }
@@ -4237,7 +4237,7 @@ fn dropped_refresh_batch_preserves_newer_published_value() {
             &active.values[1],
             ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
         ));
-        assert_eq!(active.latest_slot, Some(1));
+        assert_eq!(active.latest_slot, Some(super::delivery::BufferIndex::Second));
     }
 
     // Next refresh picks newer update v2!

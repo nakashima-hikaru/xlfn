@@ -1,7 +1,7 @@
 //! One framework launch owns its calculation, cancellation and copied response
 //! handle through preparation and reservation. No parent survives a transition.
 use super::*;
-use crate::async_udf::registry::CalculationSnapshot;
+use crate::async_udf::runtime::RuntimeCalculationSnapshot;
 use crate::async_udf::runtime::RuntimeReservation;
 use crate::cancellation::TaskCancellationOwner;
 
@@ -9,7 +9,7 @@ use crate::cancellation::TaskCancellationOwner;
 // run, without allocating cancellation state until those callbacks succeed.
 pub(super) struct CapturedLaunch<'guard, 'call, A: crate::Addin> {
     guard: &'guard crate::runtime::AsyncCallGuard<'call, A>,
-    calculation: CalculationSnapshot<'static>,
+    calculation: RuntimeCalculationSnapshot<'static, A::AsyncExecutor>,
 }
 
 impl<'guard, 'call, A: crate::Addin> CapturedLaunch<'guard, 'call, A> {
@@ -37,7 +37,7 @@ impl<'guard, 'call, A: crate::Addin> CapturedLaunch<'guard, 'call, A> {
 
 pub(super) struct LaunchOwner<'guard, 'call, A: crate::Addin> {
     guard: &'guard crate::runtime::AsyncCallGuard<'call, A>,
-    calculation: CalculationSnapshot<'static>,
+    calculation: RuntimeCalculationSnapshot<'static, A::AsyncExecutor>,
     cancellation: TaskCancellationOwner,
     token: CancellationToken,
 }
@@ -121,9 +121,7 @@ impl<'guard, 'call, A: crate::Addin> LaunchOwner<'guard, 'call, A> {
         // Bind the copied responder before any user preparation can run.
         let delivery = AsyncDelivery::new(responder, self.token, observation);
         let body = catch_no_unwind(AssertUnwindSafe(|| {
-            self.guard
-                .async_runtime()
-                .preflight_snapshot(&self.calculation)?;
+            self.calculation.preflight()?;
             let lease = self.guard.try_execution_lease()?;
             start(self.guard, lease, self.token).map(Plain)
         }))
@@ -153,9 +151,7 @@ impl<'guard, 'call, A: crate::Addin> LaunchOwner<'guard, 'call, A> {
     ) -> Option<PreparedLaunch<'guard, 'call, A, Scoped<B>, O>> {
         let delivery = AsyncDelivery::new(responder, self.token, observation);
         let body = catch_no_unwind(AssertUnwindSafe(|| {
-            self.guard
-                .async_runtime()
-                .preflight_snapshot(&self.calculation)?;
+            self.calculation.preflight()?;
             let lease = self.guard.try_execution_lease()?;
             let generation = lease.generation();
             start(self.guard, lease, self.token).map(|build| Scoped { build, generation })
@@ -179,11 +175,7 @@ impl<'guard, 'call, A: crate::Addin, B, O: CompletionObserver>
 {
     pub(super) fn reserve(self) -> Option<ReservedLaunch<'guard, 'call, A, B, O>> {
         let Self { owner, body } = self;
-        match owner
-            .guard
-            .async_runtime()
-            .reserve_snapshot(owner.calculation)
-        {
+        match owner.calculation.reserve() {
             Ok(reservation) => Some(ReservedLaunch {
                 _guard: owner.guard,
                 reservation,
