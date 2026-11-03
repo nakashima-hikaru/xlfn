@@ -3754,11 +3754,11 @@ fn miri_foreign_runtime_alias_rejected_before_topic_publication() {
     let target = test_topic_key("foreign_alias_destination");
     with_decode_scope_and_state(&first, |first, context| {
         let handle = first.lookup::<DataRecord>(context, &source).unwrap();
+        assert_eq!(handle.0, 42);
         assert!(matches!(
             second.prepare_observed_alias::<DataRecord, _>(target, handle.alias(), |_, _| Ok(())),
             Err(XllError::StaleHandle)
         ));
-        assert_eq!(handle.0, 42);
     });
     assert_eq!(second.store.len(), 0);
     assert_eq!(second.topics.read().by_key.len(), 0);
