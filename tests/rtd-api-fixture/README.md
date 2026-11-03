@@ -24,10 +24,8 @@ Run all twenty checks from the repository root:
 uv run --project tools --locked python -B tests/rtd-api-fixture/check.py
 ```
 
-The checker first fetches the fixture's own locked dependencies, since workspace
-builds may use different versions. It then uses temporary source projects,
-locked offline dependency resolution, a separate target directory and
-`CARGO_INCREMENTAL=0`. It does not edit the
+The checker uses temporary source projects, locked offline dependency resolution,
+a separate target directory and `CARGO_INCREMENTAL=0`. It does not edit the
 fixture's source while checking failure cases. Override `--target-dir` or
 `--report-dir` to choose other output directories.
 

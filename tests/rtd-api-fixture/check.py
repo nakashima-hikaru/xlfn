@@ -41,14 +41,6 @@ def main() -> int:
         (project / "src").mkdir()
         (project / "Cargo.toml").write_text(manifest_source)
         shutil.copyfile(ROOT / "Cargo.lock", project / "Cargo.lock")
-        # This consumer has its own lockfile. Workspace builds need not cache
-        # its exact versions, so fetch them before the offline feature checks.
-        shutil.copyfile(ROOT / "src/lib.rs", project / "src/lib.rs")
-        subprocess.run(
-            ["cargo", "fetch", "--manifest-path", str(project / "Cargo.toml"), "--locked"],
-            env=env,
-            check=True,
-        )
         for name, source in cases:
             shutil.copyfile(source, project / "src/lib.rs")
             for features in combos:
