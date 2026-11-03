@@ -482,8 +482,20 @@ mod tests {
     }
 
     #[test]
+    fn miri_intrusive_unwind_restores_real_tls_head() {
+        let identity = 0_u8;
+        let identity = ptr::from_ref(&identity).cast();
+        let caught = std::panic::catch_unwind(|| {
+            with_host_lifecycle(identity, |_| panic!("expected test panic"));
+        });
+        assert!(caught.is_err());
+        assert_eq!(with_host_lifecycle(identity, |_| 4), Some(4));
+    }
+
+    #[test]
     #[allow(
         clippy::mem_forget,
+        clippy::forget_non_drop,
         reason = "Verify forgetting a borrowed capability cannot forget its private registration"
     )]
     fn miri_intrusive_forgotten_capability_cannot_keep_registration() {

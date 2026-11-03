@@ -446,5 +446,21 @@
     "count": 1,
     "category": "test",
     "reason": "Observes a fixed decoder panic to verify HostInvocation drops its callback owner and calls xlFree exactly once."
+  },
+  {
+    "path": "crates/xlfn/src/boundary/host.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn miri_intrusive_unwind_restores_real_tls_head",
+    "code": "let caught = std::panic::catch_unwind(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Test catches an intentional panic to verify lifecycle TLS head restores before reuse."
+  },
+  {
+    "path": "probes/lifecycle-stack-model/src/lib.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn unwind_restores_head",
+    "code": "let caught = std::panic::catch_unwind(|| with_lifecycle(1, |_| with_lifecycle(2, |_| panic!( ))));",
+    "count": 1,
+    "category": "test",
+    "reason": "Standalone model catches an intentional panic to verify pinned linked frames pop before reuse."
   }
 ]
