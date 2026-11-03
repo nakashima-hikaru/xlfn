@@ -1,0 +1,92 @@
+#[test]
+fn trait_driven_function_signatures_compile() {
+    let tests = trybuild::TestCases::new();
+    tests.pass("tests/ui/pass/argument_defaults.rs");
+    tests.pass("tests/ui/pass/native_abi.rs");
+    tests.pass("tests/ui/pass/borrowed_inputs.rs");
+    tests.pass("tests/ui/pass/borrowed_dynamic_value.rs");
+    tests.pass("tests/ui/pass/case_distinct_udfs.rs");
+    tests.pass("tests/ui/pass/cfg_gating.rs");
+    tests.pass("tests/ui/pass/context_modes.rs");
+    tests.pass("tests/ui/pass/custom_collection_conversions.rs");
+    tests.pass("tests/ui/pass/custom_reference_conversions.rs");
+    tests.pass("tests/ui/pass/excel_enum.rs");
+    tests.pass("tests/ui/pass/eager_input_derives.rs");
+    tests.pass("tests/ui/pass/error_conversions.rs");
+    tests.pass("tests/ui/pass/macro_hygiene.rs");
+    tests.pass("tests/ui/pass/opaque_udf_body.rs");
+    tests.pass("tests/ui/pass/output_array.rs");
+    tests.pass("tests/ui/pass/numeric_return_abi.rs");
+    tests.pass("tests/ui/pass/physical_unload.rs");
+    tests.pass("tests/ui/pass/raw_identifiers.rs");
+    tests.pass("tests/ui/pass/udf_layers_tuple.rs");
+    tests.compile_fail("tests/ui/fail/argument_trait_missing.rs");
+    tests.compile_fail("tests/ui/fail/enum_legacy_variant.rs");
+    tests.compile_fail("tests/ui/fail/eager_identity_missing.rs");
+    tests.compile_fail("tests/ui/fail/framework_error_construction.rs");
+    tests.compile_fail("tests/ui/fail/context_*.rs");
+    tests.compile_fail("tests/ui/fail/callback_*.rs");
+    tests.compile_fail("tests/ui/fail/lookalike_*.rs");
+    tests.compile_fail("tests/ui/fail/nested_return_array.rs");
+    tests.compile_fail("tests/ui/fail/matrix_element_cannot_outlive_call.rs");
+    tests.compile_fail("tests/ui/fail/borrowed_dynamic_value_escape.rs");
+    tests.compile_fail("tests/ui/fail/removed_export_macro.rs");
+    tests.compile_fail("tests/ui/fail/return_trait_missing.rs");
+    tests.compile_fail("tests/ui/fail/return_abi_mismatch.rs");
+    tests.compile_fail("tests/ui/fail/sys_module_is_not_public.rs");
+    tests.compile_fail("tests/ui/fail/value_raw_abi_is_not_public.rs");
+    tests.compile_fail("tests/ui/fail/prepared_borrow_cannot_escape.rs");
+    tests.compile_fail("tests/ui/fail/preparation_collection_is_internal.rs");
+    tests.compile_fail("tests/ui/fail/udf_layers_is_sealed.rs");
+
+    #[cfg(feature = "handles")]
+    {
+        tests.pass("tests/ui/pass/custom_conversions.rs");
+        tests.pass("tests/ui/pass/renamed_crate.rs");
+        tests.pass("tests/ui/pass/trait_roles.rs");
+        tests.compile_fail("tests/ui/fail/formula_identity_missing.rs");
+        tests.compile_fail("tests/ui/fail/handle_return_*.rs");
+        tests.compile_fail("tests/ui/fail/nested_handle_storage.rs");
+        #[cfg(feature = "bench-internals")]
+        {
+            tests.compile_fail("tests/ui/fail/handle_cannot_outlive_registry.rs");
+            tests.compile_fail("tests/ui/fail/unscoped_call_scope.rs");
+        }
+    }
+
+    #[cfg(feature = "rtd")]
+    {
+        tests.pass("tests/ui/pass/rtd_typed_retry.rs");
+        tests.compile_fail("tests/ui/fail/rtd_retry_wrong_input_type.rs");
+    }
+
+    #[cfg(feature = "cache")]
+    {
+        tests.pass("tests/ui/pass/cache_endpoint.rs");
+    }
+
+    #[cfg(feature = "async")]
+    {
+        tests.pass("tests/ui/pass_async/owned_matrix.rs");
+        tests.pass("tests/ui/pass_async/native_abi.rs");
+        tests.pass("tests/ui/pass_async/numeric_return_abi.rs");
+        tests.pass("tests/ui/pass_async/context_modes.rs");
+        tests.compile_fail("tests/ui/fail_async/context_*.rs");
+        tests.compile_fail("tests/ui/fail_async/executor_*.rs");
+        tests.compile_fail("tests/ui/fail_async/borrowed_array_alias.rs");
+        tests.compile_fail("tests/ui/fail_async/borrowed_array_async.rs");
+        tests.compile_fail("tests/ui/fail_async/borrowed_inputs.rs");
+        tests.compile_fail("tests/ui/fail_async/borrowed_dynamic_value.rs");
+
+        #[cfg(feature = "handles")]
+        {
+            tests.pass("tests/ui/pass_async/async_handle.rs");
+            tests.compile_fail("tests/ui/fail_async/async_handle_input.rs");
+            tests.compile_fail("tests/ui/fail_async/handle_return_async.rs");
+            tests.compile_fail("tests/ui/fail_async/handle_lease_*.rs");
+        }
+    }
+
+    #[cfg(not(feature = "async"))]
+    tests.compile_fail("tests/ui/fail_no_async/*.rs");
+}

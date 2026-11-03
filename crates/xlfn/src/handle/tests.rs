@@ -1,0 +1,4223 @@
+use super::binding::BindingState;
+use super::formula::{FormulaCaller, resolve_formula_caller};
+use super::registry::HandleRegistryPhase;
+use super::*;
+use crate::call_return::ReturnContext;
+use crate::sync::Mutex;
+use crate::{XllError, XllResult};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+fn with_decode_scope_and_state<S, R>(
+    state: &S,
+    operation: impl for<'brand, 'call> FnOnce(
+        &'call S,
+        &mut crate::value::DecodeCallContext<'brand, 'call>,
+    ) -> R,
+) -> R {
+    crate::call::with_branded_call_scope_and_state(state, |state, storage, token| {
+        let mut context = crate::value::DecodeCallContext::with_storage(storage, token);
+        operation(state, &mut context)
+    })
+}
+
+fn lifetime_generation(raw: u64) -> crate::handle::FormulaLifetimeGeneration {
+    crate::handle::FormulaLifetimeGeneration::new(raw).expect("test server generation is non-zero")
+}
+
+fn armed_handle_slot() -> (
+    &'static FormulaHandleServiceSlot,
+    FormulaHandleServiceRead<'static>,
+) {
+    let slot: &'static FormulaHandleServiceSlot =
+        Box::leak(Box::new(FormulaHandleServiceSlot::new()));
+    slot.arm(crate::RuntimeConfig::new().handle_config())
+        .expect("test handle slot should arm");
+    slot.initialize()
+        .expect("test handle slot should initialize");
+    let runtime = slot
+        .read()
+        .expect("test handle slot should publish its runtime");
+    (slot, runtime)
+}
+use crate::input_identity::InputFingerprint;
+use crate::input_identity::InputFingerprintBuilder;
+
+fn format_formula_revision_key(
+    caller: FormulaCaller,
+    udf_id: &'static str,
+    input_bytes: &[u8; 32],
+) -> String {
+    FormulaRevisionKey::new(caller, udf_id, InputFingerprint::from_bytes(*input_bytes))
+        .format_lifetime_key()
+}
+
+fn insert_production<T>(registry: &HandleRegistry, value: Arc<T>) -> XllResult<String>
+where
+    T: Send + Sync + 'static,
+{
+    let mut value = Some(
+        Arc::try_unwrap(value)
+            .ok()
+            .expect("test value is uniquely owned"),
+    );
+    registry.insert_pending(&mut value)
+}
+
+fn with_handle<T, R>(
+    runtime: &FormulaHandleService,
+    token: &str,
+    operation: impl for<'call> FnOnce(Handle<'call, T>) -> R,
+) -> XllResult<R>
+where
+    T: ExcelHandleObject,
+{
+    with_decode_scope_and_state(runtime, |runtime, scope| {
+        runtime.lookup(scope, token).map(operation)
+    })
+}
+
+fn input_identity<T: ExcelHandleObject>(
+    slot: &'static FormulaHandleServiceSlot,
+    token: &str,
+) -> InputFingerprint {
+    use crate::value::{ArgumentContext, FormulaInputMode, argument_from_raw_with_arguments};
+    use xlfn_sys::{XLOPER12, XLOPER12Value, XLTYPE_STR};
+    let mut text: Vec<u16> = token.encode_utf16().collect();
+    text.insert(0, u16::try_from(text.len()).unwrap());
+    let mut raw = XLOPER12 {
+        value: XLOPER12Value {
+            string: text.as_mut_ptr(),
+        },
+        xltype: XLTYPE_STR,
+    };
+    crate::call::with_branded_call_scope(|storage, brand| {
+        let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
+            storage,
+            brand,
+            FormulaHandleServiceResolver::new(slot),
+            1,
+        );
+        // SAFETY: raw and its counted UTF-16 buffer live for the entire conversion.
+        let _handle = unsafe {
+            argument_from_raw_with_arguments::<FormulaInputMode, Handle<'_, T>>(
+                &mut arguments,
+                0,
+                "handle",
+                &mut raw,
+            )
+        }
+        .unwrap();
+        InputFingerprint::from_bytes(arguments.finish().unwrap().unwrap())
+    })
+}
+
+fn reference_handle_identity(object_id: HandleObjectId) -> InputFingerprint {
+    let mut builder = InputFingerprintBuilder::new(1);
+    builder
+        .with_argument(0, "handle", |encoder| {
+            encoder.u64(object_id.session());
+            encoder.u64(object_id.sequence());
+            Ok(())
+        })
+        .unwrap();
+    builder.finish().unwrap()
+}
+
+fn semantic_handle_key<T: ExcelHandleObject>(
+    slot: &'static FormulaHandleServiceSlot,
+    token: &str,
+) -> HandleTopicKey {
+    HandleTopicKey::Formula(FormulaRevisionKey::new(
+        FormulaCaller {
+            sheet_id: 0,
+            row: 20,
+            column: 4,
+        },
+        "TEST.SEMANTIC.HANDLE",
+        input_identity::<T>(slot, token),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+struct SerializationGoldenFile {
+    schema_version: u32,
+    vectors: Vec<SerializationGoldenVector>,
+}
+
+#[derive(serde::Deserialize)]
+struct SerializationGoldenVector {
+    name: String,
+    sheet_id: u64,
+    row: i32,
+    column: i32,
+    udf_id: String,
+    digest_hex: String,
+    #[serde(rename = "rtd_key")]
+    lifetime_key: String,
+}
+
+fn decode_digest_hex(hex: &str) -> [u8; 32] {
+    fn nibble(byte: u8) -> u8 {
+        match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => panic!("golden digest contains a non-lowercase-hex byte"),
+        }
+    }
+
+    assert_eq!(hex.len(), 64, "golden digest must contain 32 bytes");
+    let mut digest = [0_u8; 32];
+    let (chunks, _) = hex.as_bytes().as_chunks::<2>();
+    for (index, pair) in chunks.iter().enumerate() {
+        digest[index] = nibble(pair[0]) << 4 | nibble(pair[1]);
+    }
+    digest
+}
+
+#[test]
+fn lifetime_key_golden_vectors_match_wire_contract() {
+    let golden: SerializationGoldenFile = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../formal/fixtures/topics/serialization-golden.json"
+    )))
+    .expect("serialization golden vectors must be valid JSON");
+    assert_eq!(golden.schema_version, 1);
+
+    for vector in golden.vectors {
+        let Some(sheet_id) = usize::try_from(vector.sheet_id).ok() else {
+            // The 64-bit boundary vector is intentionally not representable
+            // when this test is compiled for a 32-bit target.
+            continue;
+        };
+        let udf_id: &'static str = Box::leak(vector.udf_id.into_boxed_str());
+        let digest = decode_digest_hex(&vector.digest_hex);
+        let actual = format_formula_revision_key(
+            FormulaCaller {
+                sheet_id,
+                row: vector.row,
+                column: vector.column,
+            },
+            udf_id,
+            &digest,
+        );
+
+        assert_eq!(
+            actual.as_bytes(),
+            vector.lifetime_key.as_bytes(),
+            "Rust RTD formatter disagrees with golden vector {}",
+            vector.name
+        );
+    }
+}
+
+#[test]
+fn formula_revision_key_changes_with_every_component() {
+    let digest = [0x12_u8; 32];
+    let caller = FormulaCaller {
+        sheet_id: 17,
+        row: 4,
+        column: 8,
+    };
+    let base = format_formula_revision_key(caller, "TEST.CREATE", &digest);
+
+    assert_ne!(
+        base,
+        format_formula_revision_key(
+            FormulaCaller {
+                sheet_id: 18,
+                ..caller
+            },
+            "TEST.CREATE",
+            &digest,
+        )
+    );
+    assert_ne!(
+        base,
+        format_formula_revision_key(FormulaCaller { row: 5, ..caller }, "TEST.CREATE", &digest,)
+    );
+    assert_ne!(
+        base,
+        format_formula_revision_key(
+            FormulaCaller {
+                column: 9,
+                ..caller
+            },
+            "TEST.CREATE",
+            &digest,
+        )
+    );
+    assert_ne!(
+        base,
+        format_formula_revision_key(caller, "TEST.OTHER", &digest)
+    );
+    assert_ne!(
+        base,
+        format_formula_revision_key(caller, "TEST.CREATE", &[0x13_u8; 32])
+    );
+
+    assert!(base.ends_with("1212121212121212121212121212121212121212121212121212121212121212"));
+}
+
+#[test]
+fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("reverse-map");
+    let expected_lifetime_key = key.format_lifetime_key();
+    let observed = Arc::new(Mutex::new(None::<String>));
+    let observed_for_callback = Arc::clone(&observed);
+
+    let preparation = runtime
+        .prepare_observed(
+            key,
+            || Ok(DataRecord(7)),
+            move |lifetime_key, observed_token| {
+                assert!(!observed_token.is_empty());
+                *observed_for_callback.lock() = Some(lifetime_key.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
+    assert!(created);
+
+    let lifetime_key = observed
+        .lock()
+        .clone()
+        .expect("observation key was recorded");
+    assert_eq!(lifetime_key, expected_lifetime_key);
+    let topics = runtime.topics.read();
+    let identity = topics
+        .by_lifetime_key
+        .get(lifetime_key.as_str())
+        .copied()
+        .expect("published RTD key must resolve to its identity");
+    let topic = topics
+        .by_key
+        .get(&identity)
+        .expect("reverse map identity must resolve to a topic");
+    assert_eq!(
+        topic.publication().lifetime_key.as_str(),
+        lifetime_key.as_str()
+    );
+    assert_eq!(topic.publication().token, token);
+    assert!(topics.by_observer_id.is_empty());
+    drop(topics);
+
+    let lease = runtime.topics.enter_read_lease().unwrap();
+    let publication = lease
+        .load(&key)
+        .expect("successful observation must commit its published snapshot");
+    assert_eq!(publication.state(), PublishedTopicState::Live);
+    drop(lease);
+
+    runtime
+        .connect(lifetime_generation(1), 41, &lifetime_key)
+        .unwrap();
+    {
+        let topics = runtime.topics.read();
+        assert_eq!(topics.by_observer_id.len(), 1);
+        assert_eq!(topics.by_observer_id.values().next(), Some(&identity));
+    }
+
+    runtime.disconnect(lifetime_generation(1), 41);
+    let topics = runtime.topics.read();
+    assert!(topics.by_key.is_empty());
+    assert!(topics.by_lifetime_key.is_empty());
+    assert!(topics.by_observer_id.is_empty());
+}
+
+#[test]
+fn cold_publication_stays_out_of_fast_snapshot_until_observation_succeeds() {
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("publication-commit-after-observation");
+
+    runtime
+        .prepare_observed(
+            key,
+            || Ok(DataRecord(1)),
+            |_, _| {
+                assert!(runtime.topics.published().load(&key).is_none());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert!(runtime.topics.published().load(&key).is_some());
+}
+
+#[test]
+fn publication_rejects_lifetime_key_collision_without_overwriting_existing_topic() {
+    let runtime = FormulaHandleService::new(8);
+    let first_key = test_topic_key("collision-first");
+    let second_key = test_topic_key("collision-second");
+    let first_lifetime_key = first_key.format_lifetime_key();
+    let second_lifetime_key = second_key.format_lifetime_key();
+    assert_ne!(first_lifetime_key, second_lifetime_key);
+
+    let first_preparation = runtime.prepare(first_key, || Ok(DataRecord(1))).unwrap();
+    let created = first_preparation.is_published();
+    let first_token = first_preparation.into_token();
+    assert!(created);
+
+    // Force the state that a formatter collision would present at the
+    // publication boundary: the existing topic owns the incoming RTD key.
+    {
+        let mut topics = runtime.topics.write();
+        topics.by_lifetime_key.remove(first_lifetime_key.as_str());
+        topics
+            .by_lifetime_key
+            .insert(second_lifetime_key.clone(), first_key);
+    }
+
+    let result = runtime.prepare(second_key, || Ok(DataRecord(2)));
+    assert!(matches!(
+        result,
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_TOPIC_COLLISION
+        })
+    ));
+
+    {
+        let topics = runtime.topics.read();
+        assert_eq!(topics.by_key.len(), 1);
+        assert_eq!(
+            topics
+                .by_key
+                .get(&first_key)
+                .map(|topic| &topic.publication().token),
+            Some(&first_token)
+        );
+        assert!(!topics.by_key.contains_key(&second_key));
+        assert_eq!(
+            topics.by_lifetime_key.get(second_lifetime_key.as_str()),
+            Some(&first_key)
+        );
+    }
+
+    // Restore the valid first-topic mapping so the test can release its
+    // registry root through the normal rollback path.
+    {
+        let mut topics = runtime.topics.write();
+        topics.by_lifetime_key.remove(second_lifetime_key.as_str());
+        topics
+            .by_lifetime_key
+            .insert(first_lifetime_key.clone(), first_key);
+    }
+    runtime.rollback(&first_lifetime_key);
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn ref_caller_uses_embedded_sheet_id_without_sheet_callbacks() {
+    let _callback_guard = crate::test_callback::lock();
+    crate::test_callback::install();
+    crate::test_callback::reset();
+    crate::test_callback::set_formula_caller(crate::test_callback::FormulaCallerKind::Ref);
+
+    let callbacks = crate::host_callback::HostCallbackSession::new();
+    let caller = resolve_formula_caller(crate::host_api::ExcelHost::new(&callbacks)).unwrap();
+
+    assert_eq!(
+        caller,
+        FormulaCaller {
+            sheet_id: 17,
+            row: 11,
+            column: 3,
+        }
+    );
+    assert_eq!(crate::test_callback::calls_for(xlfn_sys::XLF_CALLER), 1);
+    assert_eq!(crate::test_callback::calls_for(xlfn_sys::XL_SHEET_NM), 0);
+    assert_eq!(crate::test_callback::calls_for(xlfn_sys::XL_SHEET_ID), 0);
+    assert_eq!(crate::test_callback::free_calls(), 1);
+}
+
+#[test]
+fn sref_caller_keeps_sheet_lookup_fallback() {
+    let _callback_guard = crate::test_callback::lock();
+    crate::test_callback::install();
+    crate::test_callback::reset();
+    crate::test_callback::set_formula_caller(crate::test_callback::FormulaCallerKind::SRef);
+
+    let callbacks = crate::host_callback::HostCallbackSession::new();
+    let caller = resolve_formula_caller(crate::host_api::ExcelHost::new(&callbacks)).unwrap();
+
+    assert_eq!(
+        caller,
+        FormulaCaller {
+            sheet_id: 19,
+            row: 11,
+            column: 3,
+        }
+    );
+    assert_eq!(crate::test_callback::calls_for(xlfn_sys::XLF_CALLER), 1);
+    assert_eq!(crate::test_callback::calls_for(xlfn_sys::XL_SHEET_NM), 1);
+    assert_eq!(crate::test_callback::calls_for(xlfn_sys::XL_SHEET_ID), 1);
+    assert_eq!(crate::test_callback::free_calls(), 3);
+}
+
+#[test]
+fn generation_prevents_aba_and_lookup_keeps_value_alive() {
+    #[derive(Clone)]
+    struct TestObj(&'static str);
+    impl ExcelHandleObject for TestObj {}
+
+    let registry = HandleRegistry::new(4);
+    let token = insert_production(&registry, Arc::new(TestObj("first"))).unwrap();
+
+    with_decode_scope_and_state(&registry, |registry, scope| {
+        let borrowed = registry.lookup_handle::<TestObj>(scope, &token).unwrap();
+        assert_eq!(borrowed.0, "first");
+    });
+
+    registry.remove::<TestObj>(&token).unwrap();
+    assert!(matches!(
+        registry.lookup::<TestObj>(&token),
+        Err(XllError::StaleHandle)
+    ));
+
+    let replacement = insert_production(&registry, Arc::new(TestObj("replacement"))).unwrap();
+    assert_ne!(token, replacement);
+
+    with_decode_scope_and_state(&registry, |registry, scope| {
+        let replacement_handle = registry
+            .lookup_handle::<TestObj>(scope, &replacement)
+            .unwrap();
+        assert_eq!(replacement_handle.0, "replacement");
+    });
+}
+
+#[test]
+fn one_call_scope_can_borrow_from_each_runtime() {
+    struct ScopeObject(u32);
+    impl ExcelHandleObject for ScopeObject {}
+
+    let first = HandleRegistry::new(2);
+    let second = HandleRegistry::new(2);
+    let first_token = insert_production(&first, Arc::new(ScopeObject(1))).unwrap();
+    let second_token = insert_production(&second, Arc::new(ScopeObject(2))).unwrap();
+
+    let registries = (&first, &second);
+    with_decode_scope_and_state(&registries, |(first, second), scope| {
+        let first_handle = first
+            .lookup_handle::<ScopeObject>(scope, &first_token)
+            .expect("the first runtime publishes the handle");
+        assert_eq!(first_handle.0, 1);
+
+        let second_handle = second
+            .lookup_handle::<ScopeObject>(scope, &second_token)
+            .expect("binding snapshots are runtime-local and independently owned");
+        assert_eq!(second_handle.0, 2);
+    });
+}
+
+#[test]
+fn miri_binding_read_lease_delays_object_reclamation_until_reader_exit() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    struct Counted(Arc<AtomicUsize>);
+    impl ExcelHandleObject for Counted {}
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(HandleRegistry::new(2));
+    let token = insert_production(&registry, Arc::new(Counted(Arc::clone(&drops)))).unwrap();
+    let parsed = registry
+        .codec
+        .parse(
+            std::ptr::from_ref(&registry).addr(),
+            HandleToken::new(&token),
+        )
+        .unwrap();
+    let reader = registry
+        .bindings
+        .read_standalone(parsed.id)
+        .expect("inserted handle must admit a binding reader");
+    assert_eq!(reader.record().state(), BindingState::Live);
+
+    let removal_registry = Arc::clone(&registry);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let removal = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        removal_registry.remove::<Counted>(&token).unwrap();
+        finished_tx.send(()).unwrap();
+    });
+    started_rx.recv().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while reader.record().state() == BindingState::Live {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "removal did not retire its publication"
+        );
+        std::thread::yield_now();
+    }
+    finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert_eq!(reader.record().state(), BindingState::Retired);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+    drop(reader);
+    removal.join().unwrap();
+    registry.bindings.read_domain().flush_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn slot_reuse_can_publish_while_old_record_waits_for_grace() {
+    use std::time::{Duration, Instant};
+
+    struct Counted(&'static str, Arc<AtomicUsize>);
+    impl ExcelHandleObject for Counted {}
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.1.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(HandleRegistry::new(1));
+    let old_token =
+        insert_production(&registry, Arc::new(Counted("old", Arc::clone(&drops)))).unwrap();
+    let parsed_old = registry
+        .codec
+        .parse(
+            std::ptr::from_ref(&registry).addr(),
+            HandleToken::new(&old_token),
+        )
+        .unwrap();
+    let old_reader = registry.bindings.read_standalone(parsed_old.id).unwrap();
+
+    let removal_registry = Arc::clone(&registry);
+    let old_token_for_removal = old_token.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let removal = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        removal_registry
+            .remove::<Counted>(&old_token_for_removal)
+            .unwrap();
+        finished_tx.send(()).unwrap();
+    });
+    started_rx.recv().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if let Some(state) = registry.bindings.try_read_state()
+            && state.slots[parsed_old.id.slot as usize].record.is_none()
+            && state.free.contains(&parsed_old.id.slot)
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "removal did not detach its slot");
+        std::thread::yield_now();
+    }
+
+    let new_token = insert_production(&registry, Arc::new(Counted("new", Arc::clone(&drops))))
+        .expect("the detached slot can be reused before the old grace period ends");
+    let parsed_new = registry
+        .codec
+        .parse(
+            std::ptr::from_ref(&registry).addr(),
+            HandleToken::new(&new_token),
+        )
+        .unwrap();
+    assert_eq!(parsed_new.id.slot, parsed_old.id.slot);
+    assert_ne!(parsed_new.id.generation, parsed_old.id.generation);
+    assert_eq!(old_reader.record().state(), BindingState::Retired);
+    with_decode_scope_and_state(&registry, |registry, scope| {
+        assert!(matches!(
+            registry.lookup_handle::<Counted>(scope, &old_token),
+            Err(XllError::StaleHandle)
+        ));
+        assert_eq!(
+            registry
+                .lookup_handle::<Counted>(scope, &new_token)
+                .unwrap()
+                .0,
+            "new"
+        );
+    });
+    finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+
+    drop(old_reader);
+    removal.join().unwrap();
+
+    registry.remove::<Counted>(&new_token).unwrap();
+    registry.bindings.read_domain().flush_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn single_slot_churn_reclaims_binding_records() {
+    struct Counted(Arc<AtomicUsize>);
+    impl ExcelHandleObject for Counted {}
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let registry = HandleRegistry::new(1);
+    let iterations = 10_000;
+
+    for _ in 0..iterations {
+        let token = insert_production(&registry, Arc::new(Counted(Arc::clone(&drops))))
+            .expect("single binding slot must be reusable");
+        registry
+            .remove::<Counted>(&token)
+            .expect("published binding must be removable");
+    }
+
+    registry.bindings.read_domain().flush_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), iterations);
+    let state = registry.bindings.read_state();
+    assert_eq!(state.live_bindings, 0);
+    assert_eq!(state.slots.len(), 1);
+    assert!(state.slots[0].record.is_none());
+}
+
+#[test]
+fn close_rejects_new_borrows_but_retires_after_existing_call_release() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[derive(Clone)]
+    struct TestObj(&'static str);
+    impl ExcelHandleObject for TestObj {}
+
+    let registry = Arc::new(HandleRegistry::new(2));
+    let token = insert_production(&registry, Arc::new(TestObj("live"))).unwrap();
+
+    let (seal_handle, finished_rx) = with_decode_scope_and_state(&registry, |registry, scope| {
+        let borrowed = registry.lookup_handle::<TestObj>(scope, &token).unwrap();
+        assert_eq!(borrowed.0, "live");
+
+        let reg_clone = Arc::clone(registry);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let seal_handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let res = reg_clone.seal().map(|_| ());
+            finished_tx.send(res).unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        // While call scope is active, seal cannot complete because readers are active.
+        assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        assert_eq!(borrowed.0, "live");
+        (seal_handle, finished_rx)
+    });
+
+    finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    seal_handle.join().unwrap();
+}
+
+#[test]
+fn exhausted_generation_retires_the_slot_permanently() {
+    let registry = HandleRegistry::new(2);
+    let first = insert_production(&registry, Arc::new(1_u32)).unwrap();
+    registry.remove::<u32>(&first).unwrap();
+    registry.bindings.write_state().slots[0].next_generation =
+        crate::generation::BindingGeneration::new(u64::MAX).unwrap();
+    let final_token = insert_production(&registry, Arc::new(1_u32)).unwrap();
+    registry.remove::<u32>(&final_token).unwrap();
+    assert!(registry.bindings.read_state().free.is_empty());
+
+    let replacement = insert_production(&registry, Arc::new(2_u32)).unwrap();
+    assert_eq!(
+        registry
+            .codec
+            .parse(
+                std::ptr::from_ref(&registry).addr(),
+                HandleToken::new(&replacement),
+            )
+            .unwrap()
+            .id
+            .slot,
+        1
+    );
+    assert!(matches!(
+        registry.lookup::<u32>(&final_token),
+        Err(XllError::StaleHandle)
+    ));
+}
+
+#[test]
+fn corruption_and_cross_session_tokens_are_rejected() {
+    let first = HandleRegistry::new(2);
+    let second = HandleRegistry::new(2);
+    let token = insert_production(&first, Arc::new(1_u32)).unwrap();
+    let fields = token.split(':').collect::<Vec<_>>();
+    assert_eq!(fields[1], "3");
+    assert_eq!(fields[5].len(), 32);
+    let mut corrupted = token.clone();
+    let last = corrupted.pop().unwrap();
+    corrupted.push(if last == '0' { '1' } else { '0' });
+    assert!(first.lookup::<u32>(&corrupted).is_err());
+    let forged = format!(
+        "xllh:3:{}:{}:{}:{}",
+        fields[2],
+        fields[3],
+        fields[4],
+        "0".repeat(32)
+    );
+    assert!(first.lookup::<u32>(&forged).is_err());
+    assert!(second.lookup::<u32>(&token).is_err());
+}
+
+#[test]
+fn object_ids_are_namespaced_by_handle_session() {
+    let first = HandleRegistry::from_entropy(2, [0x11; 40]);
+    let second = HandleRegistry::from_entropy(2, [0x22; 40]);
+
+    let first_object = first.new_object(1_u32).unwrap();
+    let second_object = second.new_object(1_u32).unwrap();
+
+    assert_eq!(first_object.id().sequence(), 1);
+    assert_eq!(second_object.id().sequence(), 1);
+    assert_ne!(first_object.id(), second_object.id());
+    assert_ne!(first_object.id().session(), second_object.id().session());
+}
+
+#[test]
+fn public_handle_identity_survives_as_a_value_without_pinning_the_object() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("public-object-identity");
+    let token = runtime
+        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
+        .unwrap()
+        .into_token();
+
+    let identity = with_handle::<CountedDataRecord, _>(&runtime, &token, |handle| {
+        assert!(std::ptr::eq(handle.as_ref(), &*handle));
+        let identity: HandleObjectId = handle.object_id();
+        assert_eq!(identity, handle.object_id());
+        identity
+    })
+    .unwrap();
+
+    runtime
+        .store
+        .registry
+        .remove_and_drop(&token, "retire object with copied public ID");
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        with_handle::<CountedDataRecord, _>(&runtime, &token, |_| ()),
+        Err(XllError::StaleHandle)
+    ));
+
+    let replacement = runtime
+        .prepare(test_topic_key("public-object-identity-replacement"), || {
+            Ok(DataRecord(42))
+        })
+        .unwrap()
+        .into_token();
+    let replacement_id =
+        with_handle::<DataRecord, _>(&runtime, &replacement, |handle| handle.object_id()).unwrap();
+    assert_ne!(identity, replacement_id);
+    assert_eq!(identity.session(), replacement_id.session());
+}
+
+#[test]
+fn public_handle_identity_changes_after_runtime_regeneration() {
+    let slot = FormulaHandleServiceSlot::new();
+    slot.arm(crate::HandleConfig::default()).unwrap();
+    let (old_token, old_id) = {
+        let runtime = slot.read().unwrap();
+        let token = runtime
+            .prepare(test_topic_key("object-identity-generation"), || {
+                Ok(DataRecord(1))
+            })
+            .unwrap()
+            .into_token();
+        let identity =
+            with_handle::<DataRecord, _>(&runtime, &token, |handle| handle.object_id()).unwrap();
+        (token, identity)
+    };
+
+    slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
+        .unwrap();
+    slot.arm(crate::HandleConfig::default()).unwrap();
+    let runtime = slot.read().unwrap();
+    assert!(with_handle::<DataRecord, _>(&runtime, &old_token, |_| ()).is_err());
+    let new_token = runtime
+        .prepare(test_topic_key("object-identity-generation"), || {
+            Ok(DataRecord(1))
+        })
+        .unwrap()
+        .into_token();
+    let new_id =
+        with_handle::<DataRecord, _>(&runtime, &new_token, |handle| handle.object_id()).unwrap();
+    assert_ne!(old_id, new_id);
+    assert_ne!(old_id.session(), new_id.session());
+}
+
+#[cfg(all(feature = "async", feature = "handles"))]
+#[test]
+fn handle_lease_as_ref_and_identity_match_the_synchronous_handle() {
+    let runtime = FormulaHandleService::new(8);
+    let token = runtime
+        .prepare(test_topic_key("lease-public-object-identity"), || {
+            Ok(DataRecord(51))
+        })
+        .unwrap()
+        .into_token();
+    let (identity, pending) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle = runtime.lookup::<DataRecord>(scope, &token).unwrap();
+        let identity = handle.object_id();
+        let pending = handle
+            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+            .unwrap();
+        (identity, pending)
+    });
+    let brand = GenerationLeaseBrand;
+    let scope = crate::async_udf::AsyncTaskScope::new(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        &brand,
+    );
+    let lease = pending.bind(scope).unwrap();
+    assert_eq!(lease.object_id(), identity);
+    assert_eq!(lease.as_ref().0, 51);
+    assert!(std::ptr::eq(lease.as_ref(), &*lease));
+
+    static_assertions::assert_not_impl_any!(HandleAlias<'_, DataRecord>: AsRef<DataRecord>, std::ops::Deref);
+}
+
+#[test]
+fn csprng_failure_is_a_stable_initialization_error_not_a_panic() {
+    let error = HandleRegistry::try_new_with(2, |_| Err("injected CSPRNG failure"), false)
+        .err()
+        .expect("injected entropy failure is returned");
+    assert!(matches!(
+        error,
+        XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_ENTROPY
+        }
+    ));
+}
+
+#[test]
+fn close_invalidates_tokens_and_rejects_new_bindings() {
+    let registry = HandleRegistry::new(2);
+    let token = insert_production(&registry, Arc::new(42_u32)).unwrap();
+    let value = registry.lookup::<u32>(&token).unwrap();
+    registry.seal().map(|_| ()).unwrap();
+    assert!(registry.lookup::<u32>(&token).is_err());
+    assert_eq!(value, 42);
+    assert!(matches!(
+        insert_production(&registry, Arc::new(7_u32)),
+        Err(XllError::Closing)
+    ));
+}
+
+#[test]
+fn sealing_a_closed_registry_is_idempotent_without_phase_regression() {
+    let registry = HandleRegistry::new(2);
+    registry.seal().map(|_| ()).unwrap();
+    assert_eq!(registry.phase(), HandleRegistryPhase::Closed);
+
+    registry.seal().map(|_| ()).unwrap();
+    assert_eq!(registry.phase(), HandleRegistryPhase::Closed);
+}
+
+#[test]
+fn insert_racing_close_at_publication_boundaries_never_leaves_a_live_handle() {
+    use super::registry::InsertBoundary;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    for boundary in [
+        InsertBoundary::BeforeReserve,
+        InsertBoundary::AfterReserve,
+        InsertBoundary::BeforePublish,
+        InsertBoundary::AfterPublish,
+    ] {
+        let registry = Arc::new(HandleRegistry::new(2));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::channel();
+        *registry.insert_pause.lock() = Some((boundary, entered_tx, resume_rx));
+        let inserting = Arc::clone(&registry);
+        let worker_drops = Arc::clone(&drops);
+        let worker = std::thread::spawn(move || {
+            insert_production(&inserting, Arc::new(CountedDataRecord(worker_drops)))
+        });
+        let entered = entered_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        let closing = Arc::clone(&registry);
+        let closer = std::thread::spawn(move || closing.seal().map(|_| ()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while registry.phase() == HandleRegistryPhase::Open && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let close_started = registry.phase() != HandleRegistryPhase::Open;
+        let _ = resume_tx.send(());
+        let result = worker.join().unwrap();
+        closer.join().unwrap().unwrap();
+        assert!(entered, "insertion must reach {boundary:?}");
+        assert!(close_started, "close must start while insertion is paused");
+        assert_eq!(registry.phase(), HandleRegistryPhase::Closed);
+        assert_eq!(registry.len(), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        match boundary {
+            InsertBoundary::BeforeReserve | InsertBoundary::AfterReserve => {
+                assert!(matches!(result, Err(XllError::Closing)));
+            }
+            InsertBoundary::BeforePublish | InsertBoundary::AfterPublish => {
+                let token = result.unwrap();
+                assert!(matches!(
+                    registry.lookup::<u32>(&token),
+                    Err(XllError::Closing)
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn wrong_remove_type_does_not_consume_handle() {
+    let registry = HandleRegistry::new(2);
+    let token = insert_production(&registry, Arc::new(42_u32)).unwrap();
+    assert!(matches!(
+        registry.remove::<String>(&token),
+        Err(XllError::InvalidHandle)
+    ));
+    assert_eq!(registry.lookup::<u32>(&token).unwrap(), 42);
+}
+
+#[test]
+fn close_drops_values_outside_registry_lock() {
+    struct ReenterOnDrop {
+        registry: Arc<HandleRegistry>,
+    }
+    impl Drop for ReenterOnDrop {
+        fn drop(&mut self) {
+            assert!(
+                self.registry.bindings.try_read_state().is_some(),
+                "binding lock must not be held while user Drop runs"
+            );
+            assert!(matches!(self.registry.seal(), Err(XllError::Closing)));
+            assert!(matches!(
+                insert_production(&self.registry, Arc::new(1_u32)),
+                Err(XllError::Closing)
+            ));
+        }
+    }
+
+    let registry = Arc::new(HandleRegistry::new(2));
+    insert_production(
+        &registry,
+        Arc::new(ReenterOnDrop {
+            registry: Arc::clone(&registry),
+        }),
+    )
+    .unwrap();
+    registry.seal().map(|_| ()).unwrap();
+}
+
+#[test]
+fn close_contains_panicking_destructors_and_continues_dropping() {
+    struct PanicOnDrop(Arc<AtomicUsize>);
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+                &self.0,
+            )));
+        }
+    }
+
+    struct CountOnDrop(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for CountOnDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let payload_drops = Arc::new(AtomicUsize::new(0));
+    let registry = HandleRegistry::new(2);
+    insert_production(&registry, Arc::new(PanicOnDrop(Arc::clone(&payload_drops)))).unwrap();
+    insert_production(&registry, Arc::new(CountOnDrop(Arc::clone(&drops)))).unwrap();
+
+    assert!(matches!(registry.seal().map(|_| ()), Err(XllError::Panic)));
+    assert_eq!(registry.len(), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(payload_drops.load(Ordering::Acquire), 0);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DataRecord(u32);
+
+impl ExcelHandleObject for DataRecord {}
+
+struct SimpleResource;
+
+impl ExcelHandleObject for SimpleResource {}
+
+fn token_value(token: &str) -> (Vec<u16>, xlfn_sys::XLOPER12) {
+    let mut encoded = Vec::with_capacity(token.encode_utf16().count() + 1);
+    encoded.push(token.encode_utf16().count() as u16);
+    encoded.extend(token.encode_utf16());
+    let raw = xlfn_sys::XLOPER12 {
+        value: xlfn_sys::XLOPER12Value {
+            string: encoded.as_mut_ptr(),
+        },
+        xltype: xlfn_sys::XLTYPE_STR,
+    };
+    (encoded, raw)
+}
+
+#[test]
+fn repeated_formula_revision_runs_factory_exactly_once() {
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("same");
+    let lifetime_key = key.format_lifetime_key();
+    let calls = AtomicUsize::new(0);
+
+    let first_preparation = runtime
+        .prepare(key, || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(DataRecord(1))
+        })
+        .unwrap();
+    let created = first_preparation.is_published();
+    let first = first_preparation.into_token();
+    assert!(created);
+
+    let second_preparation = runtime
+        .prepare(key, || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(DataRecord(2))
+        })
+        .unwrap();
+    let created = second_preparation.is_published();
+    let second = second_preparation.into_token();
+    assert!(!created);
+    assert_eq!(first, second);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &first, |value| value.0).unwrap(),
+        1
+    );
+
+    runtime
+        .connect(lifetime_generation(1), 41, &lifetime_key)
+        .unwrap();
+    runtime.disconnect(lifetime_generation(1), 41);
+    assert_eq!(runtime.len(), 0);
+    assert!(matches!(
+        with_handle::<DataRecord, _>(&runtime, &first, |_| ()),
+        Err(XllError::StaleHandle)
+    ));
+}
+
+#[test]
+fn explicit_handle_argument_conversion_resolves_a_typed_token() {
+    let (slot, handles) = armed_handle_slot();
+    let token = handles
+        .prepare(test_topic_key("argument"), || Ok(DataRecord(19)))
+        .unwrap()
+        .into_token();
+    let (_encoded, mut raw) = token_value(&token);
+
+    crate::call::with_branded_call_scope(|storage, brand| {
+        // SAFETY: `raw` and its counted UTF-16 storage remain live for conversion.
+        let resolved: Handle<'_, DataRecord> = unsafe {
+            crate::value::argument_from_raw_with_context(storage, brand, slot, "dataset", &mut raw)
+        }
+        .unwrap();
+        assert_eq!(resolved.0, 19);
+    });
+}
+
+#[test]
+fn fresh_handle_revisions_run_factory_and_keep_old_leases_until_disconnect() {
+    let runtime = FormulaHandleService::new(8);
+    let inputs = crate::input_identity::InputFingerprint::from_bytes([42; 32]);
+    let caller = FormulaCaller {
+        sheet_id: 0,
+        row: 1,
+        column: 2,
+    };
+    let key = |inputs| HandleTopicKey::Formula(FormulaRevisionKey::new(caller, "RELOAD", inputs));
+    let first_key = key(super::fresh_invocation_inputs(inputs).unwrap());
+    let second_key = key(super::fresh_invocation_inputs(inputs).unwrap());
+    assert_ne!(first_key, second_key);
+    let calls = AtomicUsize::new(0);
+    let first = runtime
+        .prepare_observed(
+            first_key,
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(DataRecord(1))
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap()
+        .into_token();
+    runtime
+        .connect(lifetime_generation(1), 41, &first_key.format_lifetime_key())
+        .unwrap();
+
+    // A failed new invocation leaves the previous binding live.
+    let failed_key = key(super::fresh_invocation_inputs(inputs).unwrap());
+    assert!(
+        runtime
+            .prepare_observed::<DataRecord, _>(
+                failed_key,
+                || Err(XllError::custom(
+                    crate::ExcelError::NotAvailable,
+                    "unavailable"
+                )),
+                |_, _| Ok(())
+            )
+            .is_err()
+    );
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &first, |value| value.0).unwrap(),
+        1
+    );
+
+    let second = runtime
+        .prepare_observed(
+            second_key,
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(DataRecord(2))
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap()
+        .into_token();
+    runtime
+        .connect(
+            lifetime_generation(1),
+            42,
+            &second_key.format_lifetime_key(),
+        )
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    with_handle::<DataRecord, _>(&runtime, &first, |old| {
+        runtime.disconnect(lifetime_generation(1), 41);
+        assert_eq!(old.0, 1);
+        assert_eq!(
+            with_handle::<DataRecord, _>(&runtime, &second, |new| new.0).unwrap(),
+            2
+        );
+    })
+    .unwrap();
+    assert!(matches!(
+        with_handle::<DataRecord, _>(&runtime, &first, |_| ()),
+        Err(XllError::StaleHandle)
+    ));
+    runtime.disconnect(lifetime_generation(1), 42);
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn pending_handle_argument_conversion_leases_the_payload() {
+    let (_slot, handles) = armed_handle_slot();
+    let token = handles
+        .prepare(test_topic_key("async-argument"), || Ok(DataRecord(29)))
+        .unwrap()
+        .into_token();
+    let resolved = with_decode_scope_and_state(&handles, |handles, scope| {
+        handles
+            .lookup::<DataRecord>(scope, &token)
+            .unwrap()
+            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+            .unwrap()
+    });
+    handles
+        .store
+        .registry
+        .remove_and_drop(&token, "test remove async argument");
+    assert_eq!(resolved.value_for_test().0, 29);
+    drop(resolved);
+}
+
+#[test]
+fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
+    let (slot, handles) = armed_handle_slot();
+    let key = test_topic_key("argument-errors");
+    let lifetime_key = key.format_lifetime_key();
+    let token = handles
+        .prepare(key, || Ok(DataRecord(23)))
+        .unwrap()
+        .into_token();
+    handles
+        .connect(lifetime_generation(1), 91, &lifetime_key)
+        .unwrap();
+
+    let (_wrong_encoded, mut wrong_raw) = token_value(&token);
+    // SAFETY: `wrong_raw` and its counted UTF-16 storage remain live for conversion.
+    crate::call::with_branded_call_scope(|storage, brand| {
+        // SAFETY: `wrong_raw` remains live for the duration of this conversion.
+        let wrong = unsafe {
+            crate::value::argument_from_raw_with_context::<Handle<'_, SimpleResource>>(
+                storage,
+                brand,
+                slot,
+                "curve",
+                &mut wrong_raw,
+            )
+        };
+        assert!(matches!(wrong, Err(XllError::InvalidHandle)));
+    });
+
+    let (foreign_slot, _foreign_handles) = armed_handle_slot();
+    let (_foreign_encoded, mut foreign_raw) = token_value(&token);
+    // SAFETY: `foreign_raw` and its counted UTF-16 storage remain live for conversion.
+    crate::call::with_branded_call_scope(|storage, brand| {
+        // SAFETY: `foreign_raw` remains live for the duration of this conversion.
+        let foreign = unsafe {
+            crate::value::argument_from_raw_with_context::<Handle<'_, DataRecord>>(
+                storage,
+                brand,
+                foreign_slot,
+                "dataset",
+                &mut foreign_raw,
+            )
+        };
+        assert!(matches!(foreign, Err(XllError::InvalidHandle)));
+    });
+
+    let mut tampered = token.clone();
+    let last = tampered.pop().unwrap();
+    tampered.push(if last == '0' { '1' } else { '0' });
+    let (_tampered_encoded, mut tampered_raw) = token_value(&tampered);
+    // SAFETY: `tampered_raw` and its counted UTF-16 storage remain live for conversion.
+    crate::call::with_branded_call_scope(|storage, brand| {
+        // SAFETY: `tampered_raw` remains live for the duration of this conversion.
+        let tampered = unsafe {
+            crate::value::argument_from_raw_with_context::<Handle<'_, DataRecord>>(
+                storage,
+                brand,
+                slot,
+                "dataset",
+                &mut tampered_raw,
+            )
+        };
+        assert!(matches!(tampered, Err(XllError::InvalidHandle)));
+    });
+
+    handles.disconnect(lifetime_generation(1), 91);
+    let (_stale_encoded, mut stale_raw) = token_value(&token);
+    // SAFETY: `stale_raw` and its counted UTF-16 storage remain live for conversion.
+    crate::call::with_branded_call_scope(|storage, brand| {
+        // SAFETY: `stale_raw` remains live for the duration of this conversion.
+        let stale = unsafe {
+            crate::value::argument_from_raw_with_context::<Handle<'_, DataRecord>>(
+                storage,
+                brand,
+                slot,
+                "dataset",
+                &mut stale_raw,
+            )
+        };
+        assert!(matches!(stale, Err(XllError::StaleHandle)));
+    });
+}
+
+#[test]
+fn optional_handle_conversion_preserves_blank_and_missing_policy() {
+    let (slot, _handles) = armed_handle_slot();
+    let mut blank = xlfn_sys::XLOPER12::nil();
+    let mut missing = xlfn_sys::XLOPER12::missing();
+    // SAFETY: `blank` remains live for the duration of conversion.
+    crate::call::with_branded_call_scope(|storage, brand| {
+        // SAFETY: `blank` remains live for the duration of this conversion.
+        let blank_value = unsafe {
+            crate::value::argument_from_raw_with_context::<Option<Handle<'_, DataRecord>>>(
+                storage, brand, slot, "dataset", &mut blank,
+            )
+        }
+        .unwrap();
+        assert!(blank_value.is_none());
+    });
+    // SAFETY: `missing` remains live for the duration of conversion.
+    crate::call::with_branded_call_scope(|storage, brand| {
+        // SAFETY: `missing` remains live for the duration of this conversion.
+        let missing_value = unsafe {
+            crate::value::argument_from_raw_with_context::<Option<Handle<'_, DataRecord>>>(
+                storage,
+                brand,
+                slot,
+                "dataset",
+                &mut missing,
+            )
+        }
+        .unwrap();
+        assert!(missing_value.is_none());
+    });
+
+    // SAFETY: `blank` remains live for the duration of conversion.
+    crate::call::with_branded_call_scope(|storage, brand| {
+        // SAFETY: `blank` remains live for the duration of this conversion.
+        let direct_blank = unsafe {
+            crate::value::argument_from_raw_with_context::<Handle<'_, DataRecord>>(
+                storage, brand, slot, "dataset", &mut blank,
+            )
+        };
+        assert!(direct_blank.is_err());
+    });
+}
+
+#[test]
+fn existing_handle_publication_creates_an_independent_formula_owner() {
+    let runtime = FormulaHandleService::new(8);
+    let source_key = test_topic_key("source");
+    let source_lifetime_key = source_key.format_lifetime_key();
+    let source_token = runtime
+        .prepare(source_key, || Ok(DataRecord(31)))
+        .unwrap()
+        .into_token();
+    runtime
+        .connect(lifetime_generation(1), 1, &source_lifetime_key)
+        .unwrap();
+
+    let alias_key = test_topic_key("alias");
+    let alias_lifetime_key = alias_key.format_lifetime_key();
+    let (alias_token, object_id) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let resolved: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
+        let object_id = resolved.object_id();
+        let alias = runtime
+            .prepare_observed_alias::<DataRecord, _>(alias_key, resolved.alias(), |_, _| Ok(()))
+            .unwrap()
+            .into_token();
+        (alias, object_id)
+    });
+    runtime
+        .connect(lifetime_generation(1), 2, &alias_lifetime_key)
+        .unwrap();
+    assert_ne!(source_token, alias_token);
+    let source_binding = runtime
+        .store
+        .registry
+        .codec
+        .parse(
+            std::ptr::from_ref(&runtime.store.registry).addr(),
+            HandleToken::new(&source_token),
+        )
+        .unwrap()
+        .id;
+    let alias_binding = runtime
+        .store
+        .registry
+        .codec
+        .parse(
+            std::ptr::from_ref(&runtime.store.registry).addr(),
+            HandleToken::new(&alias_token),
+        )
+        .unwrap()
+        .id;
+    let alias_object_id =
+        with_handle::<DataRecord, _>(&runtime, &alias_token, |handle| handle.object_id()).unwrap();
+    assert_ne!(source_binding, alias_binding);
+    assert_eq!(alias_object_id, object_id);
+
+    runtime.disconnect(lifetime_generation(1), 1);
+    assert!(matches!(
+        with_handle::<DataRecord, _>(&runtime, &source_token, |_| ()),
+        Err(XllError::StaleHandle)
+    ));
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &alias_token, |value| value.0).unwrap(),
+        31
+    );
+
+    runtime.disconnect(lifetime_generation(1), 2);
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn aliased_binding_survives_source_retirement_and_drops_once() {
+    struct DropTracked {
+        value: u32,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ExcelHandleObject for DropTracked {}
+
+    impl Drop for DropTracked {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = FormulaHandleService::new(8);
+    let source_key = test_topic_key("alias-binding-source");
+    let source_lifetime_key = source_key.format_lifetime_key();
+    let source_token = runtime
+        .prepare(source_key, || {
+            Ok(DropTracked {
+                value: 73,
+                drops: Arc::clone(&drops),
+            })
+        })
+        .unwrap()
+        .into_token();
+    runtime
+        .connect(lifetime_generation(1), 3, &source_lifetime_key)
+        .unwrap();
+
+    let alias_key = test_topic_key("alias-binding-target");
+    let alias_lifetime_key = alias_key.format_lifetime_key();
+    let alias_token = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let source: Handle<'_, DropTracked> = runtime.lookup(scope, &source_token).unwrap();
+        runtime
+            .prepare_observed_alias::<DropTracked, _>(alias_key, source.alias(), |_, _| Ok(()))
+            .unwrap()
+            .into_token()
+    });
+
+    runtime.disconnect(lifetime_generation(1), 3);
+    assert!(matches!(
+        with_handle::<DropTracked, _>(&runtime, &source_token, |_| ()),
+        Err(XllError::StaleHandle)
+    ));
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+    runtime
+        .connect(lifetime_generation(1), 4, &alias_lifetime_key)
+        .unwrap();
+
+    assert_eq!(
+        with_handle::<DropTracked, _>(&runtime, &alias_token, |handle| (*handle).value).unwrap(),
+        73
+    );
+    runtime.disconnect(lifetime_generation(1), 4);
+    assert_eq!(runtime.len(), 0);
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn alias_publication_installs_an_independent_object_capability() {
+    struct DropTracked {
+        value: u32,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl ExcelHandleObject for DropTracked {}
+
+    impl Drop for DropTracked {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let runtime = FormulaHandleService::new(8);
+    let source_key = test_topic_key("snapshot-source");
+    let source_preparation = runtime
+        .prepare_observed(
+            source_key,
+            || {
+                Ok(DropTracked {
+                    value: 107,
+                    drops: Arc::clone(&drops),
+                })
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    let source_token = source_preparation.into_token();
+
+    let alias_key = test_topic_key("snapshot-alias");
+    let alias_token = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let source: Handle<'_, DropTracked> = runtime.lookup(scope, &source_token).unwrap();
+        let object_id = source.object_id();
+
+        let alias_token = runtime
+            .prepare_observed_alias::<DropTracked, _>(alias_key, source.alias(), |_, _| Ok(()))
+            .unwrap()
+            .into_token();
+
+        let alias_object_id = runtime
+            .lookup::<DropTracked>(scope, &alias_token)
+            .expect("aliased object must have a live binding")
+            .object_id();
+        assert_eq!(alias_object_id, object_id);
+
+        (alias_token, object_id)
+    })
+    .0;
+
+    runtime
+        .store
+        .registry
+        .remove_and_drop(&source_token, "retire source after alias publication");
+
+    assert_eq!(
+        with_handle::<DropTracked, _>(&runtime, &alias_token, |handle| (*handle).value).unwrap(),
+        107
+    );
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+    runtime
+        .store
+        .registry
+        .remove_and_drop(&alias_token, "remove snapshot alias");
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    runtime.seal().map(|_| ()).unwrap();
+}
+
+#[test]
+fn aliases_of_one_object_have_one_semantic_input_identity() {
+    let (slot, runtime) = armed_handle_slot();
+    let source_key = test_topic_key("identity-source");
+    let source_lifetime_key = source_key.format_lifetime_key();
+    let source_token = runtime
+        .prepare(source_key, || Ok(DataRecord(91)))
+        .unwrap()
+        .into_token();
+    runtime
+        .connect(lifetime_generation(1), 5, &source_lifetime_key)
+        .unwrap();
+
+    let alias_key = test_topic_key("identity-alias");
+    let alias_token = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
+        runtime
+            .prepare_observed_alias::<DataRecord, _>(alias_key, source.alias(), |_, _| Ok(()))
+            .unwrap()
+            .into_token()
+    });
+
+    let alias_lifetime_key = alias_key.format_lifetime_key();
+    runtime
+        .connect(lifetime_generation(1), 6, &alias_lifetime_key)
+        .unwrap();
+
+    let other_key = test_topic_key("identity-other");
+    let other_lifetime_key = other_key.format_lifetime_key();
+    let other_token = runtime
+        .prepare(other_key, || Ok(DataRecord(91)))
+        .unwrap()
+        .into_token();
+    runtime
+        .connect(lifetime_generation(1), 7, &other_lifetime_key)
+        .unwrap();
+
+    with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
+        let alias: Handle<'_, DataRecord> = runtime.lookup(scope, &alias_token).unwrap();
+        let other: Handle<'_, DataRecord> = runtime.lookup(scope, &other_token).unwrap();
+        assert_eq!(source.object_id(), alias.object_id());
+        assert_eq!(
+            input_identity::<DataRecord>(slot, &source_token),
+            input_identity::<DataRecord>(slot, &alias_token)
+        );
+        assert_eq!(
+            input_identity::<DataRecord>(slot, &source_token),
+            reference_handle_identity(source.object_id())
+        );
+        assert_ne!(source.object_id(), other.object_id());
+        assert_ne!(
+            input_identity::<DataRecord>(slot, &source_token),
+            input_identity::<DataRecord>(slot, &other_token)
+        );
+    });
+
+    runtime.disconnect(lifetime_generation(1), 5);
+    runtime.disconnect(lifetime_generation(1), 6);
+    runtime.disconnect(lifetime_generation(1), 7);
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn semantic_handle_identity_controls_formula_memoization() {
+    let (slot, runtime) = armed_handle_slot();
+
+    let source_key = test_topic_key("semantic-memo-source");
+    let source_token = runtime
+        .prepare(source_key, || Ok(DataRecord(91)))
+        .unwrap()
+        .into_token();
+    let source_lifetime_key = source_key.format_lifetime_key();
+    runtime
+        .connect(lifetime_generation(1), 50, &source_lifetime_key)
+        .unwrap();
+
+    let alias_key = test_topic_key("semantic-memo-alias");
+    let alias_token = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
+        runtime
+            .prepare_observed_alias::<DataRecord, _>(alias_key, source.alias(), |_, _| Ok(()))
+            .unwrap()
+            .into_token()
+    });
+
+    let alias_lifetime_key = alias_key.format_lifetime_key();
+    runtime
+        .connect(lifetime_generation(1), 51, &alias_lifetime_key)
+        .unwrap();
+
+    let other_key = test_topic_key("semantic-memo-other");
+    let other_token = runtime
+        .prepare(other_key, || Ok(DataRecord(91)))
+        .unwrap()
+        .into_token();
+    let other_lifetime_key = other_key.format_lifetime_key();
+    runtime
+        .connect(lifetime_generation(1), 52, &other_lifetime_key)
+        .unwrap();
+
+    let (source_revision, alias_revision, other_revision) =
+        with_decode_scope_and_state(&runtime, |runtime, scope| {
+            let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
+            let alias: Handle<'_, DataRecord> = runtime.lookup(scope, &alias_token).unwrap();
+            assert_eq!(source.object_id(), alias.object_id());
+            (
+                semantic_handle_key::<DataRecord>(slot, &source_token),
+                semantic_handle_key::<DataRecord>(slot, &alias_token),
+                semantic_handle_key::<DataRecord>(slot, &other_token),
+            )
+        });
+
+    assert_eq!(source_revision, alias_revision);
+    assert_ne!(source_revision, other_revision);
+
+    let factory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first_calls = Arc::clone(&factory_calls);
+    let preparation_a = runtime
+        .prepare_observed(
+            source_revision,
+            move || {
+                first_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(DataRecord(700))
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    let created_a = preparation_a.is_published();
+    let token_a = preparation_a.into_token();
+    assert!(created_a);
+
+    let second_calls = Arc::clone(&factory_calls);
+    let preparation_b = runtime
+        .prepare_observed(
+            alias_revision,
+            move || {
+                second_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(DataRecord(701))
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    let created_b = preparation_b.is_published();
+    let token_b = preparation_b.into_token();
+    assert!(!created_b);
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(token_a, token_b);
+    let object_a =
+        with_handle::<DataRecord, _>(&runtime, &token_a, |handle| handle.object_id()).unwrap();
+    let object_b =
+        with_handle::<DataRecord, _>(&runtime, &token_b, |handle| handle.object_id()).unwrap();
+    assert_eq!(object_a, object_b);
+
+    let third_calls = Arc::clone(&factory_calls);
+    let preparation_c = runtime
+        .prepare_observed(
+            other_revision,
+            move || {
+                third_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(DataRecord(702))
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    let created_c = preparation_c.is_published();
+    let token_c = preparation_c.into_token();
+    assert!(created_c);
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
+    assert_ne!(token_a, token_c);
+    let object_c =
+        with_handle::<DataRecord, _>(&runtime, &token_c, |handle| handle.object_id()).unwrap();
+    assert_ne!(object_a, object_c);
+
+    for (topic_id, lifetime_key) in [
+        (53, source_revision.format_lifetime_key()),
+        (55, other_revision.format_lifetime_key()),
+    ] {
+        runtime
+            .connect(lifetime_generation(1), topic_id, &lifetime_key)
+            .unwrap();
+    }
+
+    for topic_id in [50, 51, 52, 53, 55] {
+        runtime.disconnect(lifetime_generation(1), topic_id);
+    }
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn failed_rtd_connection_rolls_back_pending_object() {
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("pending");
+    let lifetime_key = key.format_lifetime_key();
+    runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
+    runtime.rollback(&lifetime_key);
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn lifetime_generation_prevents_stale_rtd_ownership_after_claim_and_rollback() {
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let key = test_topic_key("server-generation");
+    let lifetime_key = key.format_lifetime_key();
+    runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
+
+    runtime
+        .claim_lifetime(&lifetime_key, lifetime_generation(1))
+        .unwrap();
+    assert!(matches!(
+        runtime.claim_lifetime(&lifetime_key, lifetime_generation(2)),
+        Err(XllError::InvalidHandle)
+    ));
+    assert!(matches!(
+        runtime.connect(lifetime_generation(2), 7, &lifetime_key),
+        Err(XllError::InvalidHandle)
+    ));
+
+    let provisional = runtime
+        .connect_transaction(lifetime_generation(1), 7, &lifetime_key)
+        .unwrap();
+    drop(provisional);
+    assert!(matches!(
+        runtime.connect(lifetime_generation(2), 7, &lifetime_key),
+        Err(XllError::InvalidHandle)
+    ));
+
+    runtime
+        .connect(lifetime_generation(1), 8, &lifetime_key)
+        .unwrap();
+    runtime.disconnect(lifetime_generation(1), 8);
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn uncalculated_rtd_connection_rolls_back_an_already_connected_topic() {
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("uncalculated");
+    let lifetime_key = key.format_lifetime_key();
+    runtime.prepare(key, || Ok(DataRecord(1))).unwrap();
+    runtime
+        .connect(lifetime_generation(1), 9, &lifetime_key)
+        .unwrap();
+    runtime.rollback(&lifetime_key);
+    assert_eq!(runtime.len(), 0);
+    runtime.disconnect(lifetime_generation(1), 9);
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn uncommitted_connect_transaction_rolls_back_only_the_excel_connection() {
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let key = test_topic_key("transactional");
+    let lifetime_key = key.format_lifetime_key();
+    let token = runtime
+        .prepare(key, || Ok(DataRecord(1)))
+        .unwrap()
+        .into_token();
+
+    let connection = runtime
+        .connect_transaction(lifetime_generation(1), 10, &lifetime_key)
+        .unwrap();
+    assert_eq!(connection.token(), token);
+    drop(connection);
+
+    assert_eq!(runtime.len(), 1);
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
+        1
+    );
+
+    let retry = runtime
+        .connect_transaction(lifetime_generation(1), 10, &lifetime_key)
+        .unwrap();
+    assert_eq!(retry.token(), token);
+    retry.commit().unwrap();
+    runtime.disconnect(lifetime_generation(1), 10);
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn concurrent_handle_connect_rejects_an_uncommitted_assignment() {
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let key = test_topic_key("concurrent-transaction");
+    let lifetime_key = key.format_lifetime_key();
+    runtime.prepare(key, || Ok(DataRecord(3))).unwrap();
+
+    let connection = runtime
+        .connect_transaction(lifetime_generation(1), 12, &lifetime_key)
+        .unwrap();
+    assert!(matches!(
+        runtime.connect_transaction(lifetime_generation(1), 12, &lifetime_key),
+        Err(XllError::Overloaded)
+    ));
+    connection.commit().unwrap();
+
+    let repeated = runtime
+        .connect_transaction(lifetime_generation(1), 12, &lifetime_key)
+        .unwrap();
+    repeated.commit().unwrap();
+    runtime.disconnect(lifetime_generation(1), 12);
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn failed_repeated_connect_transaction_preserves_existing_connection() {
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let key = test_topic_key("existing-transaction");
+    let lifetime_key = key.format_lifetime_key();
+    let token = runtime
+        .prepare(key, || Ok(DataRecord(2)))
+        .unwrap()
+        .into_token();
+    runtime
+        .connect(lifetime_generation(1), 11, &lifetime_key)
+        .unwrap();
+
+    let connection = runtime
+        .connect_transaction(lifetime_generation(1), 11, &lifetime_key)
+        .unwrap();
+    assert_eq!(connection.token(), token);
+    drop(connection);
+
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
+        2
+    );
+    runtime.disconnect(lifetime_generation(1), 11);
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn excel_topic_id_cannot_be_connected_to_two_formula_topics() {
+    let runtime = FormulaHandleService::new(8);
+    let first_key = test_topic_key("first");
+    let first_lifetime_key = first_key.format_lifetime_key();
+    let second_key = test_topic_key("second");
+    let second_lifetime_key = second_key.format_lifetime_key();
+    runtime.prepare(first_key, || Ok(DataRecord(1))).unwrap();
+    runtime.prepare(second_key, || Ok(DataRecord(2))).unwrap();
+    runtime
+        .connect(lifetime_generation(1), 9, &first_lifetime_key)
+        .unwrap();
+    assert!(matches!(
+        runtime.connect(lifetime_generation(1), 9, &second_lifetime_key),
+        Err(XllError::InvalidHandle)
+    ));
+    runtime.disconnect(lifetime_generation(1), 9);
+    assert_eq!(runtime.len(), 1);
+}
+
+#[test]
+fn handle_lease_keeps_payload_alive_after_binding_retirement() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("handle-lease-retirement");
+    let token = runtime
+        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
+        .unwrap()
+        .into_token();
+
+    let pinned = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        runtime
+            .lookup::<CountedDataRecord>(scope, &token)
+            .unwrap()
+            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+            .unwrap()
+    });
+    runtime
+        .store
+        .registry
+        .remove_and_drop(&token, "test remove while pinned");
+
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    assert_eq!(pinned.value_for_test().0.load(Ordering::SeqCst), 0);
+    drop(pinned);
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(all(feature = "async-builtin", feature = "handles"))]
+#[test]
+fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
+    use crate::async_udf::HandleScopedTaskBuilder;
+    use crate::cancellation::{CancellationGuarantee, CancellationSource};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    struct PendingTask {
+        pending: crate::handle::PendingHandleLease<CountedDataRecord>,
+        started: mpsc::Sender<()>,
+    }
+
+    impl HandleScopedTaskBuilder for PendingTask {
+        type Output = ();
+        type Delivery = ();
+
+        fn build_task<'generation>(
+            self,
+            scope: crate::async_udf::AsyncTaskScope<'generation>,
+        ) -> (impl Future<Output = ()> + Send + 'generation, ()) {
+            let lease = self
+                .pending
+                .bind(scope)
+                .expect("matching fixture generation");
+            (
+                async move {
+                    self.started.send(()).unwrap();
+                    let _lease = lease;
+                    std::future::pending::<()>().await;
+                },
+                (),
+            )
+        }
+
+        fn deliver<'generation>(
+            _: (),
+            future: impl Future<Output = ()> + Send + 'generation,
+        ) -> impl Future<Output = ()> + Send + 'generation {
+            future
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let handles = FormulaHandleService::new(8);
+    let token = handles
+        .prepare(test_topic_key("scoped-task-drain"), || {
+            Ok(CountedDataRecord(Arc::clone(&drops)))
+        })
+        .unwrap()
+        .into_token();
+    let pending = with_decode_scope_and_state(&handles, |handles, scope| {
+        handles
+            .lookup::<CountedDataRecord>(scope, &token)
+            .unwrap()
+            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+            .unwrap()
+    });
+    handles
+        .store
+        .registry
+        .remove_and_drop(&token, "test remove before scoped task");
+    assert_eq!(drops.load(Ordering::Acquire), 0);
+
+    let runtime = crate::async_udf::AsyncRuntime::new();
+    runtime
+        .start(
+            crate::BuiltinAsyncExecutor::new(crate::BuiltinExecutorConfig::new()),
+            crate::AsyncTaskLimit::DEFAULT,
+        )
+        .unwrap();
+    let calculation = runtime.current_epoch();
+    let reservation = runtime.reserve(calculation).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    reservation.commit_handle_scoped(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        PendingTask {
+            pending,
+            started: started_tx,
+        },
+        CancellationSource::new(CancellationGuarantee::BestEffort).0,
+    );
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("scoped handle task should start");
+
+    runtime.cancel_calculation(calculation);
+    assert!(runtime.close().unwrap().issues.is_empty());
+    handles
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+
+    let sealed = handles.seal().unwrap();
+    sealed.finish_quiescence().unwrap();
+}
+
+#[test]
+fn handle_lease_survives_terminal_runtime_close() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("handle-lease-close");
+    let token = runtime
+        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
+        .unwrap()
+        .into_token();
+
+    let pinned = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        runtime
+            .lookup::<CountedDataRecord>(scope, &token)
+            .unwrap()
+            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+            .unwrap()
+    });
+    let sealed = runtime.seal().unwrap();
+
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    assert_eq!(pinned.value_for_test().0.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        sealed.finish_quiescence(),
+        Err(XllError::Internal { diagnostic_id })
+            if diagnostic_id == crate::diagnostics::id::DiagnosticId::HANDLE_PINS
+    ));
+    drop(pinned);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    sealed.finish_quiescence().unwrap();
+}
+
+#[test]
+fn binding_snapshot_blocks_object_quiescence_until_call_ends() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let key = test_topic_key("snapshot-quiescence");
+    let token = runtime
+        .prepare(key, || Ok(DataRecord(42)))
+        .unwrap()
+        .into_token();
+
+    let (seal_handle, finished_rx) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle = runtime.lookup::<DataRecord>(scope, &token).unwrap();
+        assert_eq!(handle.0, 42);
+
+        let rt_clone = Arc::clone(runtime);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let seal_handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let sealed = rt_clone.seal().map(|sealed| sealed.finish_quiescence());
+            finished_tx.send(sealed).unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        // While handle is live in call scope, seal is waiting for readers to drain.
+        assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        (seal_handle, finished_rx)
+    });
+
+    finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    seal_handle.join().unwrap();
+}
+
+#[test]
+fn pin_promotion_keeps_a_snapshot_owned_payload_without_a_binding() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("handle-lease-after-binding-removal");
+    let token = runtime
+        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
+        .unwrap()
+        .into_token();
+
+    let pinned = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle = runtime.lookup::<CountedDataRecord>(scope, &token).unwrap();
+        runtime
+            .store
+            .registry
+            .remove_and_drop(&token, "test remove before lease promotion");
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        handle
+            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+            .unwrap()
+    });
+
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    assert_eq!(pinned.value_for_test().0.load(Ordering::SeqCst), 0);
+    drop(pinned);
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+struct CountedDataRecord(Arc<std::sync::atomic::AtomicUsize>);
+
+impl ExcelHandleObject for CountedDataRecord {}
+
+impl Drop for CountedDataRecord {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn different_formula_keys_create_distinct_handles() {
+    let runtime = FormulaHandleService::new(8);
+    let first_key = test_topic_key("sheet:A1:rate=1");
+    let second_key = test_topic_key("sheet:A2:rate=1");
+    let changed_key = test_topic_key("sheet:A1:rate=2");
+    let first = runtime
+        .prepare(first_key, || Ok(DataRecord(1)))
+        .unwrap()
+        .into_token();
+    let second = runtime
+        .prepare(second_key, || Ok(DataRecord(1)))
+        .unwrap()
+        .into_token();
+    let changed = runtime
+        .prepare(changed_key, || Ok(DataRecord(2)))
+        .unwrap()
+        .into_token();
+    assert_ne!(first, second);
+    assert_ne!(first, changed);
+}
+
+#[test]
+fn disconnect_waits_for_an_in_flight_consumer_and_drops_once() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let key = test_topic_key("sheet:A1");
+    let lifetime_key = key.format_lifetime_key();
+    let token = runtime
+        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
+        .unwrap()
+        .into_token();
+    runtime
+        .connect(lifetime_generation(1), 7, &lifetime_key)
+        .unwrap();
+
+    let (disconnect_handle, _finished_rx) =
+        with_decode_scope_and_state(&runtime, |runtime, scope| {
+            let consumer: Handle<'_, CountedDataRecord> = runtime.lookup(scope, &token).unwrap();
+            assert_eq!(consumer.0.load(Ordering::Relaxed), 0);
+
+            let rt_clone = Arc::clone(runtime);
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let disconnect_handle = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                rt_clone.disconnect(lifetime_generation(1), 7);
+                finished_tx.send(()).unwrap();
+            });
+            started_rx.recv().unwrap();
+
+            finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+            assert_eq!(drops.load(Ordering::Relaxed), 0);
+            (disconnect_handle, finished_rx)
+        });
+
+    disconnect_handle.join().unwrap();
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    runtime.disconnect(lifetime_generation(1), 7);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn terminate_and_close_release_every_remaining_topic_once() {
+    let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = FormulaHandleService::new(8);
+    for label in ["one", "two"] {
+        let key = test_topic_key(label);
+        let lifetime_key = key.format_lifetime_key();
+        runtime
+            .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
+            .unwrap();
+        runtime
+            .claim_lifetime(&lifetime_key, lifetime_generation(1))
+            .unwrap();
+    }
+    runtime.terminate_topics(lifetime_generation(1));
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+    runtime.seal().map(|_| ()).unwrap();
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn panicking_factory_does_not_publish_a_topic() {
+    let runtime = FormulaHandleService::new(8);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = runtime
+            .prepare::<DataRecord, _>(test_topic_key("panic"), || panic!("injected factory panic"));
+    }));
+    assert!(panic.is_err());
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn same_thread_factory_reentry_returns_an_error_without_waiting() {
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("factory-reentry");
+    let preparation = runtime
+        .prepare(key, || {
+            let nested = runtime.prepare(key, || Ok(DataRecord(2)));
+            assert!(matches!(nested, Err(XllError::ReentrantCall)));
+            Ok(DataRecord(1))
+        })
+        .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
+    assert!(created);
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
+        1
+    );
+}
+
+#[test]
+fn different_key_factory_reentry_is_allowed() {
+    let runtime = FormulaHandleService::new(8);
+    let outer_key = test_topic_key("outer-factory");
+    let inner_key = test_topic_key("inner-factory");
+    let preparation = runtime
+        .prepare(outer_key, || {
+            let nested = runtime.prepare(inner_key, || Ok(DataRecord(2)));
+            assert!(nested.is_ok());
+            Ok(DataRecord(1))
+        })
+        .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
+    assert!(created);
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
+        1
+    );
+    assert_eq!(runtime.len(), 2);
+}
+
+#[test]
+fn same_thread_observer_reentry_returns_an_error_without_waiting() {
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("observer-reentry");
+    let preparation = runtime
+        .prepare_observed(
+            key,
+            || Ok(DataRecord(1)),
+            |_, _| {
+                let nested = runtime.prepare(key, || Ok(DataRecord(2)));
+                assert!(matches!(nested, Err(XllError::ReentrantCall)));
+                Ok(())
+            },
+        )
+        .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
+    assert!(created);
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
+        1
+    );
+}
+
+#[test]
+fn different_key_observer_reentry_is_allowed() {
+    let runtime = FormulaHandleService::new(8);
+    let outer_key = test_topic_key("outer-observer");
+    let inner_key = test_topic_key("inner-observer");
+    let preparation = runtime
+        .prepare_observed(
+            outer_key,
+            || Ok(DataRecord(1)),
+            |_, _| {
+                let nested = runtime.prepare(inner_key, || Ok(DataRecord(2)));
+                assert!(nested.is_ok());
+                Ok(())
+            },
+        )
+        .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
+    assert!(created);
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
+        1
+    );
+    assert_eq!(runtime.len(), 2);
+}
+
+#[test]
+fn nested_initialization_rejects_only_a_cycle() {
+    let runtime = FormulaHandleService::new(8);
+    let outer_key = test_topic_key("cycle-outer");
+    let inner_key = test_topic_key("cycle-inner");
+
+    let preparation = runtime
+        .prepare(outer_key, || {
+            let nested = runtime.prepare(inner_key, || {
+                let cycle = runtime.prepare(outer_key, || Ok(DataRecord(3)));
+                assert!(matches!(cycle, Err(XllError::ReentrantCall)));
+                Ok(DataRecord(2))
+            });
+            assert!(nested.is_ok());
+            Ok(DataRecord(1))
+        })
+        .unwrap();
+
+    assert!(preparation.is_published());
+    assert_eq!(runtime.len(), 2);
+}
+
+#[test]
+fn failed_observation_does_not_publish_a_topic_and_allows_retry() {
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("observed");
+    let first = runtime.prepare_observed(
+        key,
+        || Ok(DataRecord(1)),
+        |_, _| {
+            Err(XllError::ExcelApi {
+                function: crate::error::ExcelApiFunction::Rtd,
+                failure: crate::error::ExcelApiFailure::Status(
+                    crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+                ),
+            })
+        },
+    );
+    assert!(matches!(first, Err(XllError::ExcelApi { .. })));
+    assert_eq!(runtime.len(), 0);
+
+    let preparation = runtime
+        .prepare_observed(key, || Ok(DataRecord(2)), |_, _| Ok(()))
+        .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
+    assert!(created);
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
+        2
+    );
+}
+
+#[test]
+fn cache_hit_observe_failure_does_not_invalidate_object() {
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("observed-memoized");
+    let preparation = runtime
+        .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
+        .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
+    assert!(created);
+
+    let calls = AtomicUsize::new(0);
+    let result = runtime.prepare_observed(
+        key,
+        || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(DataRecord(2))
+        },
+        |_, _| {
+            Err(XllError::ExcelApi {
+                function: crate::error::ExcelApiFunction::Rtd,
+                failure: crate::error::ExcelApiFailure::Status(
+                    crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+                ),
+            })
+        },
+    );
+    assert!(matches!(result, Err(XllError::ExcelApi { .. })));
+
+    // factory was never invoked because cache hit skips it
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+    // original object is preserved
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
+        1
+    );
+    assert_eq!(runtime.len(), 1);
+}
+
+#[test]
+fn cache_hit_observe_failure_preserves_existing_topic() {
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("observe-retry");
+    let preparation = runtime
+        .prepare_observed(key, || Ok(DataRecord(10)), |_, _| Ok(()))
+        .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
+    assert!(created);
+
+    // Observation failure on warm hit
+    let result = runtime.prepare_observed(
+        key,
+        || Ok(DataRecord(20)),
+        |_, _| {
+            Err(XllError::ExcelApi {
+                function: crate::error::ExcelApiFunction::Rtd,
+                failure: crate::error::ExcelApiFailure::Status(
+                    crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+                ),
+            })
+        },
+    );
+    assert!(matches!(result, Err(XllError::ExcelApi { .. })));
+
+    // Retry with successful observation still reuses the same object
+    let retry_preparation = runtime
+        .prepare_observed(key, || Ok(DataRecord(30)), |_, _| Ok(()))
+        .unwrap();
+    let created = retry_preparation.is_published();
+    let retry_token = retry_preparation.into_token();
+    assert!(!created);
+    assert_eq!(retry_token, token);
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
+        10
+    );
+}
+
+#[test]
+fn observation_cannot_commit_a_topic_removed_reentrantly() {
+    let runtime = FormulaHandleService::new(8);
+    let result = runtime.prepare_observed(
+        test_topic_key("removed-during-observation"),
+        || Ok(DataRecord(1)),
+        |key, _| {
+            runtime.rollback(key);
+            Ok(())
+        },
+    );
+    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn published_warm_observation_rejects_topic_removed_reentrantly() {
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("published-removed-during-observation");
+    let preparation = runtime
+        .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
+        .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
+    assert!(created);
+
+    let result = runtime.prepare_observed::<DataRecord, _>(
+        key,
+        || -> XllResult<DataRecord> { panic!("warm factory must not run") },
+        |lifetime_key, observed_token| {
+            assert_eq!(observed_token, token);
+            runtime.rollback(lifetime_key);
+            Ok(())
+        },
+    );
+
+    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn warm_observation_rejects_generation_terminated_topic() {
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let key = test_topic_key("warm-generation-terminated");
+    let lifetime_key = key.format_lifetime_key();
+    let preparation = runtime
+        .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
+        .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
+    assert!(created);
+
+    runtime
+        .claim_lifetime(&lifetime_key, lifetime_generation(1))
+        .unwrap();
+
+    let observed_runtime = Arc::clone(&runtime);
+    let result = runtime.prepare_observed::<DataRecord, _>(
+        key,
+        || -> XllResult<DataRecord> { panic!("warm factory must not run") },
+        move |observed_lifetime_key, observed_token| {
+            assert_eq!(observed_lifetime_key, lifetime_key);
+            assert_eq!(observed_token, token);
+            observed_runtime.terminate_topics(lifetime_generation(1));
+            Ok(())
+        },
+    );
+
+    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn warm_observation_does_not_follow_recreated_same_key() {
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let key = test_topic_key("warm-same-key-aba");
+    let lifetime_key = key.format_lifetime_key();
+    let old_preparation = runtime
+        .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
+        .unwrap();
+    let created = old_preparation.is_published();
+    let old_token = old_preparation.into_token();
+    assert!(created);
+
+    let (observation_started_tx, observation_started_rx) = std::sync::mpsc::sync_channel(0);
+    let (replacement_ready_tx, replacement_ready_rx) = std::sync::mpsc::sync_channel(0);
+    let replacement_runtime = Arc::clone(&runtime);
+    let replacement_lifetime_key = lifetime_key.clone();
+    let replacement_old_token = old_token.clone();
+    let replacement = std::thread::spawn(move || {
+        observation_started_rx.recv().unwrap();
+        replacement_runtime.rollback(&replacement_lifetime_key);
+        let new_preparation = replacement_runtime
+            .prepare(key, || Ok(DataRecord(2)))
+            .unwrap();
+        let created = new_preparation.is_published();
+        let new_token = new_preparation.into_token();
+        assert!(created);
+        assert_ne!(new_token, replacement_old_token);
+        replacement_ready_tx.send(new_token).unwrap();
+    });
+
+    let observed_runtime = Arc::clone(&runtime);
+    let result = runtime.prepare_observed::<DataRecord, _>(
+        key,
+        || -> XllResult<DataRecord> { panic!("warm factory must not run") },
+        move |observed_lifetime_key, observed_token| {
+            assert_eq!(observed_lifetime_key, lifetime_key);
+            assert_eq!(observed_token, old_token);
+            observation_started_tx.send(()).unwrap();
+            let replacement_token = replacement_ready_rx.recv().unwrap();
+            assert_ne!(replacement_token, observed_token);
+            assert!(
+                with_handle::<DataRecord, _>(&observed_runtime, &replacement_token, |_| (),)
+                    .is_ok()
+            );
+            Ok(())
+        },
+    );
+
+    replacement.join().unwrap();
+    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert_eq!(runtime.len(), 1);
+}
+
+#[test]
+fn disconnect_can_remove_pending_formula_root_during_excel_connection() {
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let observed_runtime = Arc::clone(&runtime);
+    let key = test_topic_key("disconnect-during-excel-connection");
+
+    let result = runtime.prepare_observed(
+        key,
+        || Ok(DataRecord(1)),
+        move |lifetime_key, token| {
+            let connection = observed_runtime
+                .connect_transaction(lifetime_generation(1), 17, lifetime_key)
+                .expect("ConnectData must be able to claim the visible topic");
+            assert_eq!(connection.token(), token);
+
+            // DisconnectData may enter while ConnectData still owns an
+            // uncommitted connection transaction. The server operation gate
+            // permits the two COM operations to overlap.
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+            let disconnect_runtime = Arc::clone(&observed_runtime);
+            let disconnect = std::thread::spawn(move || {
+                release_rx.recv().unwrap();
+                disconnect_runtime.disconnect(lifetime_generation(1), 17);
+            });
+            release_tx.send(()).unwrap();
+            disconnect.join().unwrap();
+
+            // DisconnectData removes the visible topic and registry root
+            // without inspecting the connection commit bit.
+            assert!(matches!(
+                with_handle::<DataRecord, _>(&observed_runtime, token, |_| ()),
+                Err(XllError::StaleHandle)
+            ));
+
+            // The connection guard observes that the topic was already
+            // detached and therefore has no rollback work left to perform.
+            drop(connection);
+            Ok(())
+        },
+    );
+
+    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn disconnect_rejects_provisional_excel_commit_after_topic_detach() {
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let observed_runtime = Arc::clone(&runtime);
+    let key = test_topic_key("disconnect-before-excel-commit");
+
+    let result = runtime.prepare_observed(
+        key,
+        || Ok(DataRecord(1)),
+        move |lifetime_key, token| {
+            let connection = observed_runtime
+                .connect_transaction(lifetime_generation(1), 17, lifetime_key)
+                .expect("ConnectData must be able to claim the visible topic");
+            assert_eq!(connection.token(), token);
+
+            // DisconnectData may detach the topic before ConnectData commits
+            // its provisional Excel connection.
+            observed_runtime.disconnect(lifetime_generation(1), 17);
+
+            // The commit must fail at the detached ownership boundary. Its
+            // drop path must not recreate the topic or registry root.
+            assert!(matches!(connection.commit(), Err(XllError::StaleHandle)));
+            assert!(matches!(
+                with_handle::<DataRecord, _>(&observed_runtime, token, |_| ()),
+                Err(XllError::StaleHandle)
+            ));
+            Ok(())
+        },
+    );
+
+    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn concurrent_waiter_retries_after_observation_failure() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let (observing_tx, observing_rx) = mpsc::channel();
+    let (finish_tx, finish_rx) = mpsc::channel();
+    let first_runtime = Arc::clone(&runtime);
+    let key = test_topic_key("concurrent-observe");
+    let first = std::thread::spawn(move || {
+        first_runtime.prepare_observed(
+            key,
+            || Ok(DataRecord(1)),
+            |_, _| {
+                observing_tx.send(()).unwrap();
+                finish_rx.recv().unwrap();
+                Err(XllError::ExcelApi {
+                    function: crate::error::ExcelApiFunction::Rtd,
+                    failure: crate::error::ExcelApiFailure::Status(
+                        crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
+                    ),
+                })
+            },
+        )
+    });
+    observing_rx.recv().unwrap();
+
+    let (waiting_tx, waiting_rx) = mpsc::channel();
+    let second_runtime = Arc::clone(&runtime);
+    let second = std::thread::spawn(move || {
+        waiting_tx.send(()).unwrap();
+        second_runtime.prepare_observed(key, || Ok(DataRecord(2)), |_, _| Ok(()))
+    });
+    waiting_rx.recv().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let waiter_is_blocked = {
+            let topics = runtime.topics.read();
+            topics
+                .initializing
+                .get(&test_topic_key("concurrent-observe"))
+                .is_some_and(|initialization| initialization.waiter_count() >= 1)
+        };
+        if waiter_is_blocked {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "second prepare did not wait for observation"
+        );
+        std::thread::yield_now();
+    }
+
+    finish_tx.send(()).unwrap();
+    assert!(matches!(
+        first.join().unwrap(),
+        Err(XllError::ExcelApi { .. })
+    ));
+    let second_preparation = second.join().unwrap().unwrap();
+    let created = second_preparation.is_published();
+    let token = second_preparation.into_token();
+    assert!(created);
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
+        2
+    );
+}
+
+#[test]
+fn concurrent_prepare_with_same_key_runs_factory_once() {
+    use std::sync::Barrier;
+    use std::sync::mpsc;
+
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let factory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let (in_factory_tx, in_factory_rx) = mpsc::channel();
+    let barrier = Arc::new(Barrier::new(2));
+    let key = test_topic_key("concurrent_key");
+
+    let runtime1 = Arc::clone(&runtime);
+    let factory_calls1 = Arc::clone(&factory_calls);
+    let barrier1 = Arc::clone(&barrier);
+
+    let t1 = std::thread::spawn(move || {
+        runtime1
+            .prepare(key, || {
+                factory_calls1.fetch_add(1, Ordering::SeqCst);
+                in_factory_tx.send(()).unwrap();
+                barrier1.wait();
+                Ok(DataRecord(100))
+            })
+            .unwrap()
+    });
+
+    in_factory_rx.recv().unwrap();
+
+    let runtime2 = Arc::clone(&runtime);
+    let factory_calls2 = Arc::clone(&factory_calls);
+    let t2 = std::thread::spawn(move || {
+        runtime2
+            .prepare(key, || {
+                factory_calls2.fetch_add(1, Ordering::SeqCst);
+                Ok(DataRecord(200))
+            })
+            .unwrap()
+    });
+
+    barrier.wait();
+
+    let res1 = t1.join().unwrap();
+    let res2 = t2.join().unwrap();
+
+    // Under memoization, thread 1 creates the topic. Thread 2 waits for
+    // thread 1 to finish, then finds the existing topic and reuses it.
+    // The factory is invoked exactly once.
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+    let res1_token = res1.into_token();
+    let res2_reused = !res2.is_published();
+    let res2_token = res2.into_token();
+    assert_eq!(res1_token, res2_token);
+    assert!(res2_reused);
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &res1_token, |value| value.0).unwrap(),
+        100
+    );
+    assert_eq!(runtime.len(), 1);
+}
+
+#[test]
+fn handle_dependency_chain_propagates_identity_change() {
+    let (slot, runtime) = armed_handle_slot();
+
+    // Upstream: different semantic input fingerprint → different revision key
+    // → different token.
+    let upstream_a_key = test_topic_key("sheet:A1:CURVE.CREATE:digest_a");
+    let upstream_a_preparation = runtime
+        .prepare(upstream_a_key, || Ok(DataRecord(10)))
+        .unwrap();
+    let created = upstream_a_preparation.is_published();
+    let upstream_a = upstream_a_preparation.into_token();
+    assert!(created);
+
+    // Downstream uses the converted upstream Handle as part of its key,
+    // simulating MODEL.CREATE(Handle<'_, Curve>, params). The ObjectId is the
+    // semantic identity, so a different upstream object yields a different
+    // downstream revision key even when the source values are equal.
+    let downstream_key_a = semantic_handle_key::<DataRecord>(slot, &upstream_a);
+    let downstream_a_preparation = runtime
+        .prepare(downstream_key_a, || Ok(DataRecord(100)))
+        .unwrap();
+    let created = downstream_a_preparation.is_published();
+    let downstream_a = downstream_a_preparation.into_token();
+    assert!(created);
+
+    // Upstream changes (different arguments → different key)
+    let upstream_b_key = test_topic_key("sheet:A1:CURVE.CREATE:digest_b");
+    let upstream_b_preparation = runtime
+        .prepare(upstream_b_key, || Ok(DataRecord(20)))
+        .unwrap();
+    let created = upstream_b_preparation.is_published();
+    let upstream_b = upstream_b_preparation.into_token();
+    assert!(created);
+    assert_ne!(upstream_a, upstream_b);
+
+    // Downstream key also changes because the upstream ObjectId changed.
+    let downstream_key_b = semantic_handle_key::<DataRecord>(slot, &upstream_b);
+    let downstream_b_preparation = runtime
+        .prepare(downstream_key_b, || Ok(DataRecord(200)))
+        .unwrap();
+    let created = downstream_b_preparation.is_published();
+    let downstream_b = downstream_b_preparation.into_token();
+    assert!(created);
+    assert_ne!(downstream_a, downstream_b);
+
+    // Both downstream objects are distinct
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &downstream_a, |value| value.0).unwrap(),
+        100
+    );
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &downstream_b, |value| value.0).unwrap(),
+        200
+    );
+}
+
+#[test]
+fn close_wakes_waiter_and_prevents_creator_from_publishing() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let key = test_topic_key("closing");
+    let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (factory_started_tx, factory_started_rx) = mpsc::channel();
+    let (release_factory_tx, release_factory_rx) = mpsc::channel();
+
+    let creator_runtime = Arc::clone(&runtime);
+    let creator_observed = Arc::clone(&observed);
+    let creator = std::thread::spawn(move || {
+        creator_runtime.prepare_observed(
+            key,
+            || {
+                factory_started_tx.send(()).unwrap();
+                release_factory_rx.recv().unwrap();
+                Ok(DataRecord(1))
+            },
+            |_, _| {
+                creator_observed.store(true, Ordering::Release);
+                Ok(())
+            },
+        )
+    });
+    factory_started_rx.recv().unwrap();
+
+    let waiter_runtime = Arc::clone(&runtime);
+    let (waiter_done_tx, waiter_done_rx) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let result = waiter_runtime.prepare(key, || Ok(DataRecord(2)));
+        waiter_done_tx.send(result).unwrap();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let blocked = runtime
+            .topics
+            .read()
+            .initializing
+            .get(&key)
+            .is_some_and(|initialization| initialization.waiter_count() >= 1);
+        if blocked {
+            break;
+        }
+        assert!(Instant::now() < deadline, "waiter did not block");
+        std::thread::yield_now();
+    }
+
+    let close_runtime = Arc::clone(&runtime);
+    let closer = std::thread::spawn(move || close_runtime.seal().map(|_| ()));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !runtime.topics.read().closed {
+        assert!(
+            Instant::now() < deadline,
+            "close did not mark runtime closed"
+        );
+        std::thread::yield_now();
+    }
+    assert!(matches!(
+        waiter_done_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        Err(XllError::Closing)
+    ));
+    release_factory_tx.send(()).unwrap();
+    assert!(matches!(creator.join().unwrap(), Err(XllError::Closing)));
+    closer.join().unwrap().unwrap();
+    waiter.join().unwrap();
+    assert!(!observed.load(Ordering::Acquire));
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
+fn warm_hit_does_not_enter_single_flight_initialization() {
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("warm-fast");
+
+    let preparation = runtime
+        .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
+        .unwrap();
+    let created = preparation.is_published();
+    let token = preparation.into_token();
+
+    assert!(created);
+
+    let calls = AtomicUsize::new(0);
+
+    let second_preparation = runtime
+        .prepare_observed(
+            key,
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(DataRecord(2))
+            },
+            |key, _| {
+                let topics = runtime.topics.read();
+                let identity = topics
+                    .by_lifetime_key
+                    .get(key)
+                    .copied()
+                    .expect("warm observation must use a published RTD key");
+
+                assert!(
+                    !topics.initializing.contains_key(&identity),
+                    "warm hit must bypass per-key single-flight state",
+                );
+
+                Ok(())
+            },
+        )
+        .unwrap();
+    let created = second_preparation.is_published();
+    let second = second_preparation.into_token();
+
+    assert!(!created);
+    assert_eq!(token, second);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn close_waits_for_in_flight_warm_observation_before_closing_registry() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let runtime = Arc::new(FormulaHandleService::new(8));
+    let key = test_topic_key("warm-close");
+
+    runtime
+        .prepare_observed(key, || Ok(DataRecord(1)), |_, _| Ok(()))
+        .unwrap();
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+
+    let warm_runtime = Arc::clone(&runtime);
+    let warm = std::thread::spawn(move || {
+        warm_runtime.prepare_observed::<DataRecord, _>(
+            key,
+            || panic!("warm factory must not run"),
+            |_, _| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            },
+        )
+    });
+
+    entered_rx.recv().unwrap();
+
+    let closing_runtime = Arc::clone(&runtime);
+    let (closed_tx, closed_rx) = mpsc::channel();
+
+    let closer = std::thread::spawn(move || {
+        closed_tx.send(closing_runtime.seal().map(|_| ())).unwrap();
+    });
+
+    while !runtime.topics.read().closed {
+        std::thread::yield_now();
+    }
+
+    //
+    // close has started, but registry must remain alive while observe executes.
+    //
+    assert_eq!(runtime.store.registry.phase(), HandleRegistryPhase::Closing);
+
+    assert!(closed_rx.recv_timeout(Duration::from_millis(20)).is_err());
+
+    release_tx.send(()).unwrap();
+
+    assert!(matches!(warm.join().unwrap(), Err(XllError::Closing)));
+
+    closed_rx
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+
+    closer.join().unwrap();
+
+    assert_eq!(runtime.store.registry.phase(), HandleRegistryPhase::Closed);
+}
+
+#[test]
+fn handle_type_mismatch_returns_invalid_handle() {
+    #[derive(Debug, PartialEq, Clone)]
+    struct TypeA(u32);
+    impl ExcelHandleObject for TypeA {}
+
+    #[derive(Debug, PartialEq, Clone)]
+    struct TypeB(u32);
+    impl ExcelHandleObject for TypeB {}
+
+    let runtime = FormulaHandleService::new(16);
+    let key = test_topic_key("type_mismatch");
+    let token = runtime
+        .prepare_observed(key, || Ok(TypeA(42)), |_, _| Ok(()))
+        .unwrap()
+        .into_token();
+
+    // Looking up TypeA as TypeB must fail with InvalidHandle
+    with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let result = runtime.lookup::<TypeB>(scope, &token);
+        assert!(matches!(result, Err(XllError::InvalidHandle)));
+    });
+
+    // Looking up TypeA as TypeA must succeed
+    with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle = runtime.lookup::<TypeA>(scope, &token).unwrap();
+        assert_eq!(*handle, TypeA(42));
+    });
+}
+
+#[test]
+fn alias_preserves_pointer_and_object_identity() {
+    #[derive(Debug, PartialEq)]
+    struct TrackedObj(u64);
+    impl ExcelHandleObject for TrackedObj {}
+
+    let runtime = FormulaHandleService::new(16);
+    let key1 = test_topic_key("alias_identity_1");
+    let token1 = runtime
+        .prepare_observed(key1, || Ok(TrackedObj(12345)), |_, _| Ok(()))
+        .unwrap()
+        .into_token();
+
+    let (token2, object_id1, ptr1) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle1 = runtime.lookup::<TrackedObj>(scope, &token1).unwrap();
+        let object_id = handle1.object_id();
+        let ptr = handle1.projection_addr();
+        let alias = handle1.alias();
+        let key2 = test_topic_key("alias_identity_2");
+        let token2 = runtime
+            .prepare_observed_alias::<TrackedObj, _>(key2, alias, |_, _| Ok(()))
+            .unwrap()
+            .into_token();
+        (token2, object_id, ptr)
+    });
+
+    assert_ne!(token1, token2);
+
+    with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle2 = runtime.lookup::<TrackedObj>(scope, &token2).unwrap();
+        assert_eq!(handle2.object_id(), object_id1);
+        assert_eq!(handle2.projection_addr(), ptr1);
+        assert_eq!(*handle2, TrackedObj(12345));
+    });
+}
+
+#[test]
+fn call_borrow_keeps_value_alive_across_binding_retirement() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    struct DropCounter {
+        val: u32,
+        drops: Arc<AtomicUsize>,
+    }
+    impl ExcelHandleObject for DropCounter {}
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let runtime = Arc::new(FormulaHandleService::new(16));
+    let key = test_topic_key("call_borrow_alive");
+    let token = runtime
+        .prepare_observed(
+            key,
+            || {
+                Ok(DropCounter {
+                    val: 777,
+                    drops: Arc::clone(&drops),
+                })
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap()
+        .into_token();
+
+    let (removal_handle, _finished_rx) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle = runtime.lookup::<DropCounter>(scope, &token).unwrap();
+        assert_eq!(handle.val, 777);
+
+        let rt_clone = Arc::clone(runtime);
+        let token_clone = token.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let removal_handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            rt_clone
+                .store
+                .registry
+                .remove_and_drop(&token_clone, "test remove");
+            finished_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        // Withdrawal completes while the scope retains the payload.
+        finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(handle.val, 777);
+        (removal_handle, finished_rx)
+    });
+
+    removal_handle.join().unwrap();
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn registry_close_drops_each_handle_exactly_once() {
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    struct TrackedItem {
+        drops: Arc<AtomicUsize>,
+    }
+    impl ExcelHandleObject for TrackedItem {}
+    impl Drop for TrackedItem {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let runtime = FormulaHandleService::new(16);
+    for i in 0..5 {
+        let key = test_topic_key(&format!("close_drop_{i}"));
+        let d = Arc::clone(&drops);
+        let _ = runtime
+            .prepare_observed(key, || Ok(TrackedItem { drops: d }), |_, _| Ok(()))
+            .unwrap();
+    }
+
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    runtime.seal().map(|_| ()).unwrap();
+    assert_eq!(drops.load(Ordering::SeqCst), 5);
+}
+
+#[test]
+fn drop_panic_is_recorded_in_handle_cleanup_state() {
+    struct PanickingDrop(Arc<AtomicUsize>);
+    impl ExcelHandleObject for PanickingDrop {}
+    impl Drop for PanickingDrop {
+        fn drop(&mut self) {
+            std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+                &self.0,
+            )));
+        }
+    }
+
+    let runtime = FormulaHandleService::new(16);
+    let payload_drops = Arc::new(AtomicUsize::new(0));
+    let key = test_topic_key("drop_panic_test");
+    let token = runtime
+        .prepare_observed(
+            key,
+            || Ok(PanickingDrop(Arc::clone(&payload_drops))),
+            |_, _| Ok(()),
+        )
+        .unwrap()
+        .into_token();
+
+    // Removing and dropping the object should catch the panic and record it
+    runtime
+        .store
+        .registry
+        .remove_and_drop(&token, "test panic remove");
+
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
+    assert!(matches!(
+        runtime.store.registry.cleanup_result(),
+        Err(XllError::Panic)
+    ));
+    assert_eq!(payload_drops.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn zero_sized_type_handle_lifecycle() {
+    #[derive(Debug, PartialEq, Eq)]
+    struct ZeroSized;
+    impl ExcelHandleObject for ZeroSized {}
+
+    let runtime = FormulaHandleService::new(16);
+    let key1 = test_topic_key("zst_test_1");
+    let token1 = runtime
+        .prepare_observed(key1, || Ok(ZeroSized), |_, _| Ok(()))
+        .unwrap()
+        .into_token();
+
+    let (token2, object_id) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle1 = runtime.lookup::<ZeroSized>(scope, &token1).unwrap();
+        assert_eq!(*handle1, ZeroSized);
+        let object_id = handle1.object_id();
+        let alias = handle1.alias();
+        let key2 = test_topic_key("zst_test_2");
+        let token2 = runtime
+            .prepare_observed_alias::<ZeroSized, _>(key2, alias, |_, _| Ok(()))
+            .unwrap()
+            .into_token();
+        (token2, object_id)
+    });
+
+    with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle2 = runtime.lookup::<ZeroSized>(scope, &token2).unwrap();
+        assert_eq!(*handle2, ZeroSized);
+        assert_eq!(handle2.object_id(), object_id);
+    });
+
+    runtime
+        .store
+        .registry
+        .remove_and_drop(&token1, "remove zst 1");
+    with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle2 = runtime.lookup::<ZeroSized>(scope, &token2).unwrap();
+        assert_eq!(*handle2, ZeroSized);
+    });
+
+    runtime
+        .store
+        .registry
+        .remove_and_drop(&token2, "remove zst 2");
+    runtime.seal().map(|_| ()).unwrap();
+}
+
+#[test]
+fn alias_read_capability_delays_binding_retirement_until_scope_exit() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    struct TrackedValue {
+        _id: u32,
+        drops: Arc<AtomicUsize>,
+    }
+    impl ExcelHandleObject for TrackedValue {}
+    impl Drop for TrackedValue {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let runtime = Arc::new(FormulaHandleService::new(16));
+    let key = test_topic_key("alias_alone_alive");
+    let token = runtime
+        .prepare_observed(
+            key,
+            || {
+                Ok(TrackedValue {
+                    _id: 42,
+                    drops: Arc::clone(&drops),
+                })
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap()
+        .into_token();
+
+    let (removal, _finished_rx) = with_decode_scope_and_state(&runtime, |runtime, scope| {
+        let handle = runtime.lookup::<TrackedValue>(scope, &token).unwrap();
+        let alias = handle.alias();
+
+        let removal_runtime = Arc::clone(runtime);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let removal = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            removal_runtime
+                .store
+                .registry
+                .remove_and_drop(&token, "remove original");
+            finished_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        // Retirement withdraws the binding immediately but cannot reclaim its
+        // object capability until the alias's read permit leaves the scope.
+        finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(alias.object_id().sequence(), 1);
+        (removal, finished_rx)
+    });
+    removal.join().unwrap();
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn resolver_does_not_initialize_slot_when_unused() {
+    let slot = FormulaHandleServiceSlot::new();
+    assert!(slot.is_none());
+
+    let resolver = FormulaHandleServiceResolver::new(&slot);
+    assert!(slot.is_none());
+    drop(resolver);
+    assert!(slot.is_none());
+}
+
+#[test]
+fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
+    let _callback_guard = crate::test_callback::lock();
+    crate::test_callback::install();
+    crate::test_callback::reset();
+
+    struct TestObj(u32);
+    impl ExcelHandleObject for TestObj {}
+
+    let (slot, handle_rt) = armed_handle_slot();
+    let key = test_topic_key("resolver_test");
+    let token = handle_rt
+        .prepare_observed(key, || Ok(TestObj(123)), |_, _| Ok(()))
+        .unwrap()
+        .into_token();
+
+    let callbacks = crate::host_callback::HostCallbackSession::new();
+    crate::call::with_branded_call_scope_and_state(&callbacks, |callbacks, storage, brand| {
+        let resolver = FormulaHandleServiceResolver::new(slot);
+        let mut call_ctx =
+            crate::value::DecodeCallContext::from_handle_access(storage, brand, resolver);
+
+        // First handle resolution initializes resolver OnceCell
+        let h1: Handle<'_, TestObj> = call_ctx.resolve_handle(&token).unwrap();
+        assert_eq!(h1.0, 123);
+
+        // Second handle resolution reuses OnceCell
+        let h2: Handle<'_, TestObj> = call_ctx.resolve_handle(&token).unwrap();
+        assert_eq!(h2.0, 123);
+
+        // Take resolver and move to ReturnContext
+        let mut return_access = call_ctx.finish();
+        let moved_access = return_access.take_handle_access();
+        assert!(return_access.take_handle_access().is_none());
+
+        let res_ref = &moved_access.as_ref().unwrap().runtime;
+        assert!(std::ptr::eq(res_ref.get().unwrap(), &*handle_rt));
+
+        let mut return_ctx = ReturnContext::<crate::value::FormulaInputMode>::from_state(
+            crate::call_return::FormulaPublisher::new(
+                moved_access.expect("test context has handle access"),
+                "test_udf",
+                [0; 32],
+                callbacks,
+            ),
+        );
+        let err = return_ctx
+            .publish_new_handle(|| Ok(TestObj(456)))
+            .unwrap_err();
+        assert!(matches!(err, XllError::ExcelApi { .. }));
+    });
+}
+
+#[test]
+fn concurrent_first_use_initializes_exactly_once() {
+    let slot: &'static FormulaHandleServiceSlot =
+        Box::leak(Box::new(FormulaHandleServiceSlot::new()));
+    assert!(slot.is_none());
+    slot.arm(crate::HandleConfig::default()).unwrap();
+
+    let barrier = Arc::new(std::sync::Barrier::new(16));
+    let handles: Vec<_> = (0..16)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let read = slot.read().unwrap();
+                std::ptr::from_ref(&*read).addr()
+            })
+        })
+        .collect();
+
+    let mut ptrs = Vec::new();
+    for handle in handles {
+        ptrs.push(handle.join().unwrap());
+    }
+    assert_ne!(ptrs[0], 0);
+    for ptr in &ptrs {
+        assert_eq!(*ptr, ptrs[0]);
+    }
+    assert!(!slot.is_none());
+}
+
+#[test]
+fn close_resets_to_closed_for_reopen() {
+    let slot = FormulaHandleServiceSlot::new();
+    assert!(slot.is_none());
+
+    slot.arm(crate::HandleConfig::default()).unwrap();
+    let session1 = slot.read().unwrap().store.session();
+    assert!(!slot.is_none());
+
+    slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
+        .map(|_| ())
+        .unwrap();
+    assert!(slot.is_none());
+
+    slot.arm(crate::HandleConfig::default()).unwrap();
+    let session2 = slot.read().unwrap().store.session();
+    assert!(!slot.is_none());
+
+    assert_ne!(session1, session2);
+}
+
+#[test]
+fn handle_slot_seal_is_local_to_its_generation_bundle() {
+    let slot = FormulaHandleServiceSlot::new();
+    assert!(matches!(slot.read(), Err(XllError::Closing)));
+
+    slot.arm(crate::HandleConfig::default()).unwrap();
+    assert!(slot.read().is_ok());
+    assert!(matches!(slot.disarm(), Err(XllError::Closing)));
+
+    slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
+        .unwrap();
+    assert!(slot.is_none());
+}
+
+#[test]
+fn handle_config_rejects_an_unbounded_dense_publication_table() {
+    let slot = FormulaHandleServiceSlot::new();
+    let invalid_limit =
+        crate::HandleBindingLimit::try_from(crate::HandleConfig::MAX_SUPPORTED_BINDINGS + 1);
+
+    assert!(invalid_limit.is_err());
+    assert!(slot.is_none());
+}
+
+#[test]
+fn topic_table_tombstones_are_bounded_and_reclaimed() {
+    let runtime = FormulaHandleService::new(16);
+
+    // 1. Transient initialization failures leave zero initializing tombstones.
+    for i in 0..50 {
+        let key = test_topic_key(&format!("fail-init-{i}"));
+        let result = runtime.prepare(key, || -> XllResult<DataRecord> {
+            Err(XllError::InvalidHandle)
+        });
+        assert!(result.is_err());
+    }
+    assert_eq!(runtime.topics.read().initializing.len(), 0);
+
+    // 2. Churning publications and rollbacks reclaims retired topics.
+    for i in 0..50 {
+        let key = test_topic_key(&format!("churn-{i}"));
+        let _token = runtime
+            .prepare(key, || Ok(DataRecord(i)))
+            .unwrap()
+            .into_token();
+        let lifetime_key = key.format_lifetime_key();
+        runtime.rollback(&lifetime_key);
+    }
+    assert_eq!(runtime.topics.read().by_key.len(), 0);
+    assert_eq!(runtime.topics.read().by_lifetime_key.len(), 0);
+
+    // Drain retired topics
+    let drained = runtime.topics.try_quiesce_and_drain();
+    drop(drained);
+}
+
+#[test]
+fn handle_domain_witness_records_exact_domain() {
+    let domain1 = HandleReadDomain::new();
+    let domain2 = HandleReadDomain::new();
+
+    let domains = (domain1, domain2);
+    with_decode_scope_and_state(&domains, |(domain1, domain2), scope| {
+        let witness1 = scope.enter_handle_domain(domain1).unwrap();
+        assert_eq!(witness1.domain(), std::ptr::NonNull::from(domain1));
+
+        let witness2 = scope.enter_handle_domain(domain2).unwrap();
+        assert_eq!(witness2.domain(), std::ptr::NonNull::from(domain2));
+    });
+}
+
+#[test]
+fn miri_scope_retains_handles_across_permit_storage_growth() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let registries: Vec<_> = (0..8)
+        .map(|_| HandleRegistry::from_entropy(1, [7; 40]))
+        .collect();
+    let tokens: Vec<_> = registries
+        .iter()
+        .map(|registry| {
+            insert_production(registry, Arc::new(CountedDataRecord(Arc::clone(&drops)))).unwrap()
+        })
+        .collect();
+
+    with_decode_scope_and_state(&registries, |registries, scope| {
+        let first = registries[0]
+            .lookup_handle::<CountedDataRecord>(scope, &tokens[0])
+            .unwrap();
+        let witness = scope
+            .enter_handle_domain(registries[0].bindings.read_domain())
+            .unwrap();
+        // Single -> Multiple and subsequent Vec growth must preserve every
+        // earlier admission, including after the binding has been retired.
+        registries[0]
+            .remove::<CountedDataRecord>(&tokens[0])
+            .unwrap();
+        for (registry, token) in registries.iter().zip(&tokens).skip(1) {
+            let handle = registry
+                .lookup_handle::<CountedDataRecord>(scope, token)
+                .unwrap();
+            registry.remove::<CountedDataRecord>(token).unwrap();
+            assert!(Arc::ptr_eq(&handle.0, &drops));
+            assert!(Arc::ptr_eq(&first.0, &drops));
+            assert_eq!(
+                witness.domain(),
+                std::ptr::NonNull::from(registries[0].bindings.read_domain())
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+        }
+        for registry in registries {
+            assert_eq!(registry.bindings.read_domain().debt(), 1);
+        }
+    });
+    for registry in &registries {
+        registry.bindings.read_domain().flush_for_test();
+        assert_eq!(registry.bindings.read_domain().debt(), 0);
+    }
+    assert_eq!(drops.load(Ordering::SeqCst), registries.len());
+}
+
+#[test]
+fn miri_domain_permit_witness_lifecycle() {
+    let domain = HandleReadDomain::new();
+    // SAFETY: domain outlives permit in this test scope.
+    let permit = unsafe { domain.enter_owned() }.unwrap();
+    let witness = permit.witness();
+    assert_eq!(witness.domain(), std::ptr::NonNull::from(&domain));
+}
+
+#[test]
+fn miri_handle_scope_and_binding_lifecycle() {
+    let registry = HandleRegistry::new(2);
+    let token = insert_production(&registry, Arc::new(DataRecord(42))).unwrap();
+
+    with_decode_scope_and_state(&registry, |registry, scope| {
+        let handle = registry.lookup_handle::<DataRecord>(scope, &token).unwrap();
+        assert_eq!(handle.0, 42);
+    });
+
+    registry.remove::<DataRecord>(&token).unwrap();
+    assert!(matches!(
+        registry.lookup::<DataRecord>(&token),
+        Err(XllError::StaleHandle)
+    ));
+}
+
+#[test]
+fn miri_topic_read_lease_lifecycle() {
+    let runtime = FormulaHandleService::new(4);
+    let key = test_topic_key("miri_topic");
+    let token = runtime
+        .prepare(key, || Ok(DataRecord(42)))
+        .unwrap()
+        .into_token();
+    assert!(!token.is_empty());
+
+    {
+        let lease = runtime.topics.enter_read_lease().unwrap();
+        let publication = lease
+            .load(&key)
+            .expect("topic must be present in read lease");
+        assert_eq!(publication.state(), PublishedTopicState::Live);
+    }
+
+    let lifetime_key = key.format_lifetime_key();
+    runtime.rollback(&lifetime_key);
+    assert_eq!(runtime.topics.read().by_key.len(), 0);
+    assert_eq!(runtime.topics.read().by_lifetime_key.len(), 0);
+}
+
+#[test]
+fn miri_object_arena_lifecycle() {
+    let arena =
+        xlfn_kernel::published_owner::PublishedOwner::new(super::object::ObjectArena::new());
+    let id = ObjectId::new(1, 1);
+    // SAFETY: this test retains the stable arena owner through binding release.
+    let binding = unsafe { super::object::ObjectArena::insert(&arena, id, 12345i64) }.unwrap();
+    assert_eq!(binding.id(), id);
+
+    let dup = binding.duplicate().unwrap();
+    assert_eq!(dup.id(), id);
+
+    drop(binding);
+    drop(dup);
+    drop(arena);
+}
+
+#[test]
+fn miri_pending_publication_uses_its_original_registry() {
+    let first = HandleRegistry::from_entropy(2, [7; 40]);
+    let second = HandleRegistry::from_entropy(2, [9; 40]);
+    let pending = first.new_object(DataRecord(42)).unwrap();
+    let (token, ..) = pending.publish().unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 0);
+    with_decode_scope_and_state(&first, |first, scope| {
+        assert_eq!(
+            first.lookup_handle::<DataRecord>(scope, &token).unwrap().0,
+            42
+        );
+    });
+    assert!(second.remove::<DataRecord>(&token).is_err());
+    first.remove::<DataRecord>(&token).unwrap();
+    first.bindings.read_domain().flush_for_test();
+}
+
+#[test]
+fn miri_foreign_runtime_alias_rejected_before_topic_publication() {
+    let first = FormulaHandleService::new(4);
+    let second = FormulaHandleService::new(4);
+    let source = first
+        .prepare(test_topic_key("foreign_alias_source"), || {
+            Ok(DataRecord(42))
+        })
+        .unwrap()
+        .into_token();
+    let target = test_topic_key("foreign_alias_destination");
+    with_decode_scope_and_state(&first, |first, context| {
+        let handle = first.lookup::<DataRecord>(context, &source).unwrap();
+        assert_eq!(handle.0, 42);
+        assert!(matches!(
+            second.prepare_observed_alias::<DataRecord, _>(target, handle.alias(), |_, _| Ok(())),
+            Err(XllError::StaleHandle)
+        ));
+    });
+    assert_eq!(second.store.len(), 0);
+    assert_eq!(second.topics.read().by_key.len(), 0);
+    with_decode_scope_and_state(&first, |first, context| {
+        assert_eq!(first.lookup::<DataRecord>(context, &source).unwrap().0, 42);
+    });
+}
+
+#[test]
+fn miri_typed_pending_alias_rejects_foreign_store_and_keeps_source_live() {
+    let first = HandleStore::try_new(4).unwrap();
+    let second = HandleStore::try_new(4).unwrap();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let pending = first.erase(CountedDataRecord(Arc::clone(&drops))).unwrap();
+    let source = pending.publish().unwrap().0;
+
+    let alias = with_decode_scope_and_state(&first, |first, scope| {
+        let handle = first.lookup::<CountedDataRecord>(scope, &source).unwrap();
+        assert!(matches!(
+            handle.alias().into_pending_object_binding(&second),
+            Err(XllError::StaleHandle)
+        ));
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        let handle = first.lookup::<CountedDataRecord>(scope, &source).unwrap();
+        let pending = handle.alias().into_pending_object_binding(first).unwrap();
+        pending.publish().unwrap().0
+    });
+    assert_ne!(source, alias);
+    first.registry.remove::<CountedDataRecord>(&source).unwrap();
+    first.registry.bindings.read_domain().flush_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    with_decode_scope_and_state(&first, |first, scope| {
+        first.lookup::<CountedDataRecord>(scope, &alias).unwrap();
+    });
+    first.registry.remove::<CountedDataRecord>(&alias).unwrap();
+    first.registry.bindings.read_domain().flush_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn miri_topic_close_unpublishes_before_reclamation_can_run() {
+    let runtime = FormulaHandleService::new(4);
+    let key = test_topic_key("close_publication_order");
+    runtime
+        .prepare(key, || Ok(DataRecord(42)))
+        .unwrap()
+        .into_token();
+    let reclaim_count = std::cell::Cell::new(0);
+    let discovered_retired_topic = std::cell::Cell::new(false);
+
+    let initializations = runtime.topics.close_with_reclaim_hook(|| {
+        // Model a remover that already released the table write lock before
+        // close began, and now runs reclamation beside the close operation.
+        let retired = runtime.topics.try_quiesce_and_drain();
+        reclaim_count.set(reclaim_count.get() + retired.len());
+        drop(retired);
+
+        // A previously admitted prepare may enter the new read generation
+        // here. It must not discover any pointer whose owner was reclaimed.
+        let lease = runtime.topics.enter_read_lease().unwrap();
+        discovered_retired_topic.set(discovered_retired_topic.get() || lease.load(&key).is_some());
+    });
+
+    assert!(initializations.is_empty());
+    assert_eq!(reclaim_count.get(), 1);
+    assert!(!discovered_retired_topic.get());
+}
+
+#[test]
+fn miri_lookup_linearizes_before_withdrawal_during_projection() {
+    let registry = HandleRegistry::from_entropy(1, [7; 40]);
+    let token = insert_production(&registry, Arc::new(DataRecord(42))).unwrap();
+    let (observed_tx, observed_rx) = std::sync::mpsc::sync_channel(0);
+    let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+    *registry.after_lookup_live.lock() = Some((observed_tx, resume_rx));
+    with_decode_scope_and_state(&registry, |registry, scope| {
+        std::thread::scope(|threads| {
+            let token = &token;
+            let remover = threads.spawn(move || {
+                observed_rx
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .unwrap();
+                registry.remove::<DataRecord>(token).unwrap();
+                resume_tx.send(()).unwrap();
+            });
+            let borrowed = registry.lookup_handle::<DataRecord>(scope, token).unwrap();
+            assert_eq!(borrowed.0, 42);
+            remover.join().unwrap();
+            assert!(matches!(
+                registry.lookup_handle::<DataRecord>(scope, token),
+                Err(XllError::StaleHandle)
+            ));
+        });
+    });
+    registry.bindings.read_domain().flush_for_test();
+}
+
+#[test]
+fn miri_deferred_hard_debt_backpressures_publication_without_waiting_on_own_scope() {
+    let registry = HandleRegistry::from_entropy(1, [7; 40]);
+    let drops = Arc::new(AtomicUsize::new(0));
+    with_decode_scope_and_state(&registry, |registry, scope| {
+        for _ in 0..super::domain::HARD_DEBT_LIMIT {
+            let token =
+                insert_production(registry, Arc::new(CountedDataRecord(Arc::clone(&drops))))
+                    .unwrap();
+            let borrowed = registry
+                .lookup_handle::<CountedDataRecord>(scope, &token)
+                .unwrap();
+            registry.remove::<CountedDataRecord>(&token).unwrap();
+            assert_eq!(borrowed.0.load(Ordering::Relaxed), 0);
+        }
+        assert_eq!(
+            registry.bindings.read_domain().debt(),
+            super::domain::HARD_DEBT_LIMIT
+        );
+        assert!(matches!(
+            insert_production(registry, Arc::new(DataRecord(42))),
+            Err(XllError::Overloaded)
+        ));
+    });
+    registry.bindings.read_domain().flush_for_test();
+    assert_eq!(
+        drops.load(Ordering::Relaxed),
+        super::domain::HARD_DEBT_LIMIT
+    );
+    assert_eq!(registry.bindings.read_domain().debt(), 0);
+    assert!(insert_production(&registry, Arc::new(DataRecord(42))).is_ok());
+}
+
+#[test]
+fn miri_deferred_single_retirement_eventually_reclaims_without_more_writes() {
+    let registry = HandleRegistry::from_entropy(1, [7; 40]);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let token =
+        insert_production(&registry, Arc::new(CountedDataRecord(Arc::clone(&drops)))).unwrap();
+    with_decode_scope_and_state(&registry, |registry, scope| {
+        let borrowed = registry
+            .lookup_handle::<CountedDataRecord>(scope, &token)
+            .unwrap();
+        registry.remove::<CountedDataRecord>(&token).unwrap();
+        assert_eq!(borrowed.0.load(Ordering::Relaxed), 0);
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while drops.load(Ordering::Acquire) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a single retirement must be reclaimed without another write or seal"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn miri_deferred_seal_waits_for_in_flight_destructor() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    struct BlockingDrop {
+        entered: mpsc::Sender<()>,
+        release: crate::sync::Mutex<mpsc::Receiver<()>>,
+    }
+    impl ExcelHandleObject for BlockingDrop {}
+    impl Drop for BlockingDrop {
+        fn drop(&mut self) {
+            self.entered.send(()).unwrap();
+            self.release.get_mut().recv().unwrap();
+        }
+    }
+    let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let token = insert_production(
+        &registry,
+        Arc::new(BlockingDrop {
+            entered: entered_tx,
+            release: crate::sync::Mutex::new(release_rx),
+        }),
+    )
+    .unwrap();
+    let removing = Arc::clone(&registry);
+    let remover = std::thread::spawn(move || removing.remove::<BlockingDrop>(&token).unwrap());
+    entered_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert_eq!(registry.bindings.read_domain().debt(), 1);
+    let closing = Arc::clone(&registry);
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let closer = std::thread::spawn(move || {
+        let sealed = closing.seal().unwrap();
+        sealed.finish_quiescence().unwrap();
+        finished_tx.send(()).unwrap();
+    });
+    assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+    release_tx.send(()).unwrap();
+    finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    remover.join().unwrap();
+    closer.join().unwrap();
+    assert_eq!(registry.bindings.read_domain().debt(), 0);
+}
+
+#[test]
+fn miri_borrowing_remover_retains_registry_through_reentrant_drop() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    struct OwnsRegistry {
+        registry: Option<Arc<HandleRegistry>>,
+        entered: mpsc::Sender<()>,
+        release: crate::sync::Mutex<mpsc::Receiver<()>>,
+        finished: mpsc::Sender<()>,
+    }
+    impl ExcelHandleObject for OwnsRegistry {}
+    impl Drop for OwnsRegistry {
+        fn drop(&mut self) {
+            assert!(matches!(
+                self.registry.as_ref().unwrap().seal(),
+                Err(XllError::Closing)
+            ));
+            self.entered.send(()).unwrap();
+            self.release.get_mut().recv().unwrap();
+            drop(self.registry.take());
+            self.finished.send(()).unwrap();
+        }
+    }
+    let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
+    let weak = Arc::downgrade(&registry);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let token = insert_production(
+        &registry,
+        Arc::new(OwnsRegistry {
+            registry: Some(Arc::clone(&registry)),
+            entered: entered_tx,
+            release: crate::sync::Mutex::new(release_rx),
+            finished: finished_tx,
+        }),
+    )
+    .unwrap();
+    let removing = Arc::clone(&registry);
+    let remover = std::thread::spawn(move || {
+        removing.remove::<OwnsRegistry>(&token).unwrap();
+        removing.objects.finish_quiescence().unwrap();
+    });
+    entered_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    drop(registry);
+    release_tx.send(()).unwrap();
+    finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    remover.join().unwrap();
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn miri_deferred_removal_keeps_borrows_across_slot_reuse_and_batches() {
+    let registry = HandleRegistry::from_entropy(1, [7; 40]);
+    let drops = Arc::new(AtomicUsize::new(0));
+    with_decode_scope_and_state(&registry, |registry, scope| {
+        let mut borrows = Vec::new();
+        for _ in 0..65 {
+            let pending = registry
+                .new_object(CountedDataRecord(Arc::clone(&drops)))
+                .unwrap();
+            let (token, ..) = pending.publish().unwrap();
+            borrows.push(
+                registry
+                    .lookup_handle::<CountedDataRecord>(scope, &token)
+                    .unwrap(),
+            );
+            assert!(
+                registry
+                    .remove_and_drop_with_observer(&token, "deferred test", |_| {})
+                    .is_some()
+            );
+            assert!(matches!(
+                registry.lookup_handle::<CountedDataRecord>(scope, &token),
+                Err(crate::XllError::StaleHandle)
+            ));
+            assert_eq!(drops.load(Ordering::Relaxed), 0);
+        }
+        registry.bindings.read_domain().maintain();
+        for borrowed in borrows {
+            assert_eq!(borrowed.0.load(Ordering::Relaxed), 0);
+        }
+    });
+    registry.bindings.read_domain().flush_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), 65);
+    let sealed = registry.seal().unwrap();
+    sealed.finish_quiescence().unwrap();
+}
+
+#[test]
+fn miri_deferred_seal_racing_removal_cannot_miss_queued_records() {
+    for _ in 0..if cfg!(miri) { 4 } else { 100 } {
+        let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let pending = registry
+            .new_object(CountedDataRecord(Arc::clone(&drops)))
+            .unwrap();
+        let (token, ..) = pending.publish().unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let removing = Arc::clone(&registry);
+        let removing_barrier = Arc::clone(&barrier);
+        let worker = std::thread::spawn(move || {
+            removing_barrier.wait();
+            // A seal that wins admission is allowed to reject removal.
+            removing.remove_and_drop_with_observer(&token, "seal race", |_| {});
+        });
+        barrier.wait();
+        let sealed = registry.seal().unwrap();
+        // Seal includes destruction handed to concurrent maintenance,
+        // even before the remover has joined.
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        sealed.finish_quiescence().unwrap();
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn miri_deferred_seal_drains_debt_below_batch_threshold() {
+    let registry = HandleRegistry::from_entropy(1, [7; 40]);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let pending = registry
+        .new_object(CountedDataRecord(Arc::clone(&drops)))
+        .unwrap();
+    let (token, ..) = pending.publish().unwrap();
+    assert!(
+        registry
+            .remove_and_drop_with_observer(&token, "deferred test", |_| {})
+            .is_some()
+    );
+    let sealed = registry.seal().unwrap();
+    sealed.finish_quiescence().unwrap();
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn sealed_registry_finishes_its_owner_while_another_store_stays_open() {
+    let first = super::store::HandleStore::try_new(8).unwrap();
+    let second = super::store::HandleStore::try_new(8).unwrap();
+    let generation = crate::generation::RuntimeGeneration::new(1).unwrap();
+    let proof = first.seal().unwrap().quiescent(Some(generation)).unwrap();
+    assert_eq!(proof.generation(), Some(generation));
+    assert_eq!(first.registry.phase(), HandleRegistryPhase::Closed);
+    assert!(matches!(first.erase(DataRecord(1)), Err(XllError::Closing)));
+    assert_eq!(second.registry.phase(), HandleRegistryPhase::Open);
+    let pending = second.erase(DataRecord(2)).unwrap();
+    pending.publish().unwrap();
+    assert_eq!(second.len(), 1);
+    second.seal().unwrap().finish_quiescence().unwrap();
+}
+
+#[cfg(all(feature = "async", feature = "handles"))]
+#[test]
+fn miri_pending_handle_lease_rejects_foreign_generation_before_exposing_value() {
+    use crate::async_udf::AsyncTaskScope;
+    use crate::generation::RuntimeGeneration;
+    for scope_generation in [1, 2] {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let handles = FormulaHandleService::try_new(1).unwrap();
+        let token = handles
+            .prepare(test_topic_key("pending generation join"), || {
+                Ok(CountedDataRecord(Arc::clone(&drops)))
+            })
+            .unwrap()
+            .into_token();
+        let pending = with_handle::<CountedDataRecord, _>(&handles, &token, |handle| {
+            handle.into_pending(RuntimeGeneration::new(1).unwrap())
+        })
+        .unwrap()
+        .unwrap();
+        handles.terminate_all_topics();
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        let brand = GenerationLeaseBrand;
+        let scope = AsyncTaskScope::new(RuntimeGeneration::new(scope_generation).unwrap(), &brand);
+        let mut accesses = 0;
+        let outcome = pending.bind(scope).map(|lease| {
+            accesses += 1;
+            drop(lease);
+        });
+        if scope_generation == 1 {
+            assert!(outcome.is_ok());
+            assert_eq!(accesses, 1);
+        } else {
+            assert!(matches!(outcome, Err(XllError::StaleHandle)));
+            assert_eq!(accesses, 0);
+        }
+        // Rejection consumes and releases exactly the original raw pin; it
+        // neither returns a retryable pending owner nor exposes a typed borrow.
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+        handles.seal().unwrap();
+    }
+}
+
+#[test]
+fn miri_ghostcell_handles_outlive_decode_context() {
+    struct Tracked {
+        drops: Arc<AtomicUsize>,
+        value: u32,
+    }
+    impl ExcelHandleObject for Tracked {}
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let registry = HandleRegistry::from_entropy(8, [7; 40]);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let token = insert_production(
+        &registry,
+        Arc::new(Tracked {
+            drops: Arc::clone(&drops),
+            value: 21,
+        }),
+    )
+    .unwrap();
+    crate::call::with_branded_call_scope_and_state(&registry, |registry, storage, brand| {
+        let mut context = crate::value::DecodeCallContext::with_storage(storage, brand);
+        let first = registry
+            .lookup_handle::<Tracked>(&mut context, &token)
+            .unwrap();
+        let second = registry
+            .lookup_handle::<Tracked>(&mut context, &token)
+            .unwrap();
+        let _return_context = context.finish();
+        registry.remove::<Tracked>(&token).unwrap();
+        assert_eq!(first.value + second.value, 42);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+    });
+    registry.bindings.read_domain().flush_for_test();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn miri_ghostcell_scope_releases_permits_during_unwind() {
+    let registry = HandleRegistry::from_entropy(8, [7; 40]);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let token =
+        insert_production(&registry, Arc::new(CountedDataRecord(Arc::clone(&drops)))).unwrap();
+    let unwound = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::call::with_branded_call_scope_and_state(&registry, |registry, storage, brand| {
+            let mut context = crate::value::DecodeCallContext::with_storage(storage, brand);
+            let first = registry
+                .lookup_handle::<CountedDataRecord>(&mut context, &token)
+                .unwrap();
+            let second = registry
+                .lookup_handle::<CountedDataRecord>(&mut context, &token)
+                .unwrap();
+            registry.remove::<CountedDataRecord>(&token).unwrap();
+            assert_eq!(first.0.load(Ordering::SeqCst), 0);
+            assert_eq!(second.0.load(Ordering::SeqCst), 0);
+            panic!("exercise call teardown");
+        });
+    }));
+    assert!(unwound.is_err());
+    registry.bindings.read_domain().flush_for_test();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn ghostcell_handle_authority_stays_thread_bound() {
+    static_assertions::assert_not_impl_any!(Handle<'static, DataRecord>: Send, Sync);
+    static_assertions::assert_not_impl_any!(crate::call::CallStorage<'static, 'static>: Send, Sync);
+    static_assertions::assert_not_impl_any!(crate::value::DecodeCallContext<'static, 'static>: Send, Sync);
+}

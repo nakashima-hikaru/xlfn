@@ -1,0 +1,11 @@
+error: injected contexts must be passed by value
+ --> tests/ui/fail/context_by_reference.rs:7:20
+  |
+7 | fn shared(context: &MainThreadContext<'_, ()>) -> f64 {
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: injected contexts must be passed by value
+  --> tests/ui/fail/context_by_reference.rs:13:21
+   |
+13 | fn mutable(context: &mut ThreadSafeContext<'_, ()>) -> f64 {
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

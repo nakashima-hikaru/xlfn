@@ -1,0 +1,5 @@
+error: reference arguments cannot use strict, blank, missing, or default policies
+ --> tests/ui/strict_reference.rs:4:44
+  |
+4 | fn example(#[excel_arg(strict, reference)] value: ExcelReference<'_>) -> f64 {
+  |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^

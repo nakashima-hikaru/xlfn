@@ -1,0 +1,5 @@
+error: expected `name`, `description`, `default`, `blank`, `missing`, `strict`, or `reference`
+ --> tests/ui/native_coerce_option.rs:4:24
+  |
+4 | fn example(#[excel_arg(coerce)] value: f64) -> f64 {
+  |                        ^^^^^^

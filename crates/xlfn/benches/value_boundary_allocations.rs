@@ -1,0 +1,484 @@
+//! Allocation regression probe, separate from the uninstrumented timing benchmarks.
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::hint::black_box;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use xlfn::benchmark_support::{
+    BenchHandleObject, NumericArrayOutputBenchmark, RawArgumentIngressBenchmark,
+    RegistrationBenchmark, ScalarOutputBenchmark, SemanticIdentityBenchmark,
+    Utf16IdentityBenchmark,
+};
+use xlfn::output::XlArrayBuilder;
+
+const WARMUP_CALLS: usize = 100;
+const MEASURED_CALLS: usize = 10_000;
+const ARRAY_CELLS: usize = 1_000;
+const ARRAY_OUTPUT_CALLS: usize = 100;
+
+struct CountingAllocator;
+static ENABLED: AtomicBool = AtomicBool::new(false);
+static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+static DEALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+static REALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+static REQUESTED_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+// SAFETY: allocation/deallocation and layouts are forwarded unchanged to System.
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if ENABLED.load(Ordering::Relaxed) {
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            REQUESTED_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        // SAFETY: the allocator contract supplies a valid layout.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        if ENABLED.load(Ordering::Relaxed) {
+            DEALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+        // SAFETY: pointer and layout came from the same delegated allocator.
+        unsafe { System.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        if ENABLED.load(Ordering::Relaxed) {
+            REALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            REQUESTED_BYTES.fetch_add(size, Ordering::Relaxed);
+        }
+        // SAFETY: the caller supplies a live allocation and a valid new size.
+        unsafe { System.realloc(pointer, layout, size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Counts {
+    allocations: usize,
+    deallocations: usize,
+    reallocations: usize,
+    requested_bytes: usize,
+}
+
+fn measure(case: &str, mut operation: impl FnMut()) -> Counts {
+    measure_calls(case, MEASURED_CALLS, &mut operation)
+}
+
+fn measure_calls(case: &str, calls: usize, mut operation: impl FnMut()) -> Counts {
+    for _ in 0..WARMUP_CALLS {
+        operation();
+    }
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    DEALLOCATIONS.store(0, Ordering::Relaxed);
+    REALLOCATIONS.store(0, Ordering::Relaxed);
+    REQUESTED_BYTES.store(0, Ordering::Relaxed);
+    ENABLED.store(true, Ordering::Relaxed);
+    for _ in 0..calls {
+        operation();
+    }
+    ENABLED.store(false, Ordering::Relaxed);
+    let counts = Counts {
+        allocations: ALLOCATIONS.load(Ordering::Relaxed),
+        deallocations: DEALLOCATIONS.load(Ordering::Relaxed),
+        reallocations: REALLOCATIONS.load(Ordering::Relaxed),
+        requested_bytes: REQUESTED_BYTES.load(Ordering::Relaxed),
+    };
+    println!("{case}: calls={calls} {counts:?}");
+    counts
+}
+
+fn assert_runtime_allocation_free(case: &str, counts: Counts) {
+    if cfg!(feature = "refinement") {
+        println!("{case}: zero-allocation assertion skipped with refinement tracing enabled");
+    } else {
+        assert_eq!(counts, Counts::default(), "{case} must not allocate");
+    }
+}
+
+#[derive(Clone, Copy, xlfn::ExcelEnum)]
+#[excel_enum(crate = "xlfn")]
+enum Status {
+    Ready,
+}
+
+fn main() {
+    #[cfg(feature = "cache")]
+    {
+        use xlfn::cache::{CacheEndpoint, CacheRegistry, CalculationCache};
+        let key = "key".repeat(256);
+        let cache = CalculationCache::<String, u64>::new(8);
+        drop(
+            cache
+                .get_or_try_insert_borrowed(key.as_str(), || Ok(7))
+                .unwrap(),
+        );
+        let lookup = measure("cache/borrowed_get", || {
+            black_box(cache.get(black_box(key.as_str())).unwrap());
+        });
+        assert_runtime_allocation_free("cache borrowed get", lookup);
+        let borrowed = measure("cache/borrowed_resident_hit", || {
+            black_box(
+                cache
+                    .get_or_try_insert_borrowed(black_box(key.as_str()), || panic!("warm hit"))
+                    .unwrap(),
+            );
+        });
+        assert_runtime_allocation_free("cache borrowed resident hit", borrowed);
+        let owned = measure("cache/owned_resident_hit", || {
+            black_box(
+                cache
+                    .get_or_try_insert_with(black_box(key.clone()), || panic!("warm hit"))
+                    .unwrap(),
+            );
+        });
+        if !cfg!(feature = "refinement") {
+            assert_eq!(owned.allocations, MEASURED_CALLS);
+            assert_eq!(owned.deallocations, MEASURED_CALLS);
+            assert_eq!(owned.requested_bytes, MEASURED_CALLS * key.len());
+            assert_eq!(owned.reallocations, 0);
+        }
+        let registry = CacheRegistry::new(8);
+        let endpoint = CacheEndpoint::<String, u64>::new("borrowed_probe");
+        drop(
+            registry
+                .get_or_try_insert_borrowed(&endpoint, key.as_str(), || Ok(7))
+                .unwrap(),
+        );
+        let borrowed = measure("cache/registry_borrowed_resident_hit", || {
+            black_box(
+                registry
+                    .get_or_try_insert_borrowed(&endpoint, black_box(key.as_str()), || {
+                        panic!("warm hit")
+                    })
+                    .unwrap(),
+            );
+        });
+        assert_runtime_allocation_free("registry borrowed resident hit", borrowed);
+    }
+    for cells in [1_000, 100_000] {
+        let calls = 5;
+        let mut input = RawArgumentIngressBenchmark::mixed_matrix(cells / 1_000, 1_000, "日本語💡");
+        let owned = measure_calls(&format!("dynamic_value/{cells}/owned"), calls, || {
+            input.run_plain::<xlfn::value::ExcelValue>();
+        });
+        let lazy = measure_calls(
+            &format!("dynamic_value/{cells}/borrowed/none"),
+            calls,
+            || {
+                input.run_borrowed_value_plain(0);
+            },
+        );
+        assert_runtime_allocation_free("dynamic value with no accessed text", lazy);
+        measure_calls(
+            &format!("dynamic_value/{cells}/borrowed/first_text"),
+            calls,
+            || {
+                input.run_borrowed_value_plain(2);
+            },
+        );
+        let all = measure_calls(
+            &format!("dynamic_value/{cells}/borrowed/all"),
+            calls,
+            || {
+                input.run_borrowed_value_plain(cells);
+            },
+        );
+        let prepared_owned = measure_calls(
+            &format!("dynamic_value/{cells}/prepare_owned"),
+            calls,
+            || {
+                black_box(input.run_prepared_with_identity::<xlfn::value::ExcelValue>());
+            },
+        );
+        let prepared_borrowed = measure_calls(
+            &format!("dynamic_value/{cells}/prepare_borrowed"),
+            calls,
+            || {
+                black_box(input.run_borrowed_value_prepared(false, 0));
+            },
+        );
+        if !cfg!(feature = "refinement") {
+            assert!(
+                all.allocations < owned.allocations,
+                "scratch text must avoid per-cell owned Strings"
+            );
+            assert!(prepared_borrowed.allocations < prepared_owned.allocations);
+            assert!(
+                prepared_borrowed.allocations + prepared_borrowed.reallocations <= 2 * calls,
+                "warm preparation must retain only the identity workspace"
+            );
+            assert!(prepared_borrowed.requested_bytes <= 16 * 1024 * calls);
+        }
+    }
+    for cells in [1_000, 100_000] {
+        let mut control = RawArgumentIngressBenchmark::number_matrix(cells, 1);
+        let control_counts = measure_calls(&format!("optional_numeric/control/{cells}"), 5, || {
+            black_box(control.run_prepared_with_identity::<xlfn::value::Matrix<f64>>());
+        });
+        for kind in [
+            xlfn::benchmark_support::OptionalNumericInputKind::Owned,
+            xlfn::benchmark_support::OptionalNumericInputKind::Presence,
+            xlfn::benchmark_support::OptionalNumericInputKind::Borrowed,
+        ] {
+            let mut input = RawArgumentIngressBenchmark::optional_number_matrix(cells);
+            let counts = measure_calls(&format!("optional_numeric/{kind:?}/{cells}"), 5, || {
+                black_box(input.run_optional_numeric_prepared(kind, false));
+            });
+            if std::env::var_os("XLFN_BENCH_REPORT_ONLY").is_none() {
+                assert_eq!(
+                    counts, control_counts,
+                    "optional warm preparation must retain only the hash workspace"
+                );
+            }
+        }
+    }
+    for (label, text) in [
+        ("short", "short_str"),
+        ("unicode", "日本語💡"),
+        ("over_inline", "abcdefghijklmnopqrstuvwx"),
+    ] {
+        let mut input = RawArgumentIngressBenchmark::string(text);
+        let case = format!("argument_ingress/string_{label}/borrowed");
+        let counts = measure(&case, || input.run_borrowed_str());
+        if text.len() <= 23 {
+            assert_runtime_allocation_free(&case, counts);
+        }
+    }
+    for (label, payload) in [
+        ("ascii_short", "Ready".to_owned()),
+        ("ascii_8", "a".repeat(8)),
+        ("ascii_64", "a".repeat(64)),
+        ("ascii_512", "a".repeat(512)),
+        ("ascii_limit", "x".repeat(32_767)),
+        ("unicode_short", "日本語💡".to_owned()),
+        ("japanese_8", "日".repeat(8)),
+        ("japanese_64", "日".repeat(64)),
+        ("japanese_512", "日".repeat(512)),
+        ("unicode_limit", "日".repeat(32_767)),
+        ("empty", String::new()),
+    ] {
+        let length = payload.len();
+        let benchmark = ScalarOutputBenchmark::new(payload);
+        let borrowed = measure_calls(
+            &format!("scalar_output/{label}/borrowed"),
+            ARRAY_OUTPUT_CALLS,
+            || benchmark.run_borrowed(),
+        );
+        let owned = measure_calls(
+            &format!("scalar_output/{label}/owned"),
+            ARRAY_OUTPUT_CALLS,
+            || benchmark.run_owned(),
+        );
+        let copied = measure_calls(
+            &format!("scalar_output/{label}/copy"),
+            ARRAY_OUTPUT_CALLS,
+            || benchmark.run_copy(),
+        );
+        if !cfg!(feature = "refinement") {
+            assert_eq!(
+                copied, owned,
+                "strict UTF-16 copy must allocate only its owned UTF-8 input and the return"
+            );
+            let clones = usize::from(length != 0) * ARRAY_OUTPUT_CALLS;
+            assert_eq!(owned.allocations, borrowed.allocations + clones);
+            assert_eq!(owned.deallocations, borrowed.deallocations + clones);
+            assert_eq!(owned.reallocations, borrowed.reallocations);
+            assert_eq!(
+                owned.requested_bytes,
+                borrowed.requested_bytes + ARRAY_OUTPUT_CALLS * length,
+                "borrowed scalar output must avoid an intermediate UTF-8 allocation"
+            );
+        }
+    }
+    let scalar = ScalarOutputBenchmark::new("Ready".to_owned());
+    let text = measure("scalar_output/Ready/borrowed", || scalar.run_borrowed());
+    let enumeration = measure("scalar_output/Ready/enum", || scalar.run_enum());
+    assert_eq!(
+        enumeration, text,
+        "scalar enum labels must use the borrowed writer"
+    );
+    let numbers = measure("scalar_output/number", || scalar.run_number());
+    assert_runtime_allocation_free("scalar_output/number", numbers);
+
+    let text = Utf16IdentityBenchmark::new(&"日本語💡".repeat(80));
+    measure("identity/utf16_1k", || {
+        black_box(text.run());
+    });
+    let matrix = SemanticIdentityBenchmark::new(
+        xlfn::value::Matrix::new(1, 1_000, vec![42.0; 1_000]).unwrap(),
+    );
+    let single = measure("identity/matrix_1k", || {
+        black_box(matrix.run());
+    });
+    let multiple = measure("identity/eight_matrix_1k", || {
+        black_box(matrix.run_arguments(8));
+    });
+    assert_eq!(
+        multiple, single,
+        "hash workspace must be reused within a call"
+    );
+    if !cfg!(feature = "refinement") {
+        assert!(single.allocations + single.reallocations <= 2 * MEASURED_CALLS);
+        assert!(single.requested_bytes <= 16 * 1024 * MEASURED_CALLS);
+    }
+    for cells in [1, 1_000] {
+        measure(&format!("array{cells}/one_string_rest_numbers"), || {
+            let mut builder = XlArrayBuilder::new(1, cells).unwrap();
+            builder.push("Ready").unwrap();
+            for _ in 1..cells {
+                builder.push_f64(1.0).unwrap();
+            }
+            black_box(builder.finish().unwrap());
+        });
+    }
+    let strings = measure("array1000/str", || {
+        let mut builder = XlArrayBuilder::new(1, ARRAY_CELLS).unwrap();
+        for _ in 0..ARRAY_CELLS {
+            builder.push(black_box("Ready")).unwrap();
+        }
+        black_box(builder.finish().unwrap());
+    });
+    let enums = measure("array1000/enum", || {
+        let mut builder = XlArrayBuilder::new(1, ARRAY_CELLS).unwrap();
+        for _ in 0..ARRAY_CELLS {
+            builder.push(black_box(Status::Ready)).unwrap();
+        }
+        black_box(builder.finish().unwrap());
+    });
+    assert_eq!(
+        enums, strings,
+        "enum labels must use the borrowed string path"
+    );
+
+    for cells in [1_000, 100_000] {
+        let benchmark = NumericArrayOutputBenchmark::new(cells);
+        let matrix = measure_calls(
+            &format!("array_numeric_output/{cells}/matrix_build_return"),
+            ARRAY_OUTPUT_CALLS,
+            || benchmark.run_matrix(),
+        );
+        let direct = measure_calls(
+            &format!("array_numeric_output/{cells}/builder_build_return"),
+            ARRAY_OUTPUT_CALLS,
+            || benchmark.run_direct(),
+        );
+        if !cfg!(feature = "refinement") {
+            assert_eq!(matrix.allocations, direct.allocations + ARRAY_OUTPUT_CALLS);
+            assert_eq!(
+                matrix.deallocations,
+                direct.deallocations + ARRAY_OUTPUT_CALLS
+            );
+            assert_eq!(matrix.reallocations, direct.reallocations);
+            assert_eq!(
+                matrix.requested_bytes,
+                direct.requested_bytes + ARRAY_OUTPUT_CALLS * cells * std::mem::size_of::<f64>(),
+                "direct output must avoid the intermediate numerical result buffer",
+            );
+        }
+    }
+
+    let mut numeric = RawArgumentIngressBenchmark::number(42.0);
+    let numbers = measure("f64/plain", || numeric.run_plain::<f64>());
+    assert_runtime_allocation_free("f64/plain", numbers);
+
+    for cells in [1_000, 100_000] {
+        let mut mixed = RawArgumentIngressBenchmark::mixed_matrix(cells, 1, "text");
+        let owned = measure_calls(
+            &format!("mixed_matrix/{cells}/owned"),
+            ARRAY_OUTPUT_CALLS,
+            || mixed.run_plain::<xlfn::value::Matrix<xlfn::value::ExcelCellValue>>(),
+        );
+        let borrowed = measure_calls(
+            &format!("mixed_matrix/{cells}/borrowed"),
+            ARRAY_OUTPUT_CALLS,
+            || mixed.run_borrowed_mixed_cells(),
+        );
+        if !cfg!(feature = "refinement") {
+            assert!(
+                borrowed.allocations + borrowed.reallocations
+                    < owned.allocations + owned.reallocations,
+                "borrowed mixed cells must pool string storage rather than allocate per cell",
+            );
+        }
+    }
+
+    for cells in [1_000, 100_000] {
+        let mut numeric = RawArgumentIngressBenchmark::number_matrix(cells, 1);
+        let prepared = measure_calls(
+            &format!("matrix_ref_f64_{cells}/prepare_identity"),
+            ARRAY_OUTPUT_CALLS,
+            || {
+                black_box(numeric.run_borrowed_numeric_matrix_prepared(false));
+            },
+        );
+        let materialized = measure_calls(
+            &format!("matrix_ref_f64_{cells}/prepare_materialize"),
+            ARRAY_OUTPUT_CALLS,
+            || {
+                black_box(numeric.run_borrowed_numeric_matrix_prepared(true));
+            },
+        );
+        if !cfg!(feature = "refinement") {
+            assert!(prepared.allocations + prepared.reallocations <= 2 * ARRAY_OUTPUT_CALLS);
+            assert!(
+                prepared.requested_bytes <= 16 * 1024 * ARRAY_OUTPUT_CALLS,
+                "warm numeric MatrixRef preparation must use only the hash workspace",
+            );
+            assert_eq!(
+                materialized.allocations,
+                prepared.allocations + ARRAY_OUTPUT_CALLS
+            );
+            assert_eq!(
+                materialized.deallocations,
+                prepared.deallocations + ARRAY_OUTPUT_CALLS,
+            );
+            assert_eq!(materialized.reallocations, prepared.reallocations);
+            assert!(
+                materialized.requested_bytes
+                    >= prepared.requested_bytes
+                        + ARRAY_OUTPUT_CALLS * cells * std::mem::size_of::<f64>(),
+                "preparation must avoid the typed numeric scratch buffer",
+            );
+        }
+    }
+
+    let mut handle = RawArgumentIngressBenchmark::handle();
+    let plain = measure("handle/plain", || {
+        handle.run_handle_plain::<BenchHandleObject>()
+    });
+    let identity = measure("handle/with_identity", || {
+        black_box(handle.run_handle_with_identity::<BenchHandleObject>());
+    });
+    assert_runtime_allocation_free("handle/plain", plain);
+    assert_runtime_allocation_free("handle/with_identity", identity);
+
+    #[cfg(feature = "async")]
+    {
+        let pending = measure("handle/async_pending", || {
+            handle.run_handle_pending::<BenchHandleObject>()
+        });
+        assert_runtime_allocation_free("handle/async_pending", pending);
+    }
+
+    // This fixture installs its own deterministic host callback. Keep it after
+    // every value-boundary case, whose benchmark runtime uses another callback.
+    for count in [10, 5_000] {
+        let registration = RegistrationBenchmark::new(count);
+        for (phase, operation) in [
+            (
+                "preflight",
+                RegistrationBenchmark::run_preflight as fn(&RegistrationBenchmark),
+            ),
+            ("total", RegistrationBenchmark::run_total),
+        ] {
+            let counts = measure_calls(&format!("registration/{phase}/{count}"), 10, || {
+                operation(&registration);
+            });
+            assert_eq!(
+                counts.allocations, counts.deallocations,
+                "registration preparation and callback temporaries must be released"
+            );
+        }
+    }
+}

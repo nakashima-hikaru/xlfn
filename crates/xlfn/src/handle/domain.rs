@@ -1,0 +1,454 @@
+//! Call-scoped handle read domain and deferred reclamation.
+//!
+//! Rather than acquiring a per-record reader permit on every lookup, UDF
+//! calls register once with this domain for the duration of their invocation-owned `CallStorage`.
+//! Readers enter striped drain gates partitioned by generation, avoiding
+//! cache-line contention on individual binding records during concurrent
+//! lookups of the same handle.
+//!
+//! Removed bindings enter generation-bound queues. Writers and departing
+//! readers reclaim idle generations while borrowing the registry owner. The
+//! last reader therefore reclaims even a single retirement without a worker
+//! owning or extending the domain's lifetime. Writers apply blocking
+//! backpressure at 256 records when they cannot hold their own read permit.
+//! Final seal waits for reader and destructor completion.
+//! Only the current generation is open, so a reader that observed the old
+//! generation before rotation cannot be admitted after the grace period starts.
+
+#![allow(
+    unsafe_code,
+    reason = "owned read permits are audited temporal capabilities"
+)]
+
+mod counters;
+mod protocol;
+mod retirement;
+
+use crate::{XllError, XllResult};
+use retirement::RetirementAccounting;
+pub(super) use retirement::UnlinkedBindingOwner;
+use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
+use xlfn_kernel::rotating_read_domain::RotatingReadOwnedPermit;
+
+#[cfg(test)]
+use xlfn_kernel::rotating_read_domain::RotatingReadPermit;
+
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub(crate) struct HandleReadDomain {
+    retirement: RetirementAccounting,
+    maintenance_requests: AtomicUsize,
+}
+
+pub(crate) struct HandleDomainPermit {
+    domain: NonNull<HandleReadDomain>,
+    permit: Option<RotatingReadOwnedPermit<DEFAULT_STRIPE_COUNT>>,
+}
+
+impl HandleDomainPermit {
+    pub(crate) fn domain(&self) -> NonNull<HandleReadDomain> {
+        self.domain
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn witness(&self) -> crate::call::HandleDomainWitness<'_> {
+        crate::call::HandleDomainWitness::from_permit(self)
+    }
+}
+
+impl Drop for HandleDomainPermit {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        // SAFETY: enter_owned requires the domain owner to outlive the whole
+        // capability, including this final maintenance notification.
+        unsafe { self.domain.as_ref() }.maintain_after_reader();
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct HandleBindingDomainPermit<'domain> {
+    domain: &'domain HandleReadDomain,
+    permit: Option<RotatingReadPermit<'domain, DEFAULT_STRIPE_COUNT>>,
+}
+
+#[cfg(test)]
+impl Drop for HandleBindingDomainPermit<'_> {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        self.domain.maintain_after_reader();
+    }
+}
+
+impl HandleReadDomain {
+    pub(crate) fn new() -> Self {
+        Self {
+            retirement: RetirementAccounting::new(),
+            maintenance_requests: AtomicUsize::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn enter(&self) -> XllResult<HandleBindingDomainPermit<'_>> {
+        self.retirement
+            .enter_current_thread()
+            .map(|permit| HandleBindingDomainPermit {
+                domain: self,
+                permit: Some(permit),
+            })
+            .map_err(|_| XllError::Closing)
+    }
+
+    /// Enters the handle read domain and acquires an owned reader permit.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `self` outlives the returned [`HandleDomainPermit`].
+    /// All permits must be dropped before the domain is destroyed or moved.
+    ///
+    /// Protocol obligation [HD-1]: Reader admission under domain isolation guarantees safe access.
+    #[inline]
+    pub(crate) unsafe fn enter_owned(&self) -> XllResult<HandleDomainPermit> {
+        // SAFETY: guaranteed by caller's owner-lifetime contract;
+        // self outlives the returned permit and will be drained before reclamation.
+        unsafe {
+            self.retirement
+                .enter_owned_current_thread()
+                .map(|permit| HandleDomainPermit {
+                    domain: NonNull::from(self),
+                    permit: Some(permit),
+                })
+                .map_err(|_| XllError::Closing)
+        }
+    }
+
+    /// Withdrawal and enqueue share the binding-table writer lock with seal.
+    /// Rotation acquires this queue before publishing the next generation.
+    /// Either our withdrawal happens-before that publication, or acquiring the
+    /// queue after publication makes the recheck below select the next queue.
+    /// A double generation load without that queue/publication barrier would
+    /// not exclude new readers observing a stale withdrawn pointer.
+    ///
+    /// Protocol obligation [HD-2]: Retired bindings enter generation-bound queue; immediate drop is forbidden.
+    pub(super) fn enqueue_reclaim(&self, record: UnlinkedBindingOwner) {
+        self.retirement.register(record);
+    }
+
+    pub(crate) fn debt(&self) -> usize {
+        self.retirement.debt()
+    }
+
+    pub(crate) fn is_reclaiming_here(&self) -> bool {
+        self.retirement.is_reclaiming_here()
+    }
+
+    pub(crate) fn maintain_after_removal(&self) {
+        if self.is_reclaiming_here() {
+            return;
+        }
+        let debt = self.debt();
+        // CallStorage is !Send and all handle permits use the acquiring thread's
+        // default stripe. Looking at both generations therefore excludes an
+        // own permit without changing lookup/permit-entry bookkeeping.
+        if debt >= HARD_DEBT_LIMIT && !self.retirement.current_thread_may_be_reading() {
+            self.quiesce();
+        } else {
+            self.maintain();
+        }
+    }
+
+    fn maintain_after_reader(&self) {
+        // The permit's Release RMW precedes this fence. If a writer already
+        // sealed that stripe, acquire its Release sequence: enqueue precedes
+        // seal, so the zero-queue test cannot miss that writer's debt. If this
+        // reader left before seal, the writer's idle check sees its departure
+        // and handles the drain. A queue load without this fence can lose the
+        // final reader notification on weakly ordered hosts.
+        std::sync::atomic::fence(Ordering::Acquire);
+        if self.retirement.queued() != 0 {
+            self.maintain();
+        }
+    }
+
+    pub(crate) fn maintain(&self) {
+        if self.is_reclaiming_here() {
+            return;
+        }
+        // Writers and blocking quiescence always register. In particular,
+        // acquiring a previous failed poll's notification after releasing the
+        // transition lock makes its queued work visible to this next pass.
+        // Every requester registers once. Only the 0 -> 1 caller drives;
+        // requests arriving during a poll remain in the count and force the
+        // driver to acquire them before another poll. Subtracting the consumed
+        // batch to zero transfers driving responsibility to the next caller.
+        // One modification order replaces a two-flag handoff, so a departing
+        // reader's notification cannot be cleared without being consumed.
+        let previous = self
+            .maintenance_requests
+            .try_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |requests| match counters::add(requests, 1) {
+                    counters::CountStep::Success(next) => Some(next),
+                    counters::CountStep::FailStop => None,
+                },
+            )
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        if previous != 0 {
+            return;
+        }
+        let mut consumed = 1;
+        loop {
+            self.poll_maintenance();
+            let requested =
+                self.maintenance_requests
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
+                        match counters::subtract(requests, consumed) {
+                            counters::CountStep::Success(next) => Some(next),
+                            counters::CountStep::FailStop => None,
+                        }
+                    })
+                    .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+            if requested == consumed {
+                return;
+            }
+            consumed = requested - consumed;
+        }
+    }
+
+    fn poll_maintenance(&self) {
+        while self.retirement.queued() != 0 {
+            let Some(records) = self.retirement.poll_reclaim() else {
+                break;
+            };
+            records.reclaim();
+        }
+    }
+
+    /// Rotates the domain and drains retired bindings.
+    ///
+    /// Protocol obligation [HD-3]: Generational quiescence ensures all readers of the retired generation have drained.
+    pub(crate) fn quiesce(&self) {
+        self.retirement.quiesce_reclaim().reclaim();
+        self.maintain();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flush_for_test(&self) {
+        self.quiesce();
+        self.retirement.wait_for_completion();
+    }
+
+    /// Final drain closes reader admission and waits for destruction already
+    /// handed to another borrowing writer or departing reader.
+    ///
+    /// Protocol obligation [HD-5]: Destruction barrier: waits for domain drain and flushes remaining debt before arena teardown.
+    pub(crate) fn seal(&self) {
+        self.retirement.close_reclaim().reclaim();
+        if !self.is_reclaiming_here() {
+            self.retirement.wait_for_completion();
+        }
+    }
+}
+
+pub(crate) const HARD_DEBT_LIMIT: usize = 256;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handle::{ExcelHandleObject, registry::HandleRegistry};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn loom_empty_queue_fast_path_preserves_last_reader_notification() {
+        use loom::sync::Arc;
+        use loom::sync::atomic::{AtomicUsize, Ordering, fence};
+
+        struct Maintenance {
+            // Bits 1/2 are seal/wait flags. Keep the same RMW orderings
+            // as SealableCounter::release / seal / mark_waiting.
+            gates: [AtomicUsize; 2],
+            queued: AtomicUsize,
+            requests: AtomicUsize,
+        }
+
+        impl Maintenance {
+            fn maintain(&self) {
+                let previous = self
+                    .requests
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
+                        match counters::add(requests, 1) {
+                            counters::CountStep::Success(next) => Some(next),
+                            counters::CountStep::FailStop => None,
+                        }
+                    })
+                    .expect("maintenance request count cannot overflow");
+                if previous != 0 {
+                    return;
+                }
+                let mut consumed = 1;
+                loop {
+                    if self.queued.load(Ordering::Relaxed) != 0 {
+                        for gate in &self.gates {
+                            gate.fetch_or(2, Ordering::Release);
+                        }
+                        if self
+                            .gates
+                            .iter()
+                            .all(|gate| gate.fetch_or(4, Ordering::AcqRel) & 1 == 0)
+                        {
+                            self.queued.store(0, Ordering::Relaxed);
+                        }
+                    }
+                    let requested = self
+                        .requests
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
+                            match counters::subtract(requests, consumed) {
+                                counters::CountStep::Success(next) => Some(next),
+                                counters::CountStep::FailStop => None,
+                            }
+                        })
+                        .expect("maintenance request count cannot underflow");
+                    if requested == consumed {
+                        return;
+                    }
+                    consumed = requested - consumed;
+                }
+            }
+        }
+
+        for reader_count in [1, 2] {
+            let mut model = loom::model::Builder::new();
+            if reader_count == 2 {
+                // Three actors have a much larger schedule space. Exercise
+                // two reader stripes with bounded preemption in normal CI.
+                model.preemption_bound = Some(2);
+                model.max_permutations = Some(20_000);
+            }
+            model.check(move || {
+                let state = Arc::new(Maintenance {
+                    gates: std::array::from_fn(|index| {
+                        AtomicUsize::new(usize::from(index < reader_count))
+                    }),
+                    queued: AtomicUsize::new(0),
+                    requests: AtomicUsize::new(0),
+                });
+                let readers: Vec<_> = (0..reader_count)
+                    .map(|index| {
+                        let reader = Arc::clone(&state);
+                        loom::thread::spawn(move || {
+                            reader.gates[index].fetch_sub(1, Ordering::Release);
+                            fence(Ordering::Acquire);
+                            if reader.queued.load(Ordering::Relaxed) != 0 {
+                                reader.maintain();
+                            }
+                        })
+                    })
+                    .collect();
+                let writer = Arc::clone(&state);
+                let writer = loom::thread::spawn(move || {
+                    writer.queued.store(1, Ordering::Relaxed);
+                    writer.maintain();
+                });
+                for reader in readers {
+                    reader.join().unwrap();
+                }
+                writer.join().unwrap();
+                assert_eq!(state.queued.load(Ordering::Relaxed), 0);
+                assert_eq!(state.requests.load(Ordering::Relaxed), 0);
+            });
+        }
+    }
+
+    #[test]
+    fn miri_last_old_reader_reclaims_while_a_later_reader_remains() {
+        // Object payloads are static; keep the observation outside the arena.
+        struct Counted(Arc<AtomicUsize>);
+        impl ExcelHandleObject for Counted {}
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Release);
+            }
+        }
+        let registry = HandleRegistry::from_entropy(1, [7; 40]);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let pending = registry.new_object(Counted(Arc::clone(&drops))).unwrap();
+        let token = pending.publish().unwrap().0;
+        let domain = registry.bindings.read_domain();
+        let old = domain.enter().unwrap();
+        registry.remove::<Counted>(&token).unwrap();
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        let later = domain.enter().unwrap();
+        drop(old);
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+        assert_eq!(domain.debt(), 0);
+        drop(later);
+    }
+
+    #[test]
+    fn hard_debt_remover_without_a_read_permit_waits_for_grace() {
+        struct Payload;
+        impl ExcelHandleObject for Payload {}
+        let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
+        let publish = || {
+            let pending = registry.new_object(Payload).unwrap();
+            pending.publish().unwrap().0
+        };
+        let first = publish();
+        let (remover, finished) = crate::call::with_branded_call_scope_and_state(
+            &registry,
+            |registry, storage, brand| {
+                let mut context = crate::value::DecodeCallContext::with_storage(storage, brand);
+                let borrowed = registry
+                    .lookup_handle::<Payload>(&mut context, &first)
+                    .unwrap();
+                registry.remove::<Payload>(&first).unwrap();
+                for _ in 1..HARD_DEBT_LIMIT - 1 {
+                    registry.remove::<Payload>(&publish()).unwrap();
+                }
+                let final_token = publish();
+                // The conservative stripe observation may collide. Find a fresh
+                // remover whose own stripe is empty before testing blocking policy.
+                let mut selected = None;
+                for _ in 0..64 {
+                    let removing = Arc::clone(registry);
+                    let token = final_token.clone();
+                    let (started_tx, started_rx) = std::sync::mpsc::channel();
+                    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+                    let remover = std::thread::spawn(move || {
+                        if removing
+                            .bindings
+                            .read_domain()
+                            .retirement
+                            .current_thread_may_be_reading()
+                        {
+                            started_tx.send(false).unwrap();
+                            return;
+                        }
+                        started_tx.send(true).unwrap();
+                        removing.remove::<Payload>(&token).unwrap();
+                        finished_tx.send(()).unwrap();
+                    });
+                    if started_rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                        selected = Some((remover, finished_rx));
+                        break;
+                    }
+                    remover.join().unwrap();
+                }
+                let (remover, finished) = selected.expect("find a remover with an empty stripe");
+                assert!(finished.recv_timeout(Duration::from_millis(20)).is_err());
+                std::hint::black_box(&*borrowed);
+                (remover, finished)
+            },
+        );
+        finished.recv_timeout(Duration::from_secs(30)).unwrap();
+        remover.join().unwrap();
+        registry.bindings.read_domain().flush_for_test();
+        assert_eq!(registry.bindings.read_domain().debt(), 0);
+    }
+}

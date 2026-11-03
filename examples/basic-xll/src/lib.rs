@@ -1,0 +1,47 @@
+#![deny(unsafe_code)]
+
+use xlfn::prelude::*;
+use xlfn::reference::ExcelReference;
+
+pub struct ExampleState;
+
+pub struct ExampleAddin;
+
+#[excel_addin(name = "Example Add-in", id = "example-addin", category = "Example")]
+impl Addin for ExampleAddin {
+    type SharedState = ExampleState;
+    type LifecycleState = ();
+    type Error = XllError;
+    type Layers = ();
+
+    fn open(_context: &OpenContext<Self>) -> OpenResult<Self> {
+        Ok(Opened::new(ExampleState))
+    }
+}
+
+#[excel_function(name = "EXAMPLE.ADD", thread_safe)]
+pub fn add(
+    #[excel_arg(description = "First addend.")] x: f64,
+    #[excel_arg(description = "Second addend.")] y: f64,
+) -> XllResult<f64> {
+    Ok(x + y)
+}
+
+#[excel_function(name = "EXAMPLE.GREET", thread_safe)]
+pub fn greet(name: String) -> XllResult<String> {
+    Ok(format!("Hello, {name}!"))
+}
+
+#[excel_function(name = "EXAMPLE.ONE", thread_safe)]
+pub fn one() -> i32 {
+    1
+}
+
+#[excel_function(name = "EXAMPLE.REF.AREAS", macro_sheet)]
+pub fn reference_area_count(
+    #[excel_arg(reference, description = "Cell or range reference.")] reference: ExcelReference<'_>,
+) -> XllResult<i32> {
+    i32::try_from(reference.areas().len()).map_err(|_| XllError::Domain {
+        code: xlfn::error::DomainErrorCode::Overflow,
+    })
+}

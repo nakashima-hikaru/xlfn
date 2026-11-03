@@ -1,0 +1,7 @@
+error[E0046]: not all trait items implemented, missing: `AsyncExecutor`
+ --> tests/ui/fail_async/executor_associated_type_required.rs:5:1
+  |
+5 | impl Addin for MissingExecutor {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `AsyncExecutor` in implementation
+  |
+  = help: implement the missing item: `type AsyncExecutor = /* Type */;`

@@ -1,0 +1,35 @@
+error: an async Excel function can only inject AsyncContext
+ --> tests/ui/context_async_modes.rs:4:23
+  |
+4 | async fn main_context(context: MainThreadContext<'_, State>) -> f64 {
+  |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: an async Excel function can only inject AsyncContext
+ --> tests/ui/context_async_modes.rs:9:25
+  |
+9 | async fn thread_context(context: ThreadSafeContext<'_, State>) -> f64 {
+  |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: an async Excel function can only inject AsyncContext
+  --> tests/ui/context_async_modes.rs:14:24
+   |
+14 | async fn macro_context(context: MacroSheetContext<'_, State>) -> f64 {
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: AsyncContext can only be injected by an async Excel function
+  --> tests/ui/context_async_modes.rs:19:16
+   |
+19 | fn synchronous(context: AsyncContext<'_, State>) -> f64 {
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: an async Excel function cannot be marked thread_safe
+  --> tests/ui/context_async_modes.rs:24:1
+   |
+24 | async fn thread_flag(input: f64) -> f64 {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: an async Excel function cannot be a macro-sheet function
+  --> tests/ui/context_async_modes.rs:29:1
+   |
+29 | async fn macro_flag(input: f64) -> f64 {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

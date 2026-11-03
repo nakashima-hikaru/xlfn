@@ -1,0 +1,50 @@
+#[path = "../async_executor.rs"]
+mod executor;
+
+use xlfn::prelude::*;
+
+struct TestAddin;
+
+#[excel_addin(name = "Scoped Context", id = "scoped-context", category = "Test")]
+impl Addin for TestAddin {
+    type AsyncExecutor = executor::Executor;
+    type SharedState = ();
+    type LifecycleState = ();
+    type Error = XllError;
+    type Layers = ();
+
+    fn open(_: &OpenContext<Self>) -> OpenResult<Self> {
+        Ok(Opened::new(()).with_async_executor(executor::Executor))
+    }
+}
+
+#[derive(ExcelHandleObject)]
+struct Dataset {
+    value: f64,
+}
+
+mod custom {
+    use std::marker::PhantomData;
+    use xlfn::XllResult;
+    use xlfn::value::{FromExcel, XlValueRef};
+
+    pub struct AsyncContext<'call, A>(PhantomData<&'call A>);
+
+    impl<'call, A> FromExcel<'call> for AsyncContext<'call, A> {
+        fn from_excel(_: XlValueRef<'call>, _: &'static str) -> XllResult<Self> {
+            Ok(Self(PhantomData))
+        }
+    }
+}
+
+#[excel_function]
+async fn bad(
+    context: custom::AsyncContext<'_, TestAddin>,
+    dataset: HandleLease<'_, Dataset>,
+) -> f64 {
+    let _ = context;
+    std::future::ready(()).await;
+    dataset.value
+}
+
+fn main() {}

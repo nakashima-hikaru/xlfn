@@ -1,0 +1,8 @@
+error: lifetime may not live long enough
+ --> tests/ui/fail/prepared_borrow_cannot_escape.rs:7:5
+  |
+4 | fn escape<'call>(value: XlValueRef<'call>, identity: &mut InputIdentityEncoder)
+  |           ----- lifetime `'call` defined here
+...
+7 |     <String as PrepareExcel<'call>>::prepare(value, "value", identity)
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'call` must outlive `'static`

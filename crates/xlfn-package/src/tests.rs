@@ -1,0 +1,2147 @@
+use super::*;
+
+use proptest::prelude::*;
+
+fn synthetic_xll() -> Vec<u8> {
+    let base = synthetic_export_pe(1, &[SyntheticExportTarget::Direct], &[]);
+    let mut bytes = vec![0; 0xc00];
+    bytes[..0x200].copy_from_slice(&base[..0x200]);
+    bytes[0x400..0x800].copy_from_slice(&base[0x200..0x600]);
+    let optional = 0x98;
+    let sections = optional + 0xf0;
+    bytes[0x86..0x88].copy_from_slice(&4_u16.to_le_bytes());
+    bytes[optional + 56..optional + 60].copy_from_slice(&0x5000_u32.to_le_bytes());
+    bytes[optional + 60..optional + 64].copy_from_slice(&0x400_u32.to_le_bytes());
+    for (index, raw) in [0x400_u32, 0x600, 0x800, 0xa00].into_iter().enumerate() {
+        let section = sections + index * 40;
+        bytes[section + 20..section + 24].copy_from_slice(&raw.to_le_bytes());
+        let flags: u32 = if index == 1 { 0x60000020 } else { 0x40000040 };
+        bytes[section + 36..section + 40].copy_from_slice(&flags.to_le_bytes());
+        if index >= 2 {
+            let name: &[u8; 8] = if index == 2 {
+                b".xllexp\0"
+            } else {
+                b".xlfncrt"
+            };
+            bytes[section..section + 8].copy_from_slice(name);
+            bytes[section + 8..section + 12].copy_from_slice(&0x200_u32.to_le_bytes());
+            bytes[section + 12..section + 16]
+                .copy_from_slice(&((index as u32 + 1) * 0x1000).to_le_bytes());
+            bytes[section + 16..section + 20].copy_from_slice(&0x200_u32.to_le_bytes());
+        }
+    }
+    let mut names = REQUIRED_XLL_EXPORTS.to_vec();
+    names.sort_unstable();
+    bytes[0x418..0x41c].copy_from_slice(&(names.len() as u32).to_le_bytes());
+    bytes[0x424..0x428].copy_from_slice(&0x1060_u32.to_le_bytes());
+    let mut string = 0x490;
+    let mut manifest = 0x800;
+    for (index, name) in names.into_iter().enumerate() {
+        let pointer = 0x440 + index * 4;
+        bytes[pointer..pointer + 4]
+            .copy_from_slice(&(0x1000_u32 + (string - 0x400) as u32).to_le_bytes());
+        bytes[string..string + name.len()].copy_from_slice(name.as_bytes());
+        string += name.len() + 1;
+        bytes[manifest..manifest + name.len()].copy_from_slice(name.as_bytes());
+        manifest += name.len() + 1;
+    }
+    bytes[0xa00..0xa08].copy_from_slice(CRT_MARKER_MAGIC);
+    bytes[0xa08] = CRT_MARKER_SCHEMA;
+    bytes
+}
+
+#[test]
+fn export_manifest_rejects_corrupt_data_and_duplicate_sections() {
+    let baseline = synthetic_xll();
+    let manifest_section = 0x98 + 0xf0 + 2 * 40;
+    let mut unreadable = baseline.clone();
+    unreadable[manifest_section + 20..manifest_section + 24]
+        .copy_from_slice(&0x1000_u32.to_le_bytes());
+    let error = parse_pe_bytes(&unreadable).unwrap_err();
+    assert!(
+        error.to_string().contains("failed to read .xllexp"),
+        "{error}"
+    );
+
+    let mut invalid_utf8 = baseline.clone();
+    invalid_utf8[0x800] = 0xff;
+    let error = parse_pe_bytes(&invalid_utf8).unwrap_err();
+    assert!(
+        error.to_string().contains("invalid UTF-8 in .xllexp"),
+        "{error}"
+    );
+
+    let mut duplicate = baseline.clone();
+    let other_section = manifest_section + 40;
+    duplicate[other_section..other_section + 8].copy_from_slice(b".xllexp\0");
+    let error = parse_pe_bytes(&duplicate).unwrap_err();
+    assert!(error.to_string().contains("multiple .xllexp"), "{error}");
+
+    let mut empty = baseline.clone();
+    empty[0x800..0xa00].fill(0);
+    let info = parse_pe_bytes(&empty).unwrap();
+    assert!(info.has_export_manifest);
+    assert!(info.expected_exports.is_empty());
+    assert!(verify_xll_exports(&info, Path::new("empty.xll"), &[]).is_err());
+    let info = parse_pe_bytes(&baseline).unwrap();
+    verify_xll_exports(&info, Path::new("valid.xll"), &[]).unwrap();
+}
+
+#[test]
+fn executable_section_bounds_accept_raw_padding_and_virtual_zero_fill() {
+    let baseline = synthetic_xll();
+    let text_section = 0x98 + 0xf0 + 40;
+    for virtual_size in [0_u32, 1, 0x200, 0x800] {
+        let mut bytes = baseline.clone();
+        bytes[text_section + 8..text_section + 12].copy_from_slice(&virtual_size.to_le_bytes());
+        let info = parse_pe_bytes(&bytes).unwrap();
+        verify_xll_exports(&info, Path::new("valid.xll"), &[]).unwrap();
+    }
+    for (virtual_size, target, accepted) in [
+        (1_u32, 0x21ff_u32, true),
+        (1, 0x2200, false),
+        (0x800, 0x27ff, true),
+        (0x800, 0x2800, false),
+        (0x800, 0x2fff, false),
+    ] {
+        let mut bytes = baseline.clone();
+        bytes[text_section + 8..text_section + 12].copy_from_slice(&virtual_size.to_le_bytes());
+        bytes[0x430..0x434].copy_from_slice(&target.to_le_bytes());
+        assert_eq!(
+            parse_pe_bytes(&bytes).is_ok(),
+            accepted,
+            "{virtual_size:#x}, {target:#x}"
+        );
+    }
+}
+
+#[test]
+fn mapped_section_layout_rejects_ambiguous_ranges_before_export_lookup() {
+    let baseline = synthetic_xll();
+    let sections = 0x98 + 0xf0;
+    for (offset, value) in [
+        (sections + 2 * 40 + 12, 0x2000_u32), // overlaps executable section
+        (sections + 40 + 12, 0x1000),         // identical non-executable and code ranges
+        (sections + 40 + 12, 0x2100),         // unaligned mapping
+        (sections + 40 + 8, 0x1001),          // aligned extent overlaps next section
+        (sections + 3 * 40 + 8, 0x1001),      // mapping exceeds SizeOfImage
+        (sections + 3 * 40 + 8, u32::MAX),    // arithmetic overflow
+        (0x98 + 56, 0x4000),                  // final section outside image
+        (0x98 + 32, 0),                       // invalid SectionAlignment
+    ] {
+        let mut bytes = baseline.clone();
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        assert!(
+            parse_pe_bytes(&bytes).is_err(),
+            "accepted {offset:#x} = {value:#x}"
+        );
+    }
+}
+
+#[test]
+fn parsed_snapshot_is_transferred_without_replacing_its_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("addin.xll");
+    let bytes = SharedBytes::from(synthetic_xll());
+    fs::write(&path, bytes.as_ref()).unwrap();
+    let snapshot = PeSnapshot::parse(bytes.clone()).unwrap();
+    assert_eq!(
+        snapshot.info().crt_policy,
+        Some(EffectiveCrtPolicy::Dynamic)
+    );
+    let package = verify_staged_package(
+        &path,
+        "x86_64-pc-windows-msvc",
+        snapshot,
+        &[],
+        StagedBundle {
+            files: Vec::new(),
+            external_imports: BTreeSet::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(package.artifacts().len(), 1);
+    assert_eq!(package.artifacts()[0].bytes().as_ptr(), bytes.as_ptr());
+    assert_eq!(package.artifacts()[0].bytes(), bytes.as_ref());
+}
+
+#[test]
+fn staged_package_rejects_content_changed_after_policy_inspection() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("addin.xll");
+    let bytes = synthetic_xll();
+    let mut changed = bytes.clone();
+    changed[0x600] ^= 1;
+    fs::write(&path, &changed).unwrap();
+    let error = verify_staged_package(
+        &path,
+        "x86_64-pc-windows-msvc",
+        PeSnapshot::parse(bytes.into()).unwrap(),
+        &[],
+        StagedBundle {
+            files: Vec::new(),
+            external_imports: BTreeSet::new(),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(error, PackageError::StagedArtifactChanged { .. }));
+}
+
+fn xll_info() -> PeInfo {
+    let framework = REQUIRED_XLL_EXPORTS
+        .iter()
+        .copied()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    PeInfo {
+        machine: IMAGE_FILE_MACHINE_AMD64,
+        characteristics: IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL,
+        exports: framework.clone(),
+        forwarded_exports: BTreeMap::new(),
+        executable_exports: framework.clone(),
+        has_export_manifest: true,
+        expected_exports: framework,
+        crt_policy: Some(EffectiveCrtPolicy::Dynamic),
+        imports: BTreeSet::new(),
+        import_targets: BTreeMap::new(),
+        delay_imports: BTreeSet::new(),
+        delay_import_targets: BTreeMap::new(),
+        exported_ordinals: BTreeSet::new(),
+        nonzero_export_slots: BTreeSet::new(),
+        named_export_slots: BTreeSet::new(),
+    }
+}
+
+fn package_with_test_manifest(artifact: VerifiedArtifact) -> (VerifiedPackage, Vec<u8>) {
+    let input = BuildManifestInput::default();
+    let manifest = BuildManifest::from_input(input.clone(), std::slice::from_ref(&artifact))
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    let package = VerifiedPackage {
+        artifacts: vec![artifact],
+        expected_names: BTreeSet::from(["engine.dll".to_owned()]),
+    }
+    .with_build_manifest(input)
+    .unwrap();
+    (package, manifest)
+}
+
+#[test]
+fn crt_marker_records_the_effective_compiler_policy() {
+    let mut dynamic = [0_u8; 16];
+    dynamic[..8].copy_from_slice(CRT_MARKER_MAGIC);
+    dynamic[8] = CRT_MARKER_SCHEMA;
+    assert_eq!(
+        parse_crt_marker(&dynamic).unwrap(),
+        EffectiveCrtPolicy::Dynamic
+    );
+
+    dynamic[9] = 1;
+    assert_eq!(
+        parse_crt_marker(&dynamic).unwrap(),
+        EffectiveCrtPolicy::Static
+    );
+    dynamic[8] = 2;
+    assert!(parse_crt_marker(&dynamic).is_err());
+}
+
+#[test]
+fn crt_marker_requires_a_canonical_section_layout() {
+    let mut marker = [0_u8; 16];
+    marker[..8].copy_from_slice(CRT_MARKER_MAGIC);
+    marker[8] = CRT_MARKER_SCHEMA;
+
+    let mut junk_prefix = vec![0x5a];
+    junk_prefix.extend_from_slice(&marker);
+    assert!(parse_crt_marker(&junk_prefix).is_err());
+
+    let mut duplicate = marker.to_vec();
+    duplicate.extend_from_slice(&marker);
+    assert!(parse_crt_marker(&duplicate).is_err());
+
+    let mut reserved = marker;
+    reserved[10] = 1;
+    assert!(parse_crt_marker(&reserved).is_err());
+
+    let mut padding = marker.to_vec();
+    padding.extend_from_slice(&[0; 8]);
+    assert_eq!(
+        parse_crt_marker(&padding).unwrap(),
+        EffectiveCrtPolicy::Dynamic
+    );
+}
+
+#[test]
+fn xll_verification_requires_the_framework_manifest_and_lifecycle_exports() {
+    let path = Path::new("addin.xll");
+    let mut missing_manifest = xll_info();
+    missing_manifest.has_export_manifest = false;
+    assert!(
+        verify_xll_exports(&missing_manifest, path, &[])
+            .unwrap_err()
+            .to_string()
+            .contains(".xllexp")
+    );
+
+    let mut missing_crt_marker = xll_info();
+    missing_crt_marker.crt_policy = None;
+    assert!(
+        verify_xll_exports(&missing_crt_marker, path, &[])
+            .unwrap_err()
+            .to_string()
+            .contains(".xlfncrt")
+    );
+
+    let mut missing_lifecycle = xll_info();
+    missing_lifecycle.exports.remove("xlAutoOpen");
+    assert!(
+        verify_xll_exports(&missing_lifecycle, path, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("xlAutoOpen")
+    );
+
+    let mut missing_calculation_event = xll_info();
+    missing_calculation_event
+        .exports
+        .remove("__xlfn_calculation_ended");
+    missing_calculation_event
+        .expected_exports
+        .remove("__xlfn_calculation_ended");
+    assert!(
+        verify_xll_exports(&missing_calculation_event, path, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("__xlfn_calculation_ended")
+    );
+
+    assert!(verify_xll_exports(&xll_info(), path, &[]).is_ok());
+}
+
+#[test]
+fn xll_verification_reconciles_manifest_and_actual_udf_exports() {
+    let path = Path::new("addin.xll");
+    let mut info = xll_info();
+    info.expected_exports.insert("xll_compute".to_owned());
+    assert!(
+        verify_xll_exports(&info, path, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("xll_compute")
+    );
+    info.exports.insert("xll_compute".to_owned());
+    info.executable_exports.insert("xll_compute".to_owned());
+    assert!(verify_xll_exports(&info, path, &["xll_compute".to_owned()]).is_ok());
+}
+
+#[test]
+fn xll_verification_rejects_forwarded_entry_points() {
+    let path = Path::new("addin.xll");
+    let mut info = xll_info();
+    let forwarded = ForwardedExport {
+        library: "helper.dll".to_owned(),
+        symbol: ExportSymbol::Name("Open".to_owned()),
+    };
+    let _ = info
+        .forwarded_exports
+        .insert(ExportSymbol::Name("xlAutoOpen".to_owned()), forwarded);
+    let error = verify_xll_exports(&info, path, &[]).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("forwards required XLL export xlAutoOpen")
+    );
+}
+
+#[test]
+fn pe_image_characteristics_require_an_executable_dll() {
+    let path = Path::new("addin.xll");
+    let mut info = xll_info();
+    info.characteristics = IMAGE_FILE_EXECUTABLE_IMAGE;
+    assert!(verify_image_characteristics(&info, path).is_err());
+    info.characteristics = IMAGE_FILE_DLL;
+    assert!(verify_image_characteristics(&info, path).is_err());
+    info.characteristics = IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL | IMAGE_FILE_SYSTEM;
+    assert!(verify_image_characteristics(&info, path).is_err());
+    info.characteristics = IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL;
+    assert!(verify_image_characteristics(&info, path).is_ok());
+}
+
+#[test]
+fn xll_verification_rejects_named_exports_without_executable_targets() {
+    let path = Path::new("addin.xll");
+    let mut info = xll_info();
+    info.executable_exports.remove("xlAutoOpen");
+    let error = verify_xll_exports(&info, path, &[]).unwrap_err();
+    assert!(error.to_string().contains("direct executable target"));
+}
+
+#[test]
+fn unsafe_bundle_paths_are_rejected() {
+    assert!(validate_relative("file", "../Vendor.dll").is_err());
+    assert!(validate_relative("file", "/Vendor.dll").is_err());
+}
+
+#[test]
+fn bundle_paths_reject_dot_segments_before_path_normalization() {
+    for path in ["./Vendor.dll", "native/./Vendor.dll", "native/."] {
+        assert!(validate_relative("file", path).is_err(), "{path}");
+    }
+    assert!(validate_relative("file", "native/Vendor.dll").is_ok());
+    assert!(validate_relative("file", "native/.support.dll").is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_validation_checks_existing_ancestors() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let real_parent = directory.path().join("real-parent");
+    let linked_parent = directory.path().join("linked-parent");
+    fs::create_dir(&real_parent).unwrap();
+    symlink(&real_parent, &linked_parent).unwrap();
+
+    let error = validate_directory_path(&linked_parent.join("nested").join("dist")).unwrap_err();
+    assert!(error.to_string().contains("symlink or reparse point"));
+}
+
+#[test]
+fn bounded_directory_entry_read_stops_before_collecting_extra_entries() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("first"), []).unwrap();
+    fs::write(directory.path().join("second"), []).unwrap();
+
+    let error = read_directory_entries(directory.path(), 1).unwrap_err();
+    assert!(error.to_string().contains("entry budget"));
+}
+
+#[test]
+fn bundle_metadata_rejects_unknown_fields() {
+    let parsed: BundleMetadata =
+        serde_json::from_str(
+            r#"{"x86":["native/x86/A.dll"],"x64":["native/x64/A.dll"],"external-imports":["Inbox.dll"],"strict-paths":true}"#,
+        )
+        .unwrap();
+    assert_eq!(parsed.x86.len(), 1);
+    assert_eq!(parsed.external_imports, vec!["Inbox.dll"]);
+    assert!(parsed.strict_paths);
+    assert!(serde_json::from_str::<BundleMetadata>(r#"{"unknown":true}"#).is_err());
+}
+
+#[test]
+fn bundle_metadata_and_simple_resolution_default_to_strict_paths() {
+    let parsed: BundleMetadata = serde_json::from_str(r#"{"x86":[],"x64":[]}"#).unwrap();
+    assert!(parsed.strict_paths);
+    assert!(BundleMetadata::default().strict_paths);
+
+    let manifest = tempfile::tempdir().unwrap();
+    fs::write(manifest.path().join("Engine.dll"), []).unwrap();
+    let bundle = resolve_bundle_files(
+        manifest.path(),
+        "x86_64-pc-windows-msvc",
+        &["Engine.dll".to_owned()],
+    )
+    .unwrap();
+    assert_eq!(bundle.resolved_files().count(), 1);
+}
+
+#[test]
+fn case_insensitive_bundle_basenames_are_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir_all(directory.path().join("one")).unwrap();
+    fs::create_dir_all(directory.path().join("two")).unwrap();
+    fs::write(directory.path().join("one/Engine.dll"), []).unwrap();
+    fs::write(directory.path().join("two/engine.DLL"), []).unwrap();
+    let error = resolve_bundle_files(
+        directory.path(),
+        "x86_64-pc-windows-msvc",
+        &["one/Engine.dll".to_owned(), "two/engine.DLL".to_owned()],
+    )
+    .err()
+    .unwrap();
+    assert!(error.to_string().contains("duplicate bundle basename"));
+}
+
+#[test]
+fn windows_invalid_and_non_ascii_dll_basenames_are_rejected_on_every_host() {
+    for name in [
+        "CON.dll",
+        "aux.DLL",
+        "COM1.dll",
+        "LPT9.dll",
+        "trailing.dll.",
+        "trailing.dll ",
+        "foo:bar.dll",
+        r"foo\bar.dll",
+        "Ä.dll",
+    ] {
+        assert!(
+            windows_dll_name_key("bundle file", name).is_err(),
+            "{name:?} unexpectedly passed Windows basename validation"
+        );
+    }
+    assert_eq!(
+        windows_dll_name_key("bundle file", "Engine.DLL").unwrap(),
+        "engine.dll"
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn bundle_resolution_applies_windows_basename_rules_on_other_hosts() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("CON.dll"), []).unwrap();
+
+    let error = resolve_bundle_files(
+        directory.path(),
+        "x86_64-pc-windows-msvc",
+        &["CON.dll".to_owned()],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("reserved Windows device name"));
+}
+
+#[test]
+fn staging_flattens_multiple_configured_files() {
+    let source = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("Engine.dll"), b"engine").unwrap();
+    fs::write(source.path().join("Math.dll"), b"math").unwrap();
+    let bundle = resolve_bundle_files(
+        source.path(),
+        "x86_64-pc-windows-msvc",
+        &["Engine.dll".to_owned(), "Math.dll".to_owned()],
+    )
+    .unwrap();
+    let staging_dir = destination.path().join("stage");
+    let staging_directory = PrivateStagingDirectory::create(&staging_dir).unwrap();
+    let staged = stage_bundle(&bundle, &staging_directory).unwrap();
+    assert_eq!(staged.files.len(), 2);
+    assert!(
+        staged
+            .files
+            .iter()
+            .all(|file| file.source.starts_with(&staging_dir))
+    );
+    fs::write(source.path().join("Engine.dll"), b"replaced").unwrap();
+    assert_eq!(fs::read(staging_dir.join("Engine.dll")).unwrap(), b"engine");
+    assert_eq!(fs::read(staging_dir.join("Math.dll")).unwrap(), b"math");
+}
+
+#[test]
+fn truncated_and_mutated_xll_bytes_never_panic_the_pe_parser() {
+    let baseline = synthetic_xll();
+    let info = parse_pe_bytes(&baseline).unwrap();
+    verify_xll_exports(&info, Path::new("baseline.xll"), &[]).unwrap();
+
+    for length in 0..baseline.len() {
+        let result = std::panic::catch_unwind(|| parse_pe_bytes(&baseline[..length]));
+        assert!(
+            result.is_ok(),
+            "parser panicked for prefix of {length} bytes"
+        );
+    }
+
+    // Start with a valid PE image so corrupt sizes, counts, and RVAs exercise
+    // the header, section, and export readers as well as format detection.
+    let optional_header = 0x98;
+    let first_section = optional_header + 0xf0;
+    for offset in [
+        0x3c,                   // DOS e_lfanew
+        optional_header + 56,   // SizeOfImage
+        optional_header + 60,   // SizeOfHeaders
+        optional_header + 108,  // NumberOfRvaAndSizes
+        optional_header + 0x70, // export directory RVA
+        optional_header + 0x74, // export directory size
+        first_section + 12,     // section VirtualAddress
+        first_section + 16,     // section SizeOfRawData
+        first_section + 20,     // section PointerToRawData
+        0x400 + 20,             // export NumberOfFunctions
+        0x400 + 24,             // export NumberOfNames
+        0x400 + 28,             // export AddressOfFunctions
+        0x400 + 32,             // export AddressOfNames
+        0x400 + 36,             // export AddressOfNameOrdinals
+    ] {
+        for value in [
+            0,
+            1,
+            baseline.len() as u32 - 1,
+            baseline.len() as u32,
+            u32::MAX,
+        ] {
+            let mut bytes = baseline.clone();
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            let result = std::panic::catch_unwind(|| parse_pe_bytes(&bytes));
+            assert!(
+                result.is_ok(),
+                "parser panicked at {offset:#x} = {value:#x}"
+            );
+        }
+    }
+}
+
+fn write_u16<T>(destination: &mut [u8], value: T)
+where
+    T: object::Wrap<Inner = u16> + Copy + 'static,
+{
+    let encoded = object::endian::U16::<LE, T>::new(LE, value);
+    destination.copy_from_slice(object::pod::bytes_of(&encoded));
+}
+
+fn minimal_pe(machine: object::pe::Machine, characteristics: object::pe::FileFlags) -> Vec<u8> {
+    let peoff = 0x80usize;
+    let raw = 0x200usize;
+    let mut buf = vec![0_u8; 0x400];
+    buf[0..2].copy_from_slice(b"MZ");
+    buf[0x3c..0x40].copy_from_slice(&(peoff as u32).to_le_bytes());
+    let mut offset = peoff;
+    buf[offset..offset + 4].copy_from_slice(b"PE\0\0");
+    offset += 4;
+    write_u16(&mut buf[offset..offset + 2], machine);
+    buf[offset + 2..offset + 4].copy_from_slice(&1_u16.to_le_bytes());
+    buf[offset + 16..offset + 18].copy_from_slice(&0x00f0_u16.to_le_bytes());
+    write_u16(&mut buf[offset + 18..offset + 20], characteristics);
+    offset += 20;
+    let optional = offset;
+    buf[optional..optional + 2].copy_from_slice(&0x20b_u16.to_le_bytes());
+    buf[optional + 2] = 14;
+    buf[optional + 8..optional + 12].copy_from_slice(&0x200_u32.to_le_bytes());
+    buf[optional + 20..optional + 24].copy_from_slice(&0x1000_u32.to_le_bytes());
+    buf[optional + 24..optional + 32].copy_from_slice(&0x140000000_u64.to_le_bytes());
+    buf[optional + 32..optional + 36].copy_from_slice(&0x1000_u32.to_le_bytes());
+    buf[optional + 36..optional + 40].copy_from_slice(&0x200_u32.to_le_bytes());
+    buf[optional + 40..optional + 42].copy_from_slice(&6_u16.to_le_bytes());
+    buf[optional + 48..optional + 50].copy_from_slice(&6_u16.to_le_bytes());
+    buf[optional + 56..optional + 60].copy_from_slice(&0x2000_u32.to_le_bytes());
+    buf[optional + 60..optional + 64].copy_from_slice(&0x200_u32.to_le_bytes());
+    buf[optional + 68..optional + 70].copy_from_slice(&2_u16.to_le_bytes());
+    buf[optional + 70..optional + 72].copy_from_slice(&0x8160_u16.to_le_bytes());
+    buf[optional + 72..optional + 80].copy_from_slice(&0x100000_u64.to_le_bytes());
+    buf[optional + 80..optional + 88].copy_from_slice(&0x1000_u64.to_le_bytes());
+    buf[optional + 88..optional + 96].copy_from_slice(&0x100000_u64.to_le_bytes());
+    buf[optional + 96..optional + 104].copy_from_slice(&0x1000_u64.to_le_bytes());
+    buf[optional + 108..optional + 112].copy_from_slice(&16_u32.to_le_bytes());
+
+    offset = optional + 0xf0;
+    buf[offset..offset + 8].copy_from_slice(b".text\0\0\0");
+    buf[offset + 8..offset + 12].copy_from_slice(&0x200_u32.to_le_bytes());
+    buf[offset + 12..offset + 16].copy_from_slice(&0x1000_u32.to_le_bytes());
+    buf[offset + 16..offset + 20].copy_from_slice(&0x200_u32.to_le_bytes());
+    buf[offset + 20..offset + 24].copy_from_slice(&(raw as u32).to_le_bytes());
+    buf[offset + 32..offset + 36].copy_from_slice(&0x60000020_u32.to_le_bytes());
+    buf
+}
+
+#[test]
+fn verify_bundle_files_checks_dll_characteristics() {
+    let cases = [
+        (IMAGE_FILE_DLL, "not an executable PE image"),
+        (IMAGE_FILE_EXECUTABLE_IMAGE, "not marked as a PE DLL"),
+        (
+            IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL | IMAGE_FILE_SYSTEM,
+            "marked as a system image",
+        ),
+    ];
+    for (index, (characteristics, expected)) in cases.into_iter().enumerate() {
+        let directory = tempfile::tempdir().unwrap();
+        let name = format!("Engine{index}.dll");
+        fs::write(
+            directory.path().join(&name),
+            minimal_pe(IMAGE_FILE_MACHINE_AMD64, characteristics),
+        )
+        .unwrap();
+        let bundle = resolve_bundle_files(
+            directory.path(),
+            "x86_64-pc-windows-msvc",
+            std::slice::from_ref(&name),
+        )
+        .unwrap();
+        let error = verify_bundle_files(&bundle, "x86_64-pc-windows-msvc").unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+enum SyntheticExportTarget<'a> {
+    Zero,
+    Direct,
+    ForwardedOrdinal(&'a str, u32),
+    ForwardedName(&'a str, &'a str),
+}
+
+fn synthetic_export_pe(
+    ordinal_base: u32,
+    targets: &[SyntheticExportTarget<'_>],
+    names: &[(usize, &str)],
+) -> Vec<u8> {
+    let peoff = 0x80usize;
+    let edata_raw = 0x200usize;
+    let text_raw = 0x400usize;
+    let mut buf = vec![0_u8; 0x600];
+    buf[0..2].copy_from_slice(b"MZ");
+    buf[0x3c..0x40].copy_from_slice(&(peoff as u32).to_le_bytes());
+    let mut offset = peoff;
+    buf[offset..offset + 4].copy_from_slice(b"PE\0\0");
+    offset += 4;
+    write_u16(&mut buf[offset..offset + 2], IMAGE_FILE_MACHINE_AMD64);
+    buf[offset + 2..offset + 4].copy_from_slice(&2_u16.to_le_bytes());
+    buf[offset + 16..offset + 18].copy_from_slice(&0x00f0_u16.to_le_bytes());
+    write_u16(
+        &mut buf[offset + 18..offset + 20],
+        IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL,
+    );
+    offset += 20;
+    let optional = offset;
+    buf[optional..optional + 2].copy_from_slice(&0x20b_u16.to_le_bytes());
+    buf[optional + 2] = 14;
+    buf[optional + 8..optional + 12].copy_from_slice(&0x400_u32.to_le_bytes());
+    buf[optional + 20..optional + 24].copy_from_slice(&0x1000_u32.to_le_bytes());
+    buf[optional + 24..optional + 32].copy_from_slice(&0x140000000_u64.to_le_bytes());
+    buf[optional + 32..optional + 36].copy_from_slice(&0x1000_u32.to_le_bytes());
+    buf[optional + 36..optional + 40].copy_from_slice(&0x200_u32.to_le_bytes());
+    buf[optional + 40..optional + 42].copy_from_slice(&6_u16.to_le_bytes());
+    buf[optional + 48..optional + 50].copy_from_slice(&6_u16.to_le_bytes());
+    buf[optional + 56..optional + 60].copy_from_slice(&0x3000_u32.to_le_bytes());
+    buf[optional + 60..optional + 64].copy_from_slice(&0x200_u32.to_le_bytes());
+    buf[optional + 68..optional + 70].copy_from_slice(&2_u16.to_le_bytes());
+    buf[optional + 70..optional + 72].copy_from_slice(&0x8160_u16.to_le_bytes());
+    buf[optional + 72..optional + 80].copy_from_slice(&0x100000_u64.to_le_bytes());
+    buf[optional + 80..optional + 88].copy_from_slice(&0x1000_u64.to_le_bytes());
+    buf[optional + 88..optional + 96].copy_from_slice(&0x100000_u64.to_le_bytes());
+    buf[optional + 96..optional + 104].copy_from_slice(&0x1000_u64.to_le_bytes());
+    buf[optional + 108..optional + 112].copy_from_slice(&16_u32.to_le_bytes());
+    buf[optional + 0x70..optional + 0x74].copy_from_slice(&0x1000_u32.to_le_bytes());
+    buf[optional + 0x74..optional + 0x78].copy_from_slice(&0x180_u32.to_le_bytes());
+
+    offset = optional + 0xf0;
+    buf[offset..offset + 8].copy_from_slice(b".edata\0\0");
+    buf[offset + 8..offset + 12].copy_from_slice(&0x200_u32.to_le_bytes());
+    buf[offset + 12..offset + 16].copy_from_slice(&0x1000_u32.to_le_bytes());
+    buf[offset + 16..offset + 20].copy_from_slice(&0x200_u32.to_le_bytes());
+    buf[offset + 20..offset + 24].copy_from_slice(&(edata_raw as u32).to_le_bytes());
+    buf[offset + 32..offset + 36].copy_from_slice(&0x40000040_u32.to_le_bytes());
+    offset += 40;
+    buf[offset..offset + 8].copy_from_slice(b".text\0\0\0");
+    buf[offset + 8..offset + 12].copy_from_slice(&0x200_u32.to_le_bytes());
+    buf[offset + 12..offset + 16].copy_from_slice(&0x2000_u32.to_le_bytes());
+    buf[offset + 16..offset + 20].copy_from_slice(&0x200_u32.to_le_bytes());
+    buf[offset + 20..offset + 24].copy_from_slice(&(text_raw as u32).to_le_bytes());
+    buf[offset + 32..offset + 36].copy_from_slice(&0x60000020_u32.to_le_bytes());
+
+    let export = edata_raw;
+    buf[export + 12..export + 16].copy_from_slice(&0x1080_u32.to_le_bytes());
+    buf[export + 16..export + 20].copy_from_slice(&ordinal_base.to_le_bytes());
+    buf[export + 20..export + 24].copy_from_slice(&(targets.len() as u32).to_le_bytes());
+    buf[export + 24..export + 28].copy_from_slice(&(names.len() as u32).to_le_bytes());
+    buf[export + 28..export + 32].copy_from_slice(&0x1030_u32.to_le_bytes());
+    buf[export + 32..export + 36].copy_from_slice(&0x1040_u32.to_le_bytes());
+    buf[export + 36..export + 40].copy_from_slice(&0x1050_u32.to_le_bytes());
+
+    let mut string_offset = 0x80usize;
+    buf[export + string_offset..export + string_offset + 8].copy_from_slice(b"engine\0\0");
+    string_offset += 0x10;
+    for (index, target) in targets.iter().enumerate() {
+        let target_rva = match target {
+            SyntheticExportTarget::Zero => 0,
+            SyntheticExportTarget::Direct => 0x2000,
+            SyntheticExportTarget::ForwardedOrdinal(library, ordinal) => {
+                let forward = format!("{library}.#{ordinal}");
+                let bytes = forward.as_bytes();
+                buf[export + string_offset..export + string_offset + bytes.len()]
+                    .copy_from_slice(bytes);
+                buf[export + string_offset + bytes.len()] = 0;
+                let rva = 0x1000 + string_offset as u32;
+                string_offset += bytes.len() + 1;
+                rva
+            }
+            SyntheticExportTarget::ForwardedName(library, name) => {
+                let forward = format!("{library}.{name}");
+                let bytes = forward.as_bytes();
+                buf[export + string_offset..export + string_offset + bytes.len()]
+                    .copy_from_slice(bytes);
+                buf[export + string_offset + bytes.len()] = 0;
+                let rva = 0x1000 + string_offset as u32;
+                string_offset += bytes.len() + 1;
+                rva
+            }
+        };
+        let eat = export + 0x30 + index * 4;
+        buf[eat..eat + 4].copy_from_slice(&target_rva.to_le_bytes());
+    }
+    let mut name_string_offset = string_offset.max(0x100);
+    for (name_position, (index, name)) in names.iter().enumerate() {
+        let bytes = name.as_bytes();
+        buf[export + name_string_offset..export + name_string_offset + bytes.len()]
+            .copy_from_slice(bytes);
+        buf[export + name_string_offset + bytes.len()] = 0;
+        let name_rva = 0x1000 + name_string_offset as u32;
+        let pointer = export + 0x40 + name_position * 4;
+        buf[pointer..pointer + 4].copy_from_slice(&name_rva.to_le_bytes());
+        let ordinal_pointer = export + 0x50 + name_position * 2;
+        buf[ordinal_pointer..ordinal_pointer + 2].copy_from_slice(&(*index as u16).to_le_bytes());
+        name_string_offset += bytes.len() + 1;
+    }
+    buf
+}
+
+#[test]
+fn export_validation_tracks_eat_slots_for_aliases_and_forwarders() {
+    let alias = synthetic_export_pe(
+        1,
+        &[
+            SyntheticExportTarget::Direct,
+            SyntheticExportTarget::Direct,
+            SyntheticExportTarget::Zero,
+        ],
+        &[(0, "AliasA"), (0, "AliasB")],
+    );
+    let info = parse_pe_bytes(&alias).unwrap();
+    assert_eq!(
+        info.exported_ordinals,
+        BTreeSet::from([ExportOrdinal(1), ExportOrdinal(2)])
+    );
+    assert_eq!(
+        info.nonzero_export_slots,
+        BTreeSet::from([ExportAddressIndex(0), ExportAddressIndex(1)])
+    );
+    assert_eq!(
+        info.named_export_slots,
+        BTreeSet::from([ExportAddressIndex(0)])
+    );
+    assert_eq!(
+        info.nonzero_export_slots
+            .difference(&info.named_export_slots)
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![ExportAddressIndex(1)]
+    );
+
+    let forwarded = synthetic_export_pe(
+        1,
+        &[SyntheticExportTarget::ForwardedOrdinal("engine", 7)],
+        &[(0, "Forwarded"), (0, "SecondAlias")],
+    );
+    let info = parse_pe_bytes(&forwarded).unwrap();
+    assert_eq!(info.exported_ordinals, BTreeSet::from([ExportOrdinal(1)]));
+    assert_eq!(
+        info.forwarded_exports
+            .get(&ExportSymbol::Ordinal(ExportOrdinal(1))),
+        Some(&ForwardedExport {
+            library: "engine.dll".to_owned(),
+            symbol: ExportSymbol::Ordinal(ExportOrdinal(7)),
+        })
+    );
+    for alias in ["Forwarded", "SecondAlias"] {
+        assert_eq!(
+            info.forwarded_exports
+                .get(&ExportSymbol::Name(alias.to_owned())),
+            info.forwarded_exports
+                .get(&ExportSymbol::Ordinal(ExportOrdinal(1)))
+        );
+    }
+}
+
+#[test]
+fn export_ordinal_overflow_is_rejected_instead_of_dropped() {
+    let bytes = synthetic_export_pe(0x1_0000, &[SyntheticExportTarget::Direct], &[]);
+    let error = parse_pe_bytes(&bytes).unwrap_err();
+    assert!(error.to_string().contains("ordinal"), "{error}");
+}
+
+#[test]
+fn parsed_named_forwarder_cycles_are_rejected() {
+    let first = parse_pe_bytes(&synthetic_export_pe(
+        1,
+        &[SyntheticExportTarget::ForwardedName("second", "Entry")],
+        &[(0, "Entry")],
+    ))
+    .unwrap();
+    let second = parse_pe_bytes(&synthetic_export_pe(
+        1,
+        &[SyntheticExportTarget::ForwardedName("first", "Entry")],
+        &[(0, "Entry")],
+    ))
+    .unwrap();
+    let images = BTreeMap::from([
+        ("first.dll".to_owned(), ("First.dll".to_owned(), first)),
+        ("second.dll".to_owned(), ("Second.dll".to_owned(), second)),
+    ]);
+    let error = validate_dependency_graph(&images, &BTreeSet::new()).unwrap_err();
+    assert!(error.to_string().contains("cyclic forwarded export"));
+}
+
+#[test]
+fn parsed_named_forwarder_chain_reaches_a_direct_export() {
+    let first = parse_pe_bytes(&synthetic_export_pe(
+        1,
+        &[SyntheticExportTarget::ForwardedName("second", "Entry")],
+        &[(0, "Entry")],
+    ))
+    .unwrap();
+    let second = parse_pe_bytes(&synthetic_export_pe(
+        1,
+        &[SyntheticExportTarget::Direct],
+        &[(0, "Entry")],
+    ))
+    .unwrap();
+    let images = BTreeMap::from([
+        ("first.dll".to_owned(), ("First.dll".to_owned(), first)),
+        ("second.dll".to_owned(), ("Second.dll".to_owned(), second)),
+    ]);
+    validate_dependency_graph(&images, &BTreeSet::new()).unwrap();
+}
+
+fn graph_image(imports: &[&str], delay_imports: &[&str]) -> PeInfo {
+    PeInfo {
+        machine: IMAGE_FILE_MACHINE_AMD64,
+        characteristics: IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL,
+        exports: BTreeSet::new(),
+        forwarded_exports: BTreeMap::new(),
+        executable_exports: BTreeSet::new(),
+        has_export_manifest: false,
+        expected_exports: BTreeSet::new(),
+        crt_policy: None,
+        imports: imports.iter().map(|name| (*name).to_owned()).collect(),
+        import_targets: BTreeMap::new(),
+        delay_imports: delay_imports
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
+        delay_import_targets: BTreeMap::new(),
+        exported_ordinals: BTreeSet::new(),
+        nonzero_export_slots: BTreeSet::new(),
+        named_export_slots: BTreeSet::new(),
+    }
+}
+
+fn add_direct_export(image: &mut PeInfo, name: &str, ordinal: u16) {
+    image.exports.insert(name.to_owned());
+    image.exported_ordinals.insert(ExportOrdinal(ordinal));
+}
+
+fn add_forwarded_export(
+    image: &mut PeInfo,
+    name: &str,
+    ordinal: u16,
+    library: &str,
+    target: ExportSymbol,
+) {
+    add_direct_export(image, name, ordinal);
+    let forwarded = ForwardedExport {
+        library: library.to_ascii_lowercase(),
+        symbol: target,
+    };
+    let _ = image
+        .forwarded_exports
+        .insert(ExportSymbol::Name(name.to_owned()), forwarded.clone());
+    let _ = image
+        .forwarded_exports
+        .insert(ExportSymbol::Ordinal(ExportOrdinal(ordinal)), forwarded);
+}
+
+#[test]
+fn deep_dependency_chains_do_not_depend_on_thread_stack_size() {
+    std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(|| {
+            let mut images = BTreeMap::new();
+            for index in 0..4096 {
+                let name = format!("library{index:04}.dll");
+                let next = format!("library{:04}.dll", (index + 1) % 4096);
+                // Import cycles are valid; both eager and delayed edges must
+                // terminate without revisiting an already checked image.
+                let image = if index % 2 == 0 {
+                    graph_image(&[&next], &[])
+                } else {
+                    graph_image(&[], &[&next])
+                };
+                images.insert(name.clone(), (name, image));
+            }
+            validate_dependency_graph(&images, &BTreeSet::new()).unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn deep_forwarder_chains_and_cycles_do_not_depend_on_thread_stack_size() {
+    std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(|| {
+            let mut image = graph_image(&[], &[]);
+            for ordinal in 1..=4096 {
+                image.exported_ordinals.insert(ExportOrdinal(ordinal));
+                if ordinal < 4096 {
+                    image.forwarded_exports.insert(
+                        ExportSymbol::Ordinal(ExportOrdinal(ordinal)),
+                        ForwardedExport {
+                            library: "library.dll".to_owned(),
+                            symbol: ExportSymbol::Ordinal(ExportOrdinal(ordinal + 1)),
+                        },
+                    );
+                }
+            }
+            let mut images =
+                BTreeMap::from([("library.dll".to_owned(), ("Library.dll".to_owned(), image))]);
+            validate_dependency_graph(&images, &BTreeSet::new()).unwrap();
+
+            images
+                .get_mut("library.dll")
+                .unwrap()
+                .1
+                .forwarded_exports
+                .insert(
+                    ExportSymbol::Ordinal(ExportOrdinal(4096)),
+                    ForwardedExport {
+                        library: "library.dll".to_owned(),
+                        symbol: ExportSymbol::Ordinal(ExportOrdinal(2048)),
+                    },
+                );
+            let error = validate_dependency_graph(&images, &BTreeSet::new()).unwrap_err();
+            assert!(error.to_string().contains("cyclic forwarded export"));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn dependency_graph_reports_the_full_missing_chain() {
+    let images = BTreeMap::from([
+        (
+            "addin.xll".to_owned(),
+            ("Addin.xll".to_owned(), graph_image(&["Engine.dll"], &[])),
+        ),
+        (
+            "engine.dll".to_owned(),
+            ("Engine.dll".to_owned(), graph_image(&[], &["Model.dll"])),
+        ),
+    ]);
+    let error = validate_dependency_graph(&images, &BTreeSet::new()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Addin.xll -> Engine.dll -> model.dll")
+    );
+}
+
+#[test]
+fn dependency_graph_rejects_missing_imported_symbol() {
+    let mut addin = graph_image(&["Engine.dll"], &[]);
+    addin.import_targets.insert(
+        "Engine.dll".to_owned(),
+        BTreeSet::from([ImportTarget::Name("SymbolV2".to_owned())]),
+    );
+    let mut engine = graph_image(&[], &[]);
+    engine.exports.insert("SymbolV1".to_owned());
+    let images = BTreeMap::from([
+        ("addin.xll".to_owned(), ("Addin.xll".to_owned(), addin)),
+        ("engine.dll".to_owned(), ("Engine.dll".to_owned(), engine)),
+    ]);
+
+    let error = validate_dependency_graph(&images, &BTreeSet::new()).unwrap_err();
+    assert!(error.to_string().contains("Engine.dll!SymbolV2"));
+}
+
+#[test]
+fn dependency_graph_rejects_missing_imported_ordinal() {
+    let mut addin = graph_image(&[], &["Engine.dll"]);
+    addin.delay_import_targets.insert(
+        "Engine.dll".to_owned(),
+        BTreeSet::from([ImportTarget::Ordinal(17)]),
+    );
+    let mut engine = graph_image(&[], &[]);
+    engine.exported_ordinals.insert(ExportOrdinal(16));
+    let images = BTreeMap::from([
+        ("addin.xll".to_owned(), ("Addin.xll".to_owned(), addin)),
+        ("engine.dll".to_owned(), ("Engine.dll".to_owned(), engine)),
+    ]);
+
+    let error = validate_dependency_graph(&images, &BTreeSet::new()).unwrap_err();
+    assert!(error.to_string().contains("Engine.dll!#17"));
+}
+
+#[test]
+fn dependency_graph_accepts_existing_name_and_ordinal_targets() {
+    let mut addin = graph_image(&["Engine.dll"], &[]);
+    addin.import_targets.insert(
+        "Engine.dll".to_owned(),
+        BTreeSet::from([
+            ImportTarget::Name("Process".to_owned()),
+            ImportTarget::Ordinal(17),
+        ]),
+    );
+    let mut engine = graph_image(&[], &[]);
+    engine.exports.insert("Process".to_owned());
+    engine.exported_ordinals.insert(ExportOrdinal(17));
+    let images = BTreeMap::from([
+        ("addin.xll".to_owned(), ("Addin.xll".to_owned(), addin)),
+        ("engine.dll".to_owned(), ("Engine.dll".to_owned(), engine)),
+    ]);
+
+    validate_dependency_graph(&images, &BTreeSet::new()).unwrap();
+}
+
+#[test]
+fn dependency_graph_rejects_bundled_external_overlap_without_imports() {
+    let images = BTreeMap::from([
+        (
+            "vendor.dll".to_owned(),
+            ("Vendor.dll".to_owned(), graph_image(&[], &[])),
+        ),
+        (
+            "addin.xll".to_owned(),
+            ("Addin.xll".to_owned(), graph_image(&[], &[])),
+        ),
+    ]);
+    validate_dependency_graph(&images, &BTreeSet::new()).unwrap();
+    let external = BTreeSet::from(["vendor.dll".to_owned()]);
+
+    let error = validate_dependency_graph(&images, &external).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "DLL `vendor.dll` cannot be both bundled and external"
+    );
+}
+
+#[test]
+fn dynamically_linked_msvc_runtime_is_not_treated_as_an_inbox_dll() {
+    let images = BTreeMap::from([(
+        "addin.xll".to_owned(),
+        (
+            "Addin.xll".to_owned(),
+            graph_image(&["vcruntime140.dll"], &[]),
+        ),
+    )]);
+    let error = validate_dependency_graph(&images, &BTreeSet::new()).unwrap_err();
+    assert!(error.to_string().contains("vcruntime140.dll"));
+}
+
+#[test]
+fn explicit_external_import_permits_dynamic_msvc_runtime() {
+    let mut bundle = StagedBundle {
+        files: vec![],
+        external_imports: BTreeSet::new(),
+    };
+    bundle
+        .try_add_external_imports(["vcruntime140.dll"])
+        .unwrap();
+    let images = BTreeMap::from([(
+        "addin.xll".to_owned(),
+        (
+            "Addin.xll".to_owned(),
+            graph_image(&["vcruntime140.dll"], &[]),
+        ),
+    )]);
+    assert!(validate_dependency_graph(&images, &bundle.external_imports).is_ok());
+}
+
+#[test]
+fn staged_bundle_external_imports_validate_all_inputs_before_mutating() {
+    let mut bundle = StagedBundle {
+        files: vec![],
+        external_imports: BTreeSet::new(),
+    };
+    let error = bundle
+        .try_add_external_imports(["trusted.dll", "vendor/not-a-basename.dll"])
+        .unwrap_err();
+    assert!(error.to_string().contains("external import"));
+    assert!(bundle.external_imports.is_empty());
+}
+
+#[test]
+fn api_set_looking_names_are_not_implicitly_trusted() {
+    let images = BTreeMap::from([(
+        "addin.xll".to_owned(),
+        (
+            "Addin.xll".to_owned(),
+            graph_image(&["api-ms-win-not-a-real-contract.dll"], &[]),
+        ),
+    )]);
+    let error = validate_dependency_graph(&images, &BTreeSet::new()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("api-ms-win-not-a-real-contract.dll")
+    );
+
+    let external =
+        normalize_external_imports(&["api-ms-win-not-a-real-contract.dll".to_owned()]).unwrap();
+    validate_dependency_graph(&images, &external).unwrap();
+}
+
+#[test]
+fn explicit_external_import_is_accepted_and_validated_as_a_dll_basename() {
+    let images = BTreeMap::from([(
+        "addin.xll".to_owned(),
+        (
+            "Addin.xll".to_owned(),
+            graph_image(&["Some-Inbox-Component.dll"], &[]),
+        ),
+    )]);
+    let external = normalize_external_imports(&["some-inbox-component.DLL".to_owned()]).unwrap();
+    validate_dependency_graph(&images, &external).unwrap();
+    assert!(normalize_external_imports(&["directory/vendor.dll".to_owned()]).is_err());
+    assert!(normalize_external_imports(&["directory\\vendor.dll".to_owned()]).is_err());
+    assert!(normalize_external_imports(&["..\\vendor.dll".to_owned()]).is_err());
+    assert!(normalize_external_imports(&["C:\\Temp\\vendor.dll".to_owned()]).is_err());
+    assert!(normalize_external_imports(&["vendor.exe".to_owned()]).is_err());
+}
+
+#[test]
+fn public_dependency_verifier_rejects_a_bundled_system_dll_basename() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("Addin.xll");
+    let bundled = directory.path().join("version.dll");
+    fs::write(
+        &root,
+        minimal_pe(
+            IMAGE_FILE_MACHINE_AMD64,
+            IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL,
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &bundled,
+        minimal_pe(
+            IMAGE_FILE_MACHINE_AMD64,
+            IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL,
+        ),
+    )
+    .unwrap();
+
+    let error = verify_pe_dependency_closure(
+        &root,
+        "x86_64-pc-windows-msvc",
+        std::slice::from_ref(&bundled),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("must not shadow Windows system DLL")
+    );
+}
+
+#[test]
+fn dependency_graph_rejects_missing_forwarded_library() {
+    let mut addin = graph_image(&[], &[]);
+    add_forwarded_export(
+        &mut addin,
+        "Process",
+        1,
+        "engine.dll",
+        ExportSymbol::Name("ProcessImpl".to_owned()),
+    );
+    let images = BTreeMap::from([("addin.xll".to_owned(), ("Addin.xll".to_owned(), addin))]);
+    let error = validate_dependency_graph(&images, &BTreeSet::new()).unwrap_err();
+    assert!(error.to_string().contains("engine.dll"));
+}
+
+#[test]
+fn dependency_graph_validates_forwarded_symbol_and_chain() {
+    let mut addin = graph_image(&[], &[]);
+    add_forwarded_export(
+        &mut addin,
+        "Process",
+        1,
+        "engine.dll",
+        ExportSymbol::Name("ProcessImpl".to_owned()),
+    );
+    let mut engine = graph_image(&[], &[]);
+    add_forwarded_export(
+        &mut engine,
+        "ProcessImpl",
+        2,
+        "model.dll",
+        ExportSymbol::Ordinal(ExportOrdinal(7)),
+    );
+    let mut model = graph_image(&[], &[]);
+    model.exported_ordinals.insert(ExportOrdinal(7));
+    let images = BTreeMap::from([
+        ("addin.xll".to_owned(), ("Addin.xll".to_owned(), addin)),
+        ("engine.dll".to_owned(), ("Engine.dll".to_owned(), engine)),
+        ("model.dll".to_owned(), ("Model.dll".to_owned(), model)),
+    ]);
+    validate_dependency_graph(&images, &BTreeSet::new()).unwrap();
+}
+
+#[test]
+fn dependency_graph_rejects_missing_forwarded_symbol() {
+    let mut addin = graph_image(&[], &[]);
+    add_forwarded_export(
+        &mut addin,
+        "Process",
+        1,
+        "engine.dll",
+        ExportSymbol::Name("Missing".to_owned()),
+    );
+    let images = BTreeMap::from([
+        ("addin.xll".to_owned(), ("Addin.xll".to_owned(), addin)),
+        (
+            "engine.dll".to_owned(),
+            ("Engine.dll".to_owned(), graph_image(&[], &[])),
+        ),
+    ]);
+    let error = validate_dependency_graph(&images, &BTreeSet::new()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("forwarded export target is missing")
+    );
+}
+
+#[test]
+fn dependency_graph_rejects_forwarder_cycles() {
+    let mut addin = graph_image(&[], &[]);
+    add_forwarded_export(
+        &mut addin,
+        "Process",
+        1,
+        "engine.dll",
+        ExportSymbol::Name("ProcessImpl".to_owned()),
+    );
+    let mut engine = graph_image(&[], &[]);
+    add_forwarded_export(
+        &mut engine,
+        "ProcessImpl",
+        2,
+        "addin.xll",
+        ExportSymbol::Name("Process".to_owned()),
+    );
+    let images = BTreeMap::from([
+        ("addin.xll".to_owned(), ("Addin.xll".to_owned(), addin)),
+        ("engine.dll".to_owned(), ("Engine.dll".to_owned(), engine)),
+    ]);
+    let error = validate_dependency_graph(&images, &BTreeSet::new()).unwrap_err();
+    assert!(error.to_string().contains("cyclic forwarded export"));
+}
+
+#[cfg(unix)]
+#[test]
+fn bundle_rejects_symlink_escape_and_strict_mode_rejects_any_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let manifest = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("Vendor.dll"), b"outside").unwrap();
+    symlink(
+        outside.path().join("Vendor.dll"),
+        manifest.path().join("Escape.dll"),
+    )
+    .unwrap();
+    let strict_error = resolve_bundle_files(
+        manifest.path(),
+        "x86_64-pc-windows-msvc",
+        &["Escape.dll".to_owned()],
+    )
+    .unwrap_err();
+    assert!(strict_error.to_string().contains("rejects symlink"));
+
+    let relaxed_escape_error = resolve_bundle_files_with_policy(
+        manifest.path(),
+        "x86_64-pc-windows-msvc",
+        &["Escape.dll".to_owned()],
+        &[],
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        relaxed_escape_error
+            .to_string()
+            .contains("escapes manifest directory")
+    );
+
+    fs::write(manifest.path().join("Inside.dll"), b"inside").unwrap();
+    symlink(
+        manifest.path().join("Inside.dll"),
+        manifest.path().join("Alias.dll"),
+    )
+    .unwrap();
+    let relaxed = resolve_bundle_files_with_policy(
+        manifest.path(),
+        "x86_64-pc-windows-msvc",
+        &["Alias.dll".to_owned()],
+        &[],
+        false,
+    )
+    .unwrap();
+    assert_eq!(relaxed.resolved_files().count(), 1);
+    let strict = resolve_bundle_files_with_policy(
+        manifest.path(),
+        "x86_64-pc-windows-msvc",
+        &["Alias.dll".to_owned()],
+        &[],
+        true,
+    )
+    .unwrap_err();
+    assert!(strict.to_string().contains("rejects symlink"));
+}
+
+#[cfg(unix)]
+#[test]
+fn relaxed_bundle_preserves_symlink_names_for_staging_and_imports() {
+    use std::os::unix::fs::symlink;
+
+    let manifest = tempfile::tempdir().unwrap();
+    let bytes = synthetic_export_pe(1, &[SyntheticExportTarget::Direct], &[(0, "Entry")]);
+    let source = manifest.path().join("Inside-v2.bin");
+    fs::write(&source, &bytes).unwrap();
+    symlink(&source, manifest.path().join("Alias.dll")).unwrap();
+    symlink(&source, manifest.path().join("SecondAlias.dll")).unwrap();
+    let bundle = resolve_bundle_files_with_policy(
+        manifest.path(),
+        "x86_64-pc-windows-msvc",
+        &["Alias.dll".to_owned(), "SecondAlias.dll".to_owned()],
+        &[],
+        false,
+    )
+    .unwrap();
+    let canonical_source = fs::canonicalize(&source).unwrap();
+    for file in bundle.resolved_files() {
+        assert_eq!(file.source, canonical_source);
+        assert_eq!(file.staged_name, file.configured_path);
+    }
+    let staging = PrivateStagingDirectory::create(&manifest.path().join("stage")).unwrap();
+    let staged = stage_bundle(&bundle, &staging).unwrap();
+    assert_eq!(fs::read(staging.path().join("Alias.dll")).unwrap(), bytes);
+    assert_eq!(
+        fs::read(staging.path().join("SecondAlias.dll")).unwrap(),
+        bytes
+    );
+    assert!(!staging.path().join("Inside-v2.bin").exists());
+
+    let mut root = graph_image(&["Alias.dll", "SecondAlias.dll"], &[]);
+    root.import_targets.insert(
+        "Alias.dll".to_owned(),
+        BTreeSet::from([ImportTarget::Name("Entry".to_owned())]),
+    );
+    verify_dependency_closure(
+        Path::new("Addin.xll"),
+        "x86_64-pc-windows-msvc",
+        &staged,
+        root,
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn relaxed_bundle_validates_alias_basenames_and_collisions() {
+    use std::os::unix::fs::symlink;
+
+    let manifest = tempfile::tempdir().unwrap();
+    let source = manifest.path().join("Inside.bin");
+    fs::write(&source, []).unwrap();
+    for (alias, diagnostic) in [
+        ("version.dll", "must not shadow Windows system DLL"),
+        ("CON.dll", "reserved Windows device name"),
+    ] {
+        symlink(&source, manifest.path().join(alias)).unwrap();
+        let error = resolve_bundle_files_with_policy(
+            manifest.path(),
+            "x86_64-pc-windows-msvc",
+            &[alias.to_owned()],
+            &[],
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(diagnostic), "{error}");
+    }
+    fs::create_dir(manifest.path().join("one")).unwrap();
+    fs::create_dir(manifest.path().join("two")).unwrap();
+    symlink(&source, manifest.path().join("one/Alias.dll")).unwrap();
+    symlink(&source, manifest.path().join("two/alias.DLL")).unwrap();
+    let error = resolve_bundle_files_with_policy(
+        manifest.path(),
+        "x86_64-pc-windows-msvc",
+        &["one/Alias.dll".to_owned(), "two/alias.DLL".to_owned()],
+        &[],
+        false,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("duplicate bundle basename"));
+}
+
+#[test]
+fn private_staging_directory_rejects_existing_destination() {
+    let destination = tempfile::tempdir().unwrap();
+    let error = PrivateStagingDirectory::create(destination.path()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("private staging directory already exists")
+    );
+}
+
+#[cfg(any(unix, target_os = "windows"))]
+#[test]
+fn file_identity_distinguishes_replaced_sources() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = directory.path().join("first.dll");
+    let second = directory.path().join("second.dll");
+    fs::write(&first, b"first").unwrap();
+    fs::write(&second, b"second").unwrap();
+
+    let opened = std::fs::File::open(&first).unwrap();
+    let same = std::fs::File::open(&first).unwrap();
+    let different = std::fs::File::open(&second).unwrap();
+    assert!(same_file_identity(&opened, &same).unwrap());
+    assert!(!same_file_identity(&opened, &different).unwrap());
+}
+
+#[cfg(target_os = "windows")]
+struct BlockingAfterOpenObserver {
+    entered: std::sync::Arc<std::sync::Barrier>,
+    release: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(target_os = "windows")]
+impl SnapshotObserver for BlockingAfterOpenObserver {
+    fn after_open(&self) {
+        self.entered.wait();
+        self.release.wait();
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn snapshot_denies_in_place_writers() {
+    use crate::win32::ERROR_SHARING_VIOLATION;
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("Engine.dll");
+    fs::write(&source, vec![0x41; 1024 * 1024]).unwrap();
+
+    let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let observer = BlockingAfterOpenObserver {
+        entered: std::sync::Arc::clone(&entered),
+        release: std::sync::Arc::clone(&release),
+    };
+
+    let manifest_directory = directory.path().to_owned();
+    let resolver = std::thread::spawn(move || {
+        resolve_bundle_files_with_policy_impl(
+            &manifest_directory,
+            "x86_64-pc-windows-msvc",
+            &["Engine.dll".to_owned()],
+            &[],
+            false,
+            &observer,
+        )
+    });
+
+    entered.wait();
+
+    let error = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(ERROR_SHARING_VIOLATION));
+
+    release.wait();
+    resolver.join().unwrap().unwrap();
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn snapshot_rejects_source_already_open_for_writing() {
+    use crate::win32::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("Engine.dll");
+    fs::write(&source, b"original").unwrap();
+
+    let _writer = std::fs::OpenOptions::new()
+        .write(true)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE) as u32)
+        .open(&source)
+        .unwrap();
+
+    let error = resolve_bundle_files(
+        directory.path(),
+        "x86_64-pc-windows-msvc",
+        &["Engine.dll".to_owned()],
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, PackageError::BundleSourceBusy { .. }));
+}
+
+#[cfg(unix)]
+struct BlockingAfterFirstChunkObserver {
+    entered: std::sync::Arc<std::sync::Barrier>,
+    release: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(unix)]
+impl SnapshotObserver for BlockingAfterFirstChunkObserver {
+    fn after_first_chunk(&self, _path: &Path) {
+        self.entered.wait();
+        self.release.wait();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn same_length_in_place_mutation_during_snapshot_is_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("Engine.dll");
+    let initial = vec![0x11; 4 * 1024 * 1024];
+    let replacement = vec![0x22; initial.len()];
+    fs::write(&source, &initial).unwrap();
+
+    let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let observer = BlockingAfterFirstChunkObserver {
+        entered: std::sync::Arc::clone(&entered),
+        release: std::sync::Arc::clone(&release),
+    };
+
+    let manifest_directory = directory.path().to_owned();
+    let resolver = std::thread::spawn(move || {
+        resolve_bundle_files_with_policy_impl(
+            &manifest_directory,
+            "x86_64-pc-windows-msvc",
+            &["Engine.dll".to_owned()],
+            &[],
+            false,
+            &observer,
+        )
+    });
+
+    entered.wait();
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap();
+    writer.write_all(&replacement).unwrap();
+    writer.flush().unwrap();
+    drop(writer);
+    release.wait();
+
+    let error = resolver.join().unwrap().unwrap_err();
+    assert!(matches!(error, PackageError::UnstableBundleSource { .. }));
+}
+
+#[test]
+fn snapshot_file_keeps_the_bytes_from_its_open_handle() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("Addin.dll");
+    fs::write(&source, b"original bytes").unwrap();
+
+    let snapshot = snapshot_file("x86_64-pc-windows-msvc", &source).unwrap();
+    fs::write(&source, b"replacement bytes").unwrap();
+
+    assert_eq!(snapshot.as_ref(), b"original bytes");
+}
+
+#[test]
+fn streaming_snapshot_comparison_preserves_bytes_and_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("payload.bin");
+    for bytes in [Vec::new(), vec![0x53; 150_000]] {
+        fs::write(&source, &bytes).unwrap();
+        let mut file = std::fs::File::open(&source).unwrap();
+        let compared = compare_stable_snapshot(
+            "test",
+            &source,
+            &mut file,
+            &bytes,
+            Some(bytes.len() as u64),
+            &NoopSnapshotObserver,
+        )
+        .unwrap();
+        assert!(compared);
+        let different = compare_stable_snapshot(
+            "test",
+            &source,
+            &mut file,
+            b"different",
+            None,
+            &NoopSnapshotObserver,
+        )
+        .unwrap();
+        assert!(!different);
+        if !bytes.is_empty() {
+            for offset in [0, bytes.len() / 2, bytes.len() - 1] {
+                let mut different = bytes.clone();
+                different[offset] ^= 1;
+                assert!(
+                    !compare_stable_snapshot(
+                        "test",
+                        &source,
+                        &mut file,
+                        &different,
+                        Some(bytes.len() as u64),
+                        &NoopSnapshotObserver,
+                    )
+                    .unwrap(),
+                    "same-length corruption at byte {offset} must be rejected",
+                );
+            }
+            assert!(
+                compare_stable_snapshot(
+                    "test",
+                    &source,
+                    &mut file,
+                    &bytes,
+                    Some(bytes.len() as u64 - 1),
+                    &NoopSnapshotObserver,
+                )
+                .is_err()
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn streaming_comparison_rejects_growth_truncation_and_in_place_mutation() {
+    struct MutateAfterFirstChunk(fn(&Path));
+    impl SnapshotObserver for MutateAfterFirstChunk {
+        fn after_first_chunk(&self, path: &Path) {
+            (self.0)(path);
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("payload.bin");
+    let bytes = vec![0x53; 150_000];
+    let mutations: [fn(&Path); 3] = [
+        |path| {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .unwrap()
+                .write_all(b"growth")
+                .unwrap();
+        },
+        |path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_len(70_000)
+                .unwrap();
+        },
+        |path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .write_all(b"changed")
+                .unwrap();
+        },
+    ];
+    for mutation in mutations {
+        fs::write(&source, &bytes).unwrap();
+        let mut file = std::fs::File::open(&source).unwrap();
+        let result = compare_stable_snapshot(
+            "test",
+            &source,
+            &mut file,
+            &bytes,
+            Some(bytes.len() as u64),
+            &MutateAfterFirstChunk(mutation),
+        );
+        assert!(matches!(
+            result,
+            Err(PackageError::UnstableBundleSource { .. })
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn second_read_rejects_bytes_changed_after_the_original_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("payload.bin");
+    fs::write(&source, b"original").unwrap();
+    let mut file = std::fs::File::open(&source).unwrap();
+    let snapshot = read_stable_snapshot("test", &source, &mut file, &NoopSnapshotObserver).unwrap();
+    fs::write(&source, b"modified").unwrap();
+    assert!(matches!(
+        verify_snapshot_against_second_read("test", &source, &mut file, &snapshot),
+        Err(PackageError::UnstableBundleSource { .. })
+    ));
+}
+
+#[test]
+fn directory_preparation_shares_matching_bytes_and_falls_back_for_wrong_hints() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("payload.bin");
+    fs::write(&source, b"snapshot").unwrap();
+    for bytes in [
+        b"snapshot".as_slice(),
+        b"bad hint".as_slice(),
+        b"short".as_slice(),
+        b"a longer mismatching hint".as_slice(),
+    ] {
+        let candidate = SharedBytes::from(bytes.to_vec());
+        let shared = BTreeMap::from([(PathBuf::from("payload.bin"), candidate.clone())]);
+        let prepared = PreparedDirectoryCommit::prepare_with_shared_artifacts(
+            directory.path(),
+            &["payload.bin"],
+            &shared,
+        )
+        .unwrap();
+        let [PreparedDirectoryEntry::File { bytes: actual, .. }] = prepared.entries.as_slice()
+        else {
+            panic!("one prepared file expected");
+        };
+        assert_eq!(actual.as_ref(), b"snapshot");
+        assert_eq!(actual.as_ptr() == candidate.as_ptr(), bytes == b"snapshot");
+        prepared.verify_source_contents().unwrap();
+    }
+}
+
+#[test]
+fn streaming_source_verification_requires_identity_even_for_identical_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("payload.bin");
+    fs::write(&source, b"snapshot").unwrap();
+    let prepared = PreparedDirectoryCommit::prepare(directory.path(), &["payload.bin"]).unwrap();
+    let replacement = directory.path().join("replacement.bin");
+    fs::write(&replacement, b"snapshot").unwrap();
+    fs::rename(&replacement, &source).unwrap();
+    assert!(matches!(
+        prepared.verify_source_contents(),
+        Err(PackageError::StagedArtifactChanged { .. })
+    ));
+    prepared
+        .verify_committed_contents(directory.path())
+        .unwrap();
+}
+
+#[test]
+fn verified_artifacts_keep_bytes_and_identity_for_commit_checks() {
+    let directory = tempfile::tempdir().unwrap();
+    let staged = directory.path().join("Engine.dll");
+    fs::write(&staged, b"stable bytes").unwrap();
+    let bytes: SharedBytes = SharedBytes::from(b"stable bytes".to_vec());
+    let artifact = VerifiedArtifact::new(
+        PathBuf::from("Engine.dll"),
+        bytes,
+        fs::metadata(&staged).unwrap().permissions(),
+    );
+    let (package, manifest) = package_with_test_manifest(artifact);
+    fs::write(directory.path().join("build-manifest.json"), &manifest).unwrap();
+
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+    assert_eq!(manifest["schema"], BUILD_MANIFEST_SCHEMA);
+    assert_eq!(
+        manifest["files"],
+        serde_json::json!([{ "relative_path": "Engine.dll", "size": 12 }])
+    );
+    assert_eq!(
+        manifest["cargo_constraints"],
+        serde_json::json!({ "locked": false, "frozen": false, "offline": false })
+    );
+
+    let artifact = &package.artifacts()[0];
+    assert_eq!(artifact.relative_path(), Path::new("Engine.dll"));
+    assert_eq!(artifact.bytes(), b"stable bytes");
+    assert_eq!(artifact.size(), 12);
+    let prepared = package
+        .prepare_commit(directory.path(), "x86_64-pc-windows-msvc")
+        .unwrap();
+    prepared.verify_source_contents().unwrap();
+
+    let rebuilt_parent = tempfile::tempdir().unwrap();
+    let rebuilt = rebuilt_parent.path().join("rebuilt");
+    let rebuilt_directory = PrivateStagingDirectory::create(&rebuilt).unwrap();
+    package.materialize(&rebuilt_directory).unwrap();
+    assert_eq!(
+        fs::read(rebuilt.join("Engine.dll")).unwrap(),
+        b"stable bytes"
+    );
+
+    // Same-size mutations must still be rejected by exact byte comparison.
+    fs::write(&staged, b"altered data").unwrap();
+    assert!(
+        package
+            .prepare_commit(directory.path(), "x86_64-pc-windows-msvc")
+            .is_err()
+    );
+}
+
+#[test]
+fn prepared_package_rejects_unknown_entries_and_manifest_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let staged = directory.path().join("Engine.dll");
+    fs::write(&staged, b"stable bytes").unwrap();
+    let artifact = VerifiedArtifact::new(
+        PathBuf::from("Engine.dll"),
+        SharedBytes::from(b"stable bytes".to_vec()),
+        fs::metadata(&staged).unwrap().permissions(),
+    );
+    let (package, manifest) = package_with_test_manifest(artifact);
+    fs::write(directory.path().join("build-manifest.json"), manifest).unwrap();
+    let prepared = package
+        .prepare_commit(directory.path(), "x86_64-pc-windows-msvc")
+        .unwrap();
+
+    fs::write(directory.path().join("version.dll"), b"shadow").unwrap();
+    assert!(prepared.verify_source_contents().is_err());
+    fs::remove_file(directory.path().join("version.dll")).unwrap();
+
+    fs::write(directory.path().join("build-manifest.json"), b"{}").unwrap();
+    assert!(prepared.verify_source_contents().is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn prepared_package_opens_entries_without_following_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let staged = directory.path().join("Engine.dll");
+    let replacement = directory.path().join("replacement.dll");
+    fs::write(&staged, b"stable bytes").unwrap();
+    let artifact = VerifiedArtifact::new(
+        PathBuf::from("Engine.dll"),
+        SharedBytes::from(b"stable bytes".to_vec()),
+        fs::metadata(&staged).unwrap().permissions(),
+    );
+    let (package, manifest) = package_with_test_manifest(artifact);
+    fs::write(directory.path().join("build-manifest.json"), manifest).unwrap();
+    let prepared = package
+        .prepare_commit(directory.path(), "x86_64-pc-windows-msvc")
+        .unwrap();
+
+    fs::write(&replacement, b"stable bytes").unwrap();
+    fs::remove_file(&staged).unwrap();
+    symlink(&replacement, &staged).unwrap();
+    assert!(prepared.verify_source_contents().is_err());
+}
+
+#[test]
+fn prepared_package_rejects_replaced_staging_directory() {
+    let parent = tempfile::tempdir().unwrap();
+    let staging = parent.path().join("staging");
+    fs::create_dir(&staging).unwrap();
+    let staged = staging.join("Engine.dll");
+    fs::write(&staged, b"stable bytes").unwrap();
+    let artifact = VerifiedArtifact::new(
+        PathBuf::from("Engine.dll"),
+        SharedBytes::from(b"stable bytes".to_vec()),
+        fs::metadata(&staged).unwrap().permissions(),
+    );
+    let (package, manifest) = package_with_test_manifest(artifact);
+    fs::write(staging.join("build-manifest.json"), manifest).unwrap();
+    let prepared = package
+        .prepare_commit(&staging, "x86_64-pc-windows-msvc")
+        .unwrap();
+
+    let moved = parent.path().join("moved-staging");
+    fs::rename(&staging, &moved).unwrap();
+    let replacement = PrivateStagingDirectory::create(&staging).unwrap();
+    package.materialize(&replacement).unwrap();
+
+    assert!(prepared.verify_source_contents().is_err());
+}
+
+#[test]
+fn prepared_directory_rejects_nested_file_mutation() {
+    let parent = tempfile::tempdir().unwrap();
+    let staging = parent.path().join("staging");
+    let package = staging.join("package-a");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("manifest.json"), b"original manifest").unwrap();
+    fs::write(package.join("addin.xll"), b"original addin").unwrap();
+
+    let prepared = PreparedDirectoryCommit::prepare(&staging, &["package-a"]).unwrap();
+    fs::write(package.join("addin.xll"), b"changed addin").unwrap();
+
+    assert!(prepared.verify_source_contents().is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn private_staging_verify_rejects_replaced_path() {
+    let parent = tempfile::tempdir().unwrap();
+    let staging = parent.path().join("staging");
+    let capability = PrivateStagingDirectory::create(&staging).unwrap();
+    let moved = parent.path().join("moved-staging");
+    fs::rename(&staging, &moved).unwrap();
+    let replacement = PrivateStagingDirectory::create(&staging).unwrap();
+
+    assert!(matches!(
+        capability.verify(),
+        Err(PackageError::StagingDirectoryReplaced { .. })
+    ));
+
+    drop(replacement);
+    drop(capability);
+}
+
+#[test]
+fn stage_bundle_uses_the_resolved_file_snapshot() {
+    let source = tempfile::tempdir().unwrap();
+    let source_path = source.path().join("Engine.dll");
+    fs::write(&source_path, b"resolved bytes").unwrap();
+    let bundle = resolve_bundle_files(
+        source.path(),
+        "x86_64-pc-windows-msvc",
+        &["Engine.dll".to_owned()],
+    )
+    .unwrap();
+
+    fs::write(&source_path, b"replacement bytes").unwrap();
+    let destination = source.path().join("staging");
+    let staging_directory = PrivateStagingDirectory::create(&destination).unwrap();
+    stage_bundle(&bundle, &staging_directory).unwrap();
+
+    assert_eq!(
+        fs::read(destination.join("Engine.dll")).unwrap(),
+        b"resolved bytes"
+    );
+}
+
+#[test]
+fn resolved_bundle_verification_does_not_reopen_source_paths() {
+    let source = tempfile::tempdir().unwrap();
+    let source_path = source.path().join("Engine.dll");
+    fs::write(
+        &source_path,
+        minimal_pe(
+            IMAGE_FILE_MACHINE_AMD64,
+            IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL,
+        ),
+    )
+    .unwrap();
+    let bundle = resolve_bundle_files(
+        source.path(),
+        "x86_64-pc-windows-msvc",
+        &["Engine.dll".to_owned()],
+    )
+    .unwrap();
+    fs::remove_file(source_path).unwrap();
+
+    verify_bundle_files(&bundle, "x86_64-pc-windows-msvc").unwrap();
+    assert!(verify_bundle_files(&bundle, "i686-pc-windows-msvc").is_err());
+}
+
+#[test]
+fn bundle_rejects_windows_system_dll_name_collisions() {
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("version.dll"), b"not the system DLL").unwrap();
+
+    let error = resolve_bundle_files(
+        source.path(),
+        "x86_64-pc-windows-msvc",
+        &["version.dll".to_owned()],
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("must not shadow Windows system DLL")
+    );
+}
+
+#[test]
+fn va_based_delay_load_import_descriptor_is_rejected() {
+    let peoff = 0x80usize;
+    let raw = 0x200usize;
+    let section_rva = 0x1000u32;
+    let mut buf = vec![0u8; 0x400];
+    buf[0..2].copy_from_slice(b"MZ");
+    buf[0x3c..0x40].copy_from_slice(&(peoff as u32).to_le_bytes());
+    let mut o = peoff;
+    buf[o..o + 4].copy_from_slice(b"PE\0\0");
+    o += 4;
+    buf[o..o + 2].copy_from_slice(&0x8664u16.to_le_bytes());
+    buf[o + 2..o + 4].copy_from_slice(&1u16.to_le_bytes());
+    buf[o + 16..o + 18].copy_from_slice(&0x00f0u16.to_le_bytes());
+    buf[o + 18..o + 20].copy_from_slice(&0x2022u16.to_le_bytes());
+    o += 20;
+    let opt = o;
+    buf[opt..opt + 2].copy_from_slice(&0x20bu16.to_le_bytes());
+    buf[opt + 2] = 14;
+    buf[opt + 8..opt + 12].copy_from_slice(&0x200u32.to_le_bytes());
+    buf[opt + 20..opt + 24].copy_from_slice(&0x1000u32.to_le_bytes());
+    buf[opt + 24..opt + 32].copy_from_slice(&0x10000u64.to_le_bytes());
+    buf[opt + 32..opt + 36].copy_from_slice(&0x1000u32.to_le_bytes());
+    buf[opt + 36..opt + 40].copy_from_slice(&0x200u32.to_le_bytes());
+    buf[opt + 40..opt + 42].copy_from_slice(&6u16.to_le_bytes());
+    buf[opt + 48..opt + 50].copy_from_slice(&6u16.to_le_bytes());
+    buf[opt + 56..opt + 60].copy_from_slice(&0x2000u32.to_le_bytes());
+    buf[opt + 60..opt + 64].copy_from_slice(&0x200u32.to_le_bytes());
+    buf[opt + 68..opt + 70].copy_from_slice(&2u16.to_le_bytes());
+    buf[opt + 70..opt + 72].copy_from_slice(&0x8160u16.to_le_bytes());
+    buf[opt + 72..opt + 80].copy_from_slice(&0x100000u64.to_le_bytes());
+    buf[opt + 80..opt + 88].copy_from_slice(&0x1000u64.to_le_bytes());
+    buf[opt + 88..opt + 96].copy_from_slice(&0x100000u64.to_le_bytes());
+    buf[opt + 96..opt + 104].copy_from_slice(&0x1000u64.to_le_bytes());
+    buf[opt + 108..opt + 112].copy_from_slice(&16u32.to_le_bytes());
+    buf[opt + 0x70 + 13 * 8..opt + 0x70 + 13 * 8 + 4].copy_from_slice(&section_rva.to_le_bytes());
+    buf[opt + 0x70 + 13 * 8 + 4..opt + 0x70 + 13 * 8 + 8].copy_from_slice(&0x40u32.to_le_bytes());
+
+    o = opt + 0xf0;
+    buf[o..o + 8].copy_from_slice(b".rdata\0\0");
+    o += 8;
+    buf[o..o + 4].copy_from_slice(&0x200u32.to_le_bytes());
+    buf[o + 4..o + 8].copy_from_slice(&section_rva.to_le_bytes());
+    buf[o + 8..o + 12].copy_from_slice(&0x200u32.to_le_bytes());
+    buf[o + 12..o + 16].copy_from_slice(&(raw as u32).to_le_bytes());
+    buf[o + 32..o + 36].copy_from_slice(&0x40000040u32.to_le_bytes());
+
+    buf[raw..raw + 4].copy_from_slice(&0u32.to_le_bytes());
+    buf[raw + 4..raw + 8].copy_from_slice(&(section_rva + 0x40).to_le_bytes());
+    let name = b"evil.dll\0";
+    buf[raw + 0x40..raw + 0x40 + name.len()].copy_from_slice(name);
+
+    let error = parse_pe_bytes(&buf).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported VA-based delay load import descriptor")
+    );
+}
+
+proptest! {
+    #[test]
+    fn generated_bytes_never_panic_the_pe_parser(bytes in prop::collection::vec(any::<u8>(), 0..4096)) {
+        prop_assert!(std::panic::catch_unwind(|| parse_pe_bytes(&bytes)).is_ok());
+    }
+}
+
+#[test]
+fn verify_xll_exports_rejects_unmanifested_named_export() {
+    let path = Path::new("test.xll");
+    let mut info = xll_info();
+    verify_xll_exports(&info, path, &[]).unwrap();
+
+    info.exports.insert("CustomEntry".to_owned());
+    info.executable_exports.insert("CustomEntry".to_owned());
+    assert_eq!(
+        verify_xll_exports(&info, path, &[])
+            .unwrap_err()
+            .to_string(),
+        "test.xll has unexpected export(s): CustomEntry"
+    );
+}
+
+#[test]
+fn verify_xll_exports_rejects_unmanifested_ordinal_only_export() {
+    let path = Path::new("test.xll");
+    let mut info = xll_info();
+    info.nonzero_export_slots
+        .extend([ExportAddressIndex(1), ExportAddressIndex(2)]);
+    info.named_export_slots = info.nonzero_export_slots.clone();
+    verify_xll_exports(&info, path, &[]).unwrap();
+
+    info.named_export_slots.remove(&ExportAddressIndex(2));
+    assert_eq!(
+        verify_xll_exports(&info, path, &[])
+            .unwrap_err()
+            .to_string(),
+        "test.xll has unmanifested ordinal-only export(s)"
+    );
+}

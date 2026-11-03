@@ -1,0 +1,33 @@
+[package]
+name = "basic-xlfn"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+
+[features]
+async = ["xlfn/async"]
+async-builtin = ["async", "xlfn/async-builtin"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+xlfn = { version = "=0.2.0", path = "../../crates/xlfn" }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+raw_borrows_via_references = "deny"
+unused_must_use = "deny"
+linker_messages = "deny"
+dangling_pointers_from_locals = "deny"
+integer_to_ptr_transmutes = "deny"
+
+[lints.clippy]
+allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
+todo = "deny"
+undocumented_unsafe_blocks = "deny"

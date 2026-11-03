@@ -1,0 +1,911 @@
+//! Raw and borrowed ABI views over Excel's `XLOPER12` representation.
+
+use super::{FromExcel, MAX_ARRAY_BYTES};
+use crate::error::{InputError, Shape};
+use crate::input_identity::InputIdentityEncoder;
+use crate::{ExcelError, XllError, XllResult};
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::slice;
+use xlfn_sys::{XLBIT_DLL_FREE, XLBIT_XL_FREE, XLOPER12, XLOPER12Array, XLTYPE_MASK};
+
+/// The validated semantic value type of an Excel `XLOPER12`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[non_exhaustive]
+pub enum XlValueType {
+    /// A binary64 number.
+    Number,
+    /// A counted UTF-16 string.
+    String,
+    /// A Boolean.
+    Boolean,
+    /// A worksheet reference that may contain multiple areas.
+    Reference,
+    /// An Excel error code.
+    Error,
+    /// An Excel control-flow value.
+    Flow,
+    /// A rectangular array of cells.
+    Multi,
+    /// An omitted argument.
+    Missing,
+    /// A blank cell.
+    Nil,
+    /// A single-area worksheet reference.
+    SimpleReference,
+    /// A signed 32-bit integer.
+    Integer,
+    /// An Excel binary-data value.
+    BigData,
+}
+
+impl XlValueType {
+    /// Decodes a raw base xltype mask into a validated [`XlValueType`].
+    #[must_use]
+    pub(crate) const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            xlfn_sys::XLTYPE_NUM => Some(Self::Number),
+            xlfn_sys::XLTYPE_STR => Some(Self::String),
+            xlfn_sys::XLTYPE_BOOL => Some(Self::Boolean),
+            xlfn_sys::XLTYPE_REF => Some(Self::Reference),
+            xlfn_sys::XLTYPE_ERR => Some(Self::Error),
+            xlfn_sys::XLTYPE_FLOW => Some(Self::Flow),
+            xlfn_sys::XLTYPE_MULTI => Some(Self::Multi),
+            xlfn_sys::XLTYPE_MISSING => Some(Self::Missing),
+            xlfn_sys::XLTYPE_NIL => Some(Self::Nil),
+            xlfn_sys::XLTYPE_SREF => Some(Self::SimpleReference),
+            xlfn_sys::XLTYPE_INT => Some(Self::Integer),
+            xlfn_sys::XLTYPE_BIG_DATA => Some(Self::BigData),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for XlValueType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number => write!(f, "Number"),
+            Self::String => write!(f, "String"),
+            Self::Boolean => write!(f, "Boolean"),
+            Self::Reference => write!(f, "Reference"),
+            Self::Error => write!(f, "Error"),
+            Self::Flow => write!(f, "Flow"),
+            Self::Multi => write!(f, "Multi"),
+            Self::Missing => write!(f, "Missing"),
+            Self::Nil => write!(f, "Nil"),
+            Self::SimpleReference => write!(f, "SimpleReference"),
+            Self::Integer => write!(f, "Integer"),
+            Self::BigData => write!(f, "BigData"),
+        }
+    }
+}
+
+/// A call-scoped semantic view of one Excel value.
+///
+/// The validated base type is observable through [`Self::value_type`]. Excel
+/// ownership flags remain internal to the framework.
+#[derive(Clone, Copy)]
+pub struct XlValueRef<'call> {
+    pub(super) raw: &'call XLOPER12,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl std::fmt::Debug for XlValueRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Header validation does not eagerly validate nested payloads. Keep
+        // formatting infallible and avoid dereferencing those payloads.
+        f.debug_struct("XlValueRef")
+            .field("value_type", &self.value_type())
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) enum GridView<'call> {
+    Scalar(XlValueRef<'call>),
+    Multi {
+        rows: usize,
+        columns: usize,
+        values: &'call [XLOPER12],
+    },
+}
+
+impl<'call> GridView<'call> {
+    pub(crate) fn from_value(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        if value.value_type() == XlValueType::Multi {
+            let array = value.array(argument)?;
+            let len = (array.rows as usize) * (array.columns as usize);
+            let values = if len == 0 {
+                &[]
+            } else {
+                // SAFETY: `XlValueRef::array` validated the non-null pointer,
+                // alignment, byte size, and contiguous element range.
+                unsafe { slice::from_raw_parts(array.values.cast_const(), len) }
+            };
+            Ok(Self::Multi {
+                rows: array.rows as usize,
+                columns: array.columns as usize,
+                values,
+            })
+        } else {
+            Ok(Self::Scalar(value))
+        }
+    }
+
+    pub(crate) const fn shape(&self) -> (usize, usize) {
+        match self {
+            Self::Scalar(_) => (1, 1),
+            Self::Multi { rows, columns, .. } => (*rows, *columns),
+        }
+    }
+
+    pub(crate) fn cells(&self) -> &'call [XLOPER12] {
+        match self {
+            Self::Scalar(value) => slice::from_ref(value.raw),
+            Self::Multi { values, .. } => values,
+        }
+    }
+}
+
+impl<'call> XlValueRef<'call> {
+    /// Creates a call-scoped view over an argument supplied by Excel.
+    ///
+    /// # Safety
+    ///
+    /// A non-null, aligned `raw` must point to a live XLOPER12 for `'call`.
+    /// Null or misaligned pointers are rejected without accessing storage.
+    /// Any nested pointers selected by `xltype` must satisfy the
+    /// corresponding Excel SDK contract.
+    pub(crate) unsafe fn from_raw(raw: *mut XLOPER12) -> XllResult<Self> {
+        if !raw.is_null() && !raw.is_aligned() {
+            return Err(XllError::input(
+                "<raw>",
+                InputError::Malformed("misaligned value pointer"),
+            ));
+        }
+        // SAFETY: Alignment is checked; the caller guarantees a live value for 'call.
+        let raw = unsafe { raw.as_ref() }
+            .ok_or_else(|| XllError::input("<raw>", InputError::NullPointer))?;
+        Self::from_array_cell(raw)
+    }
+
+    #[inline]
+    pub(crate) fn from_array_cell(raw: &'call XLOPER12) -> XllResult<Self> {
+        if raw.xltype & !(XLTYPE_MASK | XLBIT_XL_FREE | XLBIT_DLL_FREE) != 0 {
+            return Err(XllError::input(
+                "<raw>",
+                InputError::Malformed("unknown xltype flag"),
+            ));
+        }
+        if XlValueType::from_raw(raw.base_type()).is_none() {
+            return Err(XllError::input(
+                "<raw>",
+                InputError::Malformed("unknown base xltype"),
+            ));
+        }
+        Ok(Self {
+            raw,
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    /// Returns the validated semantic kind without exposing ownership flags.
+    #[must_use]
+    #[inline]
+    pub const fn value_type(self) -> XlValueType {
+        match XlValueType::from_raw(self.raw.base_type()) {
+            Some(value_type) => value_type,
+            None => unreachable!(),
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) const fn raw(&self) -> &'call XLOPER12 {
+        self.raw
+    }
+
+    /// Reads a finite number without text or Boolean coercion.
+    #[inline]
+    pub fn as_f64(self) -> XllResult<f64> {
+        <f64 as FromExcel>::from_excel(self, "<array cell>")
+    }
+
+    /// Reads a Boolean without numeric or text coercion.
+    #[inline]
+    pub fn as_bool(self) -> XllResult<bool> {
+        <bool as FromExcel>::from_excel(self, "<array cell>")
+    }
+
+    /// Borrows the Excel UTF-16 string without decoding its payload.
+    #[inline]
+    pub fn as_str(self) -> XllResult<XlStrRef<'call>> {
+        self.as_str_with_argument("<array cell>")
+    }
+
+    /// Borrows a string and uses `argument` in subsequent decode errors.
+    #[inline]
+    pub fn as_str_with_argument(self, argument: &'static str) -> XllResult<XlStrRef<'call>> {
+        Ok(XlStrRef {
+            utf16: self.utf16(argument)?,
+            argument,
+        })
+    }
+
+    /// Returns whether this is a blank cell rather than an omitted argument.
+    #[must_use]
+    #[inline]
+    pub const fn is_blank(self) -> bool {
+        matches!(self.value_type(), XlValueType::Nil)
+    }
+
+    pub(crate) fn wrong_type(self, argument: &'static str, expected: &'static str) -> XllError {
+        if self.value_type() == XlValueType::Error {
+            // SAFETY: XLTYPE_ERR selects the error union member.
+            let code = unsafe { self.raw.value.error };
+            return ExcelError::from_code(code).map_or_else(
+                || XllError::input(argument, InputError::Malformed("unknown error code")),
+                XllError::ExcelValue,
+            );
+        }
+        XllError::input(
+            argument,
+            InputError::WrongType {
+                expected,
+                actual: self.value_type(),
+            },
+        )
+    }
+
+    pub(crate) fn utf16(&self, argument: &'static str) -> XllResult<&'call [u16]> {
+        if self.value_type() != XlValueType::String {
+            return Err(self.wrong_type(argument, "string"));
+        }
+        // SAFETY: XLTYPE_STR selects the string union member.
+        let pointer = unsafe { self.raw.value.string };
+        // SAFETY: this live Excel string retains its counted allocation for 'call.
+        unsafe { crate::utf16::borrow_counted(pointer, argument) }
+    }
+
+    pub(crate) fn array(&self, argument: &'static str) -> XllResult<XLOPER12Array> {
+        if self.value_type() != XlValueType::Multi {
+            return Err(self.wrong_type(argument, "array"));
+        }
+        // SAFETY: XLTYPE_MULTI selects the array union member.
+        let array = unsafe { self.raw.value.array };
+        if array.rows < 0 || array.columns < 0 {
+            return Err(XllError::input(
+                argument,
+                InputError::Malformed("negative array dimension"),
+            ));
+        }
+        let rows = array.rows as usize;
+        let columns = array.columns as usize;
+        let elements = super::matrix::array_element_count(rows, columns, argument)?;
+        let bytes = elements
+            .checked_mul(std::mem::size_of::<XLOPER12>())
+            .ok_or_else(|| {
+                XllError::input(argument, InputError::Malformed("array byte-size overflow"))
+            })?;
+        if bytes > MAX_ARRAY_BYTES {
+            return Err(XllError::input(
+                argument,
+                InputError::TooLarge {
+                    limit: MAX_ARRAY_BYTES,
+                    actual: bytes,
+                },
+            ));
+        }
+        if elements != 0 && array.values.is_null() {
+            return Err(XllError::input(argument, InputError::NullPointer));
+        }
+        if elements != 0 && !array.values.is_aligned() {
+            return Err(XllError::input(
+                argument,
+                InputError::Malformed("misaligned array pointer"),
+            ));
+        }
+        Ok(array)
+    }
+}
+
+/// A borrowed Excel string. Equality compares its UTF-16 code units;
+/// the originating argument name is retained only for conversion diagnostics.
+#[derive(Clone, Copy, Debug)]
+pub struct XlStrRef<'call> {
+    utf16: &'call [u16],
+    argument: &'static str,
+}
+
+impl PartialEq for XlStrRef<'_> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.utf16 == other.utf16
+    }
+}
+
+impl Eq for XlStrRef<'_> {}
+
+impl<'call> XlStrRef<'call> {
+    /// Returns the borrowed UTF-16 code units without the Excel length prefix.
+    #[must_use]
+    #[inline]
+    pub const fn as_utf16(self) -> &'call [u16] {
+        self.utf16
+    }
+
+    /// Decodes each Unicode character, preserving malformed surrogate errors.
+    pub fn chars(self) -> impl Iterator<Item = Result<char, std::char::DecodeUtf16Error>> + 'call {
+        char::decode_utf16(self.utf16.iter().copied())
+    }
+
+    /// Decodes into owned UTF-8, rejecting malformed UTF-16.
+    pub fn try_to_string(self) -> XllResult<String> {
+        crate::utf16::decode_owned(self.utf16, self.argument)
+    }
+}
+
+/// A borrowed array that preserves each cell's validated Excel value type.
+/// Numeric `Integer` and `Number` cells remain distinct, including in formula
+/// input identity. Use a typed numeric collection for converted semantics.
+#[derive(Clone, Copy)]
+pub struct XlArrayRef<'call> {
+    cells: &'call [XLOPER12],
+    rows: usize,
+    columns: usize,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl std::fmt::Debug for XlArrayRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XlArrayRef")
+            .field("shape", &self.shape())
+            .field("len", &self.cells.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'call> XlArrayRef<'call> {
+    pub(super) fn encode_cells(self, encoder: &mut InputIdentityEncoder) {
+        let budget = (|| {
+            let mut budget = super::ArrayInputBudget::new::<()>(self.len(), encoder.argument())?;
+            // Preflight counted lengths without decoding or hashing payloads.
+            // Over-budget arrays fail before any potentially large hash work.
+            for cell in self.cells() {
+                budget.include_raw(cell)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = budget {
+            encoder.fail(error);
+            return;
+        }
+        for cell in self.cells() {
+            encode_raw_value(cell, true, encoder);
+        }
+    }
+
+    fn from_value(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        let array = value.array(argument)?;
+        let rows = array.rows as usize;
+        let columns = array.columns as usize;
+        let len = rows * columns;
+        let cells = if len == 0 {
+            &[]
+        } else {
+            // SAFETY: XlValueRef::array validated the non-null pointer,
+            // dimensions, byte size, and lifetime of this contiguous range.
+            unsafe { slice::from_raw_parts(array.values.cast_const(), len) }
+        };
+        // Indexed access and iteration expose infallible XlValueRef values,
+        // whose semantic type must already be valid. Check only the cell
+        // headers here; payload conversion and string decoding remain lazy.
+        for cell in cells {
+            XlValueRef::from_array_cell(cell).map_err(|error| match error {
+                XllError::Input { reason, .. } => XllError::Input { argument, reason },
+                other => other,
+            })?;
+        }
+        Ok(Self {
+            cells,
+            rows,
+            columns,
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    /// Returns the number of rows.
+    #[must_use]
+    pub const fn rows(self) -> usize {
+        self.rows
+    }
+
+    /// Returns the number of columns.
+    #[must_use]
+    pub const fn columns(self) -> usize {
+        self.columns
+    }
+
+    /// Returns the rectangular shape used by conversion diagnostics.
+    #[must_use]
+    pub const fn shape(self) -> Shape {
+        Shape {
+            rows: self.rows,
+            columns: self.columns,
+        }
+    }
+
+    /// Returns the total number of cells.
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.cells.len()
+    }
+
+    /// Returns whether the array has no cells.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.cells.is_empty()
+    }
+
+    /// Reads a cell at zero-based coordinates, returning `None` out of bounds.
+    #[must_use]
+    pub fn get(self, row: usize, column: usize) -> Option<XlValueRef<'call>> {
+        if row >= self.rows || column >= self.columns {
+            return None;
+        }
+        let index = row * self.columns + column;
+        Some(XlValueRef {
+            raw: &self.cells[index],
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    /// Iterates over cells in row-major order without decoding their payloads.
+    pub fn cells(self) -> impl ExactSizeIterator<Item = XlValueRef<'call>> + 'call {
+        self.cells.iter().map(|raw| XlValueRef {
+            raw,
+            _not_send_or_sync: PhantomData,
+        })
+    }
+}
+
+impl<'call> FromExcel<'call> for XlArrayRef<'call> {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        Self::from_value(value, argument)
+    }
+}
+
+#[repr(u8)]
+enum RawValueKind {
+    Number = 1,
+    Boolean = 2,
+    String = 3,
+    Error = 4,
+    Missing = 5,
+    Blank = 6,
+    Array = 7,
+    Integer = 8,
+}
+
+fn encode_raw_value(value: XlValueRef<'_>, nested: bool, encoder: &mut InputIdentityEncoder) {
+    match value.value_type() {
+        XlValueType::Number => {
+            encoder.tag(RawValueKind::Number as u8);
+            // SAFETY: XLTYPE_NUM selects the number union member.
+            encoder.u64(unsafe { value.raw.value.number }.to_bits());
+        }
+        XlValueType::Boolean => {
+            encoder.tag(RawValueKind::Boolean as u8);
+            // SAFETY: XLTYPE_BOOL selects the boolean union member.
+            encoder.u32(unsafe { value.raw.value.boolean } as u32);
+        }
+        XlValueType::Integer => {
+            encoder.tag(RawValueKind::Integer as u8);
+            // SAFETY: XLTYPE_INT selects the integer union member.
+            encoder.i64(i64::from(unsafe { value.raw.value.integer }));
+        }
+        XlValueType::String => {
+            encoder.tag(RawValueKind::String as u8);
+            match value.utf16(encoder.argument()) {
+                Ok(text) => {
+                    encoder.utf16(text);
+                }
+                Err(error) => encoder.fail(error),
+            }
+        }
+        XlValueType::Error => {
+            encoder.tag(RawValueKind::Error as u8);
+            // SAFETY: XLTYPE_ERR selects the error union member.
+            encoder.i64(unsafe { value.raw.value.error } as i64);
+        }
+        XlValueType::Missing => encoder.tag(RawValueKind::Missing as u8),
+        XlValueType::Nil => encoder.tag(RawValueKind::Blank as u8),
+        XlValueType::Multi if !nested => match XlArrayRef::from_value(value, encoder.argument()) {
+            Ok(array) => {
+                encoder.tag(RawValueKind::Array as u8);
+                encoder.u64(array.rows() as u64);
+                encoder.u64(array.columns() as u64);
+                array.encode_cells(encoder);
+            }
+            Err(error) => encoder.fail(error),
+        },
+        XlValueType::Multi => {
+            encoder.fail_input(InputError::Malformed("nested arrays are not supported"))
+        }
+        actual => encoder.fail_input(InputError::WrongType {
+            expected: "worksheet value",
+            actual,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input_identity::InputFingerprintBuilder;
+    use crate::value::{ExcelInputIdentity, PrepareExcel};
+    use xlfn_sys::{
+        XLBIT_DLL_FREE, XLBIT_XL_FREE, XLOPER12Value, XLTYPE_BIG_DATA, XLTYPE_BOOL, XLTYPE_ERR,
+        XLTYPE_FLOW, XLTYPE_INT, XLTYPE_MISSING, XLTYPE_MULTI, XLTYPE_NIL, XLTYPE_NUM, XLTYPE_REF,
+        XLTYPE_SREF, XLTYPE_STR,
+    };
+
+    #[test]
+    fn raw_array_identity_budget_preserves_existing_framing_for_small_and_long_text() {
+        for (count, units) in [
+            (2048, vec![0x61_u16, 0x62]),
+            (2, vec![0x65e5_u16; 32_767]),
+            (1, vec![0xd800_u16]),
+        ] {
+            let mut text = std::iter::once(units.len() as u16)
+                .chain(units.iter().copied())
+                .collect::<Vec<_>>();
+            let mut cells = (0..count)
+                .map(|_| XLOPER12 {
+                    value: XLOPER12Value {
+                        string: text.as_mut_ptr(),
+                    },
+                    xltype: XLTYPE_STR,
+                })
+                .collect::<Vec<_>>();
+            let raw = XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        values: cells.as_mut_ptr(),
+                        rows: 1,
+                        columns: count,
+                    },
+                },
+                xltype: XLTYPE_MULTI,
+            };
+            let value = XlValueRef::from_array_cell(&raw).unwrap();
+            let array = XlArrayRef::from_excel(value, "values").unwrap();
+            let fingerprint = |encode: &mut dyn FnMut(&mut InputIdentityEncoder)| {
+                let mut builder = InputFingerprintBuilder::new(1);
+                builder
+                    .with_argument(0, "values", |encoder| {
+                        encode(encoder);
+                        Ok(())
+                    })
+                    .unwrap();
+                builder.finish().unwrap()
+            };
+            // Independent encoding of the established raw cell framing.
+            let expected = fingerprint(&mut |encoder| {
+                encoder.u64(1);
+                encoder.u64(count as u64);
+                for _ in 0..count {
+                    encoder.tag(RawValueKind::String as u8);
+                    encoder.utf16(&units);
+                }
+            });
+            assert_eq!(
+                fingerprint(&mut |encoder| array.encode_input_identity(encoder)),
+                expected
+            );
+            assert_eq!(
+                fingerprint(&mut |encoder| encode_raw_value(value, false, encoder)),
+                fingerprint(&mut |encoder| {
+                    encoder.tag(RawValueKind::Array as u8);
+                    array.encode_input_identity(encoder);
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn raw_array_identity_rejects_aggregate_text_budget_while_plain_view_stays_lazy() {
+        let mut text = vec![0x61_u16; crate::utf16::EXCEL_STRING_LIMIT + 1];
+        text[0] = crate::utf16::EXCEL_STRING_LIMIT as u16;
+        let per_cell = std::mem::size_of::<XLOPER12>() + text.len() * 2;
+        let count = super::super::MAX_ARRAY_BYTES / per_cell + 1;
+        // Aliasing one live source buffer models repeated host text without a
+        // 256 MiB test allocation. Each cell still costs a full logical read.
+        let mut cells = (0..count)
+            .map(|_| XLOPER12 {
+                value: XLOPER12Value {
+                    string: text.as_mut_ptr(),
+                },
+                xltype: XLTYPE_STR,
+            })
+            .collect::<Vec<_>>();
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    values: cells.as_mut_ptr(),
+                    rows: count as i32,
+                    columns: 1,
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        assert_eq!(
+            XlArrayRef::from_excel(value, "values").unwrap().len(),
+            count
+        );
+        for prepared in [false, true] {
+            let mut builder = InputFingerprintBuilder::new(1);
+            let result = builder.with_argument(0, "values", |encoder| {
+                if prepared {
+                    <XlArrayRef<'_> as PrepareExcel>::prepare(value, "values", encoder).map(drop)
+                } else {
+                    XlArrayRef::from_excel_with_identity(value, "values", encoder).map(drop)
+                }
+            });
+            assert!(matches!(result, Err(XllError::Input {
+                argument: "values",
+                reason: InputError::TooLarge { limit: super::super::MAX_ARRAY_BYTES, actual },
+            }) if actual > super::super::MAX_ARRAY_BYTES));
+            assert!(builder.finish().is_err());
+        }
+    }
+
+    #[test]
+    fn borrowed_string_equality_compares_content_across_argument_names() {
+        let mut strings = [
+            [2_u16, 0x0041, 0x03b1],
+            [2, 0x0041, 0x03b1],
+            [2, 0x0041, 0x03b2],
+        ];
+        let raw = strings.each_mut().map(|string| XLOPER12 {
+            value: XLOPER12Value {
+                string: string.as_mut_ptr(),
+            },
+            xltype: XLTYPE_STR,
+        });
+        let [left, same, different] = raw
+            .each_ref()
+            .map(|value| XlValueRef::from_array_cell(value).unwrap());
+        let left = left.as_str_with_argument("left").unwrap();
+        let same = same.as_str_with_argument("right").unwrap();
+        let different = different.as_str_with_argument("left").unwrap();
+
+        assert_eq!(left, same);
+        assert_ne!(left, different);
+    }
+
+    #[test]
+    fn borrowed_string_equality_preserves_conversion_diagnostics() {
+        let mut invalid_utf16 = [1_u16, 0xd800];
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                string: invalid_utf16.as_mut_ptr(),
+            },
+            xltype: XLTYPE_STR,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        let left = value.as_str_with_argument("left").unwrap();
+        let right = value.as_str_with_argument("right").unwrap();
+
+        assert_eq!(left, right);
+        for (value, expected) in [(left, "left"), (right, "right")] {
+            assert!(matches!(
+                value.try_to_string(),
+                Err(XllError::Input {
+                    argument,
+                    reason: InputError::InvalidUtf16,
+                }) if argument == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn xl_value_type_decodes_only_supported_base_types() {
+        let cases = [
+            (XLTYPE_NUM, XlValueType::Number),
+            (XLTYPE_STR, XlValueType::String),
+            (XLTYPE_BOOL, XlValueType::Boolean),
+            (XLTYPE_REF, XlValueType::Reference),
+            (XLTYPE_ERR, XlValueType::Error),
+            (XLTYPE_FLOW, XlValueType::Flow),
+            (XLTYPE_MULTI, XlValueType::Multi),
+            (XLTYPE_MISSING, XlValueType::Missing),
+            (XLTYPE_NIL, XlValueType::Nil),
+            (XLTYPE_SREF, XlValueType::SimpleReference),
+            (XLTYPE_INT, XlValueType::Integer),
+            (XLTYPE_BIG_DATA, XlValueType::BigData),
+        ];
+
+        for (raw, expected_type) in cases {
+            assert_eq!(XlValueType::from_raw(raw), Some(expected_type));
+        }
+
+        assert_eq!(XlValueType::from_raw(0), None);
+        assert_eq!(XlValueType::from_raw(0x0003), None);
+        assert_eq!(XlValueType::from_raw(0x0200), None);
+        assert_eq!(XlValueType::from_raw(0x1000), None);
+    }
+
+    #[test]
+    fn xl_value_type_display_matches_variant_names() {
+        assert_eq!(XlValueType::Number.to_string(), "Number");
+        assert_eq!(XlValueType::String.to_string(), "String");
+        assert_eq!(XlValueType::Boolean.to_string(), "Boolean");
+        assert_eq!(XlValueType::Reference.to_string(), "Reference");
+        assert_eq!(XlValueType::Error.to_string(), "Error");
+        assert_eq!(XlValueType::Flow.to_string(), "Flow");
+        assert_eq!(XlValueType::Multi.to_string(), "Multi");
+        assert_eq!(XlValueType::Missing.to_string(), "Missing");
+        assert_eq!(XlValueType::Nil.to_string(), "Nil");
+        assert_eq!(XlValueType::SimpleReference.to_string(), "SimpleReference");
+        assert_eq!(XlValueType::Integer.to_string(), "Integer");
+        assert_eq!(XlValueType::BigData.to_string(), "BigData");
+    }
+
+    #[test]
+    fn xl_value_ref_validates_raw_structure_and_extracts_type() {
+        let valid_oper = XLOPER12 {
+            value: XLOPER12Value { number: 42.0 },
+            xltype: XLTYPE_NUM | XLBIT_XL_FREE,
+        };
+        let value_ref = XlValueRef::from_array_cell(&valid_oper).unwrap();
+        assert_eq!(value_ref.value_type(), XlValueType::Number);
+        assert_eq!(value_ref.as_f64().unwrap(), 42.0);
+        assert!(!value_ref.is_blank());
+
+        let valid_dll_free_oper = XLOPER12 {
+            value: XLOPER12Value { number: 42.0 },
+            xltype: XLTYPE_NUM | XLBIT_DLL_FREE,
+        };
+        let dll_free_ref = XlValueRef::from_array_cell(&valid_dll_free_oper).unwrap();
+        assert_eq!(dll_free_ref.value_type(), XlValueType::Number);
+        assert_eq!(dll_free_ref.as_f64().unwrap(), 42.0);
+
+        let invalid_flag_oper = XLOPER12 {
+            value: XLOPER12Value { integer: 0 },
+            xltype: XLTYPE_NUM | 0x2000,
+        };
+        assert!(XlValueRef::from_array_cell(&invalid_flag_oper).is_err());
+
+        let invalid_base_oper = XLOPER12 {
+            value: XLOPER12Value { integer: 0 },
+            xltype: 0x0003,
+        };
+        assert!(XlValueRef::from_array_cell(&invalid_base_oper).is_err());
+
+        let nil_oper = XLOPER12::nil();
+        let nil_ref = XlValueRef::from_array_cell(&nil_oper).unwrap();
+        assert_eq!(nil_ref.value_type(), XlValueType::Nil);
+        assert!(nil_ref.is_blank());
+    }
+
+    #[test]
+    fn miri_rejects_misaligned_value_and_string_pointers_before_reading() {
+        let mut raw = XLOPER12::number(42.0);
+        let pointer = std::ptr::from_mut(&mut raw)
+            .cast::<u8>()
+            .wrapping_add(1)
+            .cast();
+        // SAFETY: the misaligned root must be rejected without accessing it.
+        let error = unsafe { XlValueRef::from_raw(pointer) }.unwrap_err();
+        assert!(matches!(
+            error,
+            XllError::Input {
+                reason: InputError::Malformed("misaligned value pointer"),
+                ..
+            }
+        ));
+
+        let mut text = [1_u16, b'A' as u16];
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                string: text.as_mut_ptr().cast::<u8>().wrapping_add(1).cast(),
+            },
+            xltype: XLTYPE_STR,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        assert!(matches!(
+            value.utf16("label"),
+            Err(XllError::Input {
+                argument: "label",
+                reason: InputError::Malformed("misaligned string pointer"),
+            })
+        ));
+    }
+
+    #[test]
+    fn borrowed_value_debug_does_not_decode_unvalidated_payloads() {
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                string: std::ptr::null_mut(),
+            },
+            xltype: XLTYPE_STR,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        assert_eq!(
+            format!("{value:?}"),
+            "XlValueRef { value_type: String, .. }"
+        );
+        assert!(value.as_str().is_err());
+    }
+
+    #[test]
+    fn borrowed_array_rejects_invalid_cell_headers_before_exposing_views() {
+        for (xltype, expected) in [
+            (XLTYPE_NUM | 0x2000, "unknown xltype flag"),
+            (0x0003, "unknown base xltype"),
+        ] {
+            let mut cells = [
+                XLOPER12::number(1.0),
+                XLOPER12 {
+                    value: XLOPER12Value { number: 2.0 },
+                    xltype,
+                },
+            ];
+            let raw = XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        values: cells.as_mut_ptr(),
+                        rows: 1,
+                        columns: 2,
+                    },
+                },
+                xltype: xlfn_sys::XLTYPE_MULTI,
+            };
+            let value = XlValueRef::from_array_cell(&raw).unwrap();
+            let result = XlArrayRef::from_excel(value, "values");
+            assert!(matches!(
+                result,
+                Err(XllError::Input {
+                    argument: "values",
+                    reason: InputError::Malformed(reason),
+                }) if reason == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn borrowed_array_preserves_lazy_payload_conversion() {
+        let mut invalid_utf16 = [1_u16, 0xd800];
+        let mut cells = [XLOPER12 {
+            value: XLOPER12Value {
+                string: invalid_utf16.as_mut_ptr(),
+            },
+            xltype: xlfn_sys::XLTYPE_STR,
+        }];
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    values: cells.as_mut_ptr(),
+                    rows: 1,
+                    columns: 1,
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        let array = XlArrayRef::from_excel(value, "values").unwrap();
+        assert_eq!(array.get(0, 0).unwrap().value_type(), XlValueType::String);
+        assert_eq!(
+            array.cells().next().unwrap().value_type(),
+            XlValueType::String
+        );
+        assert!(matches!(
+            array.get(0, 0).unwrap().as_str().unwrap().try_to_string(),
+            Err(XllError::Input {
+                reason: InputError::InvalidUtf16,
+                ..
+            })
+        ));
+    }
+}

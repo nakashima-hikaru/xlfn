@@ -1,0 +1,59 @@
+//! Cargo subcommand for checking, staging, and packaging Rust Excel XLLs.
+//!
+//! `cargo xlfn check` validates the selected Windows target and CRT policy,
+//! while `cargo xlfn package` builds a closed-world package and commits it through
+//! the transactional staging API in `xlfn-package`.
+
+use anyhow::{Context, anyhow, bail};
+use cargo_metadata::{CargoOpt, Metadata, MetadataCommand, Package};
+use fs_err as fs;
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+extern crate usage as usage_rs;
+
+use usage::{Args, Cli, Subcommands, ValueEnum};
+use xlfn_package::{BundleMetadata, validate_windows_basename};
+
+mod crt;
+
+use crt::{CrtObservation, CrtPolicy, ResolvedCrtPolicy};
+
+type Result<T = ()> = anyhow::Result<T>;
+
+fn main() {
+    if crt::wrapper_mode_requested() {
+        match crt::run_wrapper() {
+            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            Err(error) => {
+                eprintln!("cargo xlfn rustc wrapper: {error:#}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Err(error) = run() {
+        eprintln!("cargo xlfn: {error:#}");
+        std::process::exit(1);
+    }
+}
+
+mod cargo;
+mod cargo_settings;
+mod check;
+mod cli;
+mod distribution;
+mod metadata;
+mod package;
+mod pipeline;
+mod target;
+
+pub(crate) use cargo::*;
+pub(crate) use check::*;
+pub(crate) use cli::*;
+pub(crate) use distribution::*;
+pub(crate) use metadata::*;
+pub(crate) use package::*;
+pub(crate) use pipeline::*;
+pub(crate) use target::*;
+#[cfg(test)]
+mod tests;

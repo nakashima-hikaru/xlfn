@@ -1,0 +1,33 @@
+use xlfn::prelude::*;
+
+struct State;
+
+struct CaseAddin;
+
+#[excel_addin(name = "Case Test", id = "case-test", category = "Test")]
+impl Addin for CaseAddin {
+    type SharedState = State;
+    type LifecycleState = ();
+    type Error = XllError;
+    type Layers = ();
+
+    fn open(_: &OpenContext<Self>) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+        Ok(Opened::new(State))
+    }
+}
+
+#[excel_function(id = "lower_foo", name = "TEST.LOWER")]
+fn foo() -> f64 {
+    1.0
+}
+
+#[allow(non_snake_case)]
+#[excel_function(id = "upper_foo", name = "TEST.UPPER")]
+fn FOO() -> f64 {
+    2.0
+}
+
+fn main() {
+    assert_eq!(foo(), 1.0);
+    assert_eq!(FOO(), 2.0);
+}

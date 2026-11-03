@@ -1,0 +1,8 @@
+error[E0599]: no method named `set_handle_reuse` found for struct `xlfn::__private::v1::ReturnContext<'_, '_>` in the current scope
+  --> tests/ui/fail/handle_return_policy_scalar.rs:12:1
+   |
+12 | #[excel_function(handle_reuse = never)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `xlfn::__private::v1::ReturnContext<'_, '_>`
+   |
+   = note: the method was found for `xlfn::__private::v1::ReturnContext<'call, 'scope, xlfn::__private::v1::FormulaInputMode, E, C>`
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

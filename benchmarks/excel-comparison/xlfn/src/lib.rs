@@ -1,0 +1,317 @@
+//! Paired Excel workload functions. Change both implementations together.
+// MSVC reports LNK4104 for the framework's intentional COM class exports.
+#![allow(linker_messages)]
+
+mod native_abi;
+mod rtd_source;
+use rtd_source::{BenchRtdSource, RtdShared};
+
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+mod async_control;
+use async_control::AsyncControl;
+use xlfn::{
+    AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig, RtdConfig, RuntimeConfig,
+    error::InputError,
+    output::{NumericArrayBuilder, NumericArrayOutput, XlArrayBuilder, XlArrayOutput},
+    prelude::*,
+    rtd::{RtdCapacity, RtdLimits, RtdSourceHandle, RtdValue},
+};
+
+mod allocation;
+#[global_allocator]
+static ALLOCATOR: allocation::CountingAllocator = allocation::CountingAllocator::new();
+
+pub struct State {
+    shared_read: AtomicU64,
+    contended: AtomicU64,
+    async_control: AsyncControl,
+    rtd: RtdSourceHandle<BenchRtdSource>,
+    rtd_shared: Arc<RtdShared>,
+}
+
+pub struct BenchAddin;
+
+#[excel_addin(
+    name = "xlfn Excel Comparison",
+    id = "xlfn-excel-comparison",
+    category = "Bench"
+)]
+impl Addin for BenchAddin {
+    type RtdSubscription = rtd_source::BenchSubscription;
+    type RtdSources = (BenchRtdSource,);
+    type SharedState = State;
+    type LifecycleState = ();
+    type Error = XllError;
+    type Layers = ();
+    type AsyncExecutor = BuiltinAsyncExecutor;
+
+    fn open(context: &OpenContext<Self>) -> OpenResult<Self> {
+        let (source, rtd_shared) = BenchRtdSource::new();
+        let (rtd,) = context.rtd().register_sources((source,))?;
+        let limits = RtdLimits::standard()
+            .with_max_pending(RtdCapacity::disabled_if_zero(120_000))
+            .with_max_active(RtdCapacity::disabled_if_zero(120_000))
+            .with_max_queued_updates(RtdCapacity::disabled_if_zero(120_000));
+        let config = RuntimeConfig::new().with_rtd(RtdConfig::new().with_limits(limits));
+        let executor = BuiltinAsyncExecutor::new(
+            BuiltinExecutorConfig::new()
+                .with_poller_count(AsyncPollerCount::new(32).expect("32 pollers are supported")),
+        );
+        let opened = Opened::new(State {
+            shared_read: AtomicU64::new(0),
+            contended: AtomicU64::new(0),
+            async_control: AsyncControl::default(),
+            rtd,
+            rtd_shared,
+        })
+        .with_runtime_config(config)
+        .with_async_executor(executor);
+        Ok(opened)
+    }
+}
+
+#[excel_function(name = "BENCH.ID", thread_safe)]
+pub fn identity(value: f64) -> f64 {
+    value
+}
+
+#[excel_function(name = "BENCH.SUM2", thread_safe)]
+pub fn sum2(a: f64, b: f64) -> f64 {
+    a + b
+}
+
+#[excel_function(name = "BENCH.SUM4", thread_safe)]
+pub fn sum4(a: f64, b: f64, c: f64, d: f64) -> f64 {
+    a + b + c + d
+}
+
+#[excel_function(name = "BENCH.SUM8", thread_safe)]
+#[allow(clippy::too_many_arguments, reason = "Measures eight Excel arguments")]
+pub fn sum8(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64) -> f64 {
+    a + b + c + d + e + f + g + h
+}
+
+fn busy(micros: i32) {
+    if micros <= 0 {
+        return;
+    }
+    let end = Instant::now() + Duration::from_micros(micros as u64);
+    while Instant::now() < end {
+        std::hint::spin_loop();
+    }
+}
+
+#[excel_function(name = "BENCH.CPU", thread_safe)]
+pub fn cpu(value: f64, micros: i32) -> f64 {
+    busy(micros);
+    value
+}
+
+#[excel_function(name = "BENCH.ERRNUM", thread_safe)]
+pub fn error(value: f64, period: i32) -> Result<f64, ExcelError> {
+    if period > 0 && (value as i64) % period as i64 == 0 {
+        Err(ExcelError::Number)
+    } else {
+        Ok(value)
+    }
+}
+
+#[excel_function(name = "BENCH.MAT.SUM", thread_safe)]
+pub fn matrix_sum(values: NumericMatrixRef<'_>) -> f64 {
+    values.iter().copied().sum()
+}
+
+#[excel_function(name = "BENCH.MAT.MAKE", thread_safe, return_abi = "fp12")]
+pub fn matrix_make(rows: i32, columns: i32, seed: f64) -> XllResult<NumericArrayOutput> {
+    let rows =
+        usize::try_from(rows).map_err(|_| XllError::input("rows", InputError::OutOfRange))?;
+    let columns =
+        usize::try_from(columns).map_err(|_| XllError::input("columns", InputError::OutOfRange))?;
+    let count = rows
+        .checked_mul(columns)
+        .ok_or_else(|| XllError::input("rows", InputError::OutOfRange))?;
+    let mut output = NumericArrayBuilder::new(rows, columns)?;
+    for i in 0..count {
+        output.push_f64(seed + i as f64)?;
+    }
+    output.finish()
+}
+
+// The same numeric producer under the explicit Q ABI isolates return encoding.
+#[excel_function(name = "BENCH.MAT.MAKE.Q", thread_safe, return_abi = "xloper12")]
+pub fn matrix_make_q(rows: i32, columns: i32, seed: f64) -> XllResult<NumericArrayOutput> {
+    matrix_make(rows, columns, seed)
+}
+
+#[excel_function(name = "BENCH.MAT.COPY", thread_safe, return_abi = "xloper12")]
+pub fn matrix_copy(values: NumericMatrixRef<'_>) -> XllResult<XlArrayOutput> {
+    XlArrayBuilder::from_f64(values.rows(), values.columns(), values.as_slice())?.finish()
+}
+
+#[cfg(test)]
+mod numeric_abi_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_benchmarks_preserve_the_documented_return_abis() {
+        type Fp12 = xlfn::__private::v1::FP12;
+        type Xloper12 = xlfn::__private::v1::XLOPER12;
+
+        // M02/M06 have numeric FP12 and explicit Q producer controls. M03
+        // copies through XlArrayBuilder and must retain its measured Q output
+        // path rather than silently switching its storage and error policy.
+        let _: unsafe extern "system" fn(i32, i32, f64) -> *mut Fp12 = xll_matrix_make;
+        let _: unsafe extern "system" fn(i32, i32, f64) -> *mut Xloper12 = xll_matrix_make_q;
+        let _: unsafe extern "system" fn(*const Fp12) -> *mut Xloper12 = xll_matrix_copy;
+    }
+}
+
+#[excel_function(name = "BENCH.MAT.MIXED", thread_safe)]
+pub fn matrix_mixed(values: MatrixRef<'_, ExcelCellRef<'_>>) -> f64 {
+    values
+        .iter()
+        .map(|cell| match cell {
+            ExcelCellRef::Number(_) => 1.0,
+            ExcelCellRef::String(_) => 2.0,
+            ExcelCellRef::Boolean(_) => 3.0,
+            ExcelCellRef::Blank => 4.0,
+            ExcelCellRef::Error(_) => 5.0,
+        })
+        .sum()
+}
+
+#[excel_function(name = "BENCH.STR.IN", thread_safe)]
+pub fn string_input(value: String) -> f64 {
+    value.chars().count() as f64
+}
+
+#[excel_function(name = "BENCH.STR.OUT", thread_safe)]
+pub fn string_output(length: i32, japanese: bool) -> String {
+    let unit = if japanese { "日" } else { "a" };
+    unit.repeat(length.max(0) as usize)
+}
+
+#[excel_function(name = "BENCH.STR.COPY", thread_safe)]
+pub fn string_copy(value: String) -> String {
+    value
+}
+
+#[excel_function(name = "BENCH.SHARED")]
+pub fn shared_read(context: ThreadSafeContext<'_, BenchAddin>, value: f64) -> f64 {
+    value + context.state().shared_read.load(Ordering::Relaxed) as f64
+}
+
+#[excel_function(name = "BENCH.CONTENDED")]
+pub fn contended(context: ThreadSafeContext<'_, BenchAddin>, value: f64) -> f64 {
+    value + context.state().contended.fetch_add(1, Ordering::AcqRel) as f64
+}
+
+#[excel_function(name = "BENCH.ALLOC.BYTES", thread_safe)]
+pub fn alloc_bytes() -> f64 {
+    ALLOCATOR.allocated() as f64
+}
+
+/// Requested bytes released during enabled observation windows, including realloc.
+#[excel_function(name = "BENCH.ALLOC.FREED", thread_safe)]
+pub fn alloc_freed() -> f64 {
+    ALLOCATOR.freed() as f64
+}
+
+/// Enables allocation counting without resetting the cumulative counter.
+#[excel_function(name = "BENCH.ALLOC.TRACK")]
+pub fn alloc_track(enabled: bool) -> f64 {
+    ALLOCATOR.track(enabled);
+    if enabled { 1.0 } else { 0.0 }
+}
+
+#[excel_function(name = "BENCH.ASYNC")]
+pub async fn async_value(
+    context: AsyncContext<'_, BenchAddin>,
+    value: f64,
+    delay_us: i32,
+) -> XllResult<f64> {
+    let mut guard = context.state().async_control.enter(context.cancellation());
+    context.check_cancelled()?;
+    if delay_us < 0 {
+        if let Some(receiver) = context.state().async_control.wait() {
+            let _ = receiver.await;
+        }
+    } else if delay_us > 0 && delay_us < 1_000 {
+        busy(delay_us);
+    } else if delay_us > 0 {
+        futures_timer::Delay::new(Duration::from_micros(delay_us as u64)).await;
+    }
+    context.check_cancelled()?;
+    guard.complete();
+    Ok(value)
+}
+
+#[excel_function(name = "BENCH.ASYNC.ARM")]
+pub fn async_arm(
+    context: MainThreadContext<'_, BenchAddin>,
+    directory: String,
+    expected: i32,
+) -> XllResult<f64> {
+    context
+        .state()
+        .async_control
+        .arm(std::path::Path::new(&directory), expected as u64)
+        .map_err(|error| XllError::Native {
+            code: error.raw_os_error().unwrap_or(0),
+            message: format!("cannot arm async gate: {error}"),
+        })?;
+    Ok(1.0)
+}
+
+#[excel_function(name = "BENCH.ASYNC.RELEASE")]
+pub fn async_release(context: MainThreadContext<'_, BenchAddin>, sequence: f64) -> f64 {
+    context.state().async_control.release();
+    sequence
+}
+
+#[excel_function(name = "BENCH.ASYNC.ACTIVE")]
+pub fn async_active(context: ThreadSafeContext<'_, BenchAddin>) -> f64 {
+    context.state().async_control.active() as f64
+}
+
+#[excel_function(name = "BENCH.ASYNC.FINISHED")]
+pub fn async_finished(context: ThreadSafeContext<'_, BenchAddin>) -> f64 {
+    context.state().async_control.finished() as f64
+}
+
+#[excel_function(name = "BENCH.RTD")]
+pub fn rtd_value(
+    context: MainThreadContext<'_, BenchAddin>,
+    topic: String,
+    period_ms: f64,
+) -> XllResult<RtdValue> {
+    let period = period_ms.to_string();
+    context
+        .rtd()
+        .subscribe(&context.state().rtd, &[topic.as_str(), period.as_str()])
+}
+
+#[excel_function(name = "BENCH.RTD.EMITTED")]
+pub fn rtd_emitted(context: ThreadSafeContext<'_, BenchAddin>) -> f64 {
+    context.state().rtd_shared.emitted.load(Ordering::Relaxed) as f64
+}
+
+#[excel_function(name = "BENCH.RTD.PULSE")]
+pub fn rtd_pulse(context: MainThreadContext<'_, BenchAddin>, sequence: f64) -> f64 {
+    context.state().rtd_shared.set_pulse(sequence as u64);
+    sequence
+}
+
+#[excel_function(name = "BENCH.RTD.COUNT")]
+pub fn rtd_count(context: ThreadSafeContext<'_, BenchAddin>) -> f64 {
+    context.state().rtd_shared.count() as f64
+}
+
+include!(concat!(env!("OUT_DIR"), "/extra.rs"));

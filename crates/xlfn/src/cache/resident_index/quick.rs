@@ -1,0 +1,102 @@
+//! Quick Cache resident policy. Only stored values own a residency obligation.
+//! Cloned lookup/placeholder results are non-owning snapshots.
+//!
+//! This is the lifetime boundary for ResidentKey's non-owning retirement queue.
+//! Only get/insert/remove/retain/clear and scalar observations are exposed. get
+//! clones a ResidentEntry containing no key or queue pointer; remove results and
+//! insert's DefaultLifecycle request state are dropped before returning. No
+//! entry/placeholder/drain guard, callback-owned item, or backend handle escapes.
+//! ResidentKey intentionally has no Clone impl, also ruling out key-cloning
+//! iteration. The backend has no background eviction task. Any extension of
+//! this boundary must preserve destruction of all keys before the queue owner.
+
+use super::{Entry, ResidentEntry, ResidentKey, VersionedKey, VersionedKeyRef};
+use quick_cache::{
+    OptionsBuilder, Weighter,
+    sync::{Cache, DefaultLifecycle},
+};
+use std::borrow::Borrow;
+use std::collections::hash_map::RandomState;
+use std::hash::Hash;
+
+#[derive(Clone)]
+struct EntryWeight;
+
+impl<K, V> Weighter<K, ResidentEntry<V>> for EntryWeight {
+    fn weight(&self, _: &K, value: &ResidentEntry<V>) -> u64 {
+        value.weight
+    }
+}
+
+pub(super) struct QuickResidentIndex<K, V> {
+    cache: Cache<ResidentKey<K>, ResidentEntry<V>, EntryWeight, RandomState>,
+}
+
+impl<K, V> QuickResidentIndex<K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    pub(super) fn new(capacity: u64) -> Self {
+        // Weight is bytes, not an item count: never preallocate the entire
+        // byte budget as entries. Match Quick Cache's minimum shard size.
+        let estimated = usize::try_from(capacity)
+            .unwrap_or(usize::MAX)
+            .clamp(1, 1024);
+        let options = OptionsBuilder::new()
+            .shards(1)
+            .estimated_items_capacity(estimated)
+            .weight_capacity(capacity)
+            // The default 97% hot quota rejects a single full-budget entry,
+            // even with one shard. Preserve eligibility up to shard capacity.
+            .hot_allocation(1.0)
+            .build()
+            .expect("valid resident cache options");
+        Self {
+            // Use the standard RandomState hasher.
+            cache: Cache::with_options(
+                options,
+                EntryWeight,
+                RandomState::new(),
+                DefaultLifecycle::default(),
+            ),
+        }
+    }
+
+    pub(super) fn get<Q>(&self, key: &VersionedKeyRef<'_, Q>) -> Option<Entry<V>>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.cache.get(key).map(|entry| entry.snapshot())
+    }
+
+    pub(super) fn insert_resident(&self, key: ResidentKey<K>, entry: ResidentEntry<V>) {
+        self.cache.insert(key, entry);
+    }
+
+    pub(super) fn invalidate(&self, key: &VersionedKey<K>) {
+        drop(self.cache.remove(key));
+    }
+
+    pub(super) fn invalidate_before(&self, epoch: u64) {
+        self.cache.retain(|key, _| key.get().epoch >= epoch);
+    }
+
+    pub(super) fn clear(&self) {
+        self.cache.clear();
+    }
+
+    pub(super) fn resident_count(&self) -> u64 {
+        self.cache.len() as u64
+    }
+
+    pub(super) fn resident_weight(&self) -> u64 {
+        self.cache.weight()
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(super) fn estimated_index_bytes(&self) -> usize {
+        self.cache.memory_used().total()
+    }
+}

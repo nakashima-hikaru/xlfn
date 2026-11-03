@@ -1,0 +1,276 @@
+use std::collections::BTreeSet;
+
+use quote::quote;
+use syn::ext::IdentExt;
+use syn::{Data, DeriveInput, Expr, Fields};
+
+use crate::options::parse_expr_path;
+use crate::support::resolve_crate_path;
+use crate::validation::validate_registration_string;
+
+pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let mut ascii_case_insensitive = false;
+    let mut krate_opt = None;
+    for attribute in &input.attrs {
+        if !attribute.path().is_ident("excel_enum") {
+            continue;
+        }
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("ascii_case_insensitive") {
+                if ascii_case_insensitive {
+                    return Err(meta.error("duplicate ASCII case-insensitive option"));
+                }
+                ascii_case_insensitive = true;
+                Ok(())
+            } else if meta.path.is_ident("crate") {
+                if krate_opt.is_some() {
+                    return Err(meta.error("duplicate `crate` option"));
+                }
+                let expr: Expr = meta.value()?.parse()?;
+                krate_opt = Some(parse_expr_path(&expr)?);
+                Ok(())
+            } else {
+                Err(meta.error("expected `ascii_case_insensitive` or `crate = \"...\"`"))
+            }
+        })?;
+    }
+    let krate = resolve_crate_path(krate_opt.as_ref());
+    let Data::Enum(data) = &input.data else {
+        return Err(syn::Error::new_spanned(
+            &input.ident,
+            "ExcelEnum can only be derived for an enum",
+        ));
+    };
+    if data.variants.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input.ident,
+            "ExcelEnum requires at least one variant",
+        ));
+    }
+    let mut names = BTreeSet::new();
+    let mut variants = Vec::with_capacity(data.variants.len());
+    for variant in &data.variants {
+        if !matches!(variant.fields, Fields::Unit) {
+            return Err(syn::Error::new_spanned(
+                &variant.fields,
+                "ExcelEnum variants must not contain fields",
+            ));
+        }
+        let mut excel_name = None;
+        for attribute in &variant.attrs {
+            if !attribute.path().is_ident("excel_enum") {
+                continue;
+            }
+            attribute.parse_nested_meta(|meta| {
+                if meta.path.is_ident("name") {
+                    if excel_name.is_some() {
+                        return Err(meta.error("duplicate `name`"));
+                    }
+                    excel_name = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+                    Ok(())
+                } else {
+                    Err(meta.error("expected `name = \"...\"`"))
+                }
+            })?;
+        }
+        let excel_name = excel_name.unwrap_or_else(|| variant.ident.unraw().to_string());
+        if excel_name.is_empty() {
+            return Err(syn::Error::new_spanned(
+                &variant.ident,
+                "Excel enum value cannot be empty",
+            ));
+        }
+        validate_registration_string("Excel enum value", &excel_name, &variant.ident)?;
+        let uniqueness_key = if ascii_case_insensitive {
+            excel_name.to_ascii_lowercase()
+        } else {
+            excel_name.clone()
+        };
+        if !names.insert(uniqueness_key) {
+            return Err(syn::Error::new_spanned(
+                &variant.ident,
+                "duplicate Excel enum value",
+            ));
+        }
+        variants.push((variant.ident.clone(), excel_name));
+    }
+    let ident = &input.ident;
+    let expected = expected_names(&variants);
+    let (base_impl_generics, type_generics, base_where_clause) = input.generics.split_for_impl();
+    let mut from_excel_generics = input.generics.clone();
+    from_excel_generics
+        .params
+        .insert(0, syn::parse_quote!('__xlfn_call));
+    let (from_excel_impl_generics, _, from_excel_where_clause) =
+        from_excel_generics.split_for_impl();
+    let comparisons = variants.iter().map(|(variant, name)| {
+        let units = name
+            .encode_utf16()
+            .map(|unit| quote!(#unit))
+            .collect::<Vec<_>>();
+        if ascii_case_insensitive {
+            quote! {
+                if #krate::__private::v1::utf16_eq_ignore_ascii_case(
+                    __text.as_utf16(),
+                    &[#(#units),*],
+                ) {
+                    return ::core::result::Result::Ok(Self::#variant);
+                }
+            }
+        } else {
+            quote! {
+                if __text.as_utf16() == &[#(#units),*] {
+                    return ::core::result::Result::Ok(Self::#variant);
+                }
+            }
+        }
+    });
+    let outputs = variants
+        .iter()
+        .map(|(variant, name)| quote!(Self::#variant => #name))
+        .collect::<Vec<_>>();
+    let identities = variants
+        .iter()
+        .enumerate()
+        .map(|(index, (variant, _))| quote!(Self::#variant => #index as u32))
+        .collect::<Vec<_>>();
+    Ok(quote! {
+        impl #from_excel_impl_generics #krate::value::FromExcel<'__xlfn_call>
+            for #ident #type_generics #from_excel_where_clause
+        {
+            fn from_excel(
+                __value: #krate::value::XlValueRef<'__xlfn_call>,
+                __argument: &'static str,
+            ) -> #krate::error::XllResult<Self> {
+                let __text = __value.as_str_with_argument(__argument)?;
+                #(#comparisons)*
+                ::core::result::Result::Err(#krate::__private::v1::unknown_enum_error(
+                    __text,
+                    __argument,
+                    #expected,
+                ))
+            }
+        }
+
+        impl #from_excel_impl_generics #krate::value::PrepareExcel<'__xlfn_call>
+            for #ident #type_generics #from_excel_where_clause
+        {
+            type Prepared = Self;
+            fn prepare(value: #krate::value::XlValueRef<'__xlfn_call>, argument: &'static str,
+                identity: &mut #krate::value::InputIdentityEncoder) -> #krate::XllResult<Self> {
+                <Self as #krate::value::FromExcel>::from_excel_with_identity(value, argument, identity)
+            }
+            fn materialize(value: Self) -> #krate::XllResult<Self> {
+                ::core::result::Result::Ok(value)
+            }
+        }
+
+        impl #base_impl_generics #krate::value::IntoExcel
+            for #ident #type_generics #base_where_clause
+        {
+            fn into_excel(self) -> #krate::error::XllResult<#krate::value::ExcelCellOutput> {
+                let __text = match self {
+                    #(#outputs,)*
+                };
+                ::core::result::Result::Ok(
+                    #krate::value::ExcelCellOutput::String(__text.to_owned())
+                )
+            }
+
+            fn write_into<__XlfnSink: #krate::__private::v1::ExcelCellSink>(
+                self,
+                __sink: &mut __XlfnSink,
+            ) -> #krate::error::XllResult<()> {
+                let __text = match self {
+                    #(#outputs,)*
+                };
+                __sink.push_str(__text)
+            }
+        }
+
+        impl #base_impl_generics #krate::value::ExcelInputIdentity
+            for #ident #type_generics #base_where_clause
+        {
+            fn encode_input_identity(
+                &self,
+                __encoder: &mut #krate::value::InputIdentityEncoder,
+            ) {
+                let __variant = match self {
+                    #(#identities,)*
+                };
+                __encoder.u32(__variant);
+            }
+        }
+    })
+}
+
+// Candidate names live in generated static storage. Bound even that storage's
+// diagnostic view so a large enum does not produce unbounded failure text.
+fn expected_names(variants: &[(syn::Ident, String)]) -> String {
+    const MAX_BYTES: usize = 4096;
+    const TRUNCATED: &str = "…[truncated]";
+    let mut expected = String::from("[");
+    for (index, (_, name)) in variants.iter().enumerate() {
+        let item = format!("{}{name:?}", if index == 0 { "" } else { ", " });
+        if expected.len() + item.len() + 1 > MAX_BYTES {
+            expected.push_str(&item);
+            expected.truncate(expected.floor_char_boundary(MAX_BYTES - TRUNCATED.len() - 1));
+            expected.push_str(TRUNCATED);
+            break;
+        }
+        expected.push_str(&item);
+    }
+    expected.push(']');
+    expected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expected_choices_preserve_names_and_bound_utf8_text() {
+        let variants = vec![
+            (syn::parse_quote!(First), "quoted\"value".to_owned()),
+            (syn::parse_quote!(Second), "日本語💡".to_owned()),
+        ];
+        assert_eq!(
+            expected_names(&variants),
+            "[\"quoted\\\"value\", \"日本語💡\"]"
+        );
+        for names in [
+            vec!["日".repeat(4096)],
+            vec!["x".repeat(4079), "following".repeat(100)],
+        ] {
+            let variants = names
+                .into_iter()
+                .map(|name| (syn::parse_quote!(Variant), name))
+                .collect::<Vec<_>>();
+            let summary = expected_names(&variants);
+            assert!(summary.len() <= 4096);
+            assert!(summary.ends_with("…[truncated]]"));
+        }
+    }
+
+    #[test]
+    fn enum_names_must_fit_the_excel_utf16_string_limit() {
+        for (name, valid) in [
+            ("x".repeat(xlfn_common::EXCEL_STRING_LIMIT), true),
+            ("x".repeat(xlfn_common::EXCEL_STRING_LIMIT + 1), false),
+            ("😀".repeat(xlfn_common::EXCEL_STRING_LIMIT / 2 + 1), false),
+        ] {
+            let input = syn::parse_quote! {
+                enum Value {
+                    #[excel_enum(name = #name)]
+                    Item,
+                }
+            };
+            let result = expand_excel_enum(input);
+            assert_eq!(result.is_ok(), valid);
+            if let Err(error) = result {
+                assert!(error.to_string().contains("Excel enum value"));
+                assert!(error.to_string().contains("UTF-16 limit"));
+            }
+        }
+    }
+}

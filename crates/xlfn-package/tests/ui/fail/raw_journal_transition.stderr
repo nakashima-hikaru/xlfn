@@ -1,0 +1,23 @@
+error[E0603]: module `distribution` is private
+ --> tests/ui/fail/raw_journal_transition.rs:1:19
+  |
+1 | use xlfn_package::distribution::{TransactionJournal, TransactionState, write_transaction_state};
+  |                   ^^^^^^^^^^^^ private module
+  |
+note: the module `distribution` is defined here
+ --> src/lib.rs
+  |
+  | mod distribution;
+  | ^^^^^^^^^^^^^^^^
+
+error[E0603]: module `distribution` is private
+ --> tests/ui/fail/raw_journal_transition.rs:1:19
+  |
+1 | use xlfn_package::distribution::{TransactionJournal, TransactionState, write_transaction_state};
+  |                   ^^^^^^^^^^^^ private module        ---------------- enum `TransactionState` is not publicly re-exported
+  |
+note: the module `distribution` is defined here
+ --> src/lib.rs
+  |
+  | mod distribution;
+  | ^^^^^^^^^^^^^^^^

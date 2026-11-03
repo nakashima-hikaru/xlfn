@@ -1,0 +1,4893 @@
+#![allow(
+    unsafe_code,
+    reason = "Windows RTD tests implement the audited non-owning subscription lifetime contract"
+)]
+
+use super::server::shutdown_subscriptions;
+use super::subscription_backend::BackendSubscriptions;
+use super::*;
+
+#[cfg(feature = "rtd")]
+use crate::XllResult;
+#[cfg(feature = "rtd")]
+use crate::subscription::{RtdSink, RtdSource, RtdSubscription, RtdTopic};
+use crate::subscription::{RtdUpdate, StoredRtdValue};
+#[cfg(feature = "rtd")]
+use crate::sync::Mutex;
+use std::marker::PhantomData;
+use std::ptr;
+use std::rc::Rc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+use super::com_abi::{
+    DISPATCH_METHOD, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_EMPTY, VT_ERROR, VT_I4, VT_R8,
+    VT_VARIANT,
+};
+#[cfg(feature = "handles")]
+use crate::win32::{
+    CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND,
+    DISP_E_TYPEMISMATCH, DISP_E_UNKNOWNNAME, DISPID_UNKNOWN, E_NOINTERFACE,
+};
+use crate::win32::{
+    COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize, RPC_E_CHANGED_MODE, S_FALSE, S_OK,
+    SAFEARRAYBOUND, SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
+    SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayPutElement, SysAllocStringLen, SysStringLen,
+};
+use static_assertions::assert_not_impl_any;
+
+#[cfg(feature = "rtd")]
+fn connect_subscription_backend<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    ensured: &super::server::EnsuredServer<E, C>,
+    topic_id: i32,
+    key: crate::subscription::SubscriptionKey,
+) -> VARIANT {
+    let server = ensured.pointer();
+    // SAFETY: ensured retains the COM allocation through this operation.
+    let _operation = unsafe { (*server).operations.enter() }.unwrap();
+    let mut initial = VARIANT::default();
+    // SAFETY: initial is writable VARIANT storage, and the retained COM
+    // reference/admission keeps the production typed adapter and runtime live.
+    assert_eq!(
+        // SAFETY: the writable output and retained COM admission are described above.
+        unsafe {
+            ensured.subscription_server.unwrap().connect_data(
+                crate::subscription::TopicId(topic_id),
+                key,
+                &mut initial,
+            )
+        },
+        S_OK
+    );
+    initial
+}
+
+#[cfg(all(feature = "rtd", feature = "handles"))]
+type ChannelOwnerAddin =
+    crate::rtd::test_support::TestRtdAddin<crate::subscription::RtdChannelSubscription>;
+
+assert_not_impl_any!(ServerOperation<'static>: Send, Sync);
+assert_not_impl_any!(ServerNotificationOperation<'static>: Send, Sync);
+assert_not_impl_any!(ServerTermination<'static>: Send, Sync);
+assert_not_impl_any!(super::server_gate::TerminationWorkerStart<'static>: Send, Sync);
+assert_not_impl_any!(super::server_gate::ServerResourceTeardown<'static>: Send, Sync);
+assert_not_impl_any!(super::server_gate::DrainedServerOperations<'static>: Send, Sync);
+assert_not_impl_any!(super::server::QuiescentServerAccess<'static>: Send, Sync);
+assert_not_impl_any!(super::server::JoinedServerAccess<'static>: Send, Sync);
+
+struct TestComApartment {
+    should_uninitialize: bool,
+
+    // COM apartment initialization is thread-affine. Making this guard
+    // neither Send nor Sync prevents it from being dropped on another thread.
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl TestComApartment {
+    fn enter() -> Self {
+        // SAFETY:
+        // - `pv_reserved` must be null according to the `CoInitializeEx`
+        //   contract.
+        // - `COINIT_MULTITHREADED` is a valid apartment initialization flag.
+        // - The returned HRESULT is checked below.
+        // - A successful call, including `S_FALSE`, is balanced by exactly one
+        //   `CoUninitialize` call from `Drop` on the same thread.
+        let status = unsafe { CoInitializeEx(ptr::null_mut(), COINIT_MULTITHREADED as u32) };
+
+        match status {
+            S_OK | S_FALSE => Self {
+                should_uninitialize: true,
+                _not_send_or_sync: PhantomData,
+            },
+            RPC_E_CHANGED_MODE => Self {
+                // The current thread was already initialized using a different
+                // apartment model. This call did not initialize COM and must
+                // therefore not be balanced by `CoUninitialize`.
+                should_uninitialize: false,
+                _not_send_or_sync: PhantomData,
+            },
+            _ => panic!("CoInitializeEx failed: {status:#010x}"),
+        }
+    }
+}
+
+impl Drop for TestComApartment {
+    fn drop(&mut self) {
+        if self.should_uninitialize {
+            // SAFETY:
+            // - `should_uninitialize` is true only when `CoInitializeEx`
+            //   returned `S_OK` or `S_FALSE`.
+            // - Each successful `CoInitializeEx` call must be balanced by one
+            //   `CoUninitialize` call.
+            // - `_not_send_or_sync` prevents this guard from moving to another
+            //   thread, so this runs on the thread that initialized COM.
+            // - `Drop` runs at most once, so the call is not duplicated.
+            unsafe {
+                CoUninitialize();
+            }
+        }
+    }
+}
+
+#[test]
+fn server_operation_barrier_waits_and_rejects_new_com_work() {
+    use std::sync::mpsc::{self, TryRecvError};
+    use std::time::{Duration, Instant};
+
+    let barrier = Arc::new(ServerOperationBarrier::default());
+    let operation = barrier.enter().unwrap();
+    let closing_barrier = Arc::clone(&barrier);
+    let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+    let closing = std::thread::spawn(move || {
+        let _apartment = TestComApartment::enter();
+        let _termination = closing_barrier.close_and_wait().unwrap().unwrap();
+        closed_tx.send(()).unwrap();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while barrier.phase() == ServerPhase::Open {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for RTD COM shutdown"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(closed_rx.try_recv(), Err(TryRecvError::Empty));
+    assert!(barrier.enter().is_none());
+    assert!(matches!(
+        barrier.close_and_wait(),
+        Err(ServerCloseError::Reentrant)
+    ));
+
+    drop(operation);
+    closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    closing.join().unwrap();
+}
+
+#[test]
+fn server_operation_barrier_rejects_same_thread_close_without_closing() {
+    let barrier = ServerOperationBarrier::default();
+    let outer = barrier.enter().unwrap();
+    let nested = barrier.enter().unwrap();
+
+    assert!(matches!(
+        barrier.close_and_wait(),
+        Err(ServerCloseError::Reentrant)
+    ));
+    assert_eq!(barrier.phase(), ServerPhase::Open);
+    assert!(barrier.enter().is_some());
+
+    drop(nested);
+    drop(outer);
+    let termination = barrier.close_and_wait().unwrap().unwrap();
+    assert!(barrier.enter().is_none());
+    assert_eq!(
+        barrier.phase(),
+        ServerPhase::Terminating {
+            owner: std::thread::current().id(),
+            deferred: false,
+        }
+    );
+    drop(termination);
+    assert_eq!(barrier.phase(), ServerPhase::Terminated);
+    assert!(barrier.close_and_wait().unwrap().is_none());
+}
+
+#[test]
+fn drained_server_authority_is_bound_to_the_operation_barrier() {
+    let first = ServerOperationBarrier::default();
+    let second = ServerOperationBarrier::default();
+    let drained = first.drain().unwrap();
+    assert!(drained.belongs_to(&first));
+    assert!(!drained.belongs_to(&second));
+    assert!(first.enter().is_none());
+    assert!(second.enter().is_some());
+}
+
+#[test]
+fn server_teardown_capability_retains_its_target_through_active_release() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let ensured = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: ensured owns an independent reference through the complete test.
+    let server = unsafe { &*ensured.pointer() };
+    let initial_references = server.references.load(Ordering::Acquire);
+    let access = server.drain_access().unwrap();
+    assert_eq!(
+        server.references.load(Ordering::Acquire),
+        initial_references + 1
+    );
+    assert!(server.operations.enter().is_none());
+    let joined = access.join_worker().unwrap();
+    assert!(!joined.worker_panicked());
+    assert!(server.termination_worker.is_sealed());
+    assert!(server.termination_worker.reserve_start().is_err());
+    assert_eq!(joined.teardown_and_remove_active(false), S_OK);
+    assert!(ACTIVE_SERVER.lock().is_none());
+    // Dropping the global reference leaves our capability's reference live.
+    assert_eq!(
+        server.references.load(Ordering::Acquire),
+        initial_references
+    );
+    drop(joined);
+    assert_eq!(
+        server.references.load(Ordering::Acquire),
+        initial_references - 1
+    );
+    assert_eq!(server.operations.phase(), ServerPhase::Terminated);
+    drop(ensured);
+}
+
+#[test]
+fn resource_teardown_remains_exclusive_after_the_terminal_phase() {
+    let barrier = Arc::new(ServerOperationBarrier::default());
+    drop(barrier.close_and_wait().unwrap().unwrap());
+    let drained = barrier.drain().unwrap();
+    let first = drained.teardown_resources().unwrap();
+    assert!(matches!(
+        drained.teardown_resources(),
+        Err(ServerCloseError::Reentrant)
+    ));
+
+    let other = Arc::clone(&barrier);
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (acquired_tx, acquired_rx) = mpsc::sync_channel(1);
+    let waiter = thread::spawn(move || {
+        let _apartment = TestComApartment::enter();
+        assert!(other.close_and_wait().unwrap().is_none());
+        started_tx.send(()).unwrap();
+        let drained = other.drain().unwrap();
+        let _resources = drained.teardown_resources().unwrap();
+        acquired_tx.send(()).unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(acquired_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+    drop(first);
+    acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    waiter.join().unwrap();
+}
+
+#[test]
+fn terminal_close_rejects_same_thread_notification_without_closing() {
+    let barrier = ServerOperationBarrier::default();
+    let notification = barrier.enter_notification().unwrap();
+
+    assert!(matches!(
+        barrier.close_and_wait(),
+        Err(ServerCloseError::Reentrant)
+    ));
+    assert_eq!(barrier.phase(), ServerPhase::Open);
+
+    drop(notification);
+    let termination = barrier.close_and_wait().unwrap().unwrap();
+    drop(termination);
+    assert_eq!(barrier.phase(), ServerPhase::Terminated);
+}
+
+#[test]
+fn server_termination_defers_cross_thread_notification_without_waiting() {
+    use triomphe::Arc;
+    let barrier = Arc::new(ServerOperationBarrier::default());
+    let notification = barrier.enter_notification().unwrap();
+    let terminating_barrier = Arc::clone(&barrier);
+
+    std::thread::spawn(move || {
+        let request = ServerOperationBarrier::request_termination(&terminating_barrier).unwrap();
+        assert!(matches!(request, ServerTerminationRequest::Deferred(_)));
+    })
+    .join()
+    .unwrap();
+
+    assert_eq!(barrier.phase(), ServerPhase::Open);
+    drop(notification);
+
+    let termination = match ServerOperationBarrier::request_termination(&barrier).unwrap() {
+        ServerTerminationRequest::Synchronous(termination) => termination,
+        _ => panic!("quiescent server termination must stay synchronous"),
+    };
+    assert!(barrier.enter_notification().is_none());
+    assert!(matches!(
+        barrier.close_and_wait(),
+        Err(ServerCloseError::Reentrant)
+    ));
+    drop(termination);
+    assert!(matches!(
+        ServerOperationBarrier::request_termination(&barrier).unwrap(),
+        ServerTerminationRequest::Complete
+    ));
+}
+
+#[test]
+fn terminal_close_waits_for_notification_quiescence() {
+    use std::sync::mpsc::{self, TryRecvError};
+    use std::time::{Duration, Instant};
+
+    let barrier = Arc::new(ServerOperationBarrier::default());
+    let notification = barrier.enter_notification().unwrap();
+    let closing_barrier = Arc::clone(&barrier);
+    let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+    let closing = std::thread::spawn(move || {
+        let _apartment = TestComApartment::enter();
+        let _termination = closing_barrier.close_and_wait().unwrap().unwrap();
+        closed_tx.send(()).unwrap();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while barrier.phase() == ServerPhase::Open {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for terminal RTD close"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(closed_rx.try_recv(), Err(TryRecvError::Empty));
+    assert!(matches!(
+        barrier.close_and_wait(),
+        Err(ServerCloseError::Reentrant)
+    ));
+
+    drop(notification);
+    closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    closing.join().unwrap();
+    assert_eq!(barrier.phase(), ServerPhase::Terminated);
+}
+
+#[test]
+fn secondary_terminal_close_waits_for_termination_completion() {
+    use std::sync::mpsc::{self, TryRecvError};
+    use std::time::Duration;
+    use triomphe::Arc;
+
+    let barrier = Arc::new(ServerOperationBarrier::default());
+    let owner_barrier = Arc::clone(&barrier);
+    let (owner_ready_tx, owner_ready_rx) = mpsc::sync_channel(1);
+    let (release_owner_tx, release_owner_rx) = mpsc::sync_channel(1);
+    let owner = std::thread::spawn(move || {
+        let termination = match ServerOperationBarrier::request_termination(&owner_barrier).unwrap()
+        {
+            ServerTerminationRequest::Synchronous(termination) => termination,
+            _ => panic!("quiescent server termination must stay synchronous"),
+        };
+        owner_ready_tx.send(()).unwrap();
+        release_owner_rx.recv().unwrap();
+        drop(termination);
+    });
+    owner_ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let secondary_barrier = Arc::clone(&barrier);
+    let (secondary_done_tx, secondary_done_rx) = mpsc::sync_channel(1);
+    let (secondary_waiting_tx, secondary_waiting_rx) = mpsc::sync_channel(1);
+    let secondary = std::thread::spawn(move || {
+        let _apartment = TestComApartment::enter();
+        assert!(
+            secondary_barrier
+                .close_and_wait_with(|event| {
+                    secondary_waiting_tx.send(()).unwrap();
+                    event.wait_with_com_pumping()
+                })
+                .unwrap()
+                .is_none()
+        );
+        secondary_done_tx.send(()).unwrap();
+    });
+
+    secondary_waiting_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(
+        secondary_done_rx.try_recv(),
+        Err(TryRecvError::Empty),
+        "secondary close must not pass quiescence before teardown completes"
+    );
+    release_owner_tx.send(()).unwrap();
+    secondary_done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    secondary.join().unwrap();
+    owner.join().unwrap();
+    assert_eq!(barrier.phase(), ServerPhase::Terminated);
+}
+
+#[test]
+fn terminal_wait_failure_reopens_the_operation_gate() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let barrier = Arc::new(ServerOperationBarrier::default());
+    let operation_barrier = Arc::clone(&barrier);
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let operation = operation_barrier.enter().unwrap();
+        entered_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        drop(operation);
+    });
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let error = match barrier.close_and_wait_with(|_| {
+        assert!(
+            barrier.try_phase().is_some(),
+            "COM wait must run without the barrier mutex"
+        );
+        Err(E_FAIL)
+    }) {
+        Err(error) => error,
+        Ok(_) => panic!("injected COM wait failure must be returned"),
+    };
+    assert_eq!(error, ServerCloseError::WaitFailed(E_FAIL));
+    assert_eq!(barrier.phase(), ServerPhase::Open);
+
+    let accepted_after_rollback = barrier.enter().unwrap();
+    drop(accepted_after_rollback);
+    release_tx.send(()).unwrap();
+    worker.join().unwrap();
+
+    let termination = barrier.close_and_wait().unwrap().unwrap();
+    drop(termination);
+    assert_eq!(barrier.phase(), ServerPhase::Terminated);
+}
+
+// These tests mutate process-global RTD, COM-module, and ingress state.
+// Serialize them with Runtime/async tests and retain the module lease for
+// the complete test so another lifecycle test cannot open or close the
+// process-global module concurrently.
+struct RtdTestLock;
+
+struct RtdTestGuard {
+    // Fields are dropped in declaration order: release the module lease
+    // while the shared Runtime test lock is still held.
+    _module_lease: crate::ingress::TestModuleLease,
+    _runtime_lock: std::sync::MutexGuard<'static, ()>,
+}
+
+struct TestBoxedFactory(*mut ClassFactory);
+
+impl TestBoxedFactory {
+    fn as_ptr(&self) -> *mut ClassFactory {
+        self.0
+    }
+}
+
+impl Drop for TestBoxedFactory {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: this guard uniquely owns the Box allocation created
+            // by the COM-module lifetime test.
+            unsafe { drop(Box::from_raw(self.0)) };
+            self.0 = ptr::null_mut();
+        }
+    }
+}
+
+struct TestServerLock(*mut ClassFactory);
+
+impl Drop for TestServerLock {
+    fn drop(&mut self) {
+        if self.0.is_null() {
+            return;
+        }
+        // SAFETY: the paired TestBoxedFactory remains alive until after
+        // this guard and this releases exactly one successful test lock.
+        if unsafe { factory_lock_server(self.0, 0) } != S_OK {
+            std::process::abort();
+        }
+        self.0 = ptr::null_mut();
+    }
+}
+
+struct TestClassFactory<
+    E: crate::RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+>(NonNull<ClassFactory<E, C>>);
+
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> TestClassFactory<E, C> {
+    fn as_ptr(&self) -> *mut ClassFactory<E, C> {
+        self.0.as_ptr()
+    }
+
+    fn vtable(&self) -> &ClassFactoryVtable<E, C> {
+        // SAFETY: `get_test_class_factory` constructs this wrapper only
+        // from a successful COM class-factory result with the static
+        // implementation vtable.
+        unsafe { &**self.as_ptr().cast::<*const ClassFactoryVtable<E, C>>() }
+    }
+}
+
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop for TestClassFactory<E, C> {
+    fn drop(&mut self) {
+        // SAFETY: the wrapper owns exactly the factory reference returned
+        // by DllGetClassObject.
+        unsafe { (self.vtable().release)(self.as_ptr()) };
+    }
+}
+
+struct TestUnknownReference(NonNull<c_void>);
+
+impl TestUnknownReference {
+    fn new(pointer: *mut c_void) -> Self {
+        Self(NonNull::new(pointer).expect("COM returned a null interface"))
+    }
+
+    #[cfg(feature = "handles")]
+    fn as_ptr(&self) -> *mut c_void {
+        self.0.as_ptr()
+    }
+
+    fn server<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+        &self,
+        ensured: &super::server::EnsuredServer<E, C>,
+    ) -> NonNull<RtdServer<E, C>> {
+        assert_eq!(self.0.as_ptr(), ensured.pointer().cast());
+        self.0.cast()
+    }
+
+    #[cfg(feature = "handles")]
+    fn iunknown_vtable(&self) -> &IUnknown_Vtbl {
+        // SAFETY: every wrapped value is a live COM interface and the
+        // IUnknown-compatible vtable is its first ABI field.
+        unsafe { &*(*self.as_ptr().cast::<*const IUnknown_Vtbl>()) }
+    }
+}
+
+impl Drop for TestUnknownReference {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns exactly one COM interface reference.
+        unsafe { release_unknown(self.0) };
+    }
+}
+
+fn close_test_ingress() {
+    let ingress = crate::module_runtime::ingress();
+    if matches!(
+        ingress.phase(),
+        crate::ingress::PHASE_OPENING | crate::ingress::PHASE_OPEN
+    ) {
+        ingress.begin_close_with(|| {});
+    }
+    if ingress.phase() == crate::ingress::PHASE_CLOSING {
+        let _ = ingress.seal_and_drain();
+    }
+}
+
+fn cleanup_test_active_server() {
+    let pointer = ACTIVE_SERVER.lock().as_ref().map(|active| active.pointer);
+    if let Some(pointer) = pointer {
+        discard_unpublished_server(pointer, true);
+    }
+}
+
+fn clear_test_shutdown_trace() {
+    // Runtime/lifecycle tests install a process-global shutdown trace.
+    // An RTD unit test owns a synthetic module epoch and must not append
+    // resource events to a previous runtime generation.
+    module_lifetime().disable_trace_for_test();
+}
+
+impl Drop for RtdTestGuard {
+    fn drop(&mut self) {
+        // Test assertions may unwind before their explicit shutdown path.
+        // Remove the process-global server before releasing serialization,
+        // otherwise Runtime close can wait forever for RTD quiescence.
+        clear_test_shutdown_trace();
+        cleanup_test_active_server();
+        close_test_ingress();
+        crate::module_runtime::certify_quiescence_for_test();
+    }
+}
+
+impl RtdTestLock {
+    fn lock(&self) -> Result<RtdTestGuard, std::convert::Infallible> {
+        // Runtime and async tests already use this lock around operations
+        // that mutate the same process-global state. Recover poisoning so
+        // one genuine RTD assertion failure does not turn every later
+        // test into an unrelated PoisonError failure.
+        let runtime_lock = crate::runtime::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let module_lease = crate::ingress::acquire_test_module_lease();
+
+        // The module lease proves that no lifecycle test can install a new
+        // trace concurrently. Clear the completed or abandoned generation
+        // before cleanup, because releasing an old server also emits RTD
+        // resource events.
+        clear_test_shutdown_trace();
+
+        // COM entry points reject calls unless the global ingress is OPEN.
+        // Establish that precondition explicitly rather than depending on
+        // another concurrently running lifecycle test.
+        cleanup_test_active_server();
+        close_test_ingress();
+        let ingress = crate::module_runtime::ingress();
+        ingress.begin_opening();
+        ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
+        crate::module_runtime::global()
+            .rtd()
+            .expect("RTD test state")
+            .begin_open();
+
+        Ok(RtdTestGuard {
+            _module_lease: module_lease,
+            _runtime_lock: runtime_lock,
+        })
+    }
+}
+
+static TEST_LOCK: RtdTestLock = RtdTestLock;
+
+#[test]
+fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let ingress = crate::module_runtime::ingress();
+    ingress.begin_close_with(|| {});
+    let _ = ingress.seal_and_drain();
+    crate::module_runtime::certify_quiescence_for_test();
+    let baseline = module_lifetime().snapshot();
+    assert!(baseline.is_quiescent());
+    assert_eq!(dll_can_unload_now(), S_OK);
+
+    {
+        let _call = module_lifetime().enter_call();
+        let entered = module_lifetime().snapshot();
+        assert_eq!(entered.in_flight_calls, baseline.in_flight_calls + 1);
+        assert_eq!(dll_can_unload_now(), S_FALSE);
+    }
+    assert_eq!(module_lifetime().snapshot(), baseline);
+
+    ingress.begin_opening();
+    ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
+    crate::module_runtime::global()
+        .rtd()
+        .expect("RTD test state")
+        .begin_open();
+
+    let factory = TestBoxedFactory(Box::into_raw(Box::new(ClassFactory {
+        vtable: &CLASS_FACTORY_VTABLE,
+        references: AtomicU32::new(1),
+        server: ptr::null_mut(),
+        _module_lease: ComObjectLease::new(ComObjectKind::Factory),
+    })));
+    assert_eq!(
+        module_lifetime().snapshot().live_factories,
+        baseline.live_factories + 1
+    );
+    assert_eq!(dll_can_unload_now(), S_FALSE);
+
+    let pointer = factory.as_ptr();
+    // SAFETY: `pointer` is retained by TestBoxedFactory and LockServer does
+    // not inspect the null server field in this lifetime-only test.
+    assert_eq!(unsafe { factory_lock_server(pointer, 1) }, S_OK);
+    let server_lock = TestServerLock(pointer);
+    assert_eq!(
+        module_lifetime().snapshot().server_locks,
+        baseline.server_locks + 1
+    );
+
+    ingress.begin_close_with(|| {});
+    crate::module_runtime::global()
+        .rtd()
+        .expect("RTD test state")
+        .begin_close();
+    assert_eq!(dll_can_unload_now(), S_FALSE);
+
+    // New locks are rejected after close admission stops, while releasing
+    // an existing module hold remains available.
+    assert_eq!(
+        // SAFETY: `pointer` is the live class-factory instance created above. This
+        // test intentionally exercises LockServer(TRUE) through the COM ABI.
+        unsafe { factory_lock_server(pointer, 1) },
+        CO_E_SERVER_STOPPING
+    );
+    drop(server_lock);
+    assert_eq!(
+        module_lifetime().snapshot().server_locks,
+        baseline.server_locks
+    );
+    assert_eq!(
+        // SAFETY: `pointer` still refers to the same live class factory. Unlocking is
+        // permitted even after shutdown admission has closed so the module hold can be
+        // released during teardown.
+        unsafe { factory_lock_server(pointer, 0) },
+        E_UNEXPECTED
+    );
+    drop(factory);
+
+    assert_eq!(module_lifetime().snapshot(), baseline);
+    let _ = ingress.seal_and_drain();
+    crate::module_runtime::certify_quiescence_for_test();
+    assert_eq!(dll_can_unload_now(), S_OK);
+
+    let server = ComObjectLease::new(ComObjectKind::Server);
+    assert_eq!(dll_can_unload_now(), S_FALSE);
+    drop(server);
+    assert_eq!(dll_can_unload_now(), S_OK);
+}
+
+#[test]
+fn logical_rtd_close_requires_residency_and_still_rejects_git_debt() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let retained = ComObjectLease::new(ComObjectKind::Server);
+    close_test_ingress();
+    let error = crate::excel_rtd_protocol::wait_for_module_quiescence(false).unwrap_err();
+    assert!(error.missing_module_residency);
+    assert_eq!(error.outstanding_git_cookies, 0);
+    assert_eq!(error.revocation_debt, 0);
+
+    // A residency lease permits the shell, but never a registered callback.
+    module_lifetime().git_cookie_registered();
+    let error = crate::excel_rtd_protocol::wait_for_module_quiescence(true).unwrap_err();
+    assert!(!error.missing_module_residency);
+    assert_eq!(error.outstanding_git_cookies, 1);
+    module_lifetime().git_cookie_revoked();
+    let cookie = NonZeroU32::new(41).unwrap();
+    module_lifetime().git_cookie_registered();
+    module_lifetime().git_cookie_revocation_deferred(cookie);
+    let claims = module_lifetime().claim_git_revocation_debt_batch();
+    let error = crate::excel_rtd_protocol::wait_for_module_quiescence(true).unwrap_err();
+    assert_eq!(error.revocation_debt, 1);
+    drop(claims);
+    retry_git_revocation_debt_with(|_| Ok(()));
+    drop(retained);
+    crate::excel_rtd_protocol::wait_for_module_quiescence(false).unwrap();
+}
+
+#[test]
+#[cfg(all(feature = "rtd", feature = "handles"))]
+fn final_remove_retains_com_shells_without_blocking_close_or_reviving_on_reopen() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _apartment = TestComApartment::enter();
+    close_test_ingress();
+    let fixture = crate::runtime::StaticTestRuntime::<()>::new();
+    let runtime = fixture.runtime();
+    runtime
+        .ensure_module_residency(
+            crate::boundary::host::host_auto_remove::<()> as fn(&crate::runtime::Runtime<()>) -> i32
+                as *const (),
+        )
+        .unwrap();
+    let open = || {
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+    };
+    open();
+    let ensured = runtime
+        .with_subscriptions(|subscriptions| {
+            ensure_server_without_handles(Some(BackendSubscriptions::new(subscriptions)))
+        })
+        .unwrap()
+        .unwrap();
+    let server = ensured.pointer();
+    let mut factory_pointer = ptr::null_mut();
+    assert_eq!(
+        // SAFETY: the active server owns the class identity; output is writable.
+        unsafe {
+            dll_get_class_object(
+                (&raw const ensured.active.class_id).cast(),
+                (&IID_ICLASS_FACTORY as *const GUID).cast(),
+                &mut factory_pointer,
+            )
+        },
+        S_OK
+    );
+    let factory = TestUnknownReference::new(factory_pointer);
+    let factory_pointer = factory_pointer.cast::<ClassFactory>();
+    // SAFETY: the reference above retains the factory through both epochs.
+    assert_eq!(unsafe { factory_lock_server(factory_pointer, 1) }, S_OK);
+    let server_lock = TestServerLock(factory_pointer);
+
+    // Keep the host's server/factory/lock references until AFTER close returns.
+    // The old physical drain times out under cfg(test), so this regression
+    // fails rather than hanging the test process indefinitely.
+    assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+    assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+    assert!(ACTIVE_SERVER.lock().is_none());
+    assert_eq!(
+        // SAFETY: `ensured` retains the terminal server throughout inspection.
+        unsafe { (*server).operations.as_ref().phase() },
+        ServerPhase::Terminated
+    );
+    assert_eq!(runtime.resident_event_count(), 0);
+    assert!(!runtime.test_release_module_residency().unwrap());
+    assert!(runtime.module_residency_held());
+    assert_eq!(dll_can_unload_now(), S_FALSE);
+    let mut heartbeat_result = 0;
+    assert_eq!(
+        // SAFETY: server and result are valid; closed ingress rejects new work.
+        unsafe { heartbeat(server, &mut heartbeat_result) },
+        CO_E_SERVER_STOPPING
+    );
+    let first_trace = runtime.shutdown_trace_json();
+    assert!(first_trace.contains("returned_success"));
+
+    open();
+    let trace: serde_json::Value = serde_json::from_str(&runtime.shutdown_trace_json()).unwrap();
+    assert_eq!(trace["initial"]["rtdServers"], 1);
+    assert_eq!(trace["initial"]["rtdClassFactories"], 1);
+    assert_eq!(trace["initial"]["rtdServerLocks"], 1);
+    // SAFETY: old references remain live, but their per-server gate is terminal.
+    assert_eq!(unsafe { heartbeat(server, &mut heartbeat_result) }, E_FAIL);
+    let mut instance = ptr::null_mut();
+    assert_eq!(
+        // SAFETY: the live factory vtable and output/IID obey the COM ABI.
+        unsafe {
+            ((*(*factory_pointer).vtable).create_instance)(
+                factory_pointer,
+                ptr::null_mut(),
+                &IID_IRTD_SERVER,
+                &mut instance,
+            )
+        },
+        E_FAIL
+    );
+    assert!(instance.is_null());
+
+    let current = runtime
+        .with_subscriptions(|subscriptions| {
+            ensure_server_without_handles(Some(BackendSubscriptions::new(subscriptions)))
+        })
+        .unwrap()
+        .unwrap();
+    assert_ne!(current.active.generation, ensured.active.generation);
+    assert_eq!(
+        // SAFETY: the current reference retains its newly opened server.
+        unsafe { heartbeat(current.pointer(), &mut heartbeat_result,) },
+        S_OK
+    );
+    drop(server_lock);
+    drop(factory);
+    drop(ensured);
+    assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+    assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+    assert_eq!(dll_can_unload_now(), S_FALSE);
+    // Final Release is legal after logical close, but must not release the
+    // DLL self-reference while its own COM return path is still executing.
+    drop(current);
+    assert!(runtime.module_residency_held());
+    assert!(module_lifetime().snapshot().is_quiescent());
+    assert_eq!(dll_can_unload_now(), S_OK);
+    assert!(runtime.test_release_module_residency().unwrap());
+    assert!(!runtime.module_residency_held());
+    let second_trace = runtime.shutdown_trace_json();
+    assert!(second_trace.contains("returned_success"));
+    if let Some(directory) = std::env::var_os("XLFN_WINDOWS_RTD_RETAINED_TRACE_DIR") {
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            std::path::Path::new(&directory).join("close.json"),
+            first_trace,
+        )
+        .unwrap();
+        std::fs::write(
+            std::path::Path::new(&directory).join("reopen.json"),
+            second_trace,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn com_module_lifetime_emits_rtd_resource_trace_events() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let ingress = crate::module_runtime::ingress();
+    ingress.begin_close_with(|| {});
+    let _ = ingress.seal_and_drain();
+    ingress.begin_opening();
+    ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
+    crate::module_runtime::global()
+        .rtd()
+        .expect("RTD test state")
+        .begin_open();
+
+    let trace = triomphe::Arc::new(crate::shutdown_trace::ShutdownTraceRecorder::new());
+    trace
+        .begin(
+            1,
+            crate::shutdown_trace::ShutdownResources::opened(0, 0, false),
+        )
+        .unwrap();
+    module_lifetime().set_trace_sink(triomphe::Arc::clone(&trace));
+
+    let (call, accepted) = module_lifetime().enter_call();
+    assert!(accepted);
+    let factory = ComObjectLease::new(ComObjectKind::Factory);
+    let server = ComObjectLease::new(ComObjectKind::Server);
+    assert!(module_lifetime().set_server_lock(true));
+    assert!(module_lifetime().set_server_lock(false));
+    drop(server);
+    drop(factory);
+    drop(call);
+
+    let trace = trace.trace_json().unwrap();
+    if let Some(path) = std::env::var_os("XLFN_WINDOWS_RTD_TRACE") {
+        std::fs::write(path, &trace).expect("write Windows RTD shutdown trace");
+    }
+    module_lifetime().disable_trace_for_test();
+    ingress.begin_close_with(|| {});
+    let _ = ingress.seal_and_drain();
+    crate::module_runtime::certify_quiescence_for_test();
+
+    for event in [
+        "beginRtdOperation",
+        "endRtdOperation",
+        "addRtdClassFactory",
+        "removeRtdClassFactory",
+        "addRtdServer",
+        "removeRtdServer",
+        "lockRtdServer",
+        "unlockRtdServer",
+    ] {
+        assert!(
+            trace.contains(event),
+            "RTD trace is missing {event}: {trace}"
+        );
+    }
+}
+
+#[test]
+fn registered_git_cookie_blocks_module_unload() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let baseline = module_lifetime().snapshot();
+    assert!(baseline.is_quiescent());
+
+    module_lifetime().git_cookie_registered();
+    let registered = module_lifetime().snapshot();
+    assert_eq!(registered.outstanding_git_cookies, 1);
+    assert_eq!(registered.revocation_debt, 0);
+    assert!(!module_lifetime().can_unload_now());
+
+    module_lifetime().git_cookie_revoked();
+    assert_eq!(module_lifetime().snapshot(), baseline);
+}
+
+#[test]
+fn git_revocation_retry_in_flight_keeps_unload_blocked() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let baseline = module_lifetime().snapshot();
+    assert!(baseline.is_quiescent());
+    let cookie = NonZeroU32::new(41).unwrap();
+
+    module_lifetime().git_cookie_registered();
+    module_lifetime().git_cookie_revocation_deferred(cookie);
+
+    let (claimed_tx, claimed_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(0);
+    let retry = thread::spawn(move || {
+        retry_git_revocation_debt_with(|cookie| {
+            claimed_tx.send(cookie).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        });
+    });
+
+    assert_eq!(claimed_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 41);
+    let retrying = module_lifetime().snapshot();
+    assert_eq!(retrying.revocation_debt, 1);
+    assert!(module_lifetime().queued_git_revocation_debt().is_empty());
+    assert!(!module_lifetime().can_unload_now());
+
+    release_tx.send(()).unwrap();
+    retry.join().unwrap();
+    assert_eq!(module_lifetime().snapshot(), baseline);
+}
+
+#[test]
+fn panicking_git_revocation_retry_requeues_claim() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let baseline = module_lifetime().snapshot();
+    assert!(baseline.is_quiescent());
+    let cookie = NonZeroU32::new(41).unwrap();
+
+    module_lifetime().git_cookie_registered();
+    module_lifetime().git_cookie_revocation_deferred(cookie);
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        retry_git_revocation_debt_with(|_| panic!("injected GIT revoke panic"));
+    }));
+    assert!(result.is_err());
+    assert_eq!(module_lifetime().snapshot().revocation_debt, 1);
+    assert_eq!(module_lifetime().queued_git_revocation_debt(), vec![cookie]);
+
+    retry_git_revocation_debt_with(|cookie| {
+        assert_eq!(cookie, 41);
+        Ok(())
+    });
+    assert_eq!(module_lifetime().snapshot(), baseline);
+}
+
+#[test]
+fn module_quiescence_refuses_debt_claim_in_flight() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let baseline = module_lifetime().snapshot();
+    assert!(baseline.is_quiescent());
+    let cookie = NonZeroU32::new(41).unwrap();
+
+    module_lifetime().git_cookie_registered();
+    module_lifetime().git_cookie_revocation_deferred(cookie);
+    let claims = module_lifetime().claim_git_revocation_debt_batch();
+    assert_eq!(claims.len(), 1);
+    assert!(module_lifetime().queued_git_revocation_debt().is_empty());
+
+    let error = crate::excel_rtd_protocol::wait_for_module_quiescence(false).unwrap_err();
+    assert_eq!(error.outstanding_git_cookies, 0);
+    assert_eq!(error.revocation_debt, 1);
+    assert!(!module_lifetime().can_unload_now());
+
+    drop(claims);
+    retry_git_revocation_debt_with(|cookie| {
+        assert_eq!(cookie, 41);
+        Ok(())
+    });
+    assert_eq!(module_lifetime().snapshot(), baseline);
+}
+
+fn inert_update_callback() -> Box<RetainedUpdateCallback> {
+    Box::new(RetainedUpdateCallback {
+        cookie: None,
+        pump: None,
+        drop_hook: None,
+    })
+}
+
+#[test]
+fn server_start_reservation_is_single_use_and_rolls_back_failure() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let ensured = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: ensured retains this server throughout the reservation and cleanup.
+    let server = unsafe { &*ensured.pointer() };
+    let first = server.reserve_start().unwrap();
+    assert_eq!(server.start_state(), SERVER_STARTING);
+    assert!(server.reserve_start().is_none());
+    drop(first);
+    assert_eq!(server.start_state(), SERVER_NOT_STARTED);
+
+    let (published, callback) = server
+        .reserve_start()
+        .unwrap()
+        .publish_callback(inert_update_callback());
+    assert!(server.callbacks.lock().active == Some(callback));
+    assert_eq!(server.callbacks.lock().records.len(), 1);
+    published.commit();
+    assert_eq!(server.start_state(), SERVER_STARTED);
+    assert!(server.reserve_start().is_none());
+    super::server::discard_unpublished_server::<(), crate::DynamicRtdSources<()>>(
+        ensured.active.pointer,
+        ensured.newly_created,
+    );
+    assert!(server.callbacks.lock().records.is_empty());
+
+    let failed = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: failed owns a reference to the replacement until cleanup completes.
+    let failed_server = unsafe { &*failed.pointer() };
+    assert_ne!(ensured.pointer(), failed.pointer());
+    let (published, _) = failed_server
+        .reserve_start()
+        .unwrap()
+        .publish_callback(inert_update_callback());
+    drop(published);
+    assert_eq!(failed_server.start_state(), SERVER_START_FAILED);
+    assert_eq!(failed_server.callbacks.lock().records.len(), 1);
+    assert!(failed_server.reserve_start().is_none());
+    // Publishing on the replacement did not repopulate the former target.
+    assert!(server.callbacks.lock().records.is_empty());
+    super::server::discard_unpublished_server::<(), crate::DynamicRtdSources<()>>(
+        failed.active.pointer,
+        failed.newly_created,
+    );
+}
+
+#[test]
+fn failed_server_start_is_retired_without_server_terminate_before_retry() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let failed =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let server = failed.pointer();
+    // SAFETY: ACTIVE_SERVER and `failed` retain this allocation throughout the test.
+    let server_ref = unsafe { &*server };
+    let callback_drops = Arc::new(AtomicUsize::new(0));
+
+    // Exercise the post-publication failure: the subscription server closes
+    // after ServerStart is admitted, so notification attachment must fail.
+    let operation = server_ref.operations.enter().unwrap();
+    let start = server_ref.reserve_start().unwrap();
+    let drops = Arc::clone(&callback_drops);
+    let (start, callback) = start.publish_callback(Box::new(RetainedUpdateCallback {
+        cookie: None,
+        pump: None,
+        drop_hook: Some(Arc::new(move || {
+            drops.fetch_add(1, Ordering::AcqRel);
+        })),
+    }));
+    failed.subscription_server.unwrap().terminate().unwrap();
+    // SAFETY: `failed` retains the server and the callback is server-owned.
+    let attach_result =
+        unsafe { super::server::synchronize_callback_notification(server_ref, callback) };
+    assert!(attach_result.is_err());
+    drop(start);
+    // Reentrant recovery must leave the retained callback/backend intact
+    // until the failed COM method has left its server admission.
+    assert!(matches!(
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))),
+        Err(XllError::Closing)
+    ));
+    assert_eq!(callback_drops.load(Ordering::Acquire), 0);
+    drop(operation);
+
+    // Excel may release a failed activation without ever issuing
+    // ServerTerminate. A new observation must retire it and create a server.
+    let replacement =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    assert!(replacement.newly_created);
+    assert_ne!(replacement.active.pointer, failed.active.pointer);
+    assert_ne!(replacement.active.generation, failed.active.generation);
+    assert_eq!(server_ref.operations.phase(), ServerPhase::Terminated);
+    assert_eq!(callback_drops.load(Ordering::Acquire), 1);
+    let backends = server_ref.backends.lock();
+    assert!(backends.handles.is_none());
+    assert!(backends.subscriptions.is_none());
+    assert!(backends.subscription_server().is_none());
+    drop(backends);
+
+    // SAFETY: the replacement guard retains its independently allocated server.
+    let replacement_ref = unsafe { &*(replacement.pointer()) };
+    let start = replacement_ref
+        .reserve_start()
+        .expect("replacement must accept a fresh ServerStart");
+    let (start, _) = start.publish_callback(inert_update_callback());
+    start.commit();
+    shutdown_subscriptions(&subscriptions).unwrap();
+    drop(subscriptions);
+    // A delayed Excel release must not touch the now-reclaimed runtime.
+    drop(failed);
+    drop(replacement);
+}
+
+#[test]
+fn ensure_server_waits_for_terminating_server_and_concurrent_reapers_share_replacement() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let ensured =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let server = ensured.pointer();
+    // SAFETY: `ensured` retains this allocation throughout the race.
+    let server_ref = unsafe { &*server };
+    let operation = server_ref.operations.enter().unwrap();
+    // SAFETY: the retained COM server is live.
+    let status = unsafe { server_terminate(server) };
+    assert_eq!(status, S_OK);
+    assert!(matches!(
+        server_ref.operations.phase(),
+        ServerPhase::Terminating { .. }
+    ));
+
+    let rendezvous = std::sync::Barrier::new(3);
+    thread::scope(|scope| {
+        let (result_tx, result_rx) = mpsc::channel();
+        for _ in 0..2 {
+            let rendezvous = &rendezvous;
+            let subscriptions = &subscriptions;
+            let result_tx = result_tx.clone();
+            scope.spawn(move || {
+                let _apartment = TestComApartment::enter();
+                rendezvous.wait();
+                let result =
+                    ensure_server_without_handles(Some(BackendSubscriptions::new(subscriptions)))
+                        .map(|replacement| {
+                            (replacement.active.pointer, replacement.active.generation)
+                        });
+                result_tx.send(result).unwrap();
+            });
+        }
+        rendezvous.wait();
+        assert!(matches!(
+            result_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        drop(operation);
+        let first = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        let second = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, second);
+        assert_ne!(first.0, ensured.active.pointer);
+        assert_ne!(first.1, ensured.active.generation);
+    });
+    shutdown_subscriptions(&subscriptions).unwrap();
+    drop(ensured);
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn shared_server_subscription_shutdown_preserves_handle_roots_until_handle_shutdown() {
+    struct Payload;
+    impl crate::handle::ExcelHandleObject for Payload {}
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    for subscriptions_first in [false, true] {
+        let handles = FormulaHandleService::new(4);
+        let subscriptions = SubscriptionRuntime::<()>::new();
+        let ensured = ensure_server(
+            Some(&handles),
+            Some(BackendSubscriptions::new(&subscriptions)),
+        )
+        .unwrap();
+        let server = ensured.pointer();
+        // SAFETY: ACTIVE_SERVER and `ensured` retain the server until cleanup.
+        let server_ref = unsafe { &*server };
+        let key = crate::handle::test_topic_key("shared-server-shutdown");
+        let lifetime_key = key.format_lifetime_key();
+        handles.prepare(key, || Ok(Payload)).unwrap();
+        handles
+            .connect(
+                crate::formula_lifetime::FormulaLifetimeGeneration::new(
+                    ensured.active.generation.get(),
+                )
+                .unwrap(),
+                1,
+                &lifetime_key,
+            )
+            .unwrap();
+        assert_eq!(handles.len(), 1);
+
+        let callback_drops = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::clone(&callback_drops);
+        let callback = install_callback(
+            &server_ref.callbacks,
+            Box::new(RetainedUpdateCallback {
+                cookie: None,
+                pump: None,
+                drop_hook: Some(Arc::new(move || {
+                    drops.fetch_add(1, Ordering::AcqRel);
+                })),
+            }),
+        );
+        // SAFETY: `ensured` keeps the server, callback and barrier alive.
+        unsafe { synchronize_callback_notification(server_ref, callback) }.unwrap();
+
+        if subscriptions_first {
+            shutdown_subscriptions(&subscriptions).unwrap();
+        } else {
+            shutdown(&handles).unwrap();
+        }
+        assert_eq!(
+            handles.len(),
+            usize::from(subscriptions_first),
+            "subscription shutdown must retain handles until add-in quiescence"
+        );
+        assert_eq!(ACTIVE_SERVER.lock().is_some(), subscriptions_first);
+        assert_eq!(callback_drops.load(Ordering::Acquire), 1);
+        let backends = server_ref.backends.lock();
+        assert_eq!(backends.handles.is_some(), subscriptions_first);
+        assert!(backends.subscriptions.is_none());
+        assert!(backends.subscription_server().is_none());
+        drop(backends);
+        // The subscription server must reject any fresh notifier before its
+        // COM callback owner can be destroyed.
+        assert!(
+            ensured
+                .subscription_server
+                .unwrap()
+                .begin_refresh()
+                .is_err()
+        );
+
+        if subscriptions_first {
+            shutdown(&handles).unwrap();
+        } else {
+            shutdown_subscriptions(&subscriptions).unwrap();
+        }
+        assert_eq!(handles.len(), 0);
+        assert!(ACTIVE_SERVER.lock().is_none());
+        let backends = server_ref.backends.lock();
+        assert!(backends.handles.is_none());
+        assert!(backends.subscriptions.is_none());
+        assert!(backends.subscription_server().is_none());
+        drop(backends);
+        handles.seal().map(|_| ()).unwrap();
+        drop(handles);
+        drop(subscriptions);
+        // SAFETY: `ensured` is a delayed Excel-owned reference. With both
+        // runtimes gone, repeated termination must use no backend pointers.
+        let termination_status = unsafe { server_terminate(server) };
+        assert_eq!(termination_status, S_OK);
+        drop(ensured);
+        assert_eq!(callback_drops.load(Ordering::Acquire), 1);
+    }
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn handle_shutdown_retires_unobserved_and_other_generation_topics() {
+    struct Payload;
+    impl crate::handle::ExcelHandleObject for Payload {}
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    for detached_server in [false, true] {
+        let handles = FormulaHandleService::new(4);
+        let subscriptions = SubscriptionRuntime::<()>::new();
+        let ensured = if detached_server {
+            ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap()
+        } else {
+            ensure_server(
+                Some(&handles),
+                Some(BackendSubscriptions::new(&subscriptions)),
+            )
+            .unwrap()
+        };
+        let unobserved = crate::handle::test_topic_key("shutdown-unobserved");
+        handles.prepare(unobserved, || Ok(Payload)).unwrap();
+        let old = crate::handle::test_topic_key("shutdown-other-generation");
+        let old_lifetime_key = old.format_lifetime_key();
+        handles.prepare(old, || Ok(Payload)).unwrap();
+        handles
+            .claim_lifetime(
+                &old_lifetime_key,
+                crate::formula_lifetime::FormulaLifetimeGeneration::new(
+                    ensured.active.generation.get() + 1,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        if detached_server {
+            let server = ensured.pointer();
+            // SAFETY: `ensured` retains the server through worker completion.
+            let server_ref = unsafe { &*server };
+            let operation = server_ref.operations.enter().unwrap();
+            // SAFETY: the retained COM server is live.
+            let status = unsafe { server_terminate(server) };
+            assert_eq!(status, S_OK);
+            drop(operation);
+            assert!(server_ref.operations.close_and_wait().unwrap().is_none());
+            server_ref.termination_worker.join().unwrap();
+            let backends = server_ref.backends.lock();
+            assert!(backends.handles.is_none());
+            assert!(backends.subscriptions.is_none());
+            assert!(backends.subscription_server().is_none());
+        }
+
+        assert_eq!(handles.len(), 2);
+        shutdown(&handles).unwrap();
+        assert_eq!(handles.len(), 0);
+        assert!(ACTIVE_SERVER.lock().is_none());
+        shutdown_subscriptions(&subscriptions).unwrap();
+        drop(ensured);
+    }
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn server_terminate_reentry_is_deferred_and_idempotent() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the allocation throughout
+    // this test, including after deferred ACTIVE cleanup is postponed.
+    let server_ref = unsafe { &*server };
+
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the server while this test
+    // models a synchronous COM callback from an entered RTD method.
+    let operation = server_ref.operations.enter().unwrap();
+    // SAFETY: the same retained server is live. ServerTerminate must return
+    // immediately and transfer the busy cleanup to its coordinator.
+    assert_eq!(unsafe { server_terminate(server) }, S_OK);
+    // A duplicate request observes the linearized phase and is idempotent.
+    // SAFETY: `server_ref` proves that the raw server remains live.
+    assert_eq!(unsafe { server_terminate(server) }, S_OK);
+    let phase = server_ref.operations.phase();
+    assert!(matches!(
+        phase,
+        ServerPhase::Terminating { deferred: true, .. }
+    ));
+    drop(operation);
+
+    // The initiating Excel thread is allowed to wait after the original
+    // ServerTerminate call has unwound. It pumps COM until the coordinator
+    // has signaled the terminal phase, then joins the actual thread.
+    assert!(server_ref.operations.close_and_wait().unwrap().is_none());
+    server_ref.termination_worker.join().unwrap();
+    assert_eq!(server_ref.operations.phase(), ServerPhase::Terminated);
+
+    assert!(server_ref.backends.lock().handles.is_none());
+    assert_eq!(
+        ACTIVE_SERVER.lock().as_ref().unwrap().pointer,
+        server as usize
+    );
+    shutdown(&handles).unwrap();
+    assert!(ACTIVE_SERVER.lock().is_none());
+    drop(ensured);
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
+    let server_ref = unsafe { &*server };
+    let server_address = server as usize;
+    let callback_dropped = Arc::new(AtomicBool::new(false));
+    let worker_self_close_rejected = Arc::new(AtomicBool::new(false));
+
+    let drop_hook = {
+        let callback_dropped = Arc::clone(&callback_dropped);
+        let worker_self_close_rejected = Arc::clone(&worker_self_close_rejected);
+        Arc::new(move || {
+            callback_dropped.store(true, Ordering::Release);
+            let server = server_address as *mut RtdServer;
+            // SAFETY: the deferred worker reference and ACTIVE_SERVER keep
+            // the object live throughout callback revocation.
+            let rejected = matches!(
+                unsafe { (*server).operations.close_and_wait() },
+                Err(ServerCloseError::Reentrant)
+            );
+            worker_self_close_rejected.store(rejected, Ordering::Release);
+        })
+    };
+    let callback = Box::new(RetainedUpdateCallback {
+        cookie: None,
+        pump: None,
+        drop_hook: Some(drop_hook),
+    });
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the server.
+    unsafe { install_callback(&(*server).callbacks, callback) };
+
+    // Model UpdateNotify already in flight when Excel calls
+    // ServerTerminate. The COM call returns immediately.
+    // SAFETY: the retained server remains live.
+    let notification = server_ref.operations.enter_notification().unwrap();
+    // SAFETY: `server_ref` proves that the raw server remains live.
+    assert_eq!(unsafe { server_terminate(server) }, S_OK);
+    assert!(!callback_dropped.load(Ordering::Acquire));
+    drop(notification);
+
+    // The initiating Excel thread may now pump until phase completion, then
+    // must join the coordinator before any ACTIVE_SERVER removal.
+    assert!(server_ref.operations.close_and_wait().unwrap().is_none());
+    server_ref.termination_worker.join().unwrap();
+    assert!(callback_dropped.load(Ordering::Acquire));
+    assert!(worker_self_close_rejected.load(Ordering::Acquire));
+    // Deferred cleanup deliberately retains ACTIVE_SERVER until a joiner
+    // executes the final reap.
+    assert!(
+        ACTIVE_SERVER
+            .lock()
+            .as_ref()
+            .is_some_and(|active| active.pointer == server_address)
+    );
+
+    shutdown(&handles).unwrap();
+    drop(ensured);
+}
+
+#[test]
+fn deferred_start_abandonment_restores_gate_worker_and_reference() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let ensured = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: ensured owns a COM reference throughout the operation and reap.
+    let server = unsafe { &*ensured.pointer() };
+    let operation = server.operations.enter().unwrap();
+    let references = server.references.load(Ordering::Acquire);
+    let ServerTerminationRequest::Deferred(reservation) =
+        ServerOperationBarrier::request_termination(&server.operations).unwrap()
+    else {
+        panic!("admitted operation must defer termination");
+    };
+    let start = reservation.start(server).unwrap();
+    assert!(server.operations.try_phase().is_none());
+    assert_eq!(
+        server.termination_worker.phase(),
+        TerminationWorkerStatus::Starting
+    );
+    assert_eq!(server.references.load(Ordering::Acquire), references + 1);
+    drop(start);
+    assert_eq!(server.operations.phase(), ServerPhase::Open);
+    assert_eq!(
+        server.termination_worker.phase(),
+        TerminationWorkerStatus::Idle
+    );
+    assert_eq!(server.references.load(Ordering::Acquire), references);
+    drop(operation);
+    super::server::discard_unpublished_server::<(), crate::DynamicRtdSources<()>>(
+        ensured.active.pointer,
+        ensured.newly_created,
+    );
+}
+
+#[test]
+fn deferred_start_rejects_another_server_without_changing_its_worker() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let retired = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: retired keeps the old target allocated after removing its active ref.
+    let other = unsafe { &*retired.pointer() };
+    super::server::discard_unpublished_server::<(), crate::DynamicRtdSources<()>>(
+        retired.active.pointer,
+        retired.newly_created,
+    );
+    let references = other.references.load(Ordering::Acquire);
+    let ensured = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: ensured retains the new source through reservation rollback.
+    let source = unsafe { &*ensured.pointer() };
+    assert_ne!(retired.pointer(), ensured.pointer());
+    let operation = source.operations.enter().unwrap();
+    let ServerTerminationRequest::Deferred(reservation) =
+        ServerOperationBarrier::request_termination(&source.operations).unwrap()
+    else {
+        panic!("admitted operation must defer termination");
+    };
+    assert!(matches!(
+        reservation.start(other),
+        Err(ServerCloseError::Reentrant)
+    ));
+    assert_eq!(source.operations.phase(), ServerPhase::Open);
+    assert_eq!(
+        source.termination_worker.phase(),
+        TerminationWorkerStatus::Idle
+    );
+    assert_eq!(other.operations.phase(), ServerPhase::Terminated);
+    assert_eq!(
+        other.termination_worker.phase(),
+        TerminationWorkerStatus::Joined
+    );
+    assert_eq!(other.references.load(Ordering::Acquire), references);
+    drop(operation);
+    super::server::discard_unpublished_server::<(), crate::DynamicRtdSources<()>>(
+        ensured.active.pointer,
+        ensured.newly_created,
+    );
+}
+
+#[test]
+fn deferred_start_spawn_registers_worker_before_gate_commit() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let ensured = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: ensured retains this exact server through worker join and reap.
+    let server = unsafe { &*ensured.pointer() };
+    let operation = server.operations.enter().unwrap();
+    let references = server.references.load(Ordering::Acquire);
+    let ServerTerminationRequest::Deferred(reservation) =
+        ServerOperationBarrier::request_termination(&server.operations).unwrap()
+    else {
+        panic!("admitted operation must defer termination");
+    };
+    reservation.start(server).unwrap().spawn().unwrap();
+    assert_eq!(
+        server.termination_worker.phase(),
+        TerminationWorkerStatus::Running
+    );
+    assert!(matches!(
+        server.operations.phase(),
+        ServerPhase::Terminating { deferred: true, .. }
+    ));
+    assert_eq!(server.references.load(Ordering::Acquire), references + 1);
+    drop(operation);
+    assert!(server.operations.close_and_wait().unwrap().is_none());
+    server.termination_worker.seal_and_join().unwrap();
+    assert_eq!(server.operations.phase(), ServerPhase::Terminated);
+    assert_eq!(server.references.load(Ordering::Acquire), references);
+    assert!(ACTIVE_SERVER.lock().is_some());
+    super::server::discard_unpublished_server::<(), crate::DynamicRtdSources<()>>(
+        ensured.active.pointer,
+        ensured.newly_created,
+    );
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn deferred_termination_spawn_failure_rolls_back_atomically() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
+    let server_ref = unsafe { &*server };
+    let operation = server_ref.operations.enter().unwrap();
+    let references = server_ref.references.load(Ordering::Acquire);
+
+    FAIL_DEFERRED_TERMINATION_SPAWN.store(true, Ordering::Release);
+    // SAFETY: `server_ref` proves that the raw server remains live.
+    assert_eq!(unsafe { server_terminate(server) }, E_FAIL);
+    assert_eq!(server_ref.operations.phase(), ServerPhase::Open);
+    // Spawn failure drops both the bound work's COM reference and ticket,
+    // while the still-held reservation restores admission atomically.
+    assert_eq!(server_ref.references.load(Ordering::Acquire), references);
+    assert_eq!(
+        server_ref.termination_worker.phase(),
+        TerminationWorkerStatus::Idle
+    );
+    // The failed reservation did not leave the operation gate closed.
+    let accepted = server_ref.operations.enter().unwrap();
+    drop(accepted);
+    drop(operation);
+
+    shutdown(&handles).unwrap();
+    drop(ensured);
+}
+
+#[test]
+fn terminal_worker_join_seals_an_idle_worker() {
+    let worker = TerminationWorker::default();
+    worker.join().unwrap();
+    drop(worker.reserve_start().unwrap());
+    worker.seal_and_join().unwrap();
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
+    assert!(worker.reserve_start().is_err());
+    worker.seal_and_join().unwrap();
+    assert!(worker.reserve_start().is_err());
+}
+
+#[test]
+fn terminal_worker_join_rejects_its_own_start_reservation() {
+    let worker = TerminationWorker::default();
+    let start = worker.reserve_start().unwrap();
+    assert!(matches!(
+        worker.seal_and_join(),
+        Err(ServerCloseError::Reentrant)
+    ));
+    assert!(worker.is_sealed());
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Starting);
+    drop(start);
+    worker.seal_and_join().unwrap();
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
+    assert!(worker.reserve_start().is_err());
+}
+
+#[test]
+fn terminal_worker_join_keeps_an_abandoned_start_sealed() {
+    let worker = Arc::new(TerminationWorker::default());
+    let start = worker.reserve_start().unwrap();
+    std::thread::scope(|scope| {
+        let joining = scope.spawn(|| worker.seal_and_join());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !worker.is_sealed() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "joiner did not seal worker"
+            );
+            std::thread::yield_now();
+        }
+        assert!(worker.reserve_start().is_err());
+        drop(start);
+        joining.join().unwrap().unwrap();
+    });
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
+    assert!(worker.reserve_start().is_err());
+}
+
+#[test]
+fn termination_worker_can_finish_before_handle_registration() {
+    use std::sync::mpsc::{self, TryRecvError};
+    use std::time::Duration;
+
+    let worker = Arc::new(TerminationWorker::default());
+    let start = worker.reserve_start().unwrap();
+    let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+    let handle = std::thread::spawn(move || finished_tx.send(()).unwrap());
+    finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    // Joining callers must wait while the spawner still owns Starting.
+    let joining_worker = Arc::clone(&worker);
+    let (joined_tx, joined_rx) = mpsc::sync_channel(1);
+    let joining = std::thread::spawn(move || {
+        joining_worker.seal_and_join().unwrap();
+        joined_tx.send(()).unwrap();
+    });
+    assert_eq!(joined_rx.try_recv(), Err(TryRecvError::Empty));
+
+    // The OS thread may already have exited; registering its JoinHandle
+    // still transitions Starting -> Running without losing ownership.
+    start.commit(handle);
+    joined_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    joining.join().unwrap();
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
+}
+
+#[test]
+fn termination_worker_rejects_self_join_while_another_caller_owns_handle() {
+    let worker = Arc::new(TerminationWorker::default());
+    let start = worker.reserve_start().unwrap();
+    let (attempt_tx, attempt_rx) = mpsc::sync_channel(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let worker_thread = Arc::clone(&worker);
+    start.commit(std::thread::spawn(move || {
+        attempt_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        result_tx
+            .send(matches!(
+                worker_thread.seal_and_join(),
+                Err(ServerCloseError::Reentrant)
+            ))
+            .unwrap();
+    }));
+
+    std::thread::scope(|scope| {
+        let joining = scope.spawn(|| worker.seal_and_join());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while worker.phase() != TerminationWorkerStatus::Joining {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "joiner did not claim handle"
+            );
+            std::thread::yield_now();
+        }
+        attempt_tx.send(()).unwrap();
+        assert!(result_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        joining.join().unwrap().unwrap();
+    });
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
+    worker.join().unwrap();
+    assert!(worker.reserve_start().is_err());
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn deferred_cleanup_panic_signals_phase_and_is_detected_by_join() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
+    let server_ref = unsafe { &*server };
+    let operation = server_ref.operations.enter().unwrap();
+
+    PANIC_DEFERRED_TERMINATION_CLEANUP.store(true, Ordering::Release);
+    // SAFETY: `server_ref` proves that the raw server remains live.
+    assert_eq!(unsafe { server_terminate(server) }, S_OK);
+    drop(operation);
+    assert!(server_ref.operations.close_and_wait().unwrap().is_none());
+    assert!(matches!(
+        server_ref.termination_worker.join(),
+        Err(ServerCloseError::WorkerPanicked)
+    ));
+    assert_eq!(server_ref.operations.phase(), ServerPhase::Terminated);
+
+    // The coordinator has exited, so ordinary shutdown can safely perform
+    // the idempotent cleanup that the injected panic skipped.
+    shutdown(&handles).unwrap();
+    drop(ensured);
+}
+
+#[test]
+fn failed_git_revocation_is_retained_and_retryable() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let baseline = module_lifetime().snapshot();
+    assert!(baseline.is_quiescent());
+    assert!(module_lifetime().queued_git_revocation_debt().is_empty());
+
+    let cookie = NonZeroU32::new(41).unwrap();
+    module_lifetime().git_cookie_registered();
+    module_lifetime().git_cookie_revocation_deferred(cookie);
+    let error = XllError::WindowsApi {
+        function: "IGlobalInterfaceTable::RevokeInterfaceFromGlobal",
+        code: E_FAIL,
+    };
+    assert_eq!(module_lifetime().snapshot().outstanding_git_cookies, 0);
+    assert_eq!(module_lifetime().snapshot().revocation_debt, 1);
+    assert_eq!(module_lifetime().queued_git_revocation_debt(), vec![cookie]);
+
+    let mut attempts = 0;
+    retry_git_revocation_debt_with(|cookie| {
+        attempts += 1;
+        assert_eq!(cookie, 41);
+        Err(error.clone())
+    });
+    assert_eq!(attempts, 1);
+    assert_eq!(module_lifetime().snapshot().revocation_debt, 1);
+    assert_eq!(
+        module_lifetime().queued_git_revocation_debt(),
+        vec![NonZeroU32::new(41).unwrap()]
+    );
+
+    retry_git_revocation_debt_with(|cookie| {
+        attempts += 1;
+        assert_eq!(cookie, 41);
+        Ok(())
+    });
+    assert_eq!(attempts, 2);
+    assert_eq!(module_lifetime().snapshot(), baseline);
+    assert!(module_lifetime().queued_git_revocation_debt().is_empty());
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
+    use std::sync::atomic::AtomicI32;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
+    let server_address = server as usize;
+
+    let dropped_while_active = Arc::new(AtomicBool::new(false));
+    let callback_lock_was_free = Arc::new(AtomicBool::new(false));
+    let reentrant_status = Arc::new(AtomicI32::new(i32::MIN));
+
+    let drop_hook = {
+        let dropped_while_active = Arc::clone(&dropped_while_active);
+        let callback_lock_was_free = Arc::clone(&callback_lock_was_free);
+        let reentrant_status = Arc::clone(&reentrant_status);
+        Arc::new(move || {
+            let server_ptr = server_address as *mut RtdServer;
+            // SAFETY: `ensured` retains the server until after the outer
+            // termination and this hook have both returned.
+            let server = unsafe { &*server_ptr };
+            let in_flight = server.operations.in_flight();
+            if in_flight != 0 {
+                dropped_while_active.store(true, Ordering::Release);
+                return;
+            }
+
+            // Avoid hanging the test if a future regression drops while
+            // holding the callback mutex; record the violation instead.
+            let lock_was_free = server.callbacks.try_lock().is_some();
+            callback_lock_was_free.store(lock_was_free, Ordering::Release);
+            if !lock_was_free {
+                return;
+            }
+
+            // SAFETY: the server is retained and quiescent. This models a
+            // GIT revoke synchronously releasing COM code that re-enters
+            // the same server's idempotent ServerTerminate method.
+            reentrant_status.store(unsafe { server_terminate(server_ptr) }, Ordering::Release);
+        })
+    };
+
+    let previous = Box::new(RetainedUpdateCallback {
+        cookie: None,
+        pump: None,
+        drop_hook: Some(drop_hook),
+    });
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the server.
+    unsafe { install_callback(&(*server).callbacks, previous) };
+
+    // Model replacement during ServerStart. The previous callback must be
+    // retained rather than released while this operation is in flight.
+    // SAFETY: the retained server remains live.
+    let operation = unsafe { (*server).operations.enter() }.unwrap();
+    let replacement = Box::new(RetainedUpdateCallback {
+        cookie: None,
+        pump: None,
+        drop_hook: None,
+    });
+    // SAFETY: the retained server remains live.
+    unsafe { install_callback(&(*server).callbacks, replacement) };
+    assert!(!dropped_while_active.load(Ordering::Acquire));
+    assert_eq!(reentrant_status.load(Ordering::Acquire), i32::MIN);
+    drop(operation);
+
+    // SAFETY: the retained server is now quiescent. The callback hook
+    // performs one nested ServerTerminate while the outer call drains it.
+    assert_eq!(unsafe { server_terminate(server) }, S_OK);
+    assert!(!dropped_while_active.load(Ordering::Acquire));
+    assert!(callback_lock_was_free.load(Ordering::Acquire));
+    assert_eq!(reentrant_status.load(Ordering::Acquire), S_OK);
+
+    drop(ensured);
+    handles.seal().map(|_| ()).unwrap();
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
+    let _generation = ensured.active.generation;
+
+    // Model ServerStart's early backend snapshot before another thread
+    // attaches subscriptions.
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the server.
+    assert!(unsafe { (*server).backends.lock().subscriptions.is_none() });
+    // SAFETY: the retained server remains live for the scoped race.
+    let operation = unsafe { (*server).operations.enter() }.unwrap();
+
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let (attached_tx, attached_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let notifier_attached = std::thread::scope(|scope| {
+        let subscriptions = &subscriptions;
+        scope.spawn(move || {
+            let attached =
+                ensure_server_without_handles(Some(BackendSubscriptions::new(subscriptions)))
+                    .expect("attach subscriptions");
+            attached_tx.send(()).unwrap();
+            // An assertion on the installing side must not strand this thread.
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            drop(attached);
+        });
+
+        // The attaching side has published subscriptions and observed that
+        // no callback exists yet.
+        attached_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // SAFETY: `ensured` and the operation retain the attached server.
+        let subscription_server = unsafe { (*server).backends.lock().subscription_server() }
+            .expect("subscription attachment must publish its server handle");
+        assert!(subscription_server.detach_update_notifier().is_none());
+
+        let callback = Box::new(RetainedUpdateCallback {
+            cookie: None,
+            pump: None,
+            drop_hook: None,
+        });
+        // SAFETY: the retained server remains live.
+        let callback_ptr = unsafe { install_callback(&(*server).callbacks, callback) };
+        // SAFETY: the same retained server remains live. This post-install
+        // re-read must observe the attachment acknowledged by the channel.
+        unsafe { synchronize_callback_notification(&*server, callback_ptr) }.unwrap();
+        // Inspect the real subscription server's installed capability. A
+        // no-op synchronization would leave it empty despite returning Ok.
+        let notifier = subscription_server.detach_update_notifier();
+        let notifier_attached = notifier.is_some();
+        if let Some(notifier) = notifier {
+            subscription_server
+                .attach_update_notifier(notifier)
+                .unwrap();
+        }
+        release_tx.send(()).unwrap();
+        notifier_attached
+    });
+
+    drop(operation);
+    shutdown_subscriptions(&subscriptions).unwrap();
+    drop(ensured);
+    handles.seal().map(|_| ()).unwrap();
+    assert!(
+        notifier_attached,
+        "callback installation must attach a subscription notifier"
+    );
+}
+
+fn iid_null_from_fields() -> GUID {
+    GUID {
+        data1: 0,
+        data2: 0,
+        data3: 0,
+        data4: [0; 8],
+    }
+}
+
+fn iid_iunknown_from_fields() -> GUID {
+    GUID {
+        data1: 0x0000_0000,
+        data2: 0x0000,
+        data3: 0x0000,
+        data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+    }
+}
+
+fn iid_iclass_factory_from_fields() -> GUID {
+    GUID {
+        data1: 0x0000_0001,
+        data2: 0x0000,
+        data3: 0x0000,
+        data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+    }
+}
+
+fn iid_idispatch_from_fields() -> GUID {
+    GUID {
+        data1: 0x0002_0400,
+        data2: 0x0000,
+        data3: 0x0000,
+        data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+    }
+}
+
+fn iid_irtd_server_from_fields() -> GUID {
+    GUID {
+        data1: 0xec0e_6191,
+        data2: 0xdb51,
+        data3: 0x11d3,
+        data4: [0x8f, 0x3e, 0x00, 0xc0, 0x4f, 0x36, 0x51, 0xb8],
+    }
+}
+
+unsafe fn release_unknown(interface: NonNull<c_void>) -> u32 {
+    // SAFETY: callers pass one owned reference to a live COM interface. All
+    // COM interfaces begin with an IUnknown-compatible vtable.
+    let vtable = unsafe { *interface.as_ptr().cast::<*const IUnknown_Vtbl>() };
+    // SAFETY: `vtable` came from the same live interface and `interface`
+    // owns exactly one reference for this release.
+    unsafe { ((*vtable).Release)(interface.as_ptr()) }
+}
+
+fn get_test_class_factory<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    ensured: &super::server::EnsuredServer<E, C>,
+) -> TestClassFactory<E, C> {
+    let active = &ensured.active;
+    let iid = iid_iclass_factory_from_fields();
+    let mut output = ptr::null_mut();
+
+    // SAFETY: all GUIDs and the output slot remain live for the call. The
+    // IID is independently field-constructed rather than copied from the
+    // implementation constant.
+    let status = unsafe {
+        dll_get_class_object(
+            (&raw const active.class_id).cast(),
+            (&raw const iid).cast(),
+            &mut output,
+        )
+    };
+    assert_eq!(status, S_OK);
+    TestClassFactory(NonNull::new(output.cast()).expect("DllGetClassObject returned null factory"))
+}
+
+#[cfg(feature = "rtd")]
+struct DispatchTestSubscription {
+    sink: Arc<Mutex<Option<RtdSink<f64>>>>,
+    disconnected: Arc<AtomicBool>,
+}
+
+// SAFETY: DispatchTestSubscription is a mock subscription for testing.
+#[cfg(feature = "rtd")]
+unsafe impl RtdSubscription for DispatchTestSubscription {
+    fn request_cancel(&self) {}
+
+    fn disconnect_and_wait(self) -> XllResult<()> {
+        self.sink.lock().take();
+        self.disconnected.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "rtd")]
+struct CountedComSubscription {
+    _sink: RtdSink<i32>,
+    disconnected: Arc<AtomicUsize>,
+}
+
+// SAFETY: this subscription retains only an idle sink, with no worker or
+// callback; the sink is never used again after subscribe returns.
+#[cfg(feature = "rtd")]
+unsafe impl RtdSubscription for CountedComSubscription {
+    fn request_cancel(&self) {}
+
+    fn disconnect_and_wait(self) -> XllResult<()> {
+        self.disconnected.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "rtd")]
+struct CountedComSource(Arc<AtomicUsize>);
+
+// SAFETY: successful subscribe transfers its sole sink into the returned
+// owner, and publication errors retain no sink or background activity.
+#[cfg(feature = "rtd")]
+unsafe impl RtdSource for CountedComSource {
+    type Value = i32;
+    type Subscription = CountedComSubscription;
+
+    fn subscribe(&self, _: &RtdTopic, sink: RtdSink<i32>) -> XllResult<Self::Subscription> {
+        sink.publish(7)?;
+        Ok(CountedComSubscription {
+            _sink: sink,
+            disconnected: Arc::clone(&self.0),
+        })
+    }
+}
+
+#[cfg(feature = "rtd")]
+crate::rtd_subscriptions! {
+    enum MixedComSubscriptions {
+        Dispatch(DispatchTestSubscription),
+        Counted(CountedComSubscription),
+    }
+}
+
+#[cfg(feature = "rtd")]
+#[derive(Clone)]
+struct DispatchTestSource {
+    sink: Arc<Mutex<Option<RtdSink<f64>>>>,
+    disconnected: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "rtd")]
+impl DispatchTestSource {
+    fn new(disconnected: Arc<AtomicBool>) -> Self {
+        Self {
+            sink: Arc::new(Mutex::new(None)),
+            disconnected,
+        }
+    }
+
+    fn publish(&self, value: f64) -> XllResult<()> {
+        self.sink
+            .lock()
+            .as_ref()
+            .ok_or(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_DISPATCH,
+            })?
+            .publish(value)
+    }
+}
+
+// SAFETY: the test source stores the sink in its shared slot, and the returned
+// subscription clears that slot before disconnect completes.
+#[cfg(feature = "rtd")]
+unsafe impl RtdSource for DispatchTestSource {
+    type Value = f64;
+    type Subscription = DispatchTestSubscription;
+
+    fn subscribe(
+        &self,
+        _topic: &RtdTopic,
+        sink: RtdSink<Self::Value>,
+    ) -> XllResult<Self::Subscription> {
+        sink.publish(12.5)?;
+        self.sink.lock().replace(sink);
+        Ok(DispatchTestSubscription {
+            sink: Arc::clone(&self.sink),
+            disconnected: Arc::clone(&self.disconnected),
+        })
+    }
+}
+
+#[test]
+fn com_boundary_converts_panics_to_e_unexpected() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    assert_eq!(com_boundary("test COM boundary", || S_OK), S_OK);
+    assert_eq!(
+        com_boundary("test COM boundary", || panic!("injected COM panic")),
+        E_UNEXPECTED
+    );
+}
+
+#[test]
+fn com_abi_retains_panicking_payload() {
+    extern "system" fn trampoline(dropped: &Arc<AtomicUsize>) -> i32 {
+        com_boundary("panicking payload COM boundary", || {
+            std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+                dropped,
+            )))
+        })
+    }
+    extern "system" fn release_trampoline(dropped: &Arc<AtomicUsize>) -> u32 {
+        super::com_abi::com_lifetime_boundary("panicking payload COM release", 0, || {
+            std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+                dropped,
+            )))
+        })
+    }
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    assert_eq!(trampoline(&dropped), E_UNEXPECTED);
+    assert_eq!(release_trampoline(&dropped), 0);
+    assert_eq!(dropped.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn termination_worker_join_retains_panicking_payload_and_completes() {
+    let worker = TerminationWorker::default();
+    let start = worker.reserve_start().unwrap();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let payload = crate::panic_boundary::tests::PanickingPayload(Arc::clone(&dropped));
+    start.commit(std::thread::spawn(move || std::panic::panic_any(payload)));
+    assert!(matches!(
+        worker.seal_and_join(),
+        Err(ServerCloseError::WorkerPanicked)
+    ));
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
+    assert_eq!(dropped.load(Ordering::Acquire), 0);
+    assert!(worker.seal_and_join().is_ok());
+    assert!(worker.reserve_start().is_err());
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn notification_worker_is_drained_before_callback_retirement() {
+    use crate::excel_rtd::notification::NotificationPump;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
+    // SAFETY: ACTIVE_SERVER and ensured retain the allocation through cleanup.
+    let server_ref = unsafe { &*server };
+    let operations = triomphe::Arc::clone(&server_ref.operations);
+    let (entered, observed) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let pump = NotificationPump::start(move || {
+        let _operation = operations
+            .enter_notification()
+            .ok_or(crate::XllError::Closing)?;
+        entered.send(()).unwrap();
+        wait.recv_timeout(Duration::from_secs(2)).unwrap();
+        Ok(())
+    })
+    .unwrap();
+    pump.request().unwrap();
+    observed.recv_timeout(Duration::from_secs(2)).unwrap();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let dropped_hook = Arc::clone(&dropped);
+    install_callback(
+        &server_ref.callbacks,
+        Box::new(RetainedUpdateCallback {
+            cookie: None,
+            pump: Some(pump),
+            drop_hook: Some(Arc::new(move || {
+                dropped_hook.store(true, Ordering::Release)
+            })),
+        }),
+    );
+    // SAFETY: the retained server remains live during the admitted notification.
+    assert_eq!(unsafe { server_terminate(server) }, S_OK);
+    assert!(!dropped.load(Ordering::Acquire));
+    release.send(()).unwrap();
+    server_ref.operations.close_and_wait().unwrap();
+    server_ref.termination_worker.join().unwrap();
+    assert!(dropped.load(Ordering::Acquire));
+    assert_eq!(observed.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+    shutdown(&handles).unwrap();
+    drop(ensured);
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn successful_refresh_acknowledges_the_notification_worker() {
+    use crate::excel_rtd::notification::NotificationPump;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _apartment = TestComApartment::enter();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
+    // SAFETY: ACTIVE_SERVER and ensured retain the allocation through cleanup.
+    let server_ref = unsafe { &*server };
+    let pump = NotificationPump::start(|| Ok(())).unwrap();
+    pump.request().unwrap();
+    let callback = install_callback(
+        &server_ref.callbacks,
+        Box::new(RetainedUpdateCallback {
+            cookie: None,
+            pump: Some(pump),
+            drop_hook: None,
+        }),
+    );
+    // SAFETY: callback records remain live until shutdown below.
+    let callback = unsafe { callback.0.as_ref() };
+    assert!(callback.pending_notice().is_some());
+    let mut count = -1;
+    let mut array = ptr::null_mut();
+    assert_eq!(
+        // SAFETY: the server is retained; RefreshData rejects the null output.
+        unsafe { refresh_data(server, ptr::null_mut(), &mut array) },
+        E_POINTER
+    );
+    assert!(callback.pending_notice().is_some());
+    assert_eq!(
+        // SAFETY: the retained server and writable output parameters are valid.
+        unsafe { refresh_data(server, &mut count, &mut array) },
+        S_OK
+    );
+    assert_eq!(count, 0);
+    assert_eq!(callback.pending_notice(), None);
+    if !array.is_null() {
+        // SAFETY: successful RefreshData transfers the SAFEARRAY to its caller.
+        unsafe { SafeArrayDestroy(array) };
+    }
+    shutdown(&handles).unwrap();
+    drop(ensured);
+}
+
+#[test]
+fn refresh_data_converts_panics_to_e_unexpected() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    PANIC_IN_REFRESH_DATA.store(true, Ordering::Release);
+    let mut topic_count = -1;
+    let mut result = ptr::dangling_mut();
+
+    assert_eq!(
+        // SAFETY: both output locations are writable. The injected panic
+        // occurs after their initialization, before accessing the null server.
+        unsafe {
+            refresh_data::<(), crate::DynamicRtdSources<()>>(
+                ptr::null_mut(),
+                &mut topic_count,
+                &mut result,
+            )
+        },
+        E_UNEXPECTED
+    );
+    assert_eq!(topic_count, 0);
+    assert!(result.is_null());
+}
+
+#[test]
+fn refresh_data_initializes_outputs_before_rejecting_invalid_server() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let mut topic_count = -1;
+    let mut result = ptr::dangling_mut();
+    assert_eq!(
+        // SAFETY: both output locations are writable; the null server is
+        // rejected without dereferencing it or the stale array sentinel.
+        unsafe {
+            refresh_data::<(), crate::DynamicRtdSources<()>>(
+                ptr::null_mut(),
+                &mut topic_count,
+                &mut result,
+            )
+        },
+        E_POINTER
+    );
+    assert_eq!(topic_count, 0);
+    assert!(result.is_null());
+}
+
+#[test]
+fn standard_com_iids_match_their_field_definitions() {
+    assert!(guid_eq(IID_NULL, iid_null_from_fields()));
+    assert!(guid_eq(IID_IUNKNOWN, iid_iunknown_from_fields()));
+    assert!(guid_eq(
+        IID_ICLASS_FACTORY,
+        iid_iclass_factory_from_fields()
+    ));
+    assert!(guid_eq(IID_IDISPATCH, iid_idispatch_from_fields()));
+    assert!(guid_eq(IID_IRTD_SERVER, iid_irtd_server_from_fields()));
+    assert!(guid_eq(
+        IID_IRTD_UPDATE_EVENT,
+        GUID {
+            data1: 0xa437_88c1,
+            data2: 0xd91b,
+            data3: 0x11d3,
+            data4: [0x8f, 0x39, 0x00, 0xc0, 0x4f, 0x36, 0x51, 0xb8],
+        }
+    ));
+}
+
+#[test]
+fn iunknown_vtable_has_three_pointer_slots() {
+    assert_eq!(
+        std::mem::size_of::<IUnknown_Vtbl>(),
+        3 * std::mem::size_of::<usize>(),
+    );
+    assert_eq!(
+        std::mem::align_of::<IUnknown_Vtbl>(),
+        std::mem::align_of::<usize>(),
+    );
+}
+
+#[test]
+fn refresh_data_arrays_have_two_rows_for_small_and_large_batches() {
+    let _apartment = TestComApartment::enter();
+    for count in [1, 2, 3, 100] {
+        let updates = (0..count)
+            .map(|column| {
+                RtdUpdate::for_test(100 + column, RtdValue::Number(f64::from(200 + column)))
+            })
+            .collect::<Vec<_>>();
+        let mut topic_count = -1;
+        let mut array = ptr::null_mut();
+
+        assert_eq!(
+            // SAFETY: both outputs are writable, `updates` remains readable, and
+            // the returned SAFEARRAY is inspected and destroyed exactly once.
+            unsafe { write_refresh_data(&mut topic_count, &mut array, &updates) },
+            S_OK
+        );
+
+        assert_eq!(topic_count, count);
+        assert!(!array.is_null());
+
+        // SAFETY: write_refresh_data returned a live SAFEARRAY owned by this
+        // test and it has not yet been destroyed.
+        assert_eq!(unsafe { SafeArrayGetDim(array) }, 2);
+
+        let mut first_lower = -1;
+        let mut first_upper = -1;
+        let mut second_lower = -1;
+        let mut second_upper = -1;
+
+        // SAFETY: `array` is a live two-dimensional SAFEARRAY and all bound
+        // output pointers are writable.
+        unsafe {
+            assert_eq!(SafeArrayGetLBound(array, 1, &mut first_lower), S_OK);
+            assert_eq!(SafeArrayGetUBound(array, 1, &mut first_upper), S_OK);
+            assert_eq!(SafeArrayGetLBound(array, 2, &mut second_lower), S_OK);
+            assert_eq!(SafeArrayGetUBound(array, 2, &mut second_upper), S_OK);
+        }
+
+        assert_eq!((first_lower, first_upper), (0, 1));
+        assert_eq!((second_lower, second_upper), (0, count - 1));
+
+        for column in 0..count {
+            let mut topic = VARIANT::default();
+            let mut value = VARIANT::default();
+            let mut topic_index = [0, column];
+            let mut value_index = [1, column];
+
+            // SAFETY: both indices are within the validated array bounds and
+            // both VARIANT outputs are initialized writable storage.
+            unsafe {
+                assert_eq!(
+                    SafeArrayGetElement(array, topic_index.as_mut_ptr(), (&raw mut topic).cast(),),
+                    S_OK
+                );
+                assert_eq!(
+                    SafeArrayGetElement(array, value_index.as_mut_ptr(), (&raw mut value).cast(),),
+                    S_OK
+                );
+            }
+
+            // SAFETY: SafeArrayGetElement successfully initialized both
+            // VARIANTs. The checked discriminants select the union fields
+            // read below, and both values are cleared exactly once.
+            unsafe {
+                assert_eq!(topic.Anonymous.Anonymous.vt, VT_I4);
+                assert_eq!(value.Anonymous.Anonymous.vt, VT_R8);
+                assert_eq!(topic.Anonymous.Anonymous.Anonymous.lVal, 100 + column);
+                assert_eq!(
+                    value.Anonymous.Anonymous.Anonymous.dblVal,
+                    f64::from(200 + column)
+                );
+                VariantClear(&mut topic);
+                VariantClear(&mut value);
+            }
+        }
+
+        // SAFETY: ownership was not transferred from this test and the live
+        // SAFEARRAY is destroyed exactly once.
+        assert_eq!(unsafe { SafeArrayDestroy(array) }, S_OK);
+    }
+}
+
+#[test]
+fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
+    let _apartment = TestComApartment::enter();
+    let updates = [
+        RtdUpdate::for_test(201, RtdValue::Number(12.5)),
+        RtdUpdate::for_test(202, RtdValue::Integer(-17)),
+        RtdUpdate::for_test(203, RtdValue::Boolean(true)),
+        RtdUpdate::for_test(204, RtdValue::String("stream value".to_owned())),
+        RtdUpdate::for_test(205, RtdValue::Error(crate::ExcelError::NotAvailable)),
+        RtdUpdate::for_test(206, RtdValue::Empty),
+        RtdUpdate::for_test(207, RtdValue::String(String::new())),
+        RtdUpdate::for_test(208, RtdValue::String("A\0B😀漢".to_owned())),
+        RtdUpdate::for_test(209, RtdValue::String("😀漢".repeat(512))),
+    ];
+    let mut topic_count = -1;
+    let mut array = ptr::null_mut();
+
+    assert_eq!(
+        // SAFETY: both outputs are writable, `updates` remains readable, and
+        // the returned SAFEARRAY is inspected and destroyed exactly once.
+        unsafe { write_refresh_data(&mut topic_count, &mut array, &updates) },
+        S_OK
+    );
+    assert_eq!(topic_count, i32::try_from(updates.len()).unwrap());
+
+    for (column, update) in updates.iter().enumerate() {
+        let column = i32::try_from(column).unwrap();
+        let mut topic = VARIANT::default();
+        let mut value = VARIANT::default();
+        let mut topic_index = [0, column];
+        let mut value_index = [1, column];
+
+        // SAFETY: the logical RTD table has `updates.len()` columns and two
+        // rows. Automation receives those indices in [row, column] order,
+        // and both VARIANT outputs are writable.
+        unsafe {
+            assert_eq!(
+                SafeArrayGetElement(array, topic_index.as_mut_ptr(), (&raw mut topic).cast(),),
+                S_OK
+            );
+            assert_eq!(
+                SafeArrayGetElement(array, value_index.as_mut_ptr(), (&raw mut value).cast(),),
+                S_OK
+            );
+            assert_eq!(topic.Anonymous.Anonymous.vt, VT_I4);
+            assert_eq!(topic.Anonymous.Anonymous.Anonymous.lVal, update.topic_id);
+
+            match &update.value {
+                StoredRtdValue::Number(expected) => {
+                    assert_eq!(value.Anonymous.Anonymous.vt, VT_R8);
+                    assert_eq!(value.Anonymous.Anonymous.Anonymous.dblVal, *expected);
+                }
+                StoredRtdValue::Integer(expected) => {
+                    assert_eq!(value.Anonymous.Anonymous.vt, VT_I4);
+                    assert_eq!(value.Anonymous.Anonymous.Anonymous.lVal, *expected);
+                }
+                StoredRtdValue::Boolean(expected) => {
+                    assert_eq!(value.Anonymous.Anonymous.vt, VT_BOOL);
+                    assert_eq!(
+                        value.Anonymous.Anonymous.Anonymous.boolVal,
+                        if *expected {
+                            VARIANT_TRUE
+                        } else {
+                            VARIANT_FALSE
+                        }
+                    );
+                }
+                StoredRtdValue::String(expected) => {
+                    assert_eq!(value.Anonymous.Anonymous.vt, VT_BSTR);
+                    let bstr = value.Anonymous.Anonymous.Anonymous.bstrVal;
+                    assert!(!bstr.is_null());
+                    let length = SysStringLen(bstr) as usize;
+                    let actual = String::from_utf16_lossy(std::slice::from_raw_parts(bstr, length));
+                    assert_eq!(actual, expected.as_ref());
+                }
+                StoredRtdValue::Error(expected) => {
+                    assert_eq!(value.Anonymous.Anonymous.vt, VT_ERROR);
+                    assert_eq!(
+                        value.Anonymous.Anonymous.Anonymous.scode,
+                        2000 + expected.code()
+                    );
+                }
+                StoredRtdValue::Empty => {
+                    assert_eq!(value.Anonymous.Anonymous.vt, VT_EMPTY);
+                }
+            }
+
+            VariantClear(&mut topic);
+            VariantClear(&mut value);
+        }
+    }
+
+    // SAFETY: ownership was not transferred from this test and the live
+    // SAFEARRAY is destroyed exactly once.
+    assert_eq!(unsafe { SafeArrayDestroy(array) }, S_OK);
+}
+
+#[test]
+fn direct_bstr_encoding_preserves_exact_utf16_and_terminator() {
+    let _apartment = TestComApartment::enter();
+    for text in [
+        String::new(),
+        "ASCII\0text".to_owned(),
+        "A\0B😀漢".to_owned(),
+        "漢😀".repeat(1024),
+    ] {
+        let mut variant = VARIANT::default();
+        // SAFETY: the output is initialized writable storage, owned by this test.
+        assert_eq!(unsafe { write_bstr_variant(&mut variant, &text) }, S_OK);
+        // SAFETY: successful conversion initialized a VT_BSTR. Inspect its
+        // counted payload and allocator-provided terminator before clearing it.
+        unsafe {
+            assert_eq!(variant.Anonymous.Anonymous.vt, VT_BSTR);
+            let bstr = variant.Anonymous.Anonymous.Anonymous.bstrVal;
+            let length = SysStringLen(bstr) as usize;
+            assert_eq!(
+                std::slice::from_raw_parts(bstr, length),
+                text.encode_utf16().collect::<Vec<_>>()
+            );
+            assert_eq!(*bstr.add(length), 0);
+            assert_eq!(VariantClear(&mut variant), S_OK);
+        }
+    }
+}
+
+#[test]
+fn direct_refresh_conversion_failure_keeps_outputs_empty_after_partial_fill() {
+    let _apartment = TestComApartment::enter();
+    let valid = RtdUpdate::for_test(1, RtdValue::String("allocated first".to_owned()));
+    let mut invalid = RtdUpdate::for_test(2, RtdValue::Empty);
+    invalid.value = StoredRtdValue::String(
+        "a".repeat(crate::utf16::EXCEL_STRING_LIMIT + 1)
+            .into_boxed_str(),
+    );
+    let mut topic_count = -1;
+    let mut array = ptr::dangling_mut();
+    assert_eq!(
+        // SAFETY: both output pointers are writable. The conversion must clean
+        // up the first initialized BSTR when the second fails validation.
+        unsafe { write_refresh_data(&mut topic_count, &mut array, &[valid, invalid]) },
+        E_INVALIDARG
+    );
+    assert_eq!(topic_count, 0);
+    assert!(array.is_null());
+}
+
+#[test]
+fn topic_key_limits_reject_extreme_bounds_and_oversized_strings() {
+    assert!(matches!(
+        checked_topic_part_count(1, 0),
+        Err(XllError::InvalidHandle)
+    ));
+    assert_eq!(
+        checked_topic_part_count(0, 252).unwrap(),
+        MAX_RTD_TOPIC_PARTS
+    );
+    assert!(checked_topic_part_count(0, 253).is_err());
+    assert!(checked_topic_part_count(i32::MIN, i32::MAX).is_err());
+    assert!(checked_topic_part_length(crate::utf16::EXCEL_STRING_LIMIT).is_ok());
+    assert!(checked_topic_part_length(crate::utf16::EXCEL_STRING_LIMIT + 1).is_err());
+}
+
+#[test]
+fn topic_key_from_safearray_preserves_bstr_ownership_and_text_errors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let texts = [
+        "topic_日本語💡".encode_utf16().collect::<Vec<_>>(),
+        vec![0xd800],
+        vec![u16::from(b'a'); crate::utf16::EXCEL_STRING_LIMIT + 1],
+    ];
+
+    for element_type in [VT_BSTR, VT_VARIANT] {
+        for (case, units) in texts.iter().enumerate() {
+            let bound = SAFEARRAYBOUND {
+                cElements: 1,
+                lLbound: if element_type == VT_BSTR { -17 } else { 7 },
+            };
+            // SAFETY: the bound describes one element of the requested type.
+            let array = unsafe { SafeArrayCreate(element_type, 1, &bound) };
+            assert!(!array.is_null());
+            let array = scopeguard::guard(array, |array| {
+                // SAFETY: this guard uniquely owns the live test array.
+                assert_eq!(unsafe { SafeArrayDestroy(array) }, S_OK);
+            });
+            // SAFETY: units contains the complete readable UTF-16 payload,
+            // including malformed text for strict decoder error coverage.
+            let bstr = unsafe { SysAllocStringLen(units.as_ptr(), units.len() as u32) };
+            assert!(!bstr.is_null());
+            let mut source = VARIANT::default();
+            // Initialize the active discriminant and payload together before
+            // the source guard takes ownership.
+            source.Anonymous.Anonymous.vt = VT_BSTR;
+            source.Anonymous.Anonymous.Anonymous.bstrVal = bstr;
+            let mut source = scopeguard::guard(source, |mut source| {
+                // SAFETY: this guard uniquely owns the initialized BSTR variant.
+                assert_eq!(unsafe { VariantClear(&mut source) }, S_OK);
+            });
+            let data = if element_type == VT_BSTR {
+                // SafeArrayPutElement takes a BSTR pointer without another
+                // indirection; a VARIANT element takes its storage address.
+                bstr.cast_mut().cast()
+            } else {
+                (&raw mut *source).cast()
+            };
+            // SAFETY: index is the only element's lower bound and data has the
+            // representation required by the validated array element type.
+            let status = unsafe { SafeArrayPutElement(*array, &bound.lLbound, data) };
+            assert_eq!(status, S_OK);
+            // SafeArrayPutElement copied the text. The parser must use only
+            // that array-owned copy after the original BSTR is released.
+            drop(source);
+
+            for _ in 0..2 {
+                let mut array_pointer = *array;
+                // SAFETY: the test retains array ownership throughout each
+                // parse; parsing must release only its copied element.
+                let key = unsafe { topic_key_from_safearray(&mut array_pointer) };
+                match case {
+                    0 => assert_eq!(key.unwrap(), "topic_日本語💡"),
+                    1 => assert!(matches!(
+                        key,
+                        Err(XllError::Input {
+                            argument: "RTD topic",
+                            reason: crate::error::InputError::InvalidUtf16,
+                        })
+                    )),
+                    2 => assert!(matches!(key, Err(XllError::Input {
+                        argument: "RTD topic",
+                        reason: crate::error::InputError::TooLarge { limit, actual },
+                    }) if limit == crate::utf16::EXCEL_STRING_LIMIT && actual == units.len())),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn topic_key_from_safearray_handles_single_and_rejects_multi_or_invalid_dimensions() {
+    let _guard = TEST_LOCK.lock().unwrap();
+
+    // 1. Single part SAFEARRAY of VARIANT BSTR.
+    let bound = SAFEARRAYBOUND {
+        cElements: 1,
+        lLbound: 0,
+    };
+
+    // SAFETY: `bound` describes a valid one-dimensional VT_VARIANT
+    // SAFEARRAY and remains readable for the call.
+    let array = unsafe { SafeArrayCreate(VT_VARIANT, 1, &bound) };
+    assert!(!array.is_null());
+
+    let bstr_val = "topic_one".encode_utf16().collect::<Vec<_>>();
+
+    // SAFETY: `bstr_val` is readable for `bstr_val.len()` UTF-16 code units.
+    let bstr = unsafe { SysAllocStringLen(bstr_val.as_ptr(), bstr_val.len() as u32) };
+
+    let mut var = VARIANT::default();
+
+    // SAFETY: `array` is live, index zero is in bounds, and `var` is
+    // initialized as VT_BSTR. SafeArrayPutElement copies the VARIANT before
+    // VariantClear releases the local BSTR.
+    unsafe {
+        var.Anonymous.Anonymous.vt = VT_BSTR;
+        var.Anonymous.Anonymous.Anonymous.bstrVal = bstr;
+        let index = 0i32;
+        SafeArrayPutElement(array, &index, (&raw mut var).cast());
+        VariantClear(&mut var);
+    }
+
+    let mut array_ptr = array;
+
+    // SAFETY: `array_ptr` points to a live SAFEARRAY variable. The function
+    // reads the SAFEARRAY but does not take ownership of it.
+    let key = unsafe { topic_key_from_safearray(&mut array_ptr) }.unwrap();
+    assert_eq!(key, "topic_one");
+
+    // SAFETY: `array` remains owned by this test and is destroyed exactly once.
+    unsafe { SafeArrayDestroy(array) };
+
+    // 2. Multi-part SAFEARRAYs are rejected because the COM topic key is
+    // always one opaque string. Keeping one representation avoids topic
+    // identity collisions between arities.
+    let mut bounds = [SAFEARRAYBOUND {
+        cElements: 2,
+        lLbound: 0,
+    }];
+
+    // SAFETY: `bounds` describes a valid one-dimensional VT_VARIANT
+    // SAFEARRAY and remains readable for the call.
+    let array_multi = unsafe { SafeArrayCreate(VT_VARIANT, 1, bounds.as_mut_ptr()) };
+    assert!(!array_multi.is_null());
+
+    for (i, p) in ["part1", "part2"].iter().enumerate() {
+        let u16_val = p.encode_utf16().collect::<Vec<_>>();
+
+        // SAFETY: `u16_val` is readable for `u16_val.len()` UTF-16 units.
+        let bstr = unsafe { SysAllocStringLen(u16_val.as_ptr(), u16_val.len() as u32) };
+
+        let mut var = VARIANT::default();
+
+        // SAFETY: `array_multi` is live, `i` is within its two-element
+        // bounds, and `var` is initialized as VT_BSTR. SafeArrayPutElement
+        // copies the VARIANT before VariantClear releases the local BSTR.
+        unsafe {
+            var.Anonymous.Anonymous.vt = VT_BSTR;
+            var.Anonymous.Anonymous.Anonymous.bstrVal = bstr;
+            let index = i as i32;
+            SafeArrayPutElement(array_multi, &index, (&raw mut var).cast());
+            VariantClear(&mut var);
+        }
+    }
+
+    let mut array_multi_ptr = array_multi;
+
+    // SAFETY: `array_multi_ptr` points to a live SAFEARRAY variable. The
+    // function reads but does not take ownership of the array.
+    assert!(unsafe { topic_key_from_safearray(&mut array_multi_ptr) }.is_err());
+
+    // SAFETY: `array_multi` remains owned by this test and is destroyed once.
+    unsafe { SafeArrayDestroy(array_multi) };
+
+    // 3. Multi-dimensional SAFEARRAY should fail validation.
+    let mut bounds_2d = [
+        SAFEARRAYBOUND {
+            cElements: 2,
+            lLbound: 0,
+        },
+        SAFEARRAYBOUND {
+            cElements: 2,
+            lLbound: 0,
+        },
+    ];
+
+    // SAFETY: `bounds_2d` describes a valid two-dimensional VT_VARIANT
+    // SAFEARRAY and remains readable for the call.
+    let array_2d = unsafe { SafeArrayCreate(VT_VARIANT, 2, bounds_2d.as_mut_ptr()) };
+    assert!(!array_2d.is_null());
+
+    let mut array_2d_ptr = array_2d;
+
+    // SAFETY: `array_2d_ptr` points to a live SAFEARRAY variable. The
+    // function only inspects it and is expected to reject its dimensions.
+    assert!(unsafe { topic_key_from_safearray(&mut array_2d_ptr) }.is_err());
+
+    // SAFETY: `array_2d` remains owned by this test and is destroyed once.
+    unsafe { SafeArrayDestroy(array_2d) };
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn standard_com_activation_exposes_unknown_dispatch_and_rtd_server() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    assert!(ensured.newly_created);
+
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the RTD server while the
+    // factory and queried interfaces are exercised and released.
+    let factory = get_test_class_factory(&ensured);
+    // Read the first pointer-sized slot, not a Rust field projection, for
+    // every factory dispatch. The Windows CI matrix runs this on x86 and x64.
+    for iid in [iid_iunknown_from_fields(), iid_iclass_factory_from_fields()] {
+        let mut queried = ptr::null_mut();
+        // SAFETY: the factory and the independent IID/output slots are live.
+        let status =
+            unsafe { (factory.vtable().query_interface)(factory.as_ptr(), &iid, &mut queried) };
+        assert_eq!(status, S_OK);
+        let queried = TestUnknownReference::new(queried);
+        assert_eq!(queried.as_ptr(), factory.as_ptr().cast());
+        // The wrapper releases the QueryInterface reference through the
+        // returned interface's first-slot IUnknown vtable.
+        drop(queried);
+    }
+    let unknown_iid = iid_iunknown_from_fields();
+    let mut server_unknown = ptr::null_mut();
+
+    // SAFETY: `factory` is a live IClassFactory, aggregation is not
+    // requested, and both the independent IID and output remain live.
+    assert_eq!(
+        // SAFETY: see the pointer and lifetime justification above.
+        unsafe {
+            (factory.vtable().create_instance)(
+                factory.as_ptr(),
+                ptr::null_mut(),
+                &unknown_iid,
+                &mut server_unknown,
+            )
+        },
+        S_OK
+    );
+    let server_unknown = TestUnknownReference::new(server_unknown);
+
+    // Query through the returned IUnknown vtable, as a COM client does,
+    // using independently field-constructed standard/Excel IIDs.
+    // SAFETY: CreateInstance returned a live IUnknown-compatible pointer.
+    let unknown_vtable = server_unknown.iunknown_vtable();
+    for iid in [
+        iid_iunknown_from_fields(),
+        iid_idispatch_from_fields(),
+        iid_irtd_server_from_fields(),
+    ] {
+        let mut queried = ptr::null_mut();
+        // SAFETY: `server_unknown` is live, `iid` is readable, and
+        // `queried` is a writable output slot.
+        assert_eq!(
+            // SAFETY: see the pointer and lifetime justification above.
+            unsafe { (unknown_vtable.QueryInterface)(server_unknown.as_ptr(), &iid, &mut queried) },
+            S_OK
+        );
+        let _queried = TestUnknownReference::new(queried);
+    }
+
+    drop(server_unknown);
+    drop(factory);
+
+    shutdown(&handles).unwrap();
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn create_instance_nulls_output_on_every_rejected_request() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
+    let factory = get_test_class_factory(&ensured);
+    // SAFETY: `factory` is a live IClassFactory pointer.
+    let create_instance = factory.vtable().create_instance;
+    let unknown_iid = iid_iunknown_from_fields();
+    let unsupported_iid = GUID {
+        data1: 0xdead_beef,
+        data2: 0xcafe,
+        data3: 0x4000,
+        data4: [0x80, 0, 1, 2, 3, 4, 5, 6],
+    };
+    let stale = NonNull::<u8>::dangling().as_ptr().cast::<c_void>();
+
+    let mut output = stale;
+    // SAFETY: non-null `outer` intentionally requests unsupported
+    // aggregation; the other pointers are valid.
+    assert_eq!(
+        // SAFETY: see the intentional failure-case justification above.
+        unsafe { create_instance(factory.as_ptr(), stale, &unknown_iid, &mut output) },
+        CLASS_E_NOAGGREGATION
+    );
+    assert!(output.is_null());
+
+    output = stale;
+    // SAFETY: null `this` intentionally exercises pointer validation.
+    assert_eq!(
+        // SAFETY: the method validates `this` before dereferencing it.
+        unsafe { create_instance(ptr::null_mut(), ptr::null_mut(), &unknown_iid, &mut output) },
+        E_POINTER
+    );
+    assert!(output.is_null());
+
+    output = stale;
+    // SAFETY: null IID intentionally exercises pointer validation.
+    assert_eq!(
+        // SAFETY: the method validates the IID before dereferencing it.
+        unsafe { create_instance(factory.as_ptr(), ptr::null_mut(), ptr::null(), &mut output) },
+        E_POINTER
+    );
+    assert!(output.is_null());
+
+    output = stale;
+    // SAFETY: the unsupported IID is readable and output is writable.
+    assert_eq!(
+        // SAFETY: all pointers are live for the call.
+        unsafe {
+            create_instance(
+                factory.as_ptr(),
+                ptr::null_mut(),
+                &unsupported_iid,
+                &mut output,
+            )
+        },
+        E_NOINTERFACE
+    );
+    assert!(output.is_null());
+
+    // SAFETY: null output intentionally exercises pointer validation.
+    assert_eq!(
+        // SAFETY: the method validates output before dereferencing it.
+        unsafe {
+            create_instance(
+                factory.as_ptr(),
+                ptr::null_mut(),
+                &unknown_iid,
+                ptr::null_mut(),
+            )
+        },
+        E_POINTER
+    );
+
+    drop(factory);
+    shutdown(&handles).unwrap();
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn com_query_failures_clear_stale_output_pointers() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let class_factory_iid = iid_iclass_factory_from_fields();
+    let unknown_iid = iid_iunknown_from_fields();
+    let unsupported_iid = GUID {
+        data1: 0x7654_3210,
+        data2: 0xabcd,
+        data3: 0x4000,
+        data4: [0x80, 1, 2, 3, 4, 5, 6, 7],
+    };
+    let stale = NonNull::<u8>::dangling().as_ptr().cast::<c_void>();
+
+    let mut output = stale;
+    assert_eq!(
+        // SAFETY: the null class pointer intentionally exercises
+        // validation; the IID and output slot remain live.
+        unsafe {
+            dll_get_class_object(
+                ptr::null(),
+                (&raw const class_factory_iid).cast(),
+                &mut output,
+            )
+        },
+        E_POINTER
+    );
+    assert!(output.is_null());
+
+    output = stale;
+    assert_eq!(
+        // SAFETY: the class ID and output are live; the null IID
+        // intentionally exercises validation.
+        unsafe {
+            dll_get_class_object(
+                (&raw const ensured.active.class_id).cast(),
+                ptr::null(),
+                &mut output,
+            )
+        },
+        E_POINTER
+    );
+    assert!(output.is_null());
+
+    output = stale;
+    assert_eq!(
+        // SAFETY: both GUIDs and the output slot remain live. The
+        // unsupported IID intentionally forces factory QI failure.
+        unsafe {
+            dll_get_class_object(
+                (&raw const ensured.active.class_id).cast(),
+                (&raw const unsupported_iid).cast(),
+                &mut output,
+            )
+        },
+        E_NOINTERFACE
+    );
+    assert!(output.is_null());
+
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
+    let factory = get_test_class_factory(&ensured);
+    // SAFETY: `factory` is a live IClassFactory pointer.
+    let factory_query = factory.vtable().query_interface;
+
+    output = stale;
+    assert_eq!(
+        // SAFETY: null `this` intentionally exercises validation; the IID
+        // and output slot remain live.
+        unsafe { factory_query(ptr::null_mut(), &unknown_iid, &mut output) },
+        E_POINTER
+    );
+    assert!(output.is_null());
+
+    output = stale;
+    assert_eq!(
+        // SAFETY: `factory` and output are live; null IID intentionally
+        // exercises validation.
+        unsafe { factory_query(factory.as_ptr(), ptr::null(), &mut output) },
+        E_POINTER
+    );
+    assert!(output.is_null());
+
+    output = stale;
+    assert_eq!(
+        // SAFETY: all pointers are live and the IID is intentionally
+        // unsupported.
+        unsafe { factory_query(factory.as_ptr(), &unsupported_iid, &mut output) },
+        E_NOINTERFACE
+    );
+    assert!(output.is_null());
+
+    let mut server_unknown = ptr::null_mut();
+    assert_eq!(
+        // SAFETY: `factory`, the IID, and output slot remain live.
+        unsafe {
+            (factory.vtable().create_instance)(
+                factory.as_ptr(),
+                ptr::null_mut(),
+                &unknown_iid,
+                &mut server_unknown,
+            )
+        },
+        S_OK
+    );
+    let server_unknown = TestUnknownReference::new(server_unknown);
+    let server = server_unknown.server(&ensured);
+    // SAFETY: CreateInstance returned the RtdServer identity pointer.
+    let server_query = unsafe { (*server.as_ref().vtable).query_interface };
+
+    output = stale;
+    assert_eq!(
+        // SAFETY: null `this` intentionally exercises validation; the IID
+        // and output remain live.
+        unsafe { server_query(ptr::null_mut(), &unknown_iid, &mut output) },
+        E_POINTER
+    );
+    assert!(output.is_null());
+
+    output = stale;
+    assert_eq!(
+        // SAFETY: `server` and output remain live; null IID intentionally
+        // exercises validation.
+        unsafe { server_query(server.as_ptr(), ptr::null(), &mut output) },
+        E_POINTER
+    );
+    assert!(output.is_null());
+
+    output = stale;
+    assert_eq!(
+        // SAFETY: all pointers remain live and the IID is intentionally
+        // unsupported.
+        unsafe { server_query(server.as_ptr(), &unsupported_iid, &mut output) },
+        E_NOINTERFACE
+    );
+    assert!(output.is_null());
+
+    drop(server_unknown);
+    drop(factory);
+    shutdown(&handles).unwrap();
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn idispatch_resolves_names_and_invokes_heartbeat() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the server while its COM
+    // interfaces are used below.
+    let factory = get_test_class_factory(&ensured);
+    let dispatch_iid = iid_idispatch_from_fields();
+    let mut dispatch = ptr::null_mut();
+    assert_eq!(
+        // SAFETY: `factory`, the IID, and output are live for the call.
+        unsafe {
+            (factory.vtable().create_instance)(
+                factory.as_ptr(),
+                ptr::null_mut(),
+                &dispatch_iid,
+                &mut dispatch,
+            )
+        },
+        S_OK
+    );
+    let dispatch = TestUnknownReference::new(dispatch);
+    let server = dispatch.server(&ensured);
+    // SAFETY: the IDispatch pointer is the RtdServer's identity pointer.
+    let vtable = unsafe { server.as_ref().vtable };
+
+    let mut type_info_count = u32::MAX;
+    assert_eq!(
+        // SAFETY: `server` is live and the count output is writable.
+        unsafe { ((*vtable).get_type_info_count)(server.as_ptr(), &mut type_info_count) },
+        S_OK
+    );
+    assert_eq!(type_info_count, 0);
+
+    let stale = NonNull::<u8>::dangling().as_ptr().cast::<c_void>();
+    let mut type_info = stale;
+    assert_eq!(
+        // SAFETY: `server` is live and the output is writable.
+        unsafe { ((*vtable).get_type_info)(server.as_ptr(), 0, 0, &mut type_info) },
+        E_NOTIMPL
+    );
+    assert!(type_info.is_null());
+    type_info = stale;
+    assert_eq!(
+        // SAFETY: `server` is live and the output is writable.
+        unsafe { ((*vtable).get_type_info)(server.as_ptr(), 1, 0, &mut type_info) },
+        DISP_E_BADINDEX
+    );
+    assert!(type_info.is_null());
+
+    let null_iid = iid_null_from_fields();
+    for (name, expected) in [
+        ("serverstart", DISPID_SERVER_START),
+        ("CONNECTDATA", DISPID_CONNECT_DATA),
+        ("RefreshData", DISPID_REFRESH_DATA),
+        ("disconnectdata", DISPID_DISCONNECT_DATA),
+        ("hEaRtBeAt", DISPID_HEARTBEAT),
+        ("ServerTerminate", DISPID_SERVER_TERMINATE),
+    ] {
+        let name = wide_nul(name);
+        let names = [name.as_ptr()];
+        let mut id = DISPID_UNKNOWN;
+        assert_eq!(
+            // SAFETY: all COM input and output arrays remain live.
+            unsafe {
+                ((*vtable).get_ids_of_names)(
+                    server.as_ptr(),
+                    &null_iid,
+                    names.as_ptr(),
+                    1,
+                    0,
+                    &mut id,
+                )
+            },
+            S_OK
+        );
+        assert_eq!(id, expected);
+    }
+
+    let member = wide_nul("connectdata");
+    let topic = wide_nul("TOPICid");
+    let strings = wide_nul("strings");
+    let new_values = wide_nul("getnewvalues");
+    let names = [
+        member.as_ptr(),
+        topic.as_ptr(),
+        strings.as_ptr(),
+        new_values.as_ptr(),
+    ];
+    let mut ids = [99; 4];
+    assert_eq!(
+        // SAFETY: all COM input and output arrays remain live.
+        unsafe {
+            ((*vtable).get_ids_of_names)(
+                server.as_ptr(),
+                &null_iid,
+                names.as_ptr(),
+                names.len() as u32,
+                0,
+                ids.as_mut_ptr(),
+            )
+        },
+        S_OK
+    );
+    assert_eq!(ids, [DISPID_CONNECT_DATA, 0, 1, 2]);
+
+    let unknown = wide_nul("notAnRtdMember");
+    let names = [unknown.as_ptr()];
+    let mut id = 123;
+    assert_eq!(
+        // SAFETY: all COM input and output arrays remain live.
+        unsafe {
+            ((*vtable).get_ids_of_names)(server.as_ptr(), &null_iid, names.as_ptr(), 1, 0, &mut id)
+        },
+        DISP_E_UNKNOWNNAME
+    );
+    assert_eq!(id, DISPID_UNKNOWN);
+
+    let mut parameters = DISPPARAMS::default();
+    let mut result = VARIANT::default();
+    let mut exception = EXCEPINFO::default();
+    let mut argument_error = u32::MAX;
+    assert_eq!(
+        // SAFETY: the server, IID, DISPPARAMS, and outputs remain live.
+        unsafe {
+            ((*vtable).invoke)(
+                server.as_ptr(),
+                DISPID_HEARTBEAT,
+                &null_iid,
+                0,
+                DISPATCH_METHOD,
+                &mut parameters,
+                &mut result,
+                &mut exception,
+                &mut argument_error,
+            )
+        },
+        S_OK
+    );
+    // SAFETY: successful Invoke initialized `result` as VT_I4; clearing it
+    // balances any owned Automation payload (none for this scalar).
+    unsafe {
+        assert_eq!(result.Anonymous.Anonymous.vt, VT_I4);
+        assert_eq!(result.Anonymous.Anonymous.Anonymous.lVal, 1);
+        VariantClear(&mut result);
+    }
+
+    assert_eq!(
+        // SAFETY: the server, IID, and empty DISPPARAMS remain live.
+        // IDispatch explicitly permits callers to ignore a return value by
+        // passing a null pVarResult.
+        unsafe {
+            ((*vtable).invoke)(
+                server.as_ptr(),
+                DISPID_HEARTBEAT,
+                &null_iid,
+                0,
+                DISPATCH_METHOD,
+                &mut parameters,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        },
+        S_OK
+    );
+
+    drop(dispatch);
+    drop(factory);
+    shutdown(&handles).unwrap();
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
+    let factory = get_test_class_factory(&ensured);
+    let dispatch_iid = iid_idispatch_from_fields();
+    let mut dispatch = ptr::null_mut();
+    assert_eq!(
+        // SAFETY: `factory`, the IID, and output are live for the call.
+        unsafe {
+            (factory.vtable().create_instance)(
+                factory.as_ptr(),
+                ptr::null_mut(),
+                &dispatch_iid,
+                &mut dispatch,
+            )
+        },
+        S_OK
+    );
+    let dispatch = TestUnknownReference::new(dispatch);
+    let server = dispatch.server(&ensured);
+    // SAFETY: the IDispatch pointer is the RtdServer's identity pointer.
+    let vtable = unsafe { server.as_ref().vtable };
+    let null_iid = iid_null_from_fields();
+
+    let mut parameters = DISPPARAMS::default();
+    let mut result = VARIANT::default();
+    result.Anonymous.Anonymous.vt = VT_I4;
+    result.Anonymous.Anonymous.Anonymous.lVal = 99;
+    let mut exception = EXCEPINFO {
+        scode: 99,
+        ..EXCEPINFO::default()
+    };
+    let mut argument_error = 99;
+    assert_eq!(
+        // SAFETY: all pointers remain live; zero arguments intentionally
+        // exercise argument-count validation.
+        unsafe {
+            ((*vtable).invoke)(
+                server.as_ptr(),
+                DISPID_DISCONNECT_DATA,
+                &null_iid,
+                0,
+                DISPATCH_METHOD,
+                &mut parameters,
+                &mut result,
+                &mut exception,
+                &mut argument_error,
+            )
+        },
+        DISP_E_BADPARAMCOUNT
+    );
+    // SAFETY: Invoke initialized the result before rejecting the call.
+    unsafe { assert_eq!(result.Anonymous.Anonymous.vt, VT_EMPTY) };
+    assert_eq!(exception.scode, 0);
+    assert_eq!(argument_error, 0);
+
+    let mut bad_argument = VARIANT::default();
+    parameters.rgvarg = &mut bad_argument;
+    parameters.cArgs = 1;
+    assert_eq!(
+        // SAFETY: the one-element argument array and all outputs are live.
+        unsafe {
+            ((*vtable).invoke)(
+                server.as_ptr(),
+                DISPID_DISCONNECT_DATA,
+                &null_iid,
+                0,
+                DISPATCH_METHOD,
+                &mut parameters,
+                &mut result,
+                ptr::null_mut(),
+                &mut argument_error,
+            )
+        },
+        DISP_E_TYPEMISMATCH
+    );
+    assert_eq!(argument_error, 0);
+
+    assert_eq!(
+        // SAFETY: the temporary empty DISPPARAMS and result remain live for
+        // the call; flags intentionally omit DISPATCH_METHOD.
+        unsafe {
+            ((*vtable).invoke)(
+                server.as_ptr(),
+                DISPID_HEARTBEAT,
+                &null_iid,
+                0,
+                0,
+                &mut DISPPARAMS::default(),
+                &mut result,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        },
+        DISP_E_MEMBERNOTFOUND
+    );
+    // SAFETY: Invoke initialized the result before rejecting the flags.
+    unsafe { assert_eq!(result.Anonymous.Anonymous.vt, VT_EMPTY) };
+
+    let topic_array = {
+        let bound = SAFEARRAYBOUND {
+            cElements: 1,
+            lLbound: 0,
+        };
+        // SAFETY: `bound` describes a one-element VT_VARIANT SAFEARRAY.
+        let array = unsafe { SafeArrayCreate(VT_VARIANT, 1, &bound) };
+        assert!(!array.is_null());
+
+        let mut topic = VARIANT::default();
+        assert_eq!(
+            // SAFETY: `topic` is writable and the string is valid UTF-8.
+            unsafe { write_bstr_variant(&mut topic, "invalid-topic") },
+            S_OK
+        );
+        let index = 0;
+        // SAFETY: the index is within bounds and SafeArrayPutElement copies
+        // the valid VARIANT before the local is cleared.
+        assert_eq!(
+            // SAFETY: see the bounds and lifetime justification above.
+            unsafe { SafeArrayPutElement(array, &index, (&raw mut topic).cast(),) },
+            S_OK
+        );
+        // SAFETY: `topic` contains one owned BSTR initialized above.
+        unsafe { VariantClear(&mut topic) };
+        array
+    };
+
+    let mut typed_array = topic_array;
+    let mut typed_new_values = VARIANT_TRUE;
+    let mut typed_result = VARIANT::default();
+    typed_result.Anonymous.Anonymous.vt = VT_I4;
+    typed_result.Anonymous.Anonymous.Anonymous.lVal = 99;
+    assert_eq!(
+        // SAFETY: the live server, SAFEARRAY pointer, and writable outputs
+        // remain valid for this direct typed-vtable failure case.
+        unsafe {
+            connect_data(
+                server.as_ptr(),
+                41,
+                &mut typed_array,
+                &mut typed_new_values,
+                &mut typed_result,
+            )
+        },
+        E_INVALIDARG
+    );
+    assert_eq!(typed_new_values, VARIANT_FALSE);
+    // SAFETY: ConnectData initializes the out VARIANT before every early
+    // failure after pointer validation.
+    unsafe { assert_eq!(typed_result.Anonymous.Anonymous.vt, VT_EMPTY) };
+
+    let mut new_values = VARIANT_TRUE;
+    let mut reversed = [VARIANT::default(), VARIANT::default(), VARIANT::default()];
+    // DISPPARAMS stores positional arguments in reverse signature order:
+    // GetNewValues, Strings, TopicID.
+    reversed[0].Anonymous.Anonymous.vt = VT_BYREF | VT_BOOL;
+    reversed[0].Anonymous.Anonymous.Anonymous.pboolVal = &mut new_values;
+    reversed[1].Anonymous.Anonymous.vt = VT_ARRAY | VT_VARIANT;
+    reversed[1].Anonymous.Anonymous.Anonymous.parray = topic_array;
+    reversed[2].Anonymous.Anonymous.vt = VT_I4;
+    reversed[2].Anonymous.Anonymous.Anonymous.lVal = 42;
+    parameters = DISPPARAMS {
+        rgvarg: reversed.as_mut_ptr(),
+        rgdispidNamedArgs: ptr::null_mut(),
+        cArgs: 3,
+        cNamedArgs: 0,
+    };
+    assert_eq!(
+        // SAFETY: the reversed three-element argument array and outputs
+        // remain live for Invoke.
+        unsafe {
+            ((*vtable).invoke)(
+                server.as_ptr(),
+                DISPID_CONNECT_DATA,
+                &null_iid,
+                0,
+                DISPATCH_METHOD,
+                &mut parameters,
+                &mut result,
+                ptr::null_mut(),
+                &mut argument_error,
+            )
+        },
+        E_INVALIDARG
+    );
+    assert_eq!(new_values, VARIANT_FALSE);
+    // SAFETY: Invoke reset `result` to empty; reversed[1] still owns the
+    // SAFEARRAY created above and destroys it exactly once.
+    unsafe {
+        assert_eq!(result.Anonymous.Anonymous.vt, VT_EMPTY);
+        // This VARIANT owns `topic_array` and destroys it exactly once.
+        VariantClear(&mut reversed[1]);
+    }
+
+    // A named positional parameter uses the stable parameter DISPID
+    // returned by GetIDsOfNames.
+    let mut topic_id = VARIANT::default();
+    topic_id.Anonymous.Anonymous.vt = VT_I4;
+    topic_id.Anonymous.Anonymous.Anonymous.lVal = 42;
+    let mut named_id = 0;
+    parameters = DISPPARAMS {
+        rgvarg: &mut topic_id,
+        rgdispidNamedArgs: &mut named_id,
+        cArgs: 1,
+        cNamedArgs: 1,
+    };
+    assert_eq!(
+        // SAFETY: the named argument, its DISPID, and outputs remain live.
+        unsafe {
+            ((*vtable).invoke)(
+                server.as_ptr(),
+                DISPID_DISCONNECT_DATA,
+                &null_iid,
+                0,
+                DISPATCH_METHOD,
+                &mut parameters,
+                &mut result,
+                ptr::null_mut(),
+                &mut argument_error,
+            )
+        },
+        S_OK
+    );
+    // SAFETY: successful void Invoke leaves the initialized result empty.
+    unsafe { assert_eq!(result.Anonymous.Anonymous.vt, VT_EMPTY) };
+
+    // SAFETY: CreateInstance and DllGetClassObject returned these owned
+    // references.
+    drop(dispatch);
+    drop(factory);
+    shutdown(&handles).unwrap();
+}
+
+#[test]
+#[cfg(feature = "rtd")]
+fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let disconnected = Arc::new(AtomicBool::new(false));
+    let source = DispatchTestSource::new(Arc::clone(&disconnected));
+    let (arena, source_handle) =
+        crate::subscription::SourceArena::<DispatchTestSubscription>::with_source(
+            crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+            source.clone(),
+        )
+        .unwrap();
+    let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
+    let ensured =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let _generation = ensured.active.generation;
+    let handle = ensured.subscription_server.unwrap();
+
+    let prepared = subscriptions
+        .prepare(
+            &source_handle,
+            RtdTopic::single("dispatch-refresh").unwrap().borrowed(),
+        )
+        .unwrap();
+    let mut initial = connect_subscription_backend(&ensured, 77, *prepared.key());
+    // SAFETY: the production adapter wrote and committed a valid VARIANT.
+    unsafe {
+        assert_eq!(initial.Anonymous.Anonymous.vt, VT_R8);
+        assert_eq!(initial.Anonymous.Anonymous.Anonymous.dblVal, 12.5);
+        assert_eq!(VariantClear(&mut initial), S_OK);
+    }
+    drop(prepared);
+    assert_eq!(handle.pending_update_count(), 0);
+
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the server while the
+    // factory and dispatch interface are used.
+    let factory = get_test_class_factory(&ensured);
+    let dispatch_iid = iid_idispatch_from_fields();
+    let mut dispatch = ptr::null_mut();
+    assert_eq!(
+        // SAFETY: `factory`, the IID, and output slot remain live.
+        unsafe {
+            (factory.vtable().create_instance)(
+                factory.as_ptr(),
+                ptr::null_mut(),
+                &dispatch_iid,
+                &mut dispatch,
+            )
+        },
+        S_OK
+    );
+    let dispatch = TestUnknownReference::new(dispatch);
+    let server = dispatch.server(&ensured);
+    // SAFETY: CreateInstance returned the RtdServer identity pointer.
+    let vtable = unsafe { server.as_ref().vtable };
+    let null_iid = iid_null_from_fields();
+
+    let mut topic_count = -1;
+    let mut count_argument = VARIANT::default();
+    count_argument.Anonymous.Anonymous.vt = VT_BYREF | VT_I4;
+    count_argument.Anonymous.Anonymous.Anonymous.plVal = &mut topic_count;
+    let mut parameters = DISPPARAMS {
+        rgvarg: &mut count_argument,
+        rgdispidNamedArgs: ptr::null_mut(),
+        cArgs: 1,
+        cNamedArgs: 0,
+    };
+    let mut result = VARIANT::default();
+
+    // The synchronous initial publish is acknowledged by connection commit
+    // and therefore is not a pending RefreshData row.
+    source.publish(13.5).unwrap();
+    assert!(handle.pending_update_count() > 0);
+
+    assert_eq!(
+        // SAFETY: the server, IID, one-element argument array, and result
+        // remain live for Invoke.
+        unsafe {
+            ((*vtable).invoke)(
+                server.as_ptr(),
+                DISPID_REFRESH_DATA,
+                &null_iid,
+                0,
+                DISPATCH_METHOD,
+                &mut parameters,
+                &mut result,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        },
+        S_OK
+    );
+    assert_eq!(topic_count, 1);
+
+    // SAFETY: successful RefreshData initialized result as a
+    // VT_ARRAY|VT_VARIANT and transferred one owned SAFEARRAY into it.
+    let array = unsafe {
+        assert_eq!(result.Anonymous.Anonymous.vt, VT_ARRAY | VT_VARIANT);
+        result.Anonymous.Anonymous.Anonymous.parray
+    };
+    assert!(!array.is_null());
+    // SAFETY: `array` remains owned by `result` and is live until the
+    // VariantClear below.
+    assert_eq!(unsafe { SafeArrayGetDim(array) }, 2);
+
+    let mut topic = VARIANT::default();
+    let mut value = VARIANT::default();
+    let mut topic_index = [0, 0];
+    let mut value_index = [1, 0];
+    // SAFETY: both indices lie inside the one-column, two-row array, and
+    // the VARIANT outputs are writable.
+    unsafe {
+        assert_eq!(
+            SafeArrayGetElement(array, topic_index.as_mut_ptr(), (&raw mut topic).cast(),),
+            S_OK
+        );
+        assert_eq!(
+            SafeArrayGetElement(array, value_index.as_mut_ptr(), (&raw mut value).cast(),),
+            S_OK
+        );
+        assert_eq!(topic.Anonymous.Anonymous.vt, VT_I4);
+        assert_eq!(topic.Anonymous.Anonymous.Anonymous.lVal, 77);
+        assert_eq!(value.Anonymous.Anonymous.vt, VT_R8);
+        assert_eq!(value.Anonymous.Anonymous.Anonymous.dblVal, 13.5);
+        VariantClear(&mut topic);
+        VariantClear(&mut value);
+        // This is the sole owner of the transferred SAFEARRAY.
+        VariantClear(&mut result);
+    }
+    assert_eq!(handle.pending_update_count(), 0);
+
+    source.publish(14.5).unwrap();
+    assert!(handle.pending_update_count() > 0);
+    topic_count = -1;
+
+    assert_eq!(
+        // SAFETY: all inputs remain live. A null pVarResult asks Invoke to
+        // discard the returned SAFEARRAY after committing the update.
+        unsafe {
+            ((*vtable).invoke)(
+                server.as_ptr(),
+                DISPID_REFRESH_DATA,
+                &null_iid,
+                0,
+                DISPATCH_METHOD,
+                &mut parameters,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        },
+        S_OK
+    );
+    assert_eq!(topic_count, 1);
+    assert_eq!(handle.pending_update_count(), 0);
+
+    parameters = DISPPARAMS::default();
+    result.Anonymous.Anonymous.vt = VT_I4;
+    result.Anonymous.Anonymous.Anonymous.lVal = 123;
+
+    assert_eq!(
+        // SAFETY: the server remains live through its dispatch reference;
+        // ServerTerminate takes no arguments and initializes the result
+        // before quiescing the generation.
+        unsafe {
+            ((*vtable).invoke)(
+                server.as_ptr(),
+                DISPID_SERVER_TERMINATE,
+                &null_iid,
+                0,
+                DISPATCH_METHOD,
+                &mut parameters,
+                &mut result,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        },
+        S_OK
+    );
+    // SAFETY: successful void Invoke leaves the initialized result empty.
+    unsafe { assert_eq!(result.Anonymous.Anonymous.vt, VT_EMPTY) };
+    assert!(disconnected.load(Ordering::Acquire));
+
+    drop(dispatch);
+    drop(factory);
+    drop(ensured);
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[test]
+#[cfg(feature = "rtd")]
+fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cleanup() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let (returned_tx, returned_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let sta = thread::spawn(move || {
+        const COINIT_APARTMENTTHREADED: u32 = 2;
+        // SAFETY: this fresh thread enters an STA exactly once; the guard
+        // balances initialization on this same thread after all COM teardown.
+        let status = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) };
+        assert_eq!(status, S_OK);
+        let _apartment = TestComApartment {
+            should_uninitialize: true,
+            _not_send_or_sync: PhantomData,
+        };
+        let registration = crate::subscription::SourceRegistration::<
+            crate::subscription::RtdChannelSubscription,
+        >::new(crate::generation::RuntimeGeneration::new(1).unwrap());
+        let (sender_tx, sender_rx) = mpsc::sync_channel(1);
+        let source = registration
+            .register(crate::subscription::RtdChannelSource::new(
+                std::num::NonZeroUsize::new(64).unwrap(),
+                move |_| {
+                    let sender_tx = sender_tx.clone();
+                    Ok(move |sender: crate::subscription::RtdSender<i32>| {
+                        sender_tx.send(sender.clone()).unwrap();
+                        assert!(sender.wait_closed(Duration::from_secs(5)));
+                        Ok(())
+                    })
+                },
+            ))
+            .unwrap();
+        let subscriptions = SubscriptionRuntime::with_sources_for_internal(registration.finish());
+        let ensured =
+            ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+        let handle = ensured.subscription_server.unwrap();
+        let prepared = subscriptions
+            .prepare(
+                &source,
+                RtdTopic::single("sta-disconnect").unwrap().borrowed(),
+            )
+            .unwrap();
+        let mut initial = connect_subscription_backend(&ensured, 1, *prepared.key());
+        // SAFETY: the adapter returned a committed, initialized VARIANT.
+        assert_eq!(unsafe { VariantClear(&mut initial) }, S_OK);
+        prepared.commit();
+        let sender = sender_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let notifier = Arc::new(crate::rtd::test_support::TestNotifierState::new());
+        *notifier.entered.lock() = Some(entered_tx);
+        // This fake callback waits for the STA's next action, modeling an
+        // UpdateNotify queued for STA dispatch. It uses real channel locking
+        // and native DisconnectData/ServerTerminate admission and teardown.
+        *notifier.release.lock() = Some(release_rx);
+        handle
+            .attach_update_notifier(RtdNotifier::for_test(notifier))
+            .unwrap();
+        sender.try_send(1).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let server = ensured.pointer();
+        // SAFETY: `ensured` and ACTIVE_SERVER retain this live COM server.
+        assert_eq!(unsafe { disconnect_data(server, 1) }, S_OK);
+        assert_eq!(handle.pending_update_count(), 0);
+        assert_eq!(
+            // SAFETY: the same retained reference keeps the admission state live.
+            unsafe { (*server).operations.as_ref().in_flight() },
+            1
+        );
+        // SAFETY: the retained server is live; cleanup admission makes this
+        // termination deferred while the fake STA dispatch is still pending.
+        assert_eq!(unsafe { server_terminate(server) }, S_OK);
+        // SAFETY: the server remains retained until teardown completes.
+        let phase = unsafe { (*server).operations.as_ref().phase() };
+        assert!(matches!(
+            phase,
+            ServerPhase::Terminating { deferred: true, .. }
+        ));
+        returned_tx.send(()).unwrap();
+        shutdown_subscriptions(&subscriptions).unwrap();
+        assert!(sender.is_closed());
+        assert_eq!(
+            // SAFETY: close joined every deferred worker and retained reference;
+            // the original ensured reference still keeps the server alive here.
+            unsafe { (*server).operations.as_ref().in_flight() },
+            0
+        );
+        drop(ensured);
+    });
+    // Recover the old blocking path on timeout, so a regression fails without
+    // leaving a permanently blocked STA behind in the native test process.
+    let returned_before_release = returned_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    release_tx.send(()).unwrap();
+    sta.join().unwrap();
+    assert!(
+        returned_before_release,
+        "DisconnectData blocked STA dispatch"
+    );
+}
+
+#[test]
+#[cfg(all(feature = "rtd", feature = "handles"))]
+fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() {
+    // Standard IUnknown marshaling exercises real STA dispatch without an
+    // Excel-installed IRtdUpdateEvent proxy/stub. A remote QueryInterface for
+    // this unknown IID triggers the callback while final removal drains RTD.
+    const PROBE_IID: GUID = GUID {
+        data1: 0x43d9e1c2,
+        data2: 0x8a5a,
+        data3: 0x4876,
+        data4: [0xad, 0xb3, 0xc1, 0xa5, 0xfd, 0x8a, 0x57, 0x09],
+    };
+    #[repr(C)]
+    struct Probe {
+        vtable: &'static IUnknown_Vtbl,
+        references: AtomicU32,
+        callback: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+    unsafe extern "system" fn query(
+        this: *mut c_void,
+        iid: *const GUID,
+        output: *mut *mut c_void,
+    ) -> i32 {
+        // SAFETY: COM supplies a live interface and readable/writable slots.
+        let probe = unsafe { &*this.cast::<Probe>() };
+        // SAFETY: the caller supplies writable interface output.
+        unsafe { *output = ptr::null_mut() };
+        // SAFETY: the caller supplies a readable GUID.
+        if guid_eq(unsafe { *iid }, IID_IUNKNOWN) {
+            probe.references.fetch_add(1, Ordering::Relaxed);
+            // SAFETY: the returned pointer carries the newly acquired ref.
+            unsafe { *output = this };
+            return S_OK;
+        }
+        // SAFETY: the same readable GUID is retained for this invocation.
+        if guid_eq(unsafe { *iid }, PROBE_IID) {
+            let callback = probe.callback.lock().take();
+            if let Some(callback) = callback {
+                let _ = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(callback));
+            }
+        }
+        E_NOINTERFACE
+    }
+    unsafe extern "system" fn add_ref(this: *mut c_void) -> u32 {
+        // SAFETY: COM retains the interface while acquiring another ref.
+        unsafe { &*this.cast::<Probe>() }
+            .references
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
+    }
+    unsafe extern "system" fn release(this: *mut c_void) -> u32 {
+        // SAFETY: the caller consumes one live interface ref.
+        let prior = unsafe { &*this.cast::<Probe>() }
+            .references
+            .fetch_sub(1, Ordering::Release);
+        if prior == 1 {
+            std::sync::atomic::fence(Ordering::Acquire);
+            // SAFETY: this is the final ref to the original Box allocation.
+            unsafe { drop(Box::from_raw(this.cast::<Probe>())) };
+        }
+        prior - 1
+    }
+    static PROBE_VTABLE: IUnknown_Vtbl = IUnknown_Vtbl {
+        QueryInterface: query,
+        AddRef: add_ref,
+        Release: release,
+    };
+
+    let (returned_tx, returned_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let fallback_release = release_tx.clone();
+    let sta = thread::spawn(move || {
+        const COINIT_APARTMENTTHREADED: u32 = 2;
+        // SAFETY: this fresh thread initializes COM once and balances it here.
+        let status = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) };
+        assert_eq!(status, S_OK);
+        let _apartment = TestComApartment {
+            should_uninitialize: true,
+            _not_send_or_sync: PhantomData,
+        };
+        let _guard = TEST_LOCK.lock().unwrap();
+        close_test_ingress();
+        let fixture = crate::runtime::StaticTestRuntime::<ChannelOwnerAddin>::new();
+        let runtime = fixture.runtime();
+        runtime
+            .ensure_module_residency(
+                crate::boundary::host::host_auto_remove::<ChannelOwnerAddin>
+                    as fn(&crate::runtime::Runtime<ChannelOwnerAddin>) -> i32
+                    as *const (),
+            )
+            .unwrap();
+        let registration = crate::subscription::SourceRegistration::<
+            crate::subscription::RtdChannelSubscription,
+        >::new(crate::generation::RuntimeGeneration::new(1).unwrap());
+        let (sender_tx, sender_rx) = mpsc::sync_channel(1);
+        let source = registration
+            .register(crate::subscription::RtdChannelSource::new(
+                std::num::NonZeroUsize::new(64).unwrap(),
+                move |_| {
+                    let sender_tx = sender_tx.clone();
+                    Ok(move |sender: crate::subscription::RtdSender<i32>| {
+                        sender_tx.send(sender.clone()).unwrap();
+                        assert!(sender.wait_closed(Duration::from_secs(10)));
+                        Ok(())
+                    })
+                },
+            ))
+            .unwrap();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish_with_sources(opening, (), (), registration.finish());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let ensured = runtime
+            .with_subscriptions(|subscriptions| {
+                let ensured =
+                    ensure_server_without_handles(Some(BackendSubscriptions::new(subscriptions)))
+                        .unwrap();
+                let prepared = subscriptions
+                    .prepare(
+                        &source,
+                        RtdTopic::single("final-remove").unwrap().borrowed(),
+                    )
+                    .unwrap();
+                let mut initial = connect_subscription_backend(&ensured, 1, *prepared.key());
+                // SAFETY: the adapter returned a committed, initialized VARIANT.
+                assert_eq!(unsafe { VariantClear(&mut initial) }, S_OK);
+                prepared.commit();
+                ensured
+            })
+            .unwrap();
+        let sender = sender_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let notifier = Arc::new(crate::rtd::test_support::TestNotifierState::new());
+        *notifier.entered.lock() = Some(entered_tx);
+        *notifier.release.lock() = Some(release_rx);
+        ensured
+            .subscription_server
+            .unwrap()
+            .attach_update_notifier(RtdNotifier::for_test(notifier))
+            .unwrap();
+        sender.try_send(1).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // SAFETY: ACTIVE_SERVER and this reference retain the live server.
+        let status = unsafe { disconnect_data(ensured.pointer(), 1) };
+        assert_eq!(status, S_OK);
+        // Final removal must be allowed to reclaim its COM object count.
+        drop(ensured);
+
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&dispatched);
+        let probe = TestUnknownReference::new(
+            Box::into_raw(Box::new(Probe {
+                vtable: &PROBE_VTABLE,
+                references: AtomicU32::new(1),
+                callback: Mutex::new(Some(Box::new(move || {
+                    assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
+                    let epoch = runtime.removal_epoch();
+                    let intent = runtime.host_intent();
+                    assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+                    assert_eq!(crate::boundary::host::host_auto_close(runtime), 1);
+                    assert_eq!(runtime.removal_epoch(), epoch);
+                    assert_eq!(runtime.host_intent(), intent);
+                    assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
+                    assert!(runtime.module_residency_held());
+                    observed.store(true, Ordering::Release);
+                    release_tx.send(()).unwrap();
+                }))),
+            }))
+            .cast(),
+        );
+        // SAFETY: this thread owns an STA and a live IUnknown interface.
+        let git = unsafe { super::global_interface_table::get_git() }.unwrap();
+        let mut cookie = 0;
+        // SAFETY: the interface, IID, and writable cookie remain live here.
+        let status = unsafe { git.register(probe.as_ptr(), &IID_IUNKNOWN, &mut cookie) };
+        assert_eq!(status, S_OK);
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let incoming = thread::spawn(move || {
+            let _apartment = TestComApartment::enter();
+            ready_tx.send(()).unwrap();
+            while crate::module_runtime::ingress().phase() == crate::ingress::PHASE_OPEN {
+                thread::yield_now();
+            }
+            // SAFETY: this thread initialized COM; GIT owns the registered ref.
+            let git = unsafe { super::global_interface_table::get_git() }.unwrap();
+            // SAFETY: the cookie remains registered through this thread's join.
+            let interface = unsafe { git.get_interface(cookie, &IID_IUNKNOWN) }.unwrap();
+            let interface = TestUnknownReference::new(interface.as_ptr());
+            let mut output = ptr::null_mut();
+            // SAFETY: this apartment-local proxy and both GUID/output slots
+            // satisfy QueryInterface's ABI; the probe deliberately rejects IID.
+            let status = unsafe {
+                (interface.iunknown_vtable().QueryInterface)(
+                    interface.as_ptr(),
+                    &PROBE_IID,
+                    &mut output,
+                )
+            };
+            assert_eq!(status, E_NOINTERFACE);
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+        returned_tx.send(()).unwrap();
+        // Also recover a regression that blocked the first ingress drain: the
+        // test driver releases its fake notifier on timeout, then this pump
+        // completes a still-queued probe before joining its MTA caller.
+        assert!(drain_with_com_dispatch(move || incoming.join().unwrap()).is_ok());
+        assert!(dispatched.load(Ordering::Acquire));
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert!(sender.is_closed());
+        // SAFETY: no proxy user remains after the MTA caller was joined.
+        assert_eq!(unsafe { git.revoke(cookie) }, S_OK);
+    });
+    let completed_with_sta_dispatch = returned_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    let _ = fallback_release.send(());
+    sta.join().unwrap();
+    assert!(
+        completed_with_sta_dispatch,
+        "final removal blocked STA dispatch"
+    );
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn wrong_clsid_is_not_served() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let _active = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let wrong = GUID {
+        data1: 1,
+        ..GUID::default()
+    };
+    let class_factory_iid = iid_iclass_factory_from_fields();
+    let mut output = ptr::null_mut();
+
+    // SAFETY: the input pointers reference live GUID values and `output`
+    // points to a writable COM interface output slot.
+    let status = unsafe {
+        dll_get_class_object(
+            (&raw const wrong).cast(),
+            (&raw const class_factory_iid).cast(),
+            &mut output,
+        )
+    };
+
+    assert_eq!(status, CLASS_E_CLASSNOTAVAILABLE);
+    assert!(output.is_null());
+
+    shutdown(&handles).unwrap();
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn existing_server_attaches_each_backend_without_replacement() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let subscriptions = SubscriptionRuntime::<()>::new();
+
+    let first = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    assert!(first.newly_created);
+
+    let second =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    assert!(!second.newly_created);
+    assert_eq!(first.active.pointer, second.active.pointer);
+
+    let server = second.pointer();
+
+    // SAFETY: ACTIVE_SERVER owns a live reference and both EnsuredServer
+    // guards retain additional temporary references for this test.
+    let backends = unsafe { (*server).backends.lock() };
+
+    assert!(
+        backends
+            .handles
+            .as_ref()
+            // SAFETY: backends lock is held on the active server.
+            .is_some_and(|active| unsafe { active.as_ref() }.identity() == handles.identity())
+    );
+    assert!(
+        backends
+            .subscriptions
+            .as_ref()
+            .is_some_and(|active| active.is_runtime(&subscriptions))
+    );
+    drop(backends);
+    drop(second);
+    drop(first);
+    shutdown(&handles).unwrap();
+}
+
+#[test]
+#[cfg(feature = "rtd")]
+fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let (arena, source, sink, _) = crate::subscription::tests::publishing_source::<f64>(None);
+    let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
+
+    let ensured =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let server = ensured.pointer();
+
+    let callback = Box::new(RetainedUpdateCallback {
+        cookie: None,
+        pump: None,
+        drop_hook: None,
+    });
+    // SAFETY: EnsuredServer keeps server reference alive
+    unsafe {
+        install_callback(&(*server).callbacks, callback);
+    }
+
+    let notifier_state = Arc::new(crate::rtd::test_support::TestNotifierState::new());
+    let handle = ensured.subscription_server.as_ref().unwrap();
+    handle
+        .attach_update_notifier(crate::excel_rtd::RtdNotifier::for_test(Arc::clone(
+            &notifier_state,
+        )))
+        .unwrap();
+
+    let prepared = subscriptions
+        .prepare(&source, RtdTopic::single("ensure-test").unwrap().borrowed())
+        .unwrap();
+    let key = *prepared.key();
+    prepared.commit();
+    let mut initial = connect_subscription_backend(&ensured, 1, key);
+    // SAFETY: the adapter returned a committed, initialized VARIANT.
+    assert_eq!(unsafe { VariantClear(&mut initial) }, S_OK);
+
+    let sink = sink.lock().clone().unwrap();
+    sink.publish(1.0).unwrap();
+
+    assert_eq!(notifier_state.calls.load(Ordering::SeqCst), 1);
+
+    for _ in 0..100 {
+        let _res =
+            ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    }
+
+    assert_eq!(notifier_state.calls.load(Ordering::SeqCst), 1);
+    drop(ensured);
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[cfg(feature = "rtd")]
+type MixedComSources = (DispatchTestSource, CountedComSource);
+
+#[test]
+#[cfg(feature = "rtd")]
+fn typed_com_port_keeps_mixed_owners_and_rolls_back_failed_value_conversion() {
+    use super::subscription_backend::FAIL_NEXT_SUBSCRIPTION_WRITE;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _apartment = TestComApartment::enter();
+    let _reset_failure = scopeguard::guard((), |()| {
+        FAIL_NEXT_SUBSCRIPTION_WRITE.store(false, Ordering::Release);
+    });
+    let first_disconnected = Arc::new(AtomicBool::new(false));
+    let second_disconnected = Arc::new(AtomicUsize::new(0));
+    let registration = crate::subscription::SourceRegistration::<
+        MixedComSubscriptions,
+        MixedComSources,
+    >::new(crate::generation::RuntimeGeneration::new(1).unwrap());
+    let (first, second) = registration
+        .register_sources((
+            DispatchTestSource::new(Arc::clone(&first_disconnected)),
+            CountedComSource(Arc::clone(&second_disconnected)),
+        ))
+        .unwrap();
+    let subscriptions =
+        SubscriptionRuntime::<MixedComSubscriptions, MixedComSources>::with_sources_for_internal(
+            registration.finish(),
+        );
+    super::server_type::register_server_type::<MixedComSubscriptions, MixedComSources>().unwrap();
+    #[cfg(feature = "handles")]
+    let handles = FormulaHandleService::new(4);
+    #[cfg(feature = "handles")]
+    let handle_first =
+        ensure_server::<MixedComSubscriptions, MixedComSources>(Some(&handles), None).unwrap();
+    #[cfg(feature = "handles")]
+    assert!(handle_first.subscription_server.is_none());
+    let backend = BackendSubscriptions::new(&subscriptions);
+    assert!(backend.is_runtime(&subscriptions));
+    let ensured = ensure_server_without_handles(Some(backend)).unwrap();
+    #[cfg(feature = "handles")]
+    assert_eq!(handle_first.active.pointer, ensured.active.pointer);
+    let retained_factory = get_test_class_factory(&ensured);
+    // A different add-in type cannot reinterpret this allocation or replace
+    // its installed constructor while it is the active generation.
+    assert!(
+        super::server_type::register_server_type::<(), crate::DynamicRtdSources<()>>().is_err()
+    );
+    assert!(ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).is_err());
+    // Equal owner enums cannot reinterpret a server with a different catalog.
+    assert!(
+        ensure_server_without_handles::<
+            MixedComSubscriptions,
+            crate::DynamicRtdSources<MixedComSubscriptions>,
+        >(None)
+        .is_err()
+    );
+
+    let repeated =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    assert_eq!(ensured.active.pointer, repeated.active.pointer);
+
+    let prepared = subscriptions
+        .prepare(&first, RtdTopic::single("mixed-first").unwrap().borrowed())
+        .unwrap();
+    let mut initial = connect_subscription_backend(&ensured, 81, *prepared.key());
+    // SAFETY: the concrete port wrote this initialized numeric VARIANT.
+    unsafe {
+        assert_eq!(initial.Anonymous.Anonymous.vt, VT_R8);
+        assert_eq!(initial.Anonymous.Anonymous.Anonymous.dblVal, 12.5);
+        assert_eq!(VariantClear(&mut initial), S_OK);
+    }
+    prepared.commit();
+
+    let prepared = subscriptions
+        .prepare(
+            &second,
+            RtdTopic::single("mixed-second").unwrap().borrowed(),
+        )
+        .unwrap();
+    let key = *prepared.key();
+    let server = ensured.pointer();
+    // SAFETY: ensured retains this COM allocation through the admitted call.
+    let operation = unsafe { (*server).operations.enter() }.unwrap();
+    FAIL_NEXT_SUBSCRIPTION_WRITE.store(true, Ordering::Release);
+    let mut initial = VARIANT::default();
+    // SAFETY: initialized output storage and the admitted COM reference retain
+    // the real erased port while its typed transaction rolls back.
+    let status = unsafe {
+        ensured.subscription_server.unwrap().connect_data(
+            crate::subscription::TopicId(82),
+            key,
+            &mut initial,
+        )
+    };
+    drop(operation);
+    assert_eq!(status, E_FAIL);
+    assert!(!FAIL_NEXT_SUBSCRIPTION_WRITE.load(Ordering::Acquire));
+    // SAFETY: failure occurred before VARIANT publication.
+    unsafe { assert_eq!(initial.Anonymous.Anonymous.vt, VT_EMPTY) };
+    assert_eq!(second_disconnected.load(Ordering::Acquire), 1);
+    assert!(!first_disconnected.load(Ordering::Acquire));
+
+    // The same identity/topic can retry after only the failed connection was
+    // rolled back. The first enum variant remains connected throughout.
+    let mut initial = connect_subscription_backend(&ensured, 82, key);
+    // SAFETY: CountedComSource publishes i32, so the retried concrete
+    // transaction committed an integer VARIANT with an initialized lVal.
+    unsafe {
+        assert_eq!(initial.Anonymous.Anonymous.vt, VT_I4);
+        assert_eq!(initial.Anonymous.Anonymous.Anonymous.lVal, 7);
+        assert_eq!(VariantClear(&mut initial), S_OK);
+    }
+    prepared.commit();
+    shutdown_subscriptions(&subscriptions).unwrap();
+    #[cfg(feature = "handles")]
+    shutdown(&handles).unwrap();
+    assert!(first_disconnected.load(Ordering::Acquire));
+    assert_eq!(second_disconnected.load(Ordering::Acquire), 2);
+    // The detached COM allocation outlives its typed runtime; the inline
+    // copied handle is cleared and final Release must not touch that runtime.
+    drop(subscriptions);
+    super::server_type::register_server_type::<(), crate::DynamicRtdSources<()>>().unwrap();
+    let replacement =
+        ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    assert_ne!(replacement.active.generation, ensured.active.generation);
+    let mut instance = ptr::null_mut();
+    // SAFETY: the old factory retains its original concrete allocation even
+    // after a new generation has selected a different subscription owner type.
+    let status = unsafe {
+        (retained_factory.vtable().create_instance)(
+            retained_factory.as_ptr(),
+            ptr::null_mut(),
+            &IID_IRTD_SERVER,
+            &mut instance,
+        )
+    };
+    assert_eq!(status, E_FAIL);
+    assert!(instance.is_null());
+    drop(retained_factory);
+    #[cfg(feature = "handles")]
+    drop(handle_first);
+    drop(repeated);
+    drop(ensured);
+    discard_unpublished_server(replacement.active.pointer, true);
+    drop(replacement);
+}
+
+#[test]
+fn temporary_registration_mutex_serializes_other_threads() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let name = format!("Local\\XlFnRtdRegistrationTest_{}", std::process::id());
+    let first = CrossProcessRegistrationGuard::acquire_named(&name).unwrap();
+    let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let _second = CrossProcessRegistrationGuard::acquire_named(&name).unwrap();
+        acquired_tx.send(()).unwrap();
+    });
+
+    assert!(
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_millis(20))
+            .is_err()
+    );
+    drop(first);
+    acquired_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    waiter.join().unwrap();
+}
+
+#[test]
+fn scavenger_deletes_only_fully_marked_registration_for_same_module() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _maintenance = REGISTRATION_MAINTENANCE.lock();
+    let mut owned_id = GUID::default();
+    let mut foreign_id = GUID::default();
+    let mut legacy_id = GUID::default();
+
+    // SAFETY: each argument points to distinct writable GUID storage.
+    unsafe {
+        assert!(CoCreateGuid(&mut owned_id) >= 0);
+        assert!(CoCreateGuid(&mut foreign_id) >= 0);
+        assert!(CoCreateGuid(&mut legacy_id) >= 0);
+    }
+
+    let owned_class = guid_braced(owned_id);
+    let foreign_class = guid_braced(foreign_id);
+    let legacy_class = guid_braced(legacy_id);
+    let owned_prog_id = format!("{RTD_PROG_ID_PREFIX}{}", guid_compact(owned_id));
+    let foreign_prog_id = format!("{RTD_PROG_ID_PREFIX}{}", guid_compact(foreign_id));
+    let legacy_prog_id = format!("{RTD_PROG_ID_PREFIX}{}", guid_compact(legacy_id));
+    let owned_key = format!("Software\\Classes\\{owned_prog_id}");
+    let foreign_key = format!("Software\\Classes\\{foreign_prog_id}");
+    let legacy_key = format!("Software\\Classes\\{legacy_prog_id}");
+    let module = r"C:\xlfn-tests\owned.xll";
+
+    for (key, class, owner, schema) in [
+        (
+            &owned_key,
+            &owned_class,
+            RTD_REGISTRATION_OWNER,
+            RTD_REGISTRATION_SCHEMA,
+        ),
+        (
+            &foreign_key,
+            &foreign_class,
+            "another-owner",
+            RTD_REGISTRATION_SCHEMA,
+        ),
+        (&legacy_key, &legacy_class, RTD_REGISTRATION_OWNER, "1"),
+    ] {
+        set_registry_value(key, Some("XlFnOwner"), owner).unwrap();
+        set_registry_value(key, Some("XlFnRegistrationSchema"), schema).unwrap();
+        set_registry_value(key, Some("XlFnOwnerModule"), module).unwrap();
+        set_registry_value(key, Some("XlFnClassId"), class).unwrap();
+    }
+
+    let owned_class_key = format!("Software\\Classes\\CLSID\\{owned_class}");
+    set_registry_value(&format!("{owned_key}\\CLSID"), None, &owned_class).unwrap();
+    set_registry_value(&format!("{owned_class_key}\\ProgID"), None, &owned_prog_id).unwrap();
+    set_registry_value(&format!("{owned_class_key}\\InProcServer32"), None, module).unwrap();
+
+    scavenge_owned_registrations(module, None).unwrap();
+
+    assert!(
+        read_registry_string(&owned_key, "XlFnOwner")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        read_registry_string(&foreign_key, "XlFnOwner").unwrap(),
+        Some("another-owner".to_owned())
+    );
+    assert_eq!(
+        read_registry_string(&legacy_key, "XlFnRegistrationSchema").unwrap(),
+        Some("1".to_owned())
+    );
+
+    for key in [&foreign_key, &legacy_key] {
+        let key = wide_nul(key);
+        // SAFETY: `key` is an exact NUL-terminated test-owned registry key
+        // created above and may be deleted during test cleanup.
+        unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) };
+    }
+}
+
+#[test]
+fn unwrap_dispatch_variant_enforces_single_level_indirection() {
+    // 1. Direct VARIANT -> returns argument pointer directly
+    let mut direct = VARIANT::default();
+    direct.Anonymous.Anonymous.vt = VT_I4;
+    direct.Anonymous.Anonymous.Anonymous.lVal = 42;
+
+    // SAFETY: `direct` is a readable VARIANT on the stack.
+    let unwrapped = unsafe { unwrap_dispatch_variant(&mut direct) };
+    assert_eq!(unwrapped.map(|p| p.as_ptr()), Some(&raw mut direct));
+
+    // 2. VT_BYREF | VT_VARIANT -> VT_I4 -> returns inner VARIANT pointer
+    let mut inner = VARIANT::default();
+    inner.Anonymous.Anonymous.vt = VT_I4;
+    inner.Anonymous.Anonymous.Anonymous.lVal = 42;
+
+    let mut byref_valid = VARIANT::default();
+    byref_valid.Anonymous.Anonymous.vt = VT_BYREF | VT_VARIANT;
+    byref_valid.Anonymous.Anonymous.Anonymous.pvarVal = &mut inner;
+
+    // SAFETY: both VARIANTs are readable on the stack.
+    let unwrapped = unsafe { unwrap_dispatch_variant(&mut byref_valid) };
+    assert_eq!(unwrapped.map(|p| p.as_ptr()), Some(&raw mut inner));
+
+    // 3. VT_BYREF | VT_VARIANT -> null -> returns None
+    let mut byref_null = VARIANT::default();
+    byref_null.Anonymous.Anonymous.vt = VT_BYREF | VT_VARIANT;
+    byref_null.Anonymous.Anonymous.Anonymous.pvarVal = ptr::null_mut();
+
+    // SAFETY: `byref_null` is a readable VARIANT on the stack.
+    let unwrapped = unsafe { unwrap_dispatch_variant(&mut byref_null) };
+    assert_eq!(unwrapped, None);
+
+    // 4. VT_BYREF | VT_VARIANT -> VT_BYREF | VT_VARIANT -> returns None (automation spec violation)
+    let mut nested_inner = VARIANT::default();
+    nested_inner.Anonymous.Anonymous.vt = VT_BYREF | VT_VARIANT;
+    nested_inner.Anonymous.Anonymous.Anonymous.pvarVal = &mut inner;
+
+    let mut byref_nested = VARIANT::default();
+    byref_nested.Anonymous.Anonymous.vt = VT_BYREF | VT_VARIANT;
+    byref_nested.Anonymous.Anonymous.Anonymous.pvarVal = &mut nested_inner;
+
+    // SAFETY: all VARIANTs are readable on the stack.
+    let unwrapped = unsafe { unwrap_dispatch_variant(&mut byref_nested) };
+    assert_eq!(unwrapped, None);
+}
+
+#[test]
+fn registration_mutex_timeout_is_bounded_and_does_not_release_other_owner() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let name = format!(
+        "Local\\XlFnRtdRegistrationTimeoutTest_{}",
+        std::process::id()
+    );
+    let first = CrossProcessRegistrationGuard::acquire_named(&name).unwrap();
+    let waiter_name = name.clone();
+    let waiter = thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let result = CrossProcessRegistrationGuard::acquire_named_with_timeout(&waiter_name, 20);
+        assert!(matches!(
+            result,
+            Err(XllError::WindowsApi { code: 258, .. })
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // A timed-out acquisition must neither release the other owner's
+        // mutex nor leave an extra owned/locked guard behind.
+        assert!(
+            CrossProcessRegistrationGuard::acquire_named_with_timeout(&waiter_name, 0).is_err()
+        );
+    });
+    waiter.join().unwrap();
+    drop(first);
+    let name_again = name;
+    thread::spawn(move || {
+        CrossProcessRegistrationGuard::acquire_named_with_timeout(&name_again, 100).unwrap();
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn scavenger_preserves_registrations_with_inconsistent_ownership_links() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _maintenance = REGISTRATION_MAINTENANCE.lock();
+    let module = r"C:\xlfn-tests\ownership-links.xll";
+    for mismatch in 0..5 {
+        let mut owned_id = GUID::default();
+        let mut foreign_id = GUID::default();
+        // SAFETY: both GUID outputs are distinct writable stack storage.
+        unsafe {
+            assert!(CoCreateGuid(&mut owned_id) >= 0);
+            assert!(CoCreateGuid(&mut foreign_id) >= 0);
+        }
+        let class = guid_braced(owned_id);
+        let foreign_class = guid_braced(foreign_id);
+        let prog_id = format!("{RTD_PROG_ID_PREFIX}{}", guid_compact(owned_id));
+        let prog_key = format!("Software\\Classes\\{prog_id}");
+        let class_key = format!("Software\\Classes\\CLSID\\{class}");
+        let foreign_key = format!("Software\\Classes\\CLSID\\{foreign_class}");
+        set_registry_value(&foreign_key, None, "unrelated-class").unwrap();
+        set_registry_value(&prog_key, Some("XlFnOwner"), RTD_REGISTRATION_OWNER).unwrap();
+        set_registry_value(
+            &prog_key,
+            Some("XlFnRegistrationSchema"),
+            RTD_REGISTRATION_SCHEMA,
+        )
+        .unwrap();
+        set_registry_value(&prog_key, Some("XlFnOwnerModule"), module).unwrap();
+        set_registry_value(
+            &prog_key,
+            Some("XlFnClassId"),
+            if mismatch == 0 {
+                &foreign_class
+            } else {
+                &class
+            },
+        )
+        .unwrap();
+        if mismatch != 4 {
+            set_registry_value(
+                &format!("{prog_key}\\CLSID"),
+                None,
+                if mismatch == 1 {
+                    &foreign_class
+                } else {
+                    &class
+                },
+            )
+            .unwrap();
+            set_registry_value(
+                &format!("{class_key}\\ProgID"),
+                None,
+                if mismatch == 2 {
+                    "Foreign.ProgID"
+                } else {
+                    &prog_id
+                },
+            )
+            .unwrap();
+            set_registry_value(
+                &format!("{class_key}\\InProcServer32"),
+                None,
+                if mismatch == 3 {
+                    r"C:\other.xll"
+                } else {
+                    module
+                },
+            )
+            .unwrap();
+        }
+        scavenge_owned_registrations(module, None).unwrap();
+        assert_eq!(
+            read_registry_string(&prog_key, "XlFnOwner")
+                .unwrap()
+                .as_deref(),
+            Some(RTD_REGISTRATION_OWNER)
+        );
+        assert_eq!(
+            read_registry_string(&foreign_key, "").unwrap().as_deref(),
+            Some("unrelated-class")
+        );
+        for key in [prog_key, class_key, foreign_key] {
+            let key = wide_nul(&key);
+            // SAFETY: these exact GUID-derived keys were created by this test.
+            unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) };
+        }
+    }
+}
+
+#[test]
+fn failed_observation_before_server_start_releases_global_owner_and_backends() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let retained =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let observation = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
+    )
+    .unwrap();
+    drop(observation); // models any preparation/host.invoke/decoder error
+    assert!(ACTIVE_SERVER.lock().is_none());
+    // SAFETY: retained owns the last COM reference after rollback.
+    let server = unsafe { &*(retained.pointer()) };
+    assert_eq!(server.references.load(Ordering::Acquire), 1);
+    assert_eq!(server.operations.phase(), ServerPhase::Terminated);
+    assert!(server.backends.lock().subscriptions.is_none());
+    let replacement =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    assert_ne!(replacement.active.generation, retained.active.generation);
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[test]
+fn failed_observation_after_failed_start_disposes_callback_exactly_once() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let retained =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let observation = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
+    )
+    .unwrap();
+    // SAFETY: retained keeps the server live through the final assertions.
+    let server = unsafe { &*(retained.pointer()) };
+    let drops = Arc::new(AtomicUsize::new(0));
+    let tracked = Arc::clone(&drops);
+    let start = server.reserve_start().unwrap();
+    let (start, _) = start.publish_callback(Box::new(RetainedUpdateCallback {
+        cookie: None,
+        pump: None,
+        drop_hook: Some(Arc::new(move || {
+            tracked.fetch_add(1, Ordering::AcqRel);
+        })),
+    }));
+    drop(start);
+    drop(observation);
+    assert!(ACTIVE_SERVER.lock().is_none());
+    assert_eq!(server.references.load(Ordering::Acquire), 1);
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+    shutdown_subscriptions(&subscriptions).unwrap();
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn failed_observation_during_server_start_defers_teardown_until_com_call_exits() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let retained =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let observation = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
+    )
+    .unwrap();
+    // SAFETY: retained keeps the server live while its admitted COM method runs.
+    let server = unsafe { &*(retained.pointer()) };
+    let operation = server.operations.enter().unwrap();
+    let start = server.reserve_start().unwrap();
+    drop(observation);
+    assert!(ACTIVE_SERVER.lock().is_some());
+    assert!(matches!(
+        server.operations.phase(),
+        ServerPhase::Terminating { .. }
+    ));
+    assert!(server.backends.lock().subscriptions.is_some());
+    drop(start);
+    drop(operation);
+    let replacement =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    assert_ne!(replacement.active.generation, retained.active.generation);
+    assert_eq!(server.references.load(Ordering::Acquire), 1);
+    assert!(server.backends.lock().subscriptions.is_none());
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[test]
+fn failed_observation_after_successful_start_preserves_com_publication_until_shutdown() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let retained =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let observation = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
+    )
+    .unwrap();
+    // SAFETY: retained keeps the server live through observation and shutdown.
+    let server = unsafe { &*(retained.pointer()) };
+    let (start, _) = server
+        .reserve_start()
+        .unwrap()
+        .publish_callback(inert_update_callback());
+    start.commit();
+    drop(observation); // Excel can return failure after a successful ServerStart.
+    assert_eq!(
+        ACTIVE_SERVER.lock().as_ref().unwrap().pointer,
+        retained.active.pointer
+    );
+    assert_eq!(server.references.load(Ordering::Acquire), 2);
+    let retry =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    assert!(!retry.newly_created);
+    drop(retry);
+    shutdown_subscriptions(&subscriptions).unwrap();
+    assert!(ACTIVE_SERVER.lock().is_none());
+    assert_eq!(server.references.load(Ordering::Acquire), 1);
+    assert!(server.backends.lock().subscriptions.is_none());
+}
+
+#[test]
+fn concurrent_observations_keep_server_until_last_failure_and_preserve_success() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    for commit_second in [false, true] {
+        let first = super::server::ServerObservation::begin(
+            ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
+        )
+        .unwrap();
+        let mut second = super::server::ServerObservation::begin(
+            ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
+        )
+        .unwrap();
+        drop(first);
+        assert!(ACTIVE_SERVER.lock().is_some());
+        if commit_second {
+            second.commit();
+        }
+        drop(second);
+        assert_eq!(ACTIVE_SERVER.lock().is_some(), commit_second);
+        cleanup_test_active_server();
+    }
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[test]
+fn observation_rollback_racing_shutdown_releases_server_reference_once() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let retained =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let observation = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
+    )
+    .unwrap();
+    // SAFETY: retained outlives the scoped shutdown and rollback.
+    let server = unsafe { &*(retained.pointer()) };
+    thread::scope(|scope| {
+        let worker = scope.spawn(|| shutdown_subscriptions(&subscriptions));
+        while server.operations.phase() == ServerPhase::Open {
+            thread::yield_now();
+        }
+        drop(observation);
+        worker.join().unwrap().unwrap();
+    });
+    assert!(ACTIVE_SERVER.lock().is_none());
+    assert_eq!(server.references.load(Ordering::Acquire), 1);
+    assert!(server.backends.lock().subscriptions.is_none());
+}
+
+#[test]
+fn foreign_subscription_key_is_rejected_before_server_allocation() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let foreign_key = crate::subscription::SubscriptionKey::from_allocated_id(0, 1);
+    let callbacks = crate::host_callback::HostCallbackSession::new();
+    let host = crate::host_api::ExcelHost::new(&callbacks);
+    assert!(matches!(
+        super::excel_rtd::observe_subscription(&subscriptions, &foreign_key, host),
+        Err(XllError::StaleHandle)
+    ));
+    assert!(ACTIVE_SERVER.lock().is_none());
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[test]
+fn observation_admission_detects_reentrant_failed_start_recovery() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let observation = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
+    )
+    .unwrap();
+    let pointer = observation.server().pointer();
+    // SAFETY: observation owns a live reference and operation admission.
+    let server = unsafe { &*pointer };
+    let (start, _) = server
+        .reserve_start()
+        .unwrap()
+        .publish_callback(inert_update_callback());
+    drop(start);
+    assert!(matches!(
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))),
+        Err(XllError::Closing)
+    ));
+    // Recovery must return rather than wait for this same thread's observation.
+    drop(observation);
+    assert!(ACTIVE_SERVER.lock().is_none());
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[test]
+fn observations_on_different_threads_retire_only_after_last_failure() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let first = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
+    )
+    .unwrap();
+    thread::scope(|scope| {
+        let (admitted_tx, admitted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let subscriptions = &subscriptions;
+        let worker = scope.spawn(move || {
+            let second = super::server::ServerObservation::begin(
+                ensure_server_without_handles(Some(BackendSubscriptions::new(subscriptions)))
+                    .unwrap(),
+            )
+            .unwrap();
+            admitted_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            drop(second);
+        });
+        admitted_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(first);
+        assert!(ACTIVE_SERVER.lock().is_some());
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+    });
+    assert!(ACTIVE_SERVER.lock().is_none());
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[cfg(feature = "rtd")]
+#[test]
+fn failed_excel_rtd_invocation_rolls_back_subscription_observation() {
+    use crate::registration::host::test_support::{CallbackScript, Reply};
+    use xlfn_sys::{XL_GET_NAME, XLF_RTD, XLOPER12, XLOPER12Value, XLRET_FAILED, XLTYPE_STR};
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let source = DispatchTestSource::new(Arc::new(AtomicBool::new(false)));
+    let (arena, source_handle) =
+        crate::subscription::SourceArena::<DispatchTestSubscription>::with_source(
+            crate::generation::RuntimeGeneration::new(1).unwrap(),
+            source,
+        )
+        .unwrap();
+    let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
+    let prepared = subscriptions
+        .prepare(
+            &source_handle,
+            RtdTopic::single("failed-excel-rtd").unwrap().borrowed(),
+        )
+        .unwrap();
+    static MODULE: [u16; 9] = [8, 67, 58, 92, 116, 46, 120, 108, 108];
+    let script = CallbackScript::install([
+        Reply::success(
+            XL_GET_NAME,
+            XLOPER12 {
+                value: XLOPER12Value {
+                    string: MODULE.as_ptr().cast_mut(),
+                },
+                xltype: XLTYPE_STR,
+            },
+        ),
+        Reply::success(XLF_RTD, XLOPER12::nil()).status(XLRET_FAILED),
+    ]);
+    let callbacks = crate::host_callback::HostCallbackSession::new();
+    let host = crate::host_api::ExcelHost::new(&callbacks);
+    assert!(super::excel_rtd::observe_subscription(&subscriptions, prepared.key(), host).is_err());
+    assert!(ACTIVE_SERVER.lock().is_none());
+    script.assert_calls(&[XL_GET_NAME, XLF_RTD]);
+    drop(prepared);
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[cfg(all(feature = "rtd", feature = "handles"))]
+#[test]
+fn typed_handle_observer_uses_registered_nonunit_server_and_rolls_back() {
+    use crate::registration::host::test_support::{CallbackScript, Reply};
+    use xlfn_sys::{XL_GET_NAME, XLOPER12, XLRET_FAILED};
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    super::server_type::register_server_type::<MixedComSubscriptions, MixedComSources>().unwrap();
+    let script =
+        CallbackScript::install(
+            [Reply::success(XL_GET_NAME, XLOPER12::nil()).status(XLRET_FAILED)],
+        );
+    script.on_call(XL_GET_NAME, || {
+        let active = ACTIVE_SERVER.lock();
+        let active = active
+            .as_ref()
+            .expect("handle observation created the server");
+        assert_eq!(
+            active.subscription_type,
+            std::any::TypeId::of::<(MixedComSubscriptions, MixedComSources)>()
+        );
+    });
+    let callbacks = crate::host_callback::HostCallbackSession::new();
+    let host = crate::host_api::ExcelHost::new(&callbacks);
+    assert!(
+        super::excel_rtd::observe::<MixedComSubscriptions, MixedComSources>(
+            &handles,
+            crate::module_runtime::ingress(),
+            "unused-key",
+            "unused-token",
+            host,
+        )
+        .is_err()
+    );
+    // Failure precedes claim_lifetime, yet the typed COM shell must still
+    // complete the observation retirement protocol and release ACTIVE_SERVER.
+    assert!(ACTIVE_SERVER.lock().is_none());
+    script.assert_calls(&[XL_GET_NAME]);
+    shutdown(&handles).unwrap();
+    super::server_type::register_server_type::<(), crate::DynamicRtdSources<()>>().unwrap();
+}

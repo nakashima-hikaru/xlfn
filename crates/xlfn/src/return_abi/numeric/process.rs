@@ -1,0 +1,439 @@
+//! Fixed-layout process accounting shared by cooperating XLL images.
+//!
+//! Windows uses a pagefile mapping independent of any DLL image. Each image
+//! retains its own view until process exit. No destructor,
+//! allocator handle, or executable address is stored in the shared protocol.
+use crate::error::InputError;
+use crate::{ExcelError, XllError, XllResult};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(target_os = "windows")]
+mod windows;
+
+/// Provisional limit for all participating xlfn FP12 allocations in a process.
+pub const MAX_PROCESS_NUMERIC_RETURN_BYTES: usize = 512 * 1024 * 1024;
+const SCHEMA: u64 = 0x584c_4650_0002_0040;
+
+// This is a cross-image protocol, not a Rust-owned object. Keep every field
+// fixed-width and naturally aligned; never reset an existing mapping. Changing
+// this layout requires rejecting old headers, not a new mapping name/quota.
+#[repr(C, align(8))]
+pub(super) struct ProcessState {
+    schema: AtomicU64,
+    limit_bytes: AtomicU64,
+    reserved_bytes: AtomicU64,
+    reserved_buffers: AtomicU64,
+    peak_reserved_bytes: AtomicU64,
+    published_bytes: AtomicU64,
+    published_buffers: AtomicU64,
+    peak_published_bytes: AtomicU64,
+}
+
+const _: () = assert!(size_of::<ProcessState>() == 64);
+const _: () = assert!(align_of::<ProcessState>() == 8);
+const _: () = assert!(std::mem::offset_of!(ProcessState, peak_published_bytes) == 56);
+
+impl ProcessState {
+    #[cfg(any(not(target_os = "windows"), test))]
+    const fn new() -> Self {
+        Self {
+            schema: AtomicU64::new(0),
+            limit_bytes: AtomicU64::new(0),
+            reserved_bytes: AtomicU64::new(0),
+            reserved_buffers: AtomicU64::new(0),
+            peak_reserved_bytes: AtomicU64::new(0),
+            published_bytes: AtomicU64::new(0),
+            published_buffers: AtomicU64::new(0),
+            peak_published_bytes: AtomicU64::new(0),
+        }
+    }
+
+    fn initialize(&self) -> XllResult<()> {
+        let schema = self
+            .schema
+            .compare_exchange(0, SCHEMA, Ordering::AcqRel, Ordering::Acquire)
+            .unwrap_or_else(|found| found);
+        if schema != 0 && schema != SCHEMA {
+            return Err(protocol_error());
+        }
+        let limit = self
+            .limit_bytes
+            .compare_exchange(
+                0,
+                MAX_PROCESS_NUMERIC_RETURN_BYTES as u64,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .unwrap_or_else(|found| found);
+        if limit != 0 && limit != MAX_PROCESS_NUMERIC_RETURN_BYTES as u64 {
+            return Err(protocol_error());
+        }
+        self.validate()
+    }
+
+    fn validate(&self) -> XllResult<()> {
+        let limit = MAX_PROCESS_NUMERIC_RETURN_BYTES as u64;
+        if self.schema.load(Ordering::Acquire) != SCHEMA
+            || self.limit_bytes.load(Ordering::Acquire) != limit
+            || [
+                &self.reserved_bytes,
+                &self.reserved_buffers,
+                &self.peak_reserved_bytes,
+                &self.published_bytes,
+                &self.published_buffers,
+                &self.peak_published_bytes,
+            ]
+            .iter()
+            .any(|counter| counter.load(Ordering::Relaxed) > limit)
+        {
+            return Err(protocol_error());
+        }
+        Ok(())
+    }
+
+    fn reserve(&self, bytes: usize, limit: usize) -> XllResult<()> {
+        self.validate()?;
+        if bytes == 0 {
+            return Err(protocol_error());
+        }
+        let mut current = self.reserved_bytes.load(Ordering::Relaxed);
+        loop {
+            let next = current
+                .checked_add(bytes as u64)
+                .ok_or_else(protocol_error)?;
+            if next > limit as u64 {
+                return Err(XllError::input(
+                    "<numeric process retention>",
+                    InputError::TooLarge {
+                        limit,
+                        actual: usize::try_from(next).unwrap_or(usize::MAX),
+                    },
+                ));
+            }
+            match self.reserved_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    self.reserved_buffers.fetch_add(1, Ordering::Relaxed);
+                    self.peak_reserved_bytes.fetch_max(next, Ordering::Relaxed);
+                    return Ok(());
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn release_reserved(&self, bytes: usize) {
+        self.reserved_buffers.fetch_sub(1, Ordering::Relaxed);
+        self.reserved_bytes
+            .fetch_sub(bytes as u64, Ordering::AcqRel);
+    }
+
+    fn publish(&self, bytes: usize) {
+        let next = self
+            .published_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed)
+            + bytes as u64;
+        self.published_buffers.fetch_add(1, Ordering::Relaxed);
+        self.peak_published_bytes.fetch_max(next, Ordering::Relaxed);
+    }
+
+    fn release_published(&self, bytes: usize) {
+        self.published_buffers.fetch_sub(1, Ordering::Relaxed);
+        self.published_bytes
+            .fetch_sub(bytes as u64, Ordering::Relaxed);
+        self.release_reserved(bytes);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+static PROCESS_STATE: ProcessState = ProcessState::new();
+#[cfg(target_os = "windows")]
+static PROCESS_STATE: std::sync::OnceLock<&'static ProcessState> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "windows")]
+static ATTACH_LOCK: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
+
+fn shared() -> XllResult<&'static ProcessState> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(state) = PROCESS_STATE.get() {
+            return Ok(state);
+        }
+        let _attach = ATTACH_LOCK.lock();
+        if let Some(state) = PROCESS_STATE.get() {
+            return Ok(state);
+        }
+        let attached = windows::attach()?;
+        Ok(PROCESS_STATE.get_or_init(|| attached))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        PROCESS_STATE.initialize()?;
+        Ok(&PROCESS_STATE)
+    }
+}
+
+fn protocol_error() -> XllError {
+    XllError::custom(
+        ExcelError::Number,
+        "FP12 process accounting protocol is unavailable or incompatible",
+    )
+}
+
+#[must_use]
+pub(super) struct Reservation {
+    state: &'static ProcessState,
+    bytes: usize,
+}
+
+/// Plain process-lifetime data stored in the retained FP12 header. Abandoning
+/// this charge never discharges it; only a successful allocation free does.
+#[repr(C)]
+#[must_use = "retain the charge with its published allocation; dropping it does not release capacity"]
+pub(super) struct PublishedCharge {
+    bytes: usize,
+    state: &'static ProcessState,
+}
+
+const _: () = assert!(!std::mem::needs_drop::<PublishedCharge>());
+const _: () = assert!(size_of::<PublishedCharge>() == 2 * size_of::<usize>());
+
+impl Reservation {
+    pub(super) fn reserve(bytes: usize) -> XllResult<Self> {
+        let state = shared()?;
+        state.reserve(bytes, MAX_PROCESS_NUMERIC_RETURN_BYTES)?;
+        Ok(Self { state, bytes })
+    }
+    pub(super) fn publish(self) -> PublishedCharge {
+        let reserved = std::mem::ManuallyDrop::new(self);
+        reserved.state.publish(reserved.bytes);
+        PublishedCharge {
+            bytes: reserved.bytes,
+            state: reserved.state,
+        }
+    }
+}
+
+/// Recovers the accounting from the actual detached allocation and releases it
+/// only after that allocation was freed. No caller supplies a ledger or count.
+///
+/// # Safety
+/// `pointer` is a uniquely detached, published block from an epoch which Excel
+/// no longer reads. This function is called at most once unless free failed.
+#[inline]
+pub(super) unsafe fn reclaim_detached_block(
+    pointer: std::ptr::NonNull<super::NumericBlock>,
+) -> Option<usize> {
+    // SAFETY: the epoch withdrawal contract grants exclusive ownership of this
+    // initialized published header. The charge contains only plain data.
+    let retained = unsafe { &(*pointer.as_ptr()).charge };
+    // SAFETY: publication initialized this plain charge before exposing the
+    // block. Its borrow ends here, before the allocation can be freed below.
+    let charge = unsafe { retained.assume_init_read() };
+    // SAFETY: the charge was installed with this allocation before publication
+    // and retains its exact original size and process-lifetime ledger.
+    if unsafe { super::release_block(pointer, charge.bytes) } {
+        charge.state.release_published(charge.bytes);
+        Some(charge.bytes)
+    } else {
+        // The allocation and its copied plain charge remain retained. A failed
+        // free is not evidence that any of its capacity may be reused.
+        None
+    }
+}
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.state.release_reserved(self.bytes);
+    }
+}
+
+pub(super) fn read_metrics(metrics: &mut super::NumericReturnMemoryMetrics) -> XllResult<()> {
+    let state = shared()?;
+    state.validate()?;
+    metrics.process_reserved_bytes = state.reserved_bytes.load(Ordering::Relaxed) as usize;
+    metrics.process_reserved_buffers = state.reserved_buffers.load(Ordering::Relaxed) as usize;
+    metrics.process_peak_reserved_bytes =
+        state.peak_reserved_bytes.load(Ordering::Relaxed) as usize;
+    metrics.process_published_bytes = state.published_bytes.load(Ordering::Relaxed) as usize;
+    metrics.process_published_buffers = state.published_buffers.load(Ordering::Relaxed) as usize;
+    metrics.process_peak_published_bytes =
+        state.peak_published_bytes.load(Ordering::Relaxed) as usize;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn invalid_shared_counters_fail_without_resetting_live_accounting() {
+        for counter_index in 0..6 {
+            let state = ProcessState::new();
+            state.initialize().unwrap();
+            state.reserve(17, 128).unwrap();
+            let counters = [
+                &state.reserved_bytes,
+                &state.reserved_buffers,
+                &state.peak_reserved_bytes,
+                &state.published_bytes,
+                &state.published_buffers,
+                &state.peak_published_bytes,
+            ];
+            counters[counter_index].store(u64::MAX, Ordering::Relaxed);
+            let before = counters.map(|counter| counter.load(Ordering::Relaxed));
+            assert!(state.initialize().is_err());
+            assert!(state.reserve(1, 128).is_err());
+            assert_eq!(
+                before,
+                counters.map(|counter| counter.load(Ordering::Relaxed))
+            );
+        }
+    }
+
+    #[test]
+    fn reservation_revalidates_a_changed_shared_header() {
+        let state = ProcessState::new();
+        state.initialize().unwrap();
+        state.reserve(17, 128).unwrap();
+        state.schema.store(SCHEMA - 1, Ordering::Release);
+        assert!(state.reserve(1, 128).is_err());
+        assert_eq!(state.reserved_bytes.load(Ordering::Relaxed), 17);
+        let empty = ProcessState::new();
+        empty.initialize().unwrap();
+        assert!(empty.reserve(0, 128).is_err());
+    }
+    #[test]
+    fn reservations_are_bounded_and_rollback_before_publication() {
+        let state = ProcessState::new();
+        state.initialize().unwrap();
+        state.reserve(64, 128).unwrap();
+        state.reserve(64, 128).unwrap();
+        assert!(state.reserve(1, 128).is_err());
+        assert_eq!(state.reserved_bytes.load(Ordering::Relaxed), 128);
+        state.release_reserved(64);
+        assert_eq!(state.reserved_bytes.load(Ordering::Relaxed), 64);
+        state.release_reserved(64);
+        assert_eq!(state.reserved_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(state.reserved_buffers.load(Ordering::Relaxed), 0);
+        assert_eq!(state.peak_reserved_bytes.load(Ordering::Relaxed), 128);
+    }
+    #[test]
+    fn reservation_drop_rolls_back_after_an_early_error() {
+        static STATE: ProcessState = ProcessState::new();
+        STATE.initialize().unwrap();
+        let failed: XllResult<()> = (|| {
+            STATE.reserve(41, 128)?;
+            let _reservation = Reservation {
+                state: &STATE,
+                bytes: 41,
+            };
+            Err(protocol_error())
+        })();
+        assert!(failed.is_err());
+        assert_eq!(STATE.reserved_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(STATE.reserved_buffers.load(Ordering::Relaxed), 0);
+        assert_eq!(STATE.published_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn consumed_reservation_holds_both_charges_until_confirmed_free() {
+        static STATE: ProcessState = ProcessState::new();
+        STATE.initialize().unwrap();
+        STATE.reserve(41, 128).unwrap();
+        let charge = Reservation {
+            state: &STATE,
+            bytes: 41,
+        }
+        .publish();
+        assert_eq!(STATE.reserved_bytes.load(Ordering::Relaxed), 41);
+        assert_eq!(STATE.published_bytes.load(Ordering::Relaxed), 41);
+        // A charge has no automatic destructor: even ordinary abandonment
+        // does not claim that its corresponding payload was destroyed.
+        #[allow(
+            clippy::drop_non_drop,
+            reason = "assert abandonment of the plain retained charge never discharges it"
+        )]
+        drop(charge);
+        assert_eq!(STATE.reserved_buffers.load(Ordering::Relaxed), 1);
+        assert_eq!(STATE.published_buffers.load(Ordering::Relaxed), 1);
+        STATE.release_published(41);
+    }
+
+    #[test]
+    fn forgotten_published_charge_never_reopens_reserved_capacity() {
+        static STATE: ProcessState = ProcessState::new();
+        STATE.initialize().unwrap();
+        STATE.reserve(41, 64).unwrap();
+        #[expect(
+            clippy::forget_non_drop,
+            reason = "assert forgetting the plain retained charge never reopens capacity"
+        )]
+        std::mem::forget(
+            Reservation {
+                state: &STATE,
+                bytes: 41,
+            }
+            .publish(),
+        );
+        assert!(STATE.reserve(24, 64).is_err());
+        assert_eq!(STATE.reserved_bytes.load(Ordering::Relaxed), 41);
+        assert_eq!(STATE.published_bytes.load(Ordering::Relaxed), 41);
+        STATE.release_published(41);
+    }
+
+    #[test]
+    fn incompatible_protocol_or_cap_never_resets_live_counters() {
+        for invalid_schema in [true, false] {
+            let state = ProcessState::new();
+            state.initialize().unwrap();
+            state.reserve(17, 128).unwrap();
+            if invalid_schema {
+                state.schema.store(SCHEMA + 1, Ordering::Release);
+            } else {
+                state.limit_bytes.store(1, Ordering::Release);
+            }
+            assert!(state.initialize().is_err());
+            assert_eq!(state.reserved_bytes.load(Ordering::Relaxed), 17);
+        }
+    }
+    #[test]
+    fn reattached_images_keep_old_published_charges_and_share_cap() {
+        let state = ProcessState::new();
+        state.initialize().unwrap();
+        state.reserve(48, 80).unwrap();
+        state.publish(48);
+        // A fresh image attaches without clearing the earlier image's counters.
+        state.initialize().unwrap();
+        assert_eq!(state.published_bytes.load(Ordering::Relaxed), 48);
+        assert!(state.reserve(33, 80).is_err());
+        state.reserve(32, 80).unwrap();
+        state.release_reserved(32);
+        state.release_published(48);
+        assert_eq!(state.reserved_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(state.published_buffers.load(Ordering::Relaxed), 0);
+    }
+    #[test]
+    fn concurrent_reservations_cannot_overshoot_shared_limit() {
+        let state = ProcessState::new();
+        state.initialize().unwrap();
+        std::thread::scope(|scope| {
+            let state = &state;
+            for _ in 0..8 {
+                scope.spawn(move || {
+                    for _ in 0..1000 {
+                        if state.reserve(17, 64).is_ok() {
+                            assert!(state.reserved_bytes.load(Ordering::Relaxed) <= 64);
+                            state.release_reserved(17);
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(state.reserved_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(state.reserved_buffers.load(Ordering::Relaxed), 0);
+        assert!(state.peak_reserved_bytes.load(Ordering::Relaxed) <= 64);
+    }
+}

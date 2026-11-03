@@ -1,0 +1,22 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/fail/callback_frame_authority.rs:4:59
+  |
+4 |       let _frame_constructor = CallFrame::<PlainInputMode>::new::<()>;
+  |                                                             ^^^ private associated function
+  |
+ ::: src/__private.rs
+  |
+  | /         pub(crate) fn new<A: Addin + crate::addin::AddinRtdTypes<Subscription = E, Sources = C>>(
+  | |             call: &'call crate::runtime::CallGuard<'_, A>,
+  | |             storage: &'call CallStorage<'brand, 'call>,
+  | |             token: ghost_cell::GhostToken<'brand>,
+  | |             callbacks: &'call crate::host_callback::HostCallbackSession,
+  | |             argument_count: usize,
+  | |         ) -> Self {
+  | |_________________- private associated function defined here
+
+error[E0599]: no associated function or constant named `for_call` found for struct `xlfn::__private::v1::ReturnContext<'call, 'scope, M, E, C>` in the current scope
+ --> tests/ui/fail/callback_frame_authority.rs:5:46
+  |
+5 |     let _return_constructor = ReturnContext::for_call::<()>;
+  |                                              ^^^^^^^^ associated function or constant not found in `xlfn::__private::v1::ReturnContext<'_, '_, _, _, _>`

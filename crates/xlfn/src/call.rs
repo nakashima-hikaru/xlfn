@@ -1,0 +1,458 @@
+//! State owned by one Excel-visible call.
+//!
+//! Invocation storage owns permits and the scratch scope borrowed by
+//! synchronous input conversion. Its call lifetime is generative, so values
+//! containing that lifetime cannot escape the generated Excel call. The scratch
+//! allocator deliberately exposes only operations whose results are either
+//! borrowed strings or `Copy` slices; arbitrary destructor-bearing values do
+//! not belong in this call-local storage.
+
+use crate::XllResult;
+#[cfg(feature = "handles")]
+use ghost_cell::GhostCell;
+use ghost_cell::GhostToken;
+use std::cell::{Cell, OnceCell};
+use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
+use std::panic::AssertUnwindSafe;
+
+const LARGE_TYPED_COLLECTION_BYTES: usize = 64 * 1024;
+const LARGE_COLLECTION_TEXT_CAPACITY: usize = 64 * 1024;
+const INLINE_TEXT_CAPACITY: usize = 23;
+
+pub(crate) struct CallScratch {
+    arena: AssertUnwindSafe<bumpalo::Bump>,
+    strings: AssertUnwindSafe<OnceCell<Box<bumpalo::Bump>>>,
+    large_collection: AssertUnwindSafe<Cell<bool>>,
+    // Only new_inline initializes this slot: it never owns a heap allocation.
+    // ManuallyDrop avoids adding a destructor to every call, including numbers.
+    inline_text: AssertUnwindSafe<OnceCell<ManuallyDrop<smol_str::SmolStr>>>,
+}
+
+impl CallScratch {
+    fn new() -> Self {
+        Self {
+            arena: AssertUnwindSafe(bumpalo::Bump::new()),
+            strings: AssertUnwindSafe(OnceCell::new()),
+            large_collection: AssertUnwindSafe(Cell::new(false)),
+            inline_text: AssertUnwindSafe(OnceCell::new()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.arena.allocated_bytes()
+            + self
+                .strings
+                .get()
+                .map_or(0, |strings| strings.allocated_bytes())
+    }
+
+    pub(crate) fn decode_utf16<'call>(
+        &'call self,
+        units: &[u16],
+        argument: &'static str,
+    ) -> XllResult<&'call str> {
+        if units.is_empty() {
+            return Ok("");
+        }
+        let decoder = crate::utf16::Utf16Decoder::new(units);
+        if decoder.utf8_len() <= INLINE_TEXT_CAPACITY && self.inline_text.get().is_none() {
+            let mut buffer = [std::mem::MaybeUninit::uninit(); INLINE_TEXT_CAPACITY];
+            let text = decoder.decode_into(&mut buffer, argument)?;
+            // Decode is pure and this call-local cell is non-Sync. Retain the
+            // inserted borrow directly rather than discarding initialization
+            // and reconstructing its success with another get/unwrap.
+            let stored = self
+                .inline_text
+                .get_or_init(|| ManuallyDrop::new(smol_str::SmolStr::new_inline(text)));
+            return Ok(stored.as_str());
+        }
+        // Scalar and small collection text share the primary arena. A large
+        // typed collection can fill a matrix-sized chunk before its first
+        // string, so text that cannot use the inline slot gets a separate
+        // arena in that case. Its bounded initial capacity avoids a chain of
+        // tiny growing chunks; numeric-only collections never create it.
+        // Both arenas live until scope teardown.
+        let strings = if self.large_collection.get() {
+            self.strings
+                .get_or_init(|| {
+                    Box::new(bumpalo::Bump::with_capacity(LARGE_COLLECTION_TEXT_CAPACITY))
+                })
+                .as_ref()
+        } else {
+            &self.arena.0
+        };
+        let output =
+            strings.alloc_slice_fill_with(decoder.utf8_len(), |_| std::mem::MaybeUninit::uninit());
+        decoder.decode_into(output, argument)
+    }
+
+    pub(crate) fn collect_copy<T: Copy>(
+        &self,
+        len: usize,
+        mut build: impl FnMut(usize) -> XllResult<T>,
+    ) -> XllResult<&[T]> {
+        if len.saturating_mul(std::mem::size_of::<T>()) >= LARGE_TYPED_COLLECTION_BYTES {
+            self.large_collection.set(true);
+        }
+        let mut values = bumpalo::collections::Vec::with_capacity_in(len, &self.arena.0);
+        for index in 0..len {
+            values.push(build(index)?);
+        }
+        Ok(values.into_bump_slice())
+    }
+}
+
+#[cfg(feature = "handles")]
+mod permits;
+#[cfg(feature = "handles")]
+type HandlePermits = permits::Retained<crate::handle::HandleDomainPermit>;
+
+#[cfg(feature = "handles")]
+#[derive(Clone, Copy)]
+enum HandleWitnessSource<'scope> {
+    Scope {
+        _scope: &'scope CallScope<'scope>,
+        domain: std::ptr::NonNull<crate::handle::HandleReadDomain>,
+    },
+    #[cfg(test)]
+    Permit(&'scope crate::handle::HandleDomainPermit),
+}
+
+/// Borrows the scratch field in permit-retaining storage, or an owning test permit.
+/// Witness construction stays private to the code that retains its permits.
+#[derive(Clone, Copy)]
+#[cfg(feature = "handles")]
+pub(crate) struct HandleDomainWitness<'scope> {
+    source: HandleWitnessSource<'scope>,
+}
+#[cfg(feature = "handles")]
+impl<'scope> HandleDomainWitness<'scope> {
+    #[cfg(test)]
+    pub(crate) fn from_permit(permit: &'scope crate::handle::HandleDomainPermit) -> Self {
+        Self {
+            source: HandleWitnessSource::Permit(permit),
+        }
+    }
+    #[inline]
+    pub(crate) fn domain(&self) -> std::ptr::NonNull<crate::handle::HandleReadDomain> {
+        match self.source {
+            HandleWitnessSource::Scope { domain, .. } => domain,
+            #[cfg(test)]
+            HandleWitnessSource::Permit(permit) => permit.domain(),
+        }
+    }
+}
+
+/// A generative lifetime token for call-local input storage.
+///
+/// This token does not authorize Excel callbacks. Host authority is carried
+/// separately by the frame created at an actual Excel entrypoint.
+#[doc(hidden)]
+pub struct CallScope<'call> {
+    scratch: CallScratch,
+    lifetime: PhantomData<&'call mut &'call ()>,
+}
+
+impl<'call> CallScope<'call> {
+    fn new() -> Self {
+        Self {
+            scratch: CallScratch::new(),
+            lifetime: PhantomData,
+        }
+    }
+    pub(crate) fn scratch(&'call self) -> &'call CallScratch {
+        &self.scratch
+    }
+}
+
+/// Invocation-owned permits and scratch, with private construction and fields.
+/// Permits are append-only and drop before scratch, including during unwinding.
+/// The fresh GhostCell brand is independent of the invariant call lifetime.
+#[doc(hidden)]
+pub struct CallStorage<'brand, 'call> {
+    #[cfg(feature = "handles")]
+    handle_permits: GhostCell<'brand, HandlePermits>,
+    #[cfg(not(feature = "handles"))]
+    brand: PhantomData<&'brand mut &'brand ()>,
+    scope: CallScope<'call>,
+}
+impl<'brand, 'call> CallStorage<'brand, 'call> {
+    fn new() -> Self {
+        Self {
+            #[cfg(feature = "handles")]
+            handle_permits: GhostCell::new(HandlePermits::Empty),
+            #[cfg(not(feature = "handles"))]
+            brand: PhantomData,
+            scope: CallScope::new(),
+        }
+    }
+    pub(crate) fn scope(&'call self) -> &'call CallScope<'call> {
+        &self.scope
+    }
+    /// The result borrows storage, never the short mutable token borrow.
+    #[inline]
+    #[cfg(feature = "handles")]
+    pub(crate) fn enter_handle_domain(
+        &'call self,
+        token: &mut GhostToken<'brand>,
+        domain: &'call crate::handle::HandleReadDomain,
+    ) -> XllResult<crate::handle::HandleDomainWitness<'call>> {
+        let domain_ptr = std::ptr::NonNull::from(domain);
+        {
+            let permits = self.handle_permits.borrow_mut(token);
+            let retained = match &*permits {
+                HandlePermits::Empty => false,
+                HandlePermits::Single(permit) => permit.domain() == domain_ptr,
+                HandlePermits::Multiple(list) => list.iter().any(|p| p.domain() == domain_ptr),
+            };
+            if !retained {
+                // SAFETY: private generative construction and invariant 'call
+                // exclude operation-local domain owners. The enclosing owner
+                // outlives storage and all permits, including their maintenance
+                // tails. No operation removes a retained permit before teardown.
+                let permit = unsafe { domain.enter_owned()? };
+                permits.insert(permit);
+            }
+        }
+        // The only production scope-witness construction. Borrowing the scope
+        // field through this storage borrow keeps the entire owner alive.
+        Ok(HandleDomainWitness {
+            source: HandleWitnessSource::Scope {
+                _scope: &self.scope,
+                domain: domain_ptr,
+            },
+        })
+    }
+}
+
+/// Runs decoding under fresh independent GhostCell and call lifetime brands.
+#[doc(hidden)]
+pub fn with_branded_call_scope<R>(
+    operation: impl for<'brand, 'call> FnOnce(
+        &'call CallStorage<'brand, 'call>,
+        GhostToken<'brand>,
+    ) -> R,
+) -> R {
+    GhostToken::new(|token| {
+        let storage = CallStorage::new();
+        operation(&storage, token)
+    })
+}
+
+/// Reborrows an enclosing owner for the invariant lifetime of call storage.
+#[doc(hidden)]
+pub fn with_branded_call_scope_and_state<S, R>(
+    state: &S,
+    operation: impl for<'brand, 'call> FnOnce(
+        &'call S,
+        &'call CallStorage<'brand, 'call>,
+        GhostToken<'brand>,
+    ) -> R,
+) -> R {
+    GhostToken::new(|token| {
+        let storage = CallStorage::new();
+        operation(state, &storage, token)
+    })
+}
+
+/// Runs an operation under a fresh lifetime that cannot escape in its result.
+/// This memory scope never grants or resets Excel callback authority.
+#[doc(hidden)]
+pub fn with_excel_call_scope<R>(
+    operation: impl for<'scope> FnOnce(&'scope CallScope<'scope>) -> R,
+) -> R {
+    let scope = CallScope::new();
+    operation(&scope)
+}
+
+/// Runs an operation under a fresh call scope while borrowing existing state.
+/// This memory scope never grants or resets Excel callback authority.
+#[doc(hidden)]
+pub fn with_excel_call_scope_and_state<S, R>(
+    state: &S,
+    operation: impl for<'scope> FnOnce(&'scope S, &'scope CallScope<'scope>) -> R,
+) -> R {
+    let scope = CallScope::new();
+    operation(state, &scope)
+}
+
+/// Runs an operation under a fresh call scope while reborrowing the already
+/// entered runtime call guard for exactly that scope. Generation-scoped
+/// services therefore come from the guard's pinned publication without
+/// extending the guard's borrow into the generated call frame.
+#[cfg(feature = "bench-internals")]
+pub(crate) fn with_excel_call_scope_and_call<A: crate::Addin, R>(
+    call: &crate::runtime::CallGuard<'_, A>,
+    operation: impl for<'brand, 'call> FnOnce(
+        &'call crate::runtime::CallGuard<'_, A>,
+        &'call CallStorage<'brand, 'call>,
+        GhostToken<'brand>,
+    ) -> R,
+) -> R {
+    GhostToken::new(|token| {
+        let storage = CallStorage::new();
+        operation(call, &storage, token)
+    })
+}
+
+/// Reborrows entrypoint authority alongside a fresh invocation-owned token.
+/// This cannot be entered without the session issued by the Excel entrypoint.
+pub(crate) fn with_excel_callback_scope_and_call<A: crate::Addin, R>(
+    call: &crate::runtime::CallGuard<'_, A>,
+    callbacks: &crate::host_callback::HostCallbackSession,
+    operation: impl for<'brand, 'call> FnOnce(
+        &'call crate::runtime::CallGuard<'_, A>,
+        &'call CallStorage<'brand, 'call>,
+        GhostToken<'brand>,
+        &'call crate::host_callback::HostCallbackSession,
+    ) -> R,
+) -> R {
+    GhostToken::new(|token| {
+        let storage = CallStorage::new();
+        operation(call, &storage, token, callbacks)
+    })
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::{CallScratch, LARGE_TYPED_COLLECTION_BYTES};
+
+    #[cfg(feature = "handles")]
+    #[test]
+    fn miri_ghostcell_repeated_domain_registration_retains_one_permit() {
+        let domain = crate::handle::HandleReadDomain::new();
+        super::with_branded_call_scope_and_state(&domain, |domain, storage, mut token| {
+            let first = storage.enter_handle_domain(&mut token, domain).unwrap();
+            let second = storage.enter_handle_domain(&mut token, domain).unwrap();
+            assert_eq!(first.domain(), second.domain());
+            assert!(matches!(
+                storage.handle_permits.borrow(&token),
+                super::HandlePermits::Single(_)
+            ));
+        });
+    }
+
+    #[cfg(all(feature = "handles", target_pointer_width = "64"))]
+    #[test]
+    fn ghostcell_storage_preserves_layout_budget() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<super::CallStorage<'_, '_>>(), 96);
+        assert_eq!(size_of::<ghost_cell::GhostToken<'_>>(), 0);
+        assert_eq!(size_of::<super::HandleDomainWitness<'_>>(), 16);
+        assert!(size_of::<crate::value::DecodeCallContext<'_, '_>>() <= 80);
+        assert!(
+            size_of::<crate::value::ArgumentContext<'_, '_, crate::value::PlainInputMode>>() <= 80
+        );
+        static_assertions::assert_not_impl_any!(super::CallStorage<'static, 'static>: Send, Sync);
+        static_assertions::assert_not_impl_any!(crate::value::DecodeCallContext<'static, 'static>: Send, Sync);
+    }
+
+    #[test]
+    fn miri_inline_text_preserves_earlier_borrows_across_later_decodes() {
+        let scratch = CallScratch::new();
+        let first = scratch
+            .decode_utf16(&[0x65e5, 0xd83d, 0xdca1], "first")
+            .unwrap();
+        assert!(!scratch.inline_text.get().unwrap().is_heap_allocated());
+        assert_eq!(scratch.arena.allocated_bytes(), 0);
+        let second = scratch.decode_utf16(&[b'x' as u16; 23], "second").unwrap();
+        let long = scratch.decode_utf16(&[b'y' as u16; 24], "long").unwrap();
+        let length = LARGE_TYPED_COLLECTION_BYTES / std::mem::size_of::<u64>();
+        scratch
+            .collect_copy(length, |index| Ok(index as u64))
+            .unwrap();
+        let later = scratch.decode_utf16(&[b'z' as u16; 23], "later").unwrap();
+        assert_eq!(first, "日💡");
+        assert_eq!(second, "x".repeat(23));
+        assert_eq!(long, "y".repeat(24));
+        assert_eq!(later, "z".repeat(23));
+    }
+
+    #[test]
+    fn inline_text_uses_utf8_bytes_and_does_not_publish_invalid_utf16() {
+        for text in ["", "a", "aé日💡", "éééééééééééx", "日".repeat(8).as_str()] {
+            let scratch = CallScratch::new();
+            let units = text.encode_utf16().collect::<Vec<_>>();
+            assert_eq!(scratch.decode_utf16(&units, "text").unwrap(), text);
+            assert_eq!(
+                scratch.inline_text.get().is_some(),
+                !text.is_empty() && text.len() <= 23
+            );
+        }
+        let scratch = CallScratch::new();
+        assert_eq!(scratch.decode_utf16(&[], "empty").unwrap(), "");
+        assert!(scratch.inline_text.get().is_none());
+        assert!(scratch.decode_utf16(&[0xd800], "bad").is_err());
+        assert!(scratch.inline_text.get().is_none());
+        assert_eq!(scratch.decode_utf16(&[0x41], "valid").unwrap(), "A");
+    }
+
+    #[test]
+    fn miri_large_numeric_collection_keeps_first_short_text_inline() {
+        let scratch = CallScratch::new();
+        let length = LARGE_TYPED_COLLECTION_BYTES / std::mem::size_of::<u64>();
+        let values = scratch
+            .collect_copy(length, |index| Ok(index as u64))
+            .unwrap();
+        assert_eq!(values.last(), Some(&((length - 1) as u64)));
+        assert!(scratch.strings.get().is_none());
+        assert!(scratch.decode_utf16(&[0xd800], "invalid").is_err());
+        assert!(scratch.inline_text.get().is_none());
+        assert!(scratch.strings.get().is_none());
+        let first = scratch
+            .decode_utf16(&[0x65e5, 0xd83d, 0xdca1], "first")
+            .unwrap();
+        assert!(scratch.inline_text.get().is_some());
+        assert!(scratch.strings.get().is_none());
+        let later = scratch.decode_utf16(&[b'x' as u16; 24], "later").unwrap();
+        assert!(scratch.strings.get().is_some());
+        assert_eq!(first, "日💡");
+        assert_eq!(later, "x".repeat(24));
+        assert_eq!(values[length - 1], (length - 1) as u64);
+    }
+
+    #[test]
+    fn strings_stay_borrowable_when_large_collection_changes_text_storage() {
+        let scratch = CallScratch::new();
+        let small = scratch
+            .decode_utf16(&[b'o' as u16, b'k' as u16], "small")
+            .unwrap();
+        assert!(scratch.strings.get().is_none());
+        let length = LARGE_TYPED_COLLECTION_BYTES / std::mem::size_of::<u64>();
+        let values = scratch
+            .collect_copy(length, |index| Ok(index as u64))
+            .unwrap();
+        let large = scratch
+            .decode_utf16(&[0x65e5, 0xd83d, 0xdca1], "large")
+            .unwrap();
+        assert!(scratch.strings.get().is_some());
+        assert_eq!(small, "ok");
+        assert_eq!(large, "日💡");
+        assert_eq!(values[length - 1], (length - 1) as u64);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn scratch_decoding_matches_standard_utf16(
+            units in proptest::collection::vec(proptest::prelude::any::<u16>(), 0..256),
+        ) {
+            let scratch = CallScratch::new();
+            let actual = scratch.decode_utf16(&units, "text");
+            match String::from_utf16(&units) {
+                Ok(expected) => proptest::prop_assert_eq!(actual.unwrap(), expected),
+                Err(_) => proptest::prop_assert!(matches!(actual, Err(crate::XllError::Input {
+                    argument: "text", reason: crate::error::InputError::InvalidUtf16,
+                })), "invalid UTF-16 must retain its argument and error kind"),
+            }
+        }
+
+        #[test]
+        fn scratch_decoding_round_trips_valid_unicode(text in ".{0,256}") {
+            let units = text.encode_utf16().collect::<Vec<_>>();
+            let scratch = CallScratch::new();
+            proptest::prop_assert_eq!(scratch.decode_utf16(&units, "text").unwrap(), text);
+        }
+    }
+}

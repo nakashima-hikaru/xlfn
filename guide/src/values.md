@@ -1,0 +1,618 @@
+# Values and arrays
+
+Start with an owned `Matrix<T>` when a function accepts or returns a rectangular
+range. Use borrowed views or incremental output when conversion cost matters.
+
+xlfn selects the input ABI from each Rust parameter type. Native scalar
+parameters let Excel convert the input before Rust is called. Use
+`#[excel_arg(strict)]` when the original worksheet type must be checked by
+xlfn instead.
+
+## Choose a scalar type
+
+| Rust input | Default input ABI | Notes |
+| --- | --- | --- |
+| `f64` | `B`: double by value | Excel numeric conversion, then finite validation |
+| `bool` | `A`: 16-bit Boolean by value | Excel Boolean conversion; only 0 and 1 are accepted at the ABI boundary |
+| `i32` | `J`: 32-bit integer by value | Excel integer conversion, including its fractional-input rules |
+| `String` | `D%`: counted UTF-16 pointer | validated UTF-16 converted to owned UTF-8 |
+| `&str` | `D%`: counted UTF-16 pointer | decoded call-local UTF-8 for synchronous functions |
+| `NumericMatrixRef<'_>` | `K%`: FP12 pointer | borrowed numeric array after Excel conversion |
+| `i64` | `Q`: XLOPER12 value | integral input within the exact binary64 integer range |
+| `Matrix<T>`, `MatrixRef<'_, T>` | `Q` | strict element conversion |
+| `ExcelValue`, `ExcelValueRef<'_>` | `Q` | dynamic scalar, missing value, or array; the borrowed view is call-local |
+| `Option<T>`, `OptionalExcelValue<T>` | `Q` | original missing/blank states are retained |
+| `ExcelError`, `ExcelSerialDate` | `Q` | error value or finite serial with unresolved workbook date system |
+| custom `FromExcel` types and unrecognized type aliases | `Q` | declared conversion contract |
+
+Cell reference parameters continue to use `U` in macro-sheet mode. Native
+scalars are supported in both synchronous and async functions. Async `String`
+inputs are owned before the task is submitted; `&str` and `NumericMatrixRef`
+remain synchronous only. Return values keep the ordinary `Q` value ABI and
+async completion keeps its existing handle and return protocol.
+
+For example, `(spot: f64, enabled: bool, periods: i32, label: &str)` in a
+thread-safe function registers as `QBAJD%$`. The registration text, FFI
+parameter types, and admission path come from one analyzed ABI plan. The
+Boolean FFI parameter is `i16`, never Rust `bool`.
+The registration codes and C widths follow Microsoft's
+[xlfRegister specification](https://learn.microsoft.com/en-us/office/client-developer/excel/xlfregister-form-1).
+
+### Require the original worksheet type
+
+```rust
+{{#include ../fixtures/addin.md}}
+# use xlfn::prelude::*;
+#[excel_function(name = "CALC.STRICT", thread_safe)]
+fn calculate(
+    #[excel_arg(strict)] spot: f64,
+    enabled: bool,
+    #[excel_arg(strict)] periods: i32,
+) -> f64 {
+    if enabled { spot * f64::from(periods) } else { 0.0 }
+}
+```
+
+This registers as `QQAQ$`. `strict` selects `Q` and the existing `FromExcel`
+rules: `f64` accepts only finite numbers or integers, `bool` only Booleans,
+`i32` only in-range integral numbers or integers, and strings only text.
+An Excel error passed to a strict parameter expecting another type propagates
+the original error. `strict` cannot be applied to a reference, FP12 numeric
+view, or async handle lease. Native registration codes cannot be selected
+directly, and there is no `excel_arg(coerce)` option.
+
+Presence/default policies automatically select `Q`, including an explicit
+`blank = convert` or `missing = convert`. They need the original Excel value;
+`strict` is unnecessary for them. Metadata such as the argument name and
+description does not affect the ABI. Unrecognized type aliases use `Q`
+because a procedural macro cannot resolve their underlying Rust type.
+
+Excel can reject a native input before invoking the UDF. Such a worksheet
+error does not produce a Rust argument-conversion diagnostic. Exact Excel
+coercion, blank, omitted-argument, error, overflow, and fractional-integer
+behavior must be qualified on the target Excel version; the live comparison
+harness includes native/strict cases, and local Rust tests do not establish
+Excel's preprocessing behavior.
+
+`D%` strings contain a length followed by up to 32,767 UTF-16 code units.
+Empty text and embedded NUL are preserved; malformed UTF-16 is rejected on
+every call, including a handle cache hit. Handle producers validate and hash
+native strings before deferring owned-string materialization until needed.
+Equal Rust values retain the same input fingerprint through native and `Q`
+admission. Native ABI selection is a conversion contract, not a speed claim;
+measure both conversion cost and actual Excel recalculation time.
+
+Input views such as `ExcelCellRef` and `XlArrayRef` are
+synchronous, call-scoped values; see [Borrow a range](#borrow-a-range-during-a-synchronous-call).
+
+Built-in scalar outputs are `f64`, `f32`, `bool`, `i8`, `i16`, `i32`, `u8`,
+`u16`, `u32`, exactly representable `i64`, `u64`, `isize`, and `usize`, plus
+`String`, `&str`, `Cow<'_, str>`, `ExcelSerialDate`, and `ExcelError`.
+`Cow::Owned` transfers its string during semantic conversion; `Cow::Borrowed`
+uses the borrowed text writer when encoding a return. Both obey the same
+UTF-16 limits as ordinary strings.
+Integer outputs wider than 32 bits are limited to the binary64 exact-integer
+range `-2^53..=2^53` (or `0..=2^53` for unsigned integers); larger values fail
+with overflow rather than silently rounding.
+`ExcelCellOutput` and custom types implementing `IntoExcel` are also supported.
+The dynamic `ExcelValue`, borrowed input views, and `()` are not ordinary
+worksheet result types.
+
+Numbers must be finite; strings must fit Excel's counted UTF-16 representation.
+Return `ExcelError::NotAvailable` for an intentional `#N/A`
+value. Return `Err(...)` when the function failed: the latter is also reported
+as a failure in diagnostics and instrumentation.
+
+## Work with a rectangular range
+
+Use an owned `Matrix<T>` for rectangular input or output. It can outlive an
+exported call and is suitable when an async function needs owned input.
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+
+#[excel_function(name = "ARRAY.SCALE", thread_safe)]
+fn scale_grid(values: Matrix<f64>, factor: f64) -> XllResult<Matrix<f64>> {
+    let (rows, columns) = (values.rows(), values.columns());
+    let scaled = values.into_vec().into_iter().map(|value| value * factor).collect();
+    Matrix::new(rows, columns, scaled)
+}
+```
+
+With a two by two range in `A1:B2`, `=ARRAY.SCALE(A1:B2, 2)` returns a two by
+two result. `Matrix::new` checks non-zero dimensions, element count, and
+framework limits. A scalar input becomes a one by one matrix. Data is in
+row-major order.
+
+Read dimensions with `rows()` and `columns()`; use `as_slice()`, `row()`,
+`column()`, and `iter()` for access. Indexing with `matrix[(row, column)]`
+panics for an invalid coordinate. Use checked accessors for indices derived
+from workbook input.
+
+### Borrow a range during a synchronous call
+
+`XlArrayRef<'_>` reads a mixed-value array without converting every cell
+eagerly. Cell headers are validated on admission; payload conversion is lazy.
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+use xlfn::value::XlArrayRef;
+
+#[excel_function(name = "ARRAY.SUM.BORROWED", thread_safe)]
+fn sum_borrowed(values: XlArrayRef<'_>) -> XllResult<f64> {
+    values.cells().try_fold(0.0, |sum, cell| Ok(sum + cell.as_f64()?))
+}
+```
+
+`MatrixRef<'_, T>` materializes `Copy` elements in call-local scratch. For
+example, `MatrixRef<'_, &str>` avoids a separate owned string for each cell.
+Neither borrowed view can escape the call or be an async argument.
+
+Use `MatrixRef<'_, ExcelCellRef<'_>>` to retain the distinctions between
+numbers, strings, Booleans, blanks, and errors without owning each string:
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+
+#[excel_function(name = "ARRAY.COUNT.STRINGS", thread_safe)]
+fn count_strings(values: MatrixRef<'_, ExcelCellRef<'_>>) -> f64 {
+    values.iter().filter(|cell| matches!(cell, ExcelCellRef::String(_))).count() as f64
+}
+```
+
+This view still validates every cell and decodes UTF-16 text into call-local
+UTF-8 scratch. It avoids per-cell owned strings, rather than borrowing Excel's
+text buffer as UTF-8.
+
+A synchronous handle producer accepting `MatrixRef<'_, f64>` validates and
+identifies the input on every recalculation, but creates the scratch slice only
+when it needs to run the function. Reusing its cached object avoids copying the
+numeric cells into scratch.
+
+### Borrow a dynamic value
+
+Use `ExcelValueRef<'_>` when one parameter can contain a scalar, an omitted
+argument, or an array. `ExcelValue` remains available when the input must be
+owned. The borrowed type distinguishes `Missing` from
+`Scalar(ExcelCellRef::Blank)`:
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+
+#[excel_function(name = "VALUE.FIRST.IS.TEXT", thread_safe)]
+fn first_is_text(value: ExcelValueRef<'_>) -> XllResult<bool> {
+    let cell = match value {
+        ExcelValueRef::Missing => return Ok(false),
+        ExcelValueRef::Scalar(cell) => cell,
+        ExcelValueRef::Array(array) => match array.get(0, 0)? {
+            Some(cell) => cell,
+            None => return Ok(false),
+        },
+    };
+    Ok(matches!(cell, ExcelCellRef::String(_)))
+}
+```
+
+`ExcelArrayRef` provides `rows()`, `columns()`, `shape()`, `len()`, and checked
+`get(row, column)`. Input validation always checks every cell, dimensions,
+size limits, and UTF-16, including cells the function never accesses. Text is
+decoded into call-local scratch only when accessed. Repeated access can decode
+the same cell again; use `MatrixRef<'_, ExcelCellRef<'_>>` when repeatedly
+traversing the whole array.
+
+Formula identity uses the same scalar/array semantics as `ExcelValue` and is
+computed before materialization. A cached handle hit therefore does not decode
+the dynamic input's strings. Borrowed dynamic values work in synchronous and
+main-thread functions and cannot outlive the call or become async inputs.
+
+### Borrow a numeric range directly
+
+Use `NumericMatrixRef<'_>` when Excel's numeric coercion is appropriate. Its
+argument uses Excel's `K%` registration type and borrows the contiguous FP12
+double buffer. xlfn validates dimensions, size limits, and finite numbers, then
+passes the borrowed slice to your function without allocating or copying a
+typed matrix.
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+
+#[excel_function(name = "ARRAY.SUM.NUMERIC", thread_safe)]
+fn sum_numeric(values: NumericMatrixRef<'_>) -> f64 {
+    values.iter().copied().sum()
+}
+```
+
+Excel coerces this argument before invoking Rust. Blank cells become zero;
+inputs that Excel cannot coerce into a numeric array return a worksheet error
+without calling the function. The function cannot inspect original text,
+Boolean, blank, missing, or error cell types. `NumericMatrixRef` therefore
+cannot use `excel_arg` strict/presence/default/reference policies. Keep `Matrix<f64>`
+or `MatrixRef<'_, f64>` when strict xlfn conversion is required, and use mixed
+cell views when the original cell distinctions matter.
+
+Read dimensions with `shape()`, `rows()`, and `columns()`, and access elements
+with `as_slice()`, `iter()`, `row()`, or checked `get(row, column)`. The buffer
+exists only during the synchronous call and cannot be an async argument.
+Return ABI selection depends on the Rust return type, independently of input ABI.
+Ordinary `Matrix`, `Row`, and `Column` results use `XLOPER12*` (`Q`),
+including `Result` and `XllResult`, so the selected Excel error survives.
+`NumericArrayOutput` explicitly opts into `FP12*` (`K%`), including inside
+`Result<T, E>`. Scalars and mixed arrays also use Q.
+Unrecognized type aliases default to Q; `return_abi = "fp12"` can select the
+numeric ABI explicitly and requires a compatible numeric return type.
+Asynchronous functions keep the `xlAsyncReturn` completion path.
+
+### Return numeric arrays directly
+
+`NumericArrayBuilder` writes finite doubles directly into FP12-compatible
+contiguous storage, without building an XLOPER12 for each cell:
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+use xlfn::output::{NumericArrayBuilder, NumericArrayOutput};
+
+#[excel_function(name = "ARRAY.PRICES", thread_safe)]
+fn prices(spot: f64, strikes: NumericMatrixRef<'_>) -> XllResult<NumericArrayOutput> {
+    let mut output = NumericArrayBuilder::new(strikes.rows(), strikes.columns())?;
+    for &strike in strikes.as_slice() {
+        output.push_f64((spot - strike).max(0.0))?;
+    }
+    output.finish()
+}
+```
+
+This registers `K%BK%$`. Use `return_abi = "fp12"` on an ordinary numeric matrix or vector to select
+the FP12 publication path with a final copy into contiguous return storage.
+All FP12 failures, including input errors, `ExcelValue`, panics, non-finite
+numbers, and exceeded limits, return null, which Excel displays as `#NUM!`.
+The runtime records details synchronously in its bounded diagnostic history.
+
+Ordinary matrices preserve worksheet error distinctions such as `#N/A`
+and `IFNA` by default:
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+
+#[excel_function(name = "ARRAY.STRICT", thread_safe)]
+fn strict_prices() -> Result<Matrix<f64>, ExcelError> {
+    Err(ExcelError::NotAvailable)
+}
+```
+
+Diagnostics cannot restore Excel formula error semantics lost by FP12.
+Excel input coercion can fail before entering Rust; those failures cannot be
+recorded by xlfn. See [Errors and diagnostics](errors-diagnostics.md).
+
+FP12 storage uses Windows process-heap allocations. Published buffers stay
+immutable until the next outer synchronous UDF invocation on the same thread;
+nested calls defer reclamation. The final published buffer is deliberately
+retained across thread exit and physical DLL unload because Excel supplies no
+FP12 release notification. Unpublished buffers are released normally.
+
+Provisional limits are 16 MiB per result (8 + 8 × rows × columns), 64 MiB
+published per thread, 256 MiB published per module image, and 512 MiB reserved
+across the process. Allocation headers count toward the thread, module, and
+process limits. The process budget is reserved before allocation and includes
+unpublished builders, outputs, queued asynchronous results, and published
+buffers. Failed allocations and dropped unpublished outputs release their
+reservation; published buffers release it only when reclamation is safe.
+Exceeding a limit on the FP12 return path produces `#NUM!` and a diagnostic.
+
+On Windows, process accounting uses shared state that survives physical DLL
+unload. All module images using the same accounting protocol share the 512 MiB
+budget, including final buffers retained by unloaded images. Each loaded image
+retains its own view of the same shared physical counters until process exit;
+each physical reload retains one more view, while mapping handles are closed
+after attachment. Shared memory contains counters and protocol metadata, with
+no virtual addresses. A protected current-user/SYSTEM DACL is validated when
+attaching to either new or existing mappings. Processes with the same user
+authority are trusted; the DACL does not provide isolation from that user.
+An incompatible accounting header, limit, or out-of-range counter is an error;
+loading another DLL never creates a separate budget. Allocations made by older
+xlfn versions without this protocol cannot be counted retrospectively. Published buffers left by an
+unloaded image remain retained until process exit; the shared budget bounds
+further allocations rather than reclaiming those buffers. If abandoned buffers
+exhaust the budget, restart the Excel process to release them. Unloading and
+reloading the add-in does not reset the process budget.
+
+`numeric_return_memory_metrics()?` reports current-thread and module published
+retention, plus process reserved and published bytes, buffer counts, and byte
+peaks. It returns an error if the operating system cannot initialize or attach
+the shared accounting state. Querying metrics can initialize that state without
+changing UDF execution or admission. Concurrent updates can make the individual
+fields describe slightly different instants. These limits are implementation
+safety budgets pending native Excel load testing, not empirically tuned limits.
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+use xlfn::output::numeric_return_memory_metrics;
+
+#[excel_function(name = "ARRAY.PROCESS.RESERVED.BYTES", thread_safe)]
+fn process_reserved_bytes() -> XllResult<f64> {
+    Ok(numeric_return_memory_metrics()?.process_reserved_bytes as f64)
+}
+```
+
+The FP12 registration and delayed reclamation follow Microsoft's
+[data types](https://learn.microsoft.com/en-us/office/client-developer/excel/data-types-used-by-excel)
+and [memory management](https://learn.microsoft.com/en-us/office/client-developer/excel/memory-management-in-excel)
+contracts. Native Windows/Excel validation remains required for deployment.
+
+### Build a large result incrementally
+
+When an output is large or produced one cell at a time, `XlArrayBuilder`
+writes the result without an intermediate owned matrix.
+Use it when the function can calculate each output cell directly. Returning an
+existing `Matrix<T>` remains convenient when the application already needs that
+owned matrix; converting it to Excel still encodes each cell into return storage.
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+use xlfn::output::{XlArrayBuilder, XlArrayOutput};
+use xlfn::value::XlArrayRef;
+
+#[excel_function(name = "ARRAY.DOUBLED", thread_safe)]
+fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
+    let shape = values.shape();
+    let mut output = XlArrayBuilder::new(shape.rows, shape.columns)?;
+    for cell in values.cells() {
+        output.push_f64(cell.as_f64()? * 2.0)?;
+    }
+    output.finish()
+}
+```
+
+The builder rejects non-finite output as `#NUM!` and checks dimensions and
+return-storage limits.
+
+For an existing row-major numeric slice,
+`XlArrayBuilder::from_f64(rows, columns, values)?.finish()` validates and
+encodes it directly without an intermediate owned `Matrix`.
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+use xlfn::output::{XlArrayBuilder, XlArrayOutput};
+
+#[excel_function(name = "ARRAY.COPY.NUMERIC", thread_safe)]
+fn copy_numeric(values: NumericMatrixRef<'_>) -> XllResult<XlArrayOutput> {
+    XlArrayBuilder::from_f64(values.rows(), values.columns(), values.as_slice())?.finish()
+}
+```
+
+The bulk constructor requires the slice length to match the requested shape
+and rejects non-finite numbers. It writes ordinary Excel value cells into owned
+return storage, preserving the same error handling and `xlAutoFree12` cleanup
+as other array results.
+
+### Reuse a large dataset across formulas
+
+Passing a range to a handle producer still checks its contents on recalculation
+to determine whether the existing object can be reused. A warm hit therefore
+still scans a large input; it avoids reconstructing the object, not reading the
+range.
+
+For several formulas that use the same large dataset, create one
+[formula-owned handle](handles.md#create-and-use-an-object) and pass its token to
+the consumers. Consumers borrow the existing Rust object instead of converting
+and hashing the original cells for each formula. Keep the dataset in the
+producer's owned object, and add an explicit version argument when it depends on
+external data.
+
+## Keep one-dimensional shape explicit
+
+`Row<T>` accepts a scalar or one row; `Column<T>` accepts a scalar or one
+column. Both reject a genuinely two-dimensional array.
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+
+#[excel_function(name = "ARRAY.CUMSUM", thread_safe)]
+fn cumulative(values: Row<f64>) -> XllResult<Row<f64>> {
+    let mut total = 0.0;
+    Row::new(values.into_vec().into_iter().map(|value| {
+        total += value;
+        total
+    }).collect())
+}
+```
+
+`Vec<T>` and `BoundedVarArgs<T, MAX>` are input-only one-dimensional
+containers: they do not retain row or column orientation. Choose `Row<T>` or
+`Column<T>` explicitly when returning a one-dimensional result. Use the bounded
+form when a maximum is part of the worksheet contract; `MAX` must be greater
+than zero.
+
+## Treat dates and dynamic values deliberately
+
+`ExcelSerialDate` retains a finite Excel serial and an
+`ExcelDateSystem::Workbook` marker. A cell alone does not say whether the
+workbook uses the 1900 or 1904 date system. A macro-sheet UDF can query
+`context.workbook_date_system(&reference)?`, then attach the resolved setting
+with `serial.with_date_system(system)` before converting to a civil date.
+The reference must contain an explicit nonzero sheet identity. Internal
+current-sheet references are rejected because they cannot identify the target
+workbook independently of Excel's active selection. Failed callbacks and
+unavailable settings return errors; they never select a default epoch.
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+use xlfn::reference::ExcelReference;
+use xlfn::value::ExcelSerialDate;
+
+#[excel_function(name = "DATE.YEAR")]
+fn date_year(
+    context: MacroSheetContext<'_, GuideAddin>,
+    #[excel_arg(reference)] settlement: ExcelReference<'_>,
+) -> XllResult<i16> {
+    let system = context.workbook_date_system(&settlement)?;
+    let serial = context.coerce_matrix::<ExcelSerialDate>(&settlement)?;
+    let date = serial.get(0, 0).ok_or_else(||
+        XllError::input("settlement", xlfn::error::InputError::OutOfRange))?;
+    Ok(date.with_date_system(system).to_ymd_with_argument("settlement")?.0)
+}
+```
+
+The setting belongs to the referenced workbook, which may differ from the
+formula's workbook and the active workbook. It is queried on each invocation;
+changing the setting may require explicit recalculation. This operation uses
+`xlSheetNm` followed by `GET.DOCUMENT(20, workbook_name)` and requires
+[macro-sheet information-function permissions](https://learn.microsoft.com/en-us/office/client-developer/excel/xlfregister-form-1#registering-worksheet-functions-as-macro-sheet-equivalents-handling-uncalculated-cells).
+Native Excel qualification remains pending; the runnable cases and evidence
+requirements are in `tests/excel-date-system/README.md` in the repository.
+
+Use `ExcelSerialDate::from_ymd(year, month, day, system)` to construct a
+midnight serial, and `date.to_ymd()` to read its Gregorian calendar day.
+Their component types are `year: i16`, `month: i8`, and `day: i8`, matching
+Jiff's civil-date constructor and accessors.
+`to_ymd_with_argument("settlement")` and, with Jiff enabled,
+`to_jiff_with_argument("settlement")` attach a worksheet argument name to
+calendar-conversion errors; ordinary conversions retain the label `date`.
+`with_date_system` reinterprets the same serial rather than shifting it to
+preserve the calendar date across epochs.
+Calendar conversions support years `1..=9999`. They return an error for an
+unresolved `Workbook` convention or the fictitious 1900-02-29 (serial day
+60 in the 1900 system), instead of mapping it to another date. Reading a
+calendar day uses the serial's floor: `-0.25` belongs to the day before
+serial zero. `fractional_day()` retains its floating-point remainder policy;
+rounding can produce `1.0` for a very small negative serial.
+
+```rust
+use xlfn::value::{ExcelDateSystem, ExcelSerialDate};
+
+let date = ExcelSerialDate::from_ymd(2026, 10, 5, ExcelDateSystem::Windows1900)?;
+assert_eq!(date.serial(), 46300.0);
+assert_eq!(date.to_ymd()?, (2026, 10, 5));
+# Ok::<(), xlfn::XllError>(())
+```
+
+The optional `jiff` feature provides `from_jiff` / `to_jiff` methods
+for [`jiff::civil::Date`](https://docs.rs/jiff/latest/jiff/civil/struct.Date.html).
+Enable it with `xlfn = { version = "0.2.0", features = ["jiff"] }`.
+Importing a calendar date requires the date system as an
+argument. Exporting a calendar date discards the fractional day and keeps
+the same validation rules as `to_ymd()`.
+
+`ExcelValue` is an owned, intentionally dynamic **input** representation.
+It does not implement the ordinary worksheet output contract. Convert it
+deliberately to an output type instead of returning it directly. Prefer
+concrete parameter types when possible: they give clearer errors and less
+downstream branching. Its array form contains only `ExcelCellValue`, so
+nested arrays and missing cells cannot be represented.
+
+## Optional and omitted arguments
+
+Wrap a parameter in `Option<T>` to accept empty or omitted arguments from Excel.
+When the user leaves an argument blank or passes an empty cell, the parameter
+receives `None`:
+
+```rust
+{{#include ../fixtures/addin.md}}
+# use xlfn::prelude::*;
+#[excel_function(name = "CALC.SCALE", thread_safe)]
+fn scale(value: f64, factor: Option<f64>) -> f64 {
+    value * factor.unwrap_or(1.0)
+}
+```
+
+`Option<T>` and `OptionalExcelValue<T>` describe input presence only. A return
+value cannot preserve the distinction between an omitted argument and a blank
+cell, so choose an explicit value, empty string, or `ExcelError` on output.
+
+To supply a default for an omitted argument, write `#[excel_arg(default = expr)]`.
+Blank cells keep the parameter type's normal conversion. Select `blank = default`
+to default them too, or `blank = error` to reject them. An explicit `missing`
+policy overrides the inferred default; string policies such as `"default"` and
+`"error"` are also accepted. Use `missing = convert` to preserve the declared
+type's normal conversion, such as `None` for `Option<T>` or `Missing` for
+`OptionalExcelValue<T>`. `blank = convert` similarly selects normal conversion
+for a blank cell. The expression is evaluated only when its selected
+presence policy uses the default.
+
+```rust
+{{#include ../fixtures/addin.md}}
+# use xlfn::prelude::*;
+#[excel_function(name = "CALC.SCALE.DEFAULT", thread_safe)]
+fn scale_default(value: f64, #[excel_arg(default = 1.0, blank = error)] factor: f64) -> f64 {
+    value * factor
+}
+```
+
+Derive `ExcelEnum` for a fieldless enum used as a string parameter or result.
+The enum and its variants share the `excel_enum` attribute: the enum controls
+matching, and each variant can override its worksheet text.
+
+```rust
+{{#include ../fixtures/addin.md}}
+# use xlfn::prelude::*;
+#[derive(ExcelEnum)]
+#[excel_enum(ascii_case_insensitive)]
+enum Direction {
+    #[excel_enum(name = "Forward")]
+    Forward,
+    Reverse,
+}
+
+#[excel_function(name = "CALC.DIRECTION", thread_safe)]
+fn direction(value: Direction) -> Direction {
+    value
+}
+```
+
+Unknown enum strings return `#VALUE!`. Diagnostics retain the argument name,
+received text, and expected choices. Long input and choice lists are shown as
+bounded prefixes with an explicit truncation marker. Integer codes require an
+application conversion type rather than `ExcelEnum`.
+
+All value types are exposed through `xlfn::value`; their implementation modules
+are private. Borrowed UTF-16 text can be decoded with the fallible
+`XlStrRef::try_to_string` method.
+
+Next, see [Execution modes and contexts](execution-modes.md) to control how Excel runs your functions.
+
+
+## Collection operations and serialization
+
+Owned `Matrix` values iterate in row-major order. `MatrixRef` supports the same
+`[(row, column)]` indexing for reads; an owned `Matrix` also supports element
+updates. `Row`, `Column`, and `BoundedVarArgs` expose ordinary slice operations
+and iteration. Mutating their elements preserves their dimensions and limits.
+For computed coordinates, `Matrix::get` / `get_mut` and `MatrixRef::get`
+return `None` if either axis is out of bounds, including overflow-sized
+coordinates. `as_mut_slice`, `row_mut`, and the exact-size `rows_mut` iterator
+permit element changes while preserving shape. `try_map` consumes the matrix
+in row-major order, keeps its dimensions, and returns the first mapping error,
+dropping partial output and remaining input normally. `Row` / `Column` also
+support `AsMut<[T]>`, checked `TryFrom<Vec<T>>`, and conversion back to `Vec<T>`.
+
+```rust
+use xlfn::value::Matrix;
+
+let mut matrix = Matrix::from_fn(2, 3, |row, column| row * 10 + column)?;
+matrix[(1, 2)] = 99;
+assert_eq!(matrix.into_iter().collect::<Vec<_>>(), vec![0, 1, 2, 10, 11, 99]);
+let filled = Matrix::fill(2, 2, 7)?;
+assert_eq!(filled.as_slice(), &[7, 7, 7, 7]);
+assert!(Matrix::try_from(vec![vec![1], vec![2, 3]]).is_err());
+# Ok::<(), xlfn::XllError>(())
+```
+
+Enable the `serde` feature for `Serialize` and `Deserialize` on `ExcelError`,
+`ExcelCellValue`, `ExcelCellOutput`, `ExcelValue`, `OptionalExcelValue`, and the
+owned collection types. Cell and presence enums use Serde's externally tagged
+representation; matrices use `{rows, columns, data}` with row-major data, and
+rows, columns, and bounded varargs use sequences. Reading a matrix or bounded
+collection validates its dimensions or length through its constructor. Cell
+numbers must be finite during both serialization and deserialization. Borrowed
+call-scoped views do not acquire an owned serialization contract.

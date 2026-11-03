@@ -1,0 +1,2196 @@
+use crate::XllError;
+use xlfn_kernel::thread_affine::ThreadAffineError;
+
+mod authority;
+mod phase;
+mod state;
+
+pub(crate) use authority::LifecycleControl;
+pub(crate) use phase::{HostLifecycleIntent, LifecyclePhase};
+pub use state::ExecutionLease;
+pub(crate) use state::{
+    CommittedOpen, CompletedRemovalIntent, FinalCloseDecision, FinalRemovalReady,
+    GenerationAdmission, IssuedRemovalClaim, LifecycleAccess, LifecycleCoordinator,
+    OpenFailureDisposition, OpenRollbackReady, OpenStart, RollbackDecision,
+};
+
+pub(crate) fn lifecycle_access_error(error: ThreadAffineError) -> XllError {
+    let diagnostic_id = match error {
+        ThreadAffineError::WrongThread | ThreadAffineError::StaleAccess => {
+            crate::diagnostics::id::DiagnosticId::LIFECYCLE_THREAD
+        }
+        _ => crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
+    };
+    XllError::Internal { diagnostic_id }
+}
+
+#[cold]
+pub(crate) fn lifecycle_invariant_violation(_message: &'static str) -> ! {
+    #[cfg(not(test))]
+    std::process::abort();
+
+    #[cfg(test)]
+    panic!("lifecycle ownership invariant violated: {_message}");
+}
+
+#[cfg(test)]
+#[allow(
+    unsafe_code,
+    reason = "Lifecycle tests exercise the audited FFI return boundary"
+)]
+mod tests {
+    use super::*;
+    use crate::addin::{Addin, BuildInfo, OpenContext};
+    use crate::boundary::host::{host_auto_close, host_auto_open, host_auto_remove};
+    use crate::diagnostics::AddinId;
+    use crate::generation::RuntimeGeneration;
+    use crate::host_callback::HostCallbackSession;
+    use crate::runtime::AddinLifecycleAccess;
+    use crate::runtime::Runtime;
+    use crate::runtime::test_support::{
+        HostAttached, RemovalSuccess, active_runtime_generation, initialize_addin, remove_addin,
+        remove_addin_inner, rollback_active_open, rollback_open,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static COMPOSITION_TRACE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn check_composition_trace_with_lean(
+        checker: &std::ffi::OsString,
+        label: &str,
+        trace: &str,
+        artifact_name: &str,
+    ) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        if let Some(directory) = std::env::var_os("XLFN_COMPOSITION_TRACE_DIR") {
+            let path = std::path::Path::new(&directory).join(artifact_name);
+            std::fs::write(path, trace).expect("write Rust composition trace");
+        }
+        let mut child = Command::new(checker)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| {
+                panic!("failed to start composition checker for {label}: {error}")
+            });
+        child
+            .stdin
+            .take()
+            .expect("composition checker stdin is piped")
+            .write_all(trace.as_bytes())
+            .unwrap_or_else(|error| panic!("failed to write {label} composition trace: {error}"));
+        let output = child.wait_with_output().unwrap_or_else(|error| {
+            panic!("failed to wait for {label} composition checker: {error}")
+        });
+        assert!(
+            output.status.success(),
+            "Lean checker rejected {label} Rust composition trace: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn assert_commit_open_precedes_lift_shutdown(trace: &str) {
+        let document: serde_json::Value =
+            serde_json::from_str(trace).expect("composition trace must be valid JSON");
+        let events = document["events"]
+            .as_array()
+            .expect("composition trace must contain an events array");
+        let mut committed = false;
+        for event in events {
+            if event.get("beginOpen").is_some() {
+                committed = false;
+            }
+            if event.get("liftShutdown").is_some() {
+                assert!(
+                    committed,
+                    "LiftShutdown was recorded before CommitOpen: {trace}"
+                );
+            }
+            if event.get("commitOpen").is_some() {
+                committed = true;
+            }
+        }
+    }
+
+    struct RetryClose;
+
+    struct RetryState {
+        attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    fn test_open_context<A: Addin>() -> OpenContext<A> {
+        OpenContext::new(
+            std::path::PathBuf::from("test.xll"),
+            BuildInfo::new(AddinId::parse("test").unwrap(), "0", "test"),
+            RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        )
+    }
+
+    fn lifecycle_access<A: Addin>(
+        runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    ) -> AddinLifecycleAccess<'_, A> {
+        runtime
+            .bind_addin_lifecycle()
+            .expect("test runs on the lifecycle thread")
+    }
+
+    static LAYERS_PANIC_CLOSES: AtomicUsize = AtomicUsize::new(0);
+    static LAYERS_PANIC_QUIESCES: AtomicUsize = AtomicUsize::new(0);
+    static LAYERS_PANIC_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct LayersPanic;
+
+    impl Addin for LayersPanic {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ();
+        type LifecycleState = ();
+        type Error = XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(
+            _: &OpenContext<Self>,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            Ok(crate::addin::Opened::new(()))
+        }
+
+        fn quiesce(
+            _: &mut Self::SharedState,
+            _: &mut Self::LifecycleState,
+        ) -> Result<(), Self::Error> {
+            LAYERS_PANIC_QUIESCES.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        fn cleanup(_: &mut Self::LifecycleState, _: &mut crate::shutdown::CleanupReporter<'_>) {
+            assert!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire) >= 1);
+            LAYERS_PANIC_CLOSES.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn xl_auto_close_on_closed_runtime_invalidates_a_pending_open_epoch() {
+        let runtime = Runtime::<LayersPanic>::new();
+        let stale_epoch = runtime.removal_epoch();
+
+        assert_eq!(host_auto_close::<LayersPanic>(&runtime), 1);
+        assert!(runtime.begin_open_if_epoch(stale_epoch).is_err());
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn failed_concurrent_open_does_not_rollback_the_owner_attempt() {
+        let runtime = Runtime::<LayersPanic>::new();
+        let owner = runtime.begin_open().unwrap();
+        let lifecycle = lifecycle_access(&runtime);
+
+        rollback_active_open::<LayersPanic, HostAttached<LayersPanic>>(&lifecycle, None);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Opening);
+
+        let mut owner = runtime.publish(owner, (), ());
+        runtime.finish_open(&mut owner, Vec::new()).unwrap();
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Open);
+    }
+
+    #[test]
+    fn open_transaction_stages_state_and_layers_together() {
+        let _test_guard = LAYERS_PANIC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        LAYERS_PANIC_CLOSES.store(0, Ordering::Release);
+        LAYERS_PANIC_QUIESCES.store(0, Ordering::Release);
+        let runtime = Runtime::<LayersPanic>::new();
+        let removal_epoch = runtime.removal_epoch();
+        let transaction = runtime
+            .begin_open_if_epoch(removal_epoch)
+            .unwrap()
+            .attach_host(crate::host_callback::HostCallbackSession::new());
+        let lifecycle = lifecycle_access(&runtime);
+        let (transaction, _) =
+            match initialize_addin::<LayersPanic>(test_open_context(), transaction) {
+                Ok(result) => result,
+                Err(failure) => {
+                    let error = failure.recover(&lifecycle);
+                    panic!("unexpected add-in initialization failure: {error}");
+                }
+            };
+        assert!(runtime.has_opening_generation());
+        assert!(!runtime.has_current_generation());
+        rollback_active_open(&lifecycle, Some(transaction));
+        assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
+        assert_eq!(LAYERS_PANIC_CLOSES.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn controlled_reload_reclaims_old_generation_before_new_open() {
+        let _test_guard = LAYERS_PANIC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        LAYERS_PANIC_CLOSES.store(0, Ordering::Release);
+        LAYERS_PANIC_QUIESCES.store(0, Ordering::Release);
+        let runtime = Runtime::<LayersPanic>::new();
+        let first_open = runtime.begin_open().unwrap();
+        let mut first_open = runtime.publish(first_open, (), ());
+        runtime.finish_open(&mut first_open, Vec::new()).unwrap();
+        let first_generation = runtime.last_committed_generation();
+
+        let lifecycle = lifecycle_access(&runtime);
+        assert_eq!(
+            remove_addin::<LayersPanic>(&runtime, &lifecycle, &mut HostCallbackSession::new()),
+            1
+        );
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        runtime.clear_host_intent();
+        let second_open = runtime.begin_open().unwrap();
+        let mut second_open = runtime.publish(second_open, (), ());
+        runtime.finish_open(&mut second_open, Vec::new()).unwrap();
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Open);
+        assert!(runtime.last_committed_generation() > first_generation);
+        assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
+        assert_eq!(host_auto_remove::<LayersPanic>(&runtime), 1);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 2);
+    }
+
+    struct ReloadFailure;
+
+    impl Addin for ReloadFailure {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ();
+        type LifecycleState = ();
+        type Error = XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(
+            _: &OpenContext<Self>,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
+            })
+        }
+    }
+
+    #[test]
+    fn failed_controlled_reload_quarantines_the_runtime() {
+        let runtime = Runtime::<ReloadFailure>::new();
+        let first_open = runtime.begin_open().unwrap();
+        let mut first_open = runtime.publish(first_open, (), ());
+        runtime.finish_open(&mut first_open, Vec::new()).unwrap();
+
+        assert_eq!(
+            host_auto_open::<ReloadFailure>(
+                &runtime,
+                &AddinId::parse("test").unwrap(),
+                "0",
+                "test",
+                &[],
+            ),
+            0
+        );
+        assert_eq!(
+            runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
+        assert_eq!(host_auto_close::<ReloadFailure>(&runtime), 1);
+        assert_eq!(
+            runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
+    }
+
+    impl Addin for RetryClose {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ();
+        type LifecycleState = RetryState;
+        type Error = XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(
+            _context: &OpenContext<Self>,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            unreachable!("the close retry test publishes state directly")
+        }
+
+        fn cleanup(
+            state: &mut Self::LifecycleState,
+            reporter: &mut crate::shutdown::CleanupReporter<'_>,
+        ) {
+            state
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            reporter.warn(
+                "test cleanup",
+                crate::shutdown::CleanupIssueKind::RegistryCleanup,
+                XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_RETRY,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn addin_cleanup_issue_does_not_prevent_finalizing_runtime() {
+        let runtime = Runtime::<RetryClose>::new();
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish_with_lifecycle(
+            open_attempt,
+            (),
+            RetryState {
+                attempts: std::sync::Arc::clone(&attempts),
+            },
+            (),
+        );
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+
+        let lifecycle = lifecycle_access(&runtime);
+        remove_addin_inner::<RetryClose>(&runtime, &lifecycle, &mut HostCallbackSession::new());
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert!(runtime.take_current_generation().is_none() && !runtime.has_opening_generation());
+    }
+
+    struct CleanupPanic;
+
+    struct DropObserved(std::sync::Arc<AtomicUsize>);
+
+    impl Drop for DropObserved {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    impl Addin for CleanupPanic {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ();
+        type LifecycleState = DropObserved;
+        type Error = XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(
+            _: &OpenContext<Self>,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            unreachable!()
+        }
+
+        fn cleanup(_: &mut Self::LifecycleState, _: &mut crate::shutdown::CleanupReporter<'_>) {
+            panic!("injected cleanup panic");
+        }
+    }
+
+    #[test]
+    fn cleanup_panic_retains_state_and_quarantines_runtime() {
+        let runtime = Runtime::<CleanupPanic>::new();
+        let drops = std::sync::Arc::new(AtomicUsize::new(0));
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish_with_lifecycle(
+            opening,
+            (),
+            DropObserved(std::sync::Arc::clone(&drops)),
+            (),
+        );
+        let lifecycle = lifecycle_access(&runtime);
+        assert!(
+            runtime
+                .with_addin_lifecycle_for_test(&lifecycle, |_| ())
+                .is_ok()
+        );
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        remove_addin_inner::<CleanupPanic>(&runtime, &lifecycle, &mut HostCallbackSession::new());
+
+        assert_eq!(
+            runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        assert!(
+            !runtime
+                .shutdown_trace_json()
+                .contains("generationReclaimed"),
+            "retained add-in state must not be reported as reclaimed"
+        );
+        assert!(
+            runtime
+                .with_addin_lifecycle_for_test(&lifecycle, |_| ())
+                .is_ok()
+        );
+    }
+
+    struct WrongThreadRemoval;
+
+    impl Addin for WrongThreadRemoval {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ();
+        type LifecycleState = DropObserved;
+        type Error = XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(
+            _: &OpenContext<Self>,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            unreachable!("the wrong-thread test publishes state directly")
+        }
+
+        fn quiesce(
+            _: &mut Self::SharedState,
+            _: &mut Self::LifecycleState,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn cleanup(_: &mut Self::LifecycleState, _: &mut crate::shutdown::CleanupReporter<'_>) {}
+    }
+
+    #[test]
+    fn wrong_thread_deactivation_quarantines_before_touching_lifecycle_state() {
+        for deactivate in [
+            host_auto_remove::<WrongThreadRemoval>,
+            host_auto_close::<WrongThreadRemoval>,
+        ] {
+            let runtime = std::sync::Arc::new(Runtime::<WrongThreadRemoval>::new());
+            let drops = std::sync::Arc::new(AtomicUsize::new(0));
+            let opening = runtime.begin_open().unwrap();
+            let mut opening = runtime.publish_with_lifecycle(
+                opening,
+                (),
+                DropObserved(std::sync::Arc::clone(&drops)),
+                (),
+            );
+            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            assert!(
+                runtime
+                    .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
+                    .is_ok()
+            );
+            let lifecycle = lifecycle_access(&runtime);
+
+            let removal_runtime = std::sync::Arc::clone(&runtime);
+            std::thread::spawn(move || {
+                assert_eq!(deactivate(&removal_runtime), 1);
+            })
+            .join()
+            .expect("wrong-thread removal worker panicked");
+
+            assert_eq!(
+                runtime.phase(),
+                crate::lifecycle::LifecyclePhase::Quarantined
+            );
+            assert!(runtime.module_residency_held());
+            assert_eq!(drops.load(Ordering::Acquire), 0);
+            assert!(
+                runtime
+                    .with_addin_lifecycle_for_test(&lifecycle, |_| ())
+                    .is_ok()
+            );
+        }
+    }
+
+    struct QuiesceFailure;
+
+    impl Addin for QuiesceFailure {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ();
+        type LifecycleState = DropObserved;
+        type Error = XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(
+            _: &OpenContext<Self>,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            unreachable!()
+        }
+
+        fn quiesce(
+            _: &mut Self::SharedState,
+            _: &mut Self::LifecycleState,
+        ) -> Result<(), Self::Error> {
+            Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::QUIESCENCE_FAILURE,
+            })
+        }
+    }
+
+    #[test]
+    fn quiesce_failure_enters_quarantine_without_dropping_state() {
+        for close_boundary in [false, true] {
+            let runtime = Runtime::<QuiesceFailure>::new();
+            let drops = std::sync::Arc::new(AtomicUsize::new(0));
+            let opening = runtime.begin_open().unwrap();
+            let mut opening = runtime.publish_with_lifecycle(
+                opening,
+                (),
+                DropObserved(std::sync::Arc::clone(&drops)),
+                (),
+            );
+            let lifecycle = lifecycle_access(&runtime);
+            assert!(
+                runtime
+                    .with_addin_lifecycle_for_test(&lifecycle, |_| ())
+                    .is_ok()
+            );
+            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+            runtime
+                .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
+                .unwrap();
+            if close_boundary {
+                assert_eq!(host_auto_close(&runtime), 1);
+            } else {
+                let result = remove_addin_inner::<QuiesceFailure>(
+                    &runtime,
+                    &lifecycle,
+                    &mut HostCallbackSession::new(),
+                );
+                assert!(matches!(result, RemovalSuccess::Quarantined));
+            }
+            assert!(runtime.module_residency_held());
+            assert_eq!(
+                runtime.phase(),
+                crate::lifecycle::LifecyclePhase::Quarantined
+            );
+            assert_eq!(drops.load(Ordering::Acquire), 0);
+            assert_eq!(host_auto_close::<QuiesceFailure>(&runtime), 1);
+            assert_eq!(
+                runtime.phase(),
+                crate::lifecycle::LifecyclePhase::Quarantined
+            );
+        }
+    }
+
+    #[test]
+    fn open_rollback_cleanup_issue_still_finalizes_without_reinstalling_state() {
+        let runtime = Runtime::<RetryClose>::new();
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let open_attempt = runtime.begin_open().unwrap();
+        let open_attempt = runtime.publish_with_lifecycle(
+            open_attempt,
+            (),
+            RetryState {
+                attempts: std::sync::Arc::clone(&attempts),
+            },
+            (),
+        );
+
+        assert!(open_attempt.fail_for_test().requires_rollback());
+        let mut callbacks = HostCallbackSession::new();
+        let lifecycle = lifecycle_access(&runtime);
+        let outcome = rollback_open::<RetryClose>(
+            &runtime,
+            &lifecycle,
+            &mut callbacks,
+            active_runtime_generation(&runtime),
+        );
+        assert!(outcome.is_finalized());
+        assert!(outcome.is_finalized());
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert!(runtime.take_current_generation().is_none() && !runtime.has_opening_generation());
+    }
+
+    #[test]
+    fn open_rollback_preserves_a_final_removal_owner_that_took_over_cleanup() {
+        let runtime = Runtime::<CleanClose>::new();
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime.publish(opening, (), ());
+        assert!(opening.fail_for_test().requires_rollback());
+
+        // Final removal wins after the failed open publishes its resources but
+        // before rollback acquires the affine cleanup authority.
+        let final_owner = runtime.begin_final_removal().unwrap();
+        let lifecycle = lifecycle_access(&runtime);
+        let outcome = rollback_open::<CleanClose>(
+            &runtime,
+            &lifecycle,
+            &mut HostCallbackSession::new(),
+            active_runtime_generation(&runtime),
+        );
+        assert!(outcome.cleanup_owned_elsewhere());
+        assert!(!outcome.is_finalized());
+        assert_eq!(outcome.failure_hazard(), None);
+        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+
+        drop(final_owner);
+        assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+    }
+
+    struct CleanClose;
+
+    impl Addin for CleanClose {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ();
+        type LifecycleState = ();
+        type Error = XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(
+            _context: &OpenContext<Self>,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            unreachable!()
+        }
+    }
+
+    // SAFETY: this test Addin has no application-owned executable sources.
+    unsafe impl crate::addin::PhysicallyUnloadableAddin for CleanClose {}
+
+    struct InitializationFailure<const PANIC: bool>;
+
+    impl<const PANIC: bool> Addin for InitializationFailure<PANIC> {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ();
+        type LifecycleState = ();
+        type Error = XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(_: &OpenContext<Self>) -> Result<crate::addin::Opened<(), ()>, XllError> {
+            if PANIC {
+                panic!("injected application initialization panic");
+            }
+            Err(XllError::Overloaded)
+        }
+    }
+
+    fn initialization_quarantine_traces<const PANIC: bool>(
+        previously_removed: bool,
+    ) -> (String, String) {
+        let runtime = Runtime::<InitializationFailure<PANIC>>::new();
+        if previously_removed {
+            let opening = runtime.begin_open().unwrap();
+            // begin_open holds the shared module test lease, including the
+            // diagnostic router, until this runtime finishes removal.
+            crate::diagnostics::reset_diagnostic_router().unwrap();
+            let mut opening = runtime.publish(opening, (), ());
+            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            assert_eq!(host_auto_remove(&runtime), 1);
+            let previous: serde_json::Value =
+                serde_json::from_str(&runtime.composition_trace_json()).unwrap();
+            assert_eq!(previous["outcome"], "returned_success");
+        }
+        let transaction = runtime
+            .begin_open()
+            .unwrap()
+            .attach_host(crate::host_callback::HostCallbackSession::new());
+        let attempt = runtime.protocol_generation().unwrap();
+        let starting: serde_json::Value =
+            serde_json::from_str(&runtime.composition_trace_json()).unwrap();
+        assert_eq!(starting["outcome"], "in_progress");
+        let context = OpenContext::new(
+            std::path::PathBuf::from("test.xll"),
+            BuildInfo::new(AddinId::parse("test").unwrap(), "0", "test"),
+            attempt,
+        );
+        let lifecycle = lifecycle_access(&runtime);
+        let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            match initialize_addin::<InitializationFailure<PANIC>>(context, transaction) {
+                Ok(_) => panic!("injected initialization failure must fail"),
+                Err(failure) => {
+                    assert!(matches!(failure.recover(&lifecycle), XllError::Overloaded));
+                }
+            }
+        }));
+        assert_eq!(result.is_err(), PANIC);
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        let composition = runtime.composition_trace_json();
+        let shutdown = runtime.shutdown_trace_json();
+        let document: serde_json::Value = serde_json::from_str(&composition).unwrap();
+        let events = document["events"].as_array().unwrap();
+        let terminal = &events.last().unwrap()["quarantineOpen"];
+        assert_eq!(document["outcome"], "quarantined");
+        assert!(terminal["attempt"].as_u64().is_some_and(|id| id > 0));
+        assert_eq!(
+            terminal["reason"],
+            if PANIC {
+                "boundaryPanic"
+            } else {
+                "addinShutdownFailed"
+            }
+        );
+        assert!(!events.iter().any(|event| event.get("failOpen").is_some()));
+        assert_commit_open_precedes_lift_shutdown(&composition);
+        let shutdown_document: serde_json::Value = serde_json::from_str(&shutdown).unwrap();
+        assert_eq!(shutdown_document["initial"], "opening");
+        assert_eq!(shutdown_document["attempt"], terminal["attempt"]);
+        assert_eq!(shutdown_document["reason"], terminal["reason"]);
+        assert_eq!(shutdown_document["outcome"], "quarantined");
+        assert!(shutdown_document.get("generation").is_none());
+        // Later host hints cannot replace quarantine with a success outcome.
+        assert_eq!(host_auto_remove(&runtime), 1);
+        assert_eq!(host_auto_close(&runtime), 1);
+        assert!(runtime.begin_open().is_err());
+        assert_eq!(runtime.composition_trace_json(), composition);
+        assert_eq!(runtime.shutdown_trace_json(), shutdown);
+        (composition, shutdown)
+    }
+
+    #[test]
+    fn initialization_quarantine_records_error_and_panic_after_initial_and_reopened_attempts() {
+        let _runtime_guard = crate::runtime::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _trace_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for previously_removed in [false, true] {
+            initialization_quarantine_traces::<false>(previously_removed);
+            initialization_quarantine_traces::<true>(previously_removed);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires XLFN_COMPOSITION_CHECKER and XLFN_SHUTDOWN_CHECKER"]
+    fn rust_composition_initialization_quarantine_traces_are_accepted_by_lean_checker() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let _runtime_guard = crate::runtime::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _trace_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let composition_checker = std::env::var_os("XLFN_COMPOSITION_CHECKER").unwrap();
+        let shutdown_checker = std::env::var_os("XLFN_SHUTDOWN_CHECKER").unwrap();
+        let reject = |checker: &std::ffi::OsString, document: &serde_json::Value| {
+            let mut child = Command::new(checker)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(document.to_string().as_bytes())
+                .unwrap();
+            assert!(
+                !child.wait_with_output().unwrap().status.success(),
+                "invalid trace accepted: {document}"
+            );
+        };
+        for previously_removed in [false, true] {
+            for (label, (composition, shutdown)) in [
+                (
+                    "error",
+                    initialization_quarantine_traces::<false>(previously_removed),
+                ),
+                (
+                    "panic",
+                    initialization_quarantine_traces::<true>(previously_removed),
+                ),
+            ] {
+                let suffix = format!(
+                    "{label}-{}",
+                    if previously_removed {
+                        "reopen"
+                    } else {
+                        "initial"
+                    }
+                );
+                check_composition_trace_with_lean(
+                    &composition_checker,
+                    &suffix,
+                    &composition,
+                    &format!("rust-composition-open-quarantine-{suffix}.json"),
+                );
+                check_composition_trace_with_lean(
+                    &shutdown_checker,
+                    &suffix,
+                    &shutdown,
+                    &format!("rust-shutdown-open-quarantine-{suffix}.json"),
+                );
+                let original: serde_json::Value = serde_json::from_str(&composition).unwrap();
+                let mut false_success = original.clone();
+                false_success["outcome"] = "returned_success".into();
+                reject(&composition_checker, &false_success);
+                let mut wrong_attempt = original.clone();
+                wrong_attempt["events"]
+                    .as_array_mut()
+                    .unwrap()
+                    .last_mut()
+                    .unwrap()["quarantineOpen"]["attempt"] = 0.into();
+                reject(&composition_checker, &wrong_attempt);
+                let sampled_epoch = original["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find_map(|event| {
+                        event
+                            .get("beginOpen")
+                            .map(|open| open["sampledEpoch"].clone())
+                    })
+                    .unwrap();
+                let mut reopen = original;
+                reopen["events"].as_array_mut().unwrap().push(serde_json::json!({"beginOpen": {"sampledEpoch": sampled_epoch, "attempt": 99}}));
+                reject(&composition_checker, &reopen);
+                let mut false_shutdown_success: serde_json::Value =
+                    serde_json::from_str(&shutdown).unwrap();
+                false_shutdown_success["outcome"] = "returned_success".into();
+                reject(&shutdown_checker, &false_shutdown_success);
+            }
+        }
+    }
+
+    struct TraceDiagnosticSink;
+
+    impl crate::diagnostics::DiagnosticSink for TraceDiagnosticSink {
+        fn report(&self, _event: &crate::diagnostics::DiagnosticEvent<'_>) {}
+    }
+
+    #[cfg(all(feature = "rtd", feature = "handles"))]
+    mod lean_shutdown_trace_tests {
+        use super::*;
+        use crate::XllResult;
+
+        struct TraceCleanup;
+
+        impl Addin for TraceCleanup {
+            #[cfg(feature = "rtd")]
+            type RtdSubscription = TraceSubscription;
+            #[cfg(feature = "rtd")]
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+            type SharedState = ();
+            type LifecycleState = ();
+            type Error = XllError;
+            type Layers = ();
+            #[cfg(feature = "async-builtin")]
+            type AsyncExecutor = crate::BuiltinAsyncExecutor;
+            #[cfg(all(feature = "async", not(feature = "async-builtin")))]
+            type AsyncExecutor = crate::NoAsyncExecutor;
+
+            fn open(_context: &OpenContext<Self>) -> crate::OpenResult<Self> {
+                unreachable!()
+            }
+
+            fn cleanup(
+                _state: &mut Self::LifecycleState,
+                reporter: &mut crate::shutdown::CleanupReporter<'_>,
+            ) {
+                reporter.warn(
+                    "Lean checker cleanup trace",
+                    crate::shutdown::CleanupIssueKind::RegistryCleanup,
+                    XllError::Internal {
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::LEAN_TRACE,
+                    },
+                );
+            }
+        }
+
+        struct TraceHandle;
+
+        impl crate::handle::ExcelHandleObject for TraceHandle {}
+
+        struct TraceSubscription;
+
+        // SAFETY: trace subscription does not interact with external state.
+        unsafe impl crate::subscription::RtdSubscription for TraceSubscription {
+            fn request_cancel(&self) {}
+
+            fn disconnect_and_wait(self) -> XllResult<()> {
+                Ok(())
+            }
+        }
+
+        struct TraceSource {
+            sink: std::sync::Arc<std::sync::Mutex<Option<crate::subscription::RtdSink<f64>>>>,
+        }
+
+        // SAFETY: the trace source stores the sink only in the test-owned slot;
+        // the ignored checker test does not use it after teardown.
+        unsafe impl crate::subscription::RtdSource for TraceSource {
+            type Value = f64;
+            type Subscription = TraceSubscription;
+
+            fn subscribe(
+                &self,
+                _topic: &crate::subscription::RtdTopic,
+                sink: crate::subscription::RtdSink<Self::Value>,
+            ) -> XllResult<Self::Subscription> {
+                self.sink.lock().unwrap().replace(sink);
+                Ok(TraceSubscription)
+            }
+        }
+
+        #[test]
+        #[ignore = "requires XLFN_SHUTDOWN_CHECKER to point to the Lean executable"]
+        fn rust_shutdown_resource_traces_are_accepted_by_lean_checker() {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+
+            let checker = std::env::var_os("XLFN_SHUTDOWN_CHECKER")
+                .expect("XLFN_SHUTDOWN_CHECKER must point to shutdown_trace_checker");
+
+            let check = |label: &str, trace: String| {
+                let mut child = Command::new(&checker)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap_or_else(|error| {
+                        panic!("failed to start shutdown_trace_checker for {label}: {error}")
+                    });
+                child
+                    .stdin
+                    .take()
+                    .expect("checker stdin is piped")
+                    .write_all(trace.as_bytes())
+                    .unwrap_or_else(|error| {
+                        panic!("failed to write {label} shutdown trace: {error}")
+                    });
+                let output = child.wait_with_output().unwrap_or_else(|error| {
+                    panic!("failed to wait for {label} shutdown trace: {error}")
+                });
+                assert!(
+                    output.status.success(),
+                    "Lean checker rejected {label} Rust trace: {}\ntrace:\n{trace}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            };
+
+            let static_fixture = crate::runtime::StaticTestRuntime::<TraceCleanup>::new();
+            let runtime = static_fixture.runtime();
+            let opening = runtime.begin_open().unwrap();
+            let trace_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let (arena, source) = crate::subscription::SourceArena::with_source(
+                opening.attempt_id().into_runtime_generation(),
+                TraceSource {
+                    sink: std::sync::Arc::clone(&trace_sink),
+                },
+            )
+            .unwrap();
+            let mut opening = runtime.publish_with_sources(opening, (), (), arena);
+            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+            crate::diagnostics::reset_diagnostic_router().unwrap();
+            crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
+            crate::diagnostics::report_no_unwind("lean_checker_trace", &XllError::Panic);
+
+            let pointer = crate::return_abi::ffi_boundary(runtime, || Ok::<f64, XllError>(1.0));
+            // SAFETY: `pointer` is the live DLL-owned block returned by the
+            // framework boundary above and is freed exactly once here.
+            let free = unsafe { crate::return_abi::free_return_boundary(pointer) };
+            drop(free);
+
+            runtime
+                .with_formula_handle_service(|handles| {
+                    handles
+                        .prepare(crate::handle::test_topic_key("lean-checker-handle"), || {
+                            Ok(TraceHandle)
+                        })
+                        .unwrap();
+                })
+                .unwrap();
+
+            let notifier_state =
+                std::sync::Arc::new(crate::rtd::test_support::TestNotifierState::new());
+            runtime
+                .with_subscriptions(|subscriptions| {
+                    // SAFETY: `subscriptions` is owned by `runtime` which outlives this test closure.
+                    let server = unsafe {
+                        subscriptions
+                            .register_server(
+                                crate::subscription::ServerGeneration::new(1)
+                                    .expect("non-zero test server generation"),
+                            )
+                            .unwrap()
+                    };
+                    server
+                        .attach_update_notifier(crate::excel_rtd::RtdNotifier::for_test(
+                            std::sync::Arc::clone(&notifier_state),
+                        ))
+                        .unwrap();
+                    let prepared = subscriptions
+                        .prepare(
+                            &source,
+                            crate::subscription::RtdTopic::single("lean-checker-subscription")
+                                .unwrap()
+                                .borrowed(),
+                        )
+                        .unwrap();
+                    let id = prepared.id();
+                    prepared.commit();
+                    let conn = subscriptions
+                        .connect_transaction(&server, crate::subscription::TopicId(1), id)
+                        .unwrap();
+                    conn.commit().unwrap();
+                    trace_sink
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .expect("trace source must retain its RTD sink")
+                        .publish(1.0)
+                        .unwrap();
+                    assert_eq!(notifier_state.calls.load(Ordering::Acquire), 1);
+                })
+                .unwrap();
+
+            #[cfg(feature = "async-builtin")]
+            {
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let (cancellation, _token) = crate::cancellation::CancellationSource::new(
+                    crate::cancellation::CancellationGuarantee::BestEffort,
+                );
+                runtime
+                    .start_async(
+                        crate::BuiltinAsyncExecutor::new(crate::BuiltinExecutorConfig::new()),
+                        crate::AsyncTaskLimit::DEFAULT,
+                    )
+                    .unwrap();
+                let ingress = crate::module_runtime::ingress()
+                    .enter_with(|| {})
+                    .into_admitted()
+                    .expect("test call enters during OPEN");
+                let call = runtime
+                    .enter(&ingress)
+                    .expect("async trace task must be spawned from an admitted call");
+                runtime
+                    .async_runtime()
+                    .submit(
+                        runtime.async_runtime().current_epoch(),
+                        async move {
+                            done_tx.send(()).unwrap();
+                        },
+                        cancellation,
+                    )
+                    .unwrap();
+                drop(call);
+                done_rx
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("Lean checker async trace task did not complete");
+            }
+
+            assert_eq!(host_auto_remove::<TraceCleanup>(runtime), 1);
+            let trace = runtime.shutdown_trace_json();
+            for event in [
+                "enterExternal",
+                "leaveExternal",
+                "enterCall",
+                "leaveCall",
+                "createReturnBlock",
+                "beginReturnFree",
+                "releaseReturnBlock",
+                "endReturnFree",
+                "addHandle",
+                "removeHandle",
+                "beginRtdOperation",
+                "endRtdOperation",
+                "addSubscription",
+                "removeSubscription",
+                "beginCallback",
+                "endCallback",
+                "startDiagnostics",
+                "enqueueDiagnostic",
+                "flushDiagnostic",
+                "recordCleanupIssue",
+            ] {
+                assert!(
+                    trace.contains(event),
+                    "resource trace is missing {event}: {trace}"
+                );
+            }
+            #[cfg(feature = "async-builtin")]
+            for event in [
+                "startAsyncExecutor",
+                "startAsyncTask",
+                "endAsyncTask",
+                "stopAsyncExecutor",
+            ] {
+                assert!(
+                    trace.contains(event),
+                    "resource trace is missing {event}: {trace}"
+                );
+            }
+            check("resourceful", trace);
+
+            let clean_runtime = Runtime::<CleanClose>::new();
+            let opening = clean_runtime.begin_open().unwrap();
+            crate::diagnostics::reset_diagnostic_router().unwrap();
+            let mut opening = clean_runtime.publish(opening, (), ());
+            clean_runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            assert_eq!(host_auto_remove::<CleanClose>(&clean_runtime), 1);
+            check("clean", clean_runtime.shutdown_trace_json());
+
+            let failure_runtime = Runtime::<QuiesceFailure>::new();
+            let drops = std::sync::Arc::new(AtomicUsize::new(0));
+            let opening = failure_runtime.begin_open().unwrap();
+            let mut opening = failure_runtime.publish_with_lifecycle(
+                opening,
+                (),
+                DropObserved(std::sync::Arc::clone(&drops)),
+                (),
+            );
+            failure_runtime
+                .finish_open(&mut opening, Vec::new())
+                .unwrap();
+            assert_eq!(host_auto_remove::<QuiesceFailure>(&failure_runtime), 1);
+            assert_eq!(
+                failure_runtime.phase(),
+                crate::lifecycle::LifecyclePhase::Quarantined
+            );
+            let failure_trace = failure_runtime.shutdown_trace_json();
+            assert!(failure_trace.contains("quarantined"));
+            check("quarantine", failure_trace);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
+    fn rust_composition_traces_are_accepted_by_lean_checker() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
+            .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
+        let runtime = Runtime::<CleanClose>::new_with_physical_unload();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        crate::diagnostics::reset_diagnostic_router().unwrap();
+        crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
+        crate::diagnostics::report_no_unwind("composition_checker_trace", &XllError::Panic);
+
+        assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
+        let trace = runtime.composition_trace_json();
+        if let Some(path) = std::env::var_os("XLFN_COMPOSITION_TRACE") {
+            std::fs::write(path, &trace).expect("write Rust composition trace");
+        }
+        let mut child = Command::new(&checker)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to start composition_trace_checker");
+        child
+            .stdin
+            .take()
+            .expect("composition checker stdin is piped")
+            .write_all(trace.as_bytes())
+            .expect("failed to write composition trace");
+        let output = child
+            .wait_with_output()
+            .expect("failed to wait for composition_trace_checker");
+        assert!(
+            output.status.success(),
+            "Lean checker rejected Rust composition trace: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn composition_commit_open_precedes_lift_shutdown_events() {
+        let _runtime_test_guard = crate::runtime::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let runtime = Runtime::<CleanClose>::new_with_physical_unload();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let observation = runtime.observer().observe_call();
+        drop(observation);
+
+        assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
+        assert_commit_open_precedes_lift_shutdown(&runtime.composition_trace_json());
+    }
+
+    #[test]
+    #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
+    fn rust_composition_already_closed_trace_is_accepted_by_lean_checker() {
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
+            .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
+        let runtime = Runtime::<CleanClose>::new();
+
+        assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
+        check_composition_trace_with_lean(
+            &checker,
+            "already closed",
+            &runtime.composition_trace_json(),
+            "rust-composition-already-closed-trace.json",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
+    fn rust_composition_reopen_trace_is_accepted_by_lean_checker() {
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
+            .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
+        let runtime = Runtime::<CleanClose>::new();
+
+        for label in ["first", "second"] {
+            let opening = runtime.begin_open().unwrap();
+            crate::diagnostics::reset_diagnostic_router().unwrap();
+            let mut opening = runtime.publish(opening, (), ());
+            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
+            crate::diagnostics::report_no_unwind(label, &XllError::Panic);
+            assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
+        }
+
+        let trace = runtime.composition_trace_json();
+        assert_commit_open_precedes_lift_shutdown(&trace);
+        check_composition_trace_with_lean(
+            &checker,
+            "reopen",
+            &trace,
+            "rust-composition-reopen-trace.json",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
+    fn rust_composition_owner_takeover_trace_is_accepted_by_lean_checker() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
+            .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
+        let runtime = Runtime::<CleanClose>::new();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        crate::diagnostics::reset_diagnostic_router().unwrap();
+        crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
+        crate::diagnostics::report_no_unwind("composition_takeover_trace", &XllError::Panic);
+
+        let first = runtime.begin_final_removal().unwrap();
+        drop(first);
+        let second = runtime.begin_final_removal().unwrap();
+        drop(second);
+
+        assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
+        let trace = runtime.composition_trace_json();
+        if let Some(path) = std::env::var_os("XLFN_COMPOSITION_TAKEOVER_TRACE") {
+            std::fs::write(path, &trace).expect("write Rust composition takeover trace");
+        }
+        let mut child = Command::new(&checker)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to start composition_trace_checker");
+        child
+            .stdin
+            .take()
+            .expect("composition checker stdin is piped")
+            .write_all(trace.as_bytes())
+            .expect("failed to write composition takeover trace");
+        let output = child
+            .wait_with_output()
+            .expect("failed to wait for composition_trace_checker");
+        assert!(
+            output.status.success(),
+            "Lean checker rejected Rust composition takeover trace:\n\
+             stdout:\n{}\n\
+             stderr:\n{}\n\
+             trace:\n{trace}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn uncommitted_final_close_trace() -> String {
+        let uncommitted = std::sync::Arc::new(Runtime::<CleanClose>::new());
+        let opening = uncommitted.begin_open().unwrap();
+        let mut opening = uncommitted.publish(opening, (), ());
+        let closing_runtime = std::sync::Arc::clone(&uncommitted);
+        let (owner_tx, owner_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let close_waiter = std::thread::spawn(move || {
+            let removal_attempt = closing_runtime
+                .begin_final_removal()
+                .expect("final close must acquire after open rejection");
+            owner_tx.send(()).expect("final close owner signal");
+            release_rx.recv().expect("final close release signal");
+            drop(removal_attempt);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while uncommitted.phase() != crate::lifecycle::LifecyclePhase::Closing
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            uncommitted.phase(),
+            crate::lifecycle::LifecyclePhase::Closing
+        );
+        assert!(matches!(
+            uncommitted.finish_open(&mut opening, Vec::new()),
+            Err(XllError::Closing)
+        ));
+        owner_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("final close owner was not acquired");
+        release_tx.send(()).expect("final close release signal");
+        close_waiter.join().expect("final close waiter panicked");
+        assert_eq!(host_auto_remove::<CleanClose>(&uncommitted), 1);
+        uncommitted.composition_trace_json()
+    }
+
+    #[test]
+    fn open_rejection_is_recorded_before_final_close_owner_acquisition() {
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let trace = uncommitted_final_close_trace();
+        let document: serde_json::Value =
+            serde_json::from_str(&trace).expect("composition trace must be valid JSON");
+        let events = document["events"]
+            .as_array()
+            .expect("composition trace must contain an events array");
+        let begin = events
+            .iter()
+            .position(|event| event.get("beginOpen").is_some())
+            .expect("trace must record open beginning");
+        let request = events
+            .iter()
+            .position(|event| event == "requestFinalClose")
+            .expect("trace must record final close request");
+        let rejection = events
+            .iter()
+            .position(|event| event.get("finishOpenRejectedByClose").is_some())
+            .expect("trace must record open rejection");
+        let owner = events
+            .iter()
+            .position(|event| event == "acquireFinalCloseOwner")
+            .expect("trace must record final close owner acquisition");
+        assert!(
+            begin < request && request < rejection && rejection < owner,
+            "final close overtook the open rejection record: {trace}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
+    fn rust_composition_uncommitted_and_rollback_traces_are_accepted_by_lean_checker() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
+            .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
+        let check = |label: &str, trace: String, path_name: &str| {
+            if let Some(directory) = std::env::var_os("XLFN_COMPOSITION_TRACE_DIR") {
+                let path = std::path::Path::new(&directory).join(path_name);
+                std::fs::write(path, &trace).expect("write Rust composition path trace");
+            }
+            let mut child = Command::new(&checker)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap_or_else(|error| {
+                    panic!("failed to start composition checker for {label}: {error}")
+                });
+            child
+                .stdin
+                .take()
+                .expect("composition checker stdin is piped")
+                .write_all(trace.as_bytes())
+                .unwrap_or_else(|error| {
+                    panic!("failed to write {label} composition trace: {error}")
+                });
+            let output = child.wait_with_output().unwrap_or_else(|error| {
+                panic!("failed to wait for {label} composition checker: {error}")
+            });
+            assert!(
+                output.status.success(),
+                "Lean checker rejected {label} Rust composition trace:\n\
+                 stdout:\n{}\n\
+                 stderr:\n{}\n\
+                 trace:\n{trace}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        check(
+            "uncommitted final close",
+            uncommitted_final_close_trace(),
+            "rust-composition-uncommitted-trace.json",
+        );
+
+        let rollback = Runtime::<CleanClose>::new();
+        let opening = rollback.begin_open().unwrap();
+        assert!(opening.fail_for_test().requires_rollback());
+        let mut callbacks = HostCallbackSession::new();
+        let lifecycle = lifecycle_access(&rollback);
+        let outcome = rollback_open::<CleanClose>(
+            &rollback,
+            &lifecycle,
+            &mut callbacks,
+            active_runtime_generation(&rollback),
+        );
+        assert!(outcome.is_finalized());
+        check(
+            "open rollback",
+            rollback.composition_trace_json(),
+            "rust-composition-open-rollback-trace.json",
+        );
+    }
+
+    #[test]
+    fn close_owner_is_held_until_the_success_boundary_finishes() {
+        let runtime = Runtime::<CleanClose>::new();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        let lifecycle = lifecycle_access(&runtime);
+        let success =
+            remove_addin_inner::<CleanClose>(&runtime, &lifecycle, &mut HostCallbackSession::new());
+        assert!(runtime.begin_open().is_err());
+        let RemovalSuccess::Closed { finalized } = success else {
+            panic!("test close must own the close attempt");
+        };
+        finalized.record_return();
+
+        let reopened = runtime.begin_open().unwrap();
+        let mut reopened = runtime.publish(reopened, (), ());
+        runtime.finish_open(&mut reopened, Vec::new()).unwrap();
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Open);
+    }
+
+    struct AlwaysFailClose;
+
+    impl Addin for AlwaysFailClose {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ();
+        type LifecycleState = ();
+        type Error = XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(
+            _context: &OpenContext<Self>,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            unreachable!()
+        }
+
+        fn cleanup(
+            _state: &mut Self::LifecycleState,
+            reporter: &mut crate::shutdown::CleanupReporter<'_>,
+        ) {
+            reporter.warn(
+                "always fail cleanup",
+                crate::shutdown::CleanupIssueKind::RegistryCleanup,
+                XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::FAILURE,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn failing_open_rollback_is_finalized_by_xl_auto_close() {
+        let runtime = Runtime::<AlwaysFailClose>::new();
+        let open_attempt = runtime.begin_open().unwrap();
+        let open_attempt = runtime.publish(open_attempt, (), ());
+
+        assert!(open_attempt.fail_for_test().requires_rollback());
+        let mut callbacks = HostCallbackSession::new();
+        let lifecycle = lifecycle_access(&runtime);
+        assert!(
+            rollback_open::<AlwaysFailClose>(
+                &runtime,
+                &lifecycle,
+                &mut callbacks,
+                active_runtime_generation(&runtime),
+            )
+            .is_finalized()
+        );
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+
+        assert_eq!(host_auto_close::<AlwaysFailClose>(&runtime), 1);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn xl_auto_close_waits_for_active_call_and_returns_one_after_clean_close() {
+        let fixture = crate::runtime::StaticTestRuntime::<CleanClose>::new();
+        let runtime = fixture.runtime();
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, (), ());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let ingress = crate::module_runtime::ingress()
+                .enter_udf_with(|| {})
+                .into_admitted()
+                .expect("test call enters during OPEN");
+            let call = runtime.enter(&ingress).unwrap();
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(call);
+            drop(ingress);
+        });
+
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            release_tx.send(()).unwrap();
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(host_auto_close::<CleanClose>(runtime), 1);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(20));
+        releaser.join().unwrap();
+        holder.join().unwrap();
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn xl_auto_close_alone_quiesces_and_cleans_the_generation_once() {
+        let _test_guard = LAYERS_PANIC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        LAYERS_PANIC_CLOSES.store(0, Ordering::Release);
+        LAYERS_PANIC_QUIESCES.store(0, Ordering::Release);
+        let runtime = Runtime::<LayersPanic>::new();
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, (), ());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+
+        assert_eq!(host_auto_close::<LayersPanic>(&runtime), 1);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert!(!runtime.has_current_generation());
+        assert!(!runtime.has_opening_generation());
+        assert!(
+            crate::module_runtime::ingress()
+                .enter_udf_with(|| {})
+                .into_admitted()
+                .is_err()
+        );
+
+        assert_eq!(host_auto_remove::<LayersPanic>(&runtime), 1);
+        assert_eq!(host_auto_close::<LayersPanic>(&runtime), 1);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
+        assert_eq!(LAYERS_PANIC_CLOSES.load(Ordering::Acquire), 1);
+    }
+
+    #[inline(never)]
+    fn lifecycle_residency_probe_anchor() {}
+
+    #[test]
+    fn xl_auto_close_releases_residency_after_logical_cleanup() {
+        let runtime = Runtime::<CleanClose>::new_with_physical_unload();
+        assert!(
+            runtime
+                .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
+                .is_ok()
+        );
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, (), ());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+
+        let _ = host_auto_close::<CleanClose>(&runtime);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert!(!runtime.module_residency_held());
+    }
+
+    #[test]
+    fn xl_auto_remove_retains_residency_until_xl_auto_close() {
+        let runtime = Runtime::<CleanClose>::new_with_physical_unload();
+        runtime
+            .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
+            .unwrap();
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, (), ());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+
+        assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
+        assert!(runtime.module_residency_held());
+        let _ = host_auto_close::<CleanClose>(&runtime);
+        assert!(!runtime.module_residency_held());
+    }
+
+    #[test]
+    fn xl_auto_close_keeps_residency_without_the_physical_unload_opt_in() {
+        let runtime = Runtime::<CleanClose>::new();
+        runtime
+            .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
+            .unwrap();
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, (), ());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+
+        assert_eq!(host_auto_close::<CleanClose>(&runtime), 1);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert!(runtime.module_residency_held());
+    }
+
+    #[test]
+    fn failed_open_after_removal_preserves_the_later_release_marker() {
+        let runtime = Runtime::<CleanClose>::new_with_physical_unload();
+        assert!(
+            runtime
+                .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
+                .is_ok()
+        );
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, (), ());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
+
+        assert_eq!(
+            host_auto_open::<CleanClose>(
+                &runtime,
+                &AddinId::parse("test").unwrap(),
+                "0",
+                "test",
+                &[],
+            ),
+            0
+        );
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert_eq!(
+            runtime.host_intent(),
+            HostLifecycleIntent::ExplicitRemovalComplete
+        );
+        let _ = host_auto_close::<CleanClose>(&runtime);
+        assert!(!runtime.module_residency_held());
+    }
+
+    #[cfg(all(feature = "async-builtin", not(target_os = "windows")))]
+    #[test]
+    fn close_stops_async_before_terminal_unregister_and_never_calls_excel_afterwards() {
+        use xlfn_sys::{
+            XL_ASYNC_RETURN, XL_FREE, XLF_UNREGISTER, XLOPER12, XLOPER12BigData,
+            XLOPER12BigDataHandle, XLOPER12Value, XLRET_ABORT, XLTYPE_BIG_DATA,
+        };
+
+        struct AsyncCloseAddin;
+
+        impl Addin for AsyncCloseAddin {
+            #[cfg(feature = "rtd")]
+            type RtdSubscription = ();
+            #[cfg(feature = "rtd")]
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+            type SharedState = ();
+            type LifecycleState = ();
+            type Error = XllError;
+            type Layers = ();
+            type AsyncExecutor = crate::BuiltinAsyncExecutor;
+
+            fn open(_: &OpenContext<Self>) -> crate::OpenResult<Self> {
+                unreachable!("the test publishes its isolated runtime directly")
+            }
+        }
+
+        let runtime = Box::leak(Box::new(Runtime::<AsyncCloseAddin>::new()));
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, (), ());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        runtime
+            .start_async(
+                crate::BuiltinAsyncExecutor::new(crate::BuiltinExecutorConfig::new()),
+                crate::AsyncTaskLimit::DEFAULT,
+            )
+            .unwrap();
+        let mut journal = crate::registration::HostMutationJournal::default();
+        journal.record_registrations([crate::registration::RegistrationId {
+            id: 1.0,
+            excel_name: "TEST.CLOSE.ORDER",
+        }]);
+        runtime.merge_host_for_test(journal);
+
+        let _callback_guard = crate::test_callback::lock();
+        crate::test_callback::install();
+        crate::test_callback::reset();
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let mut bytes = vec![1_u8, 2, 3, 4];
+        let mut handle = XLOPER12 {
+            value: XLOPER12Value {
+                big_data: XLOPER12BigData {
+                    handle: XLOPER12BigDataHandle {
+                        data: bytes.as_mut_ptr(),
+                    },
+                    byte_count: bytes.len() as i32,
+                },
+            },
+            xltype: XLTYPE_BIG_DATA,
+        };
+        // SAFETY: `handle` is a valid, stack-local XLOPER12 constructed above.
+        unsafe {
+            crate::async_udf::async_udf_boundary_named(
+                runtime,
+                "test_async_close_order",
+                "TEST.ASYNC.CLOSE.ORDER",
+                &mut handle,
+                move |_, _, _| {
+                    Ok(async move {
+                        started_tx.send(()).unwrap();
+                        std::future::pending::<()>().await;
+                        Ok::<_, XllError>(123.0)
+                    })
+                },
+            );
+        }
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("async close-order task did not start");
+
+        crate::test_callback::set_terminal(XLF_UNREGISTER, XLRET_ABORT);
+        assert_eq!(host_auto_close::<AsyncCloseAddin>(runtime), 1);
+        assert_eq!(
+            runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
+        assert_eq!(
+            crate::test_callback::callback_order(),
+            vec![XL_ASYNC_RETURN, XLF_UNREGISTER, XL_FREE]
+        );
+        assert_eq!(crate::test_callback::async_return_calls(), 1);
+        assert_eq!(crate::test_callback::total_calls(), 3);
+        // The test intentionally stops at the quarantine boundary after a
+        // terminal unregister. Restore the RTD test epoch for later cases;
+        // ingress is already sealed and must remain sealed until the next
+        // Runtime::begin_open.
+        #[cfg(any(feature = "rtd", feature = "handles"))]
+        if let Some(rtd) = crate::module_runtime::global().rtd() {
+            rtd.begin_open();
+        }
+        runtime.release_test_module_lease();
+    }
+
+    #[cfg(all(feature = "rtd", feature = "handles"))]
+    mod rtd_handle_order_tests {
+        use super::*;
+        use crate::XllResult;
+
+        struct OrderedClose;
+
+        struct OrderedState {
+            events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        }
+
+        struct OrderedHandle {
+            events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        }
+
+        struct OrderedSubscription {
+            events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        }
+
+        // SAFETY: test subscription records ordering in arc-mutex.
+        unsafe impl crate::subscription::RtdSubscription for OrderedSubscription {
+            fn request_cancel(&self) {}
+
+            fn disconnect_and_wait(self) -> XllResult<()> {
+                self.events.lock().unwrap().push("subscription");
+                Ok(())
+            }
+        }
+
+        struct OrderedSource {
+            events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        }
+
+        // SAFETY: this source does not retain or use the sink.
+        unsafe impl crate::subscription::RtdSource for OrderedSource {
+            type Value = f64;
+            type Subscription = OrderedSubscription;
+
+            fn subscribe(
+                &self,
+                _topic: &crate::subscription::RtdTopic,
+                _sink: crate::subscription::RtdSink<Self::Value>,
+            ) -> XllResult<Self::Subscription> {
+                Ok(OrderedSubscription {
+                    events: std::sync::Arc::clone(&self.events),
+                })
+            }
+        }
+
+        impl Drop for OrderedHandle {
+            fn drop(&mut self) {
+                self.events.lock().unwrap().push("handle");
+            }
+        }
+
+        impl crate::handle::ExcelHandleObject for OrderedHandle {}
+
+        impl Addin for OrderedClose {
+            #[cfg(feature = "rtd")]
+            type RtdSubscription = OrderedSubscription;
+            #[cfg(feature = "rtd")]
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+            type SharedState = ();
+            type LifecycleState = OrderedState;
+            type Error = XllError;
+            type Layers = ();
+            #[cfg(feature = "async")]
+            type AsyncExecutor = crate::NoAsyncExecutor;
+
+            fn open(
+                _context: &OpenContext<Self>,
+            ) -> Result<
+                crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+                Self::Error,
+            > {
+                unreachable!()
+            }
+
+            fn cleanup(
+                state: &mut Self::LifecycleState,
+                _: &mut crate::shutdown::CleanupReporter<'_>,
+            ) {
+                state.events.lock().unwrap().push("state");
+            }
+        }
+
+        #[test]
+        fn runtime_owned_subscriptions_and_handles_drop_before_addin_state_closes() {
+            let runtime = Runtime::<OrderedClose>::new();
+            let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let open_attempt = runtime.begin_open().unwrap();
+            let (arena, source) = crate::subscription::SourceArena::with_source(
+                open_attempt.attempt_id().into_runtime_generation(),
+                OrderedSource {
+                    events: std::sync::Arc::clone(&events),
+                },
+            )
+            .unwrap();
+            let mut open_attempt = runtime.publish_with_lifecycle_and_sources(
+                open_attempt,
+                (),
+                OrderedState {
+                    events: std::sync::Arc::clone(&events),
+                },
+                (),
+                arena,
+            );
+            runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+            runtime
+                .with_formula_handle_service(|handles| {
+                    handles
+                        .prepare(crate::handle::test_topic_key("ordered"), || {
+                            Ok(OrderedHandle {
+                                events: std::sync::Arc::clone(&events),
+                            })
+                        })
+                        .unwrap();
+                })
+                .unwrap();
+            runtime
+                .with_subscriptions(|subscriptions| {
+                    // SAFETY: `subscriptions` is owned by `runtime` which outlives this test closure.
+                    let server = unsafe {
+                        subscriptions
+                            .register_server(
+                                crate::subscription::ServerGeneration::new(1)
+                                    .expect("non-zero test server generation"),
+                            )
+                            .unwrap()
+                    };
+                    let prepared = subscriptions
+                        .prepare(
+                            &source,
+                            crate::subscription::RtdTopic::single("ordered")
+                                .unwrap()
+                                .borrowed(),
+                        )
+                        .unwrap();
+                    let id = prepared.id();
+                    prepared.commit();
+                    let conn = subscriptions
+                        .connect_transaction(&server, crate::subscription::TopicId(1), id)
+                        .unwrap();
+                    conn.commit().unwrap();
+                    let _ = server;
+                })
+                .unwrap();
+
+            assert_eq!(host_auto_close::<OrderedClose>(&runtime), 1);
+            assert_eq!(*events.lock().unwrap(), ["subscription", "handle", "state"]);
+        }
+    }
+
+    struct StagedRaceState {
+        quiesced: std::sync::Arc<AtomicUsize>,
+        cleaned: std::sync::Arc<AtomicUsize>,
+        dropped: std::sync::Arc<AtomicUsize>,
+        quiesce_entered: Option<std::sync::mpsc::Sender<()>>,
+        quiesce_release: Option<std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
+    }
+
+    impl Drop for StagedRaceState {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct StagedRaceAddin;
+
+    impl Addin for StagedRaceAddin {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ();
+        type LifecycleState = StagedRaceState;
+        type Error = XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(
+            _context: &OpenContext<Self>,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            unreachable!()
+        }
+
+        fn quiesce(
+            _: &mut Self::SharedState,
+            state: &mut Self::LifecycleState,
+        ) -> Result<(), Self::Error> {
+            state.quiesced.fetch_add(1, Ordering::SeqCst);
+            if let Some(entered) = state.quiesce_entered.take() {
+                let _ = entered.send(());
+            }
+            if let Some(release) = state.quiesce_release.as_ref() {
+                let _ = release.lock().unwrap().recv();
+            }
+            Ok(())
+        }
+
+        fn cleanup(state: &mut Self::LifecycleState, _: &mut crate::shutdown::CleanupReporter<'_>) {
+            state.cleaned.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn close_reclaims_staged_opening_generation_when_finish_open_loses_race() {
+        let fixture = crate::runtime::StaticTestRuntime::<StagedRaceAddin>::new();
+        let runtime = fixture.runtime();
+        let quiesced = std::sync::Arc::new(AtomicUsize::new(0));
+        let cleaned = std::sync::Arc::new(AtomicUsize::new(0));
+        let dropped = std::sync::Arc::new(AtomicUsize::new(0));
+
+        let (quiesce_entered_tx, _quiesce_entered_rx) = std::sync::mpsc::channel();
+        let (quiesce_release_tx, quiesce_release_rx) = std::sync::mpsc::channel();
+        let open_attempt = runtime.begin_open().unwrap();
+        let state = StagedRaceState {
+            quiesced: std::sync::Arc::clone(&quiesced),
+            cleaned: std::sync::Arc::clone(&cleaned),
+            dropped: std::sync::Arc::clone(&dropped),
+            quiesce_entered: Some(quiesce_entered_tx),
+            quiesce_release: Some(std::sync::Arc::new(std::sync::Mutex::new(
+                quiesce_release_rx,
+            ))),
+        };
+        let mut open_attempt = runtime.publish_with_lifecycle(open_attempt, (), state, ());
+
+        let close_runtime = runtime;
+        let (close_started_tx, close_started_rx) = std::sync::mpsc::channel();
+        let (close_release_tx, close_release_rx) = std::sync::mpsc::channel();
+        let close_waiter = std::thread::spawn(move || {
+            let removal_attempt = close_runtime
+                .begin_final_removal()
+                .expect("final close must acquire after open rejection");
+            close_started_tx.send(()).unwrap();
+            close_release_rx.recv().unwrap();
+            drop(removal_attempt);
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while runtime.phase() != crate::lifecycle::LifecyclePhase::Closing
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
+        assert!(runtime.finish_open(&mut open_attempt, Vec::new()).is_err());
+        close_started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        close_release_tx.send(()).unwrap();
+        close_waiter.join().unwrap();
+        quiesce_release_tx.send(()).unwrap();
+        assert_eq!(host_auto_remove::<StagedRaceAddin>(runtime), 1);
+
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert_eq!(quiesced.load(Ordering::SeqCst), 1);
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(runtime.take_current_generation().is_none());
+        assert!(!runtime.has_opening_generation());
+    }
+
+    struct PanicLayersState {
+        quiesced: std::sync::Arc<AtomicUsize>,
+        cleaned: std::sync::Arc<AtomicUsize>,
+        dropped: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl Drop for PanicLayersState {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct PanicLayersAddin;
+
+    impl Addin for PanicLayersAddin {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ();
+        type LifecycleState = PanicLayersState;
+        type Error = XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(
+            _context: &OpenContext<Self>,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            unreachable!()
+        }
+
+        fn quiesce(
+            _: &mut Self::SharedState,
+            state: &mut Self::LifecycleState,
+        ) -> Result<(), Self::Error> {
+            state.quiesced.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn cleanup(state: &mut Self::LifecycleState, _: &mut crate::shutdown::CleanupReporter<'_>) {
+            state.cleaned.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn complete_opening_generation_restores_for_rollback() {
+        let runtime = Runtime::<PanicLayersAddin>::new();
+        let quiesced = std::sync::Arc::new(AtomicUsize::new(0));
+        let cleaned = std::sync::Arc::new(AtomicUsize::new(0));
+        let dropped = std::sync::Arc::new(AtomicUsize::new(0));
+
+        let open_attempt = runtime.begin_open().unwrap();
+        let state = PanicLayersState {
+            quiesced: std::sync::Arc::clone(&quiesced),
+            cleaned: std::sync::Arc::clone(&cleaned),
+            dropped: std::sync::Arc::clone(&dropped),
+        };
+        let open_attempt = runtime.publish_with_lifecycle(open_attempt, (), state, ());
+        assert!(runtime.has_opening_generation());
+
+        assert!(open_attempt.fail_for_test().requires_rollback());
+        let mut callbacks = HostCallbackSession::new();
+        let lifecycle = lifecycle_access(&runtime);
+        let outcome = rollback_open::<PanicLayersAddin>(
+            &runtime,
+            &lifecycle,
+            &mut callbacks,
+            active_runtime_generation(&runtime),
+        );
+        assert!(outcome.is_finalized());
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+
+        assert_eq!(quiesced.load(Ordering::SeqCst), 1);
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(!runtime.has_opening_generation());
+    }
+}

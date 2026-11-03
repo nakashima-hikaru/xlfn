@@ -1,0 +1,20 @@
+{
+  "initial": "initial",
+  "events": [
+    {
+      "beginOpen": {
+        "sampledEpoch": 0,
+        "attempt": 1
+      }
+    },
+    "requestFinalClose",
+    {
+      "quarantineOpen": {
+        "attempt": 1,
+        "reason": "boundaryPanic"
+      }
+    }
+  ],
+  "trace_truncated": false,
+  "outcome": "quarantined"
+}

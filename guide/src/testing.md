@@ -1,0 +1,135 @@
+# Test your add-in
+
+Testing an xlfn add-in typically involves two levels: fast unit tests for
+your calculation logic using standard `cargo test`, and artifact verification
+using `cargo xlfn check` followed by validation in Excel.
+
+## Unit test calculation logic
+
+`#[excel_function]` converts Excel values to Rust types and delegates to your
+function. To keep calculations easily testable without mock Excel environments,
+keep the core computation in pure Rust functions:
+
+```rust
+# pub struct GuideAddin;
+# #[xlfn::excel_addin(name = "Guide example", id = "guide-example", category = "Guide")]
+# impl xlfn::Addin for GuideAddin {
+#     type SharedState = ();
+#     type LifecycleState = ();
+#     type Error = xlfn::XllError;
+#     type Layers = ();
+#     fn open(_: &xlfn::OpenContext<Self>) -> xlfn::XllResult<xlfn::Opened<()>> {
+#         Ok(xlfn::Opened::new(()))
+#     }
+# }
+# fn main() { assert_eq!(compute_hypot(3.0, 4.0), 5.0); }
+# use xlfn::prelude::*;
+pub fn compute_hypot(x: f64, y: f64) -> f64 {
+    x.hypot(y)
+}
+
+#[excel_function(name = "MATH.HYPOT", thread_safe)]
+pub fn hypot(x: f64, y: f64) -> f64 {
+    compute_hypot(x, y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_hypot;
+
+    #[test]
+    fn test_hypot() {
+        assert_eq!(compute_hypot(3.0, 4.0), 5.0);
+    }
+}
+```
+
+Pure Rust functions can be tested on any platform with `cargo test`.
+Because pure unit tests do not exercise Excel's argument conversion or C API
+boundary, verify the integrated XLL artifact as well.
+
+## Verify the XLL artifact with `cargo xlfn check`
+
+`cargo xlfn check` verifies the built binary and bundle without starting Excel.
+Run it for your target architectures:
+
+```powershell
+cargo xlfn check --target x86_64-pc-windows-msvc
+cargo xlfn check --target i686-pc-windows-msvc
+```
+
+This checks:
+
+- PE architecture matching the target (64-bit vs 32-bit);
+- Required Excel exports and symbol decorations (including x86 stdcall);
+- Embedded registration metadata;
+- Packaged companion files and CRT dependency closure.
+
+For more details on building and checking artifacts, see
+[Build, validate, and load](build-validation.md).
+
+## Validate an async executor adapter
+
+Test executor reservation rejection, task destruction without a first poll,
+cancellation, and shutdown after tasks finish. Task registry accounting must
+reach zero before executor shutdown releases its resources. Test failed open
+and registration rollback as well as normal close.
+
+For xlfn development, `just test-async` checks the executor-independent API and
+`just test-async-builtin` additionally checks the polling pool. `just miri-async`
+checks registry ownership with the ordinary and Tree Borrows models;
+`just miri-async-handles` checks scoped handle futures. Strict provenance checks
+cover calculation-pin reclamation separately. They do not qualify the full
+blocking shutdown path, because the current `parking_lot` dependency reconstructs
+pointers from integers in its lock wait implementation.
+
+`just typestate` compiles valid and invalid internal lifecycle callers against a
+temporary copy of the current sources. It checks that calculation drain requires
+closed, drained admission; registry close requires cancellation and task drain;
+and connection commit requires installation. Server termination requires a
+cancellation request before finishing and retains that request's result in its
+owner. The termination coordinator grants one consuming completion authority;
+abandonment publishes failure to its waiters. Consumed capabilities cannot be
+reused, and sibling modules cannot directly mutate lifecycle state. Typed pending
+handles retain their exact payload type through publication, including function
+type subtyping; ready input arguments cannot forge a deferred value. Teardown
+stages must carry their recovery authority and require callback close, host
+detachment, and add-in quiescence before sealing services. Removal consumes its
+initial owner into that transaction. Cache endpoint memoization requires
+matching endpoint and pointer types. Unload policy is fixed in the runtime type;
+the physical policy requires the add-in's physical-unload contract and cannot
+be substituted for the logical policy. Each invalid fixture must produce its
+specified diagnostic at the marked source line. The checks keep these APIs
+private and cover async, RTD, handles, and cache features. Fetch the workspace
+dependencies before running this offline check on a fresh checkout. Open commit
+requires initialized service inputs and installed lifecycle state. Async delivery
+consumes its pending response, and RTD publish termination requires a drained
+capability tied to the same publish core. Windows COM start fixtures require
+callback publication before commit. They run on Windows CI and are explicitly
+skipped on other hosts unless a Windows `--target` is selected. These checks
+compile code without executing Excel.
+
+Additional fixtures require executor publication readers and tasks to drain
+before shutdown, bind handle seals to their originating registry, and make
+undrained module retention terminal. Cache leader completion and channel permit
+transfer each consume their owner. RTD worker variants retain the payload for
+their state, including the thread identity needed to reject self-join while
+another caller is already joining. Runtime regressions also check abandonment,
+retry ownership, producer destruction, and permit lifetime.
+
+## Test in Excel
+
+Artifact checks verify binary structure, but end-to-end worksheet behavior
+requires loading the add-in into Excel:
+
+1. Build the package:
+   ```powershell
+   cargo xlfn package --target x86_64-pc-windows-msvc
+   ```
+2. In Excel, load the `.xll` via **File → Options → Add-ins → Excel Add-ins → Browse**.
+3. Verify worksheet calls:
+   - Call your functions with valid inputs and confirm expected outputs.
+   - Test invalid inputs and boundary cases to confirm appropriate Excel error
+     codes (`#VALUE!`, `#NUM!`, `#N/A`).
+   - For stateful, async, or RTD functions, verify that recalculation, updates,
+     and add-in unload behave cleanly.

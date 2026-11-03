@@ -1,0 +1,30 @@
+use xlfn::prelude::*;
+
+struct State;
+
+struct PhysicalUnloadAddin;
+
+#[excel_addin(
+    name = "Physical Unload",
+    id = "physical-unload",
+    category = "Test",
+    physical_unload
+)]
+impl Addin for PhysicalUnloadAddin {
+    type SharedState = State;
+    type LifecycleState = ();
+    type Error = XllError;
+    type Layers = ();
+
+    fn open(
+        _: &OpenContext<Self>,
+    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+        Ok(Opened::new(State))
+    }
+}
+
+// SAFETY: this compile fixture represents an add-in that synchronously stops
+// every application-owned executable source before physical unload.
+unsafe impl xlfn::PhysicallyUnloadableAddin for PhysicalUnloadAddin {}
+
+fn main() {}

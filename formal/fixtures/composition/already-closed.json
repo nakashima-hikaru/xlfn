@@ -1,0 +1,8 @@
+{
+  "initial": "initial",
+  "events": [
+    "requestFinalClose"
+  ],
+  "trace_truncated": false,
+  "outcome": "returned_success"
+}

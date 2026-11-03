@@ -1,0 +1,5 @@
+error[E0433]: cannot find `sys` in `xlfn`
+ --> tests/ui/fail/sys_module_is_not_public.rs:2:23
+  |
+2 |     let _: *mut xlfn::sys::XLOPER12 = std::ptr::null_mut();
+  |                       ^^^ could not find `sys` in `xlfn`

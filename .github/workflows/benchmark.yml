@@ -1,0 +1,174 @@
+name: Benchmarks
+
+"on":
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - closed
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+
+concurrency:
+  group: benchmarks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark-lint:
+    name: Benchmark lint
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    runs-on: windows-2025
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install just
+        uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d # just
+
+      - name: Lint benchmark targets
+        shell: bash
+        run: just bench-check
+
+  benchmark:
+    name: Criterion benchmarks
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    runs-on: windows-2025
+    env:
+      BENCHER_TESTBED: github-windows-2025
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install just
+        uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d # just
+
+      - name: Install Bencher CLI
+        uses: bencherdev/bencher@24c333d7030390d2f3e130569386f4f1f8577113 # v0.6.15
+
+      - name: Check Bencher configuration
+        id: bencher-config
+        shell: bash
+        env:
+          BENCHER_API_KEY: ${{ secrets.BENCHER_API_KEY }}
+          BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+        run: |
+          if [[ -n "$BENCHER_API_KEY" && -n "$BENCHER_PROJECT" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Set the BENCHER_API_KEY secret and BENCHER_PROJECT repository variable to publish benchmark history."
+          fi
+
+      - name: Track benchmarks with Bencher (branch / nightly)
+        if: steps.bencher-config.outputs.enabled == 'true' && github.event_name != 'pull_request'
+        shell: bash
+        env:
+          BENCHER_API_KEY: ${{ secrets.BENCHER_API_KEY }}
+          BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bencher run \
+            --project "$BENCHER_PROJECT" \
+            --key "$BENCHER_API_KEY" \
+            --branch "$GITHUB_REF_NAME" \
+            --testbed "$BENCHER_TESTBED" \
+            --adapter rust_criterion \
+            --github-actions "$GITHUB_TOKEN" \
+            --threshold-measure latency \
+            --threshold-test t_test \
+            --threshold-min-sample-size 10 \
+            --threshold-max-sample-size 30 \
+            --threshold-upper-boundary 0.99 \
+            --thresholds-reset \
+            --error-on-alert \
+            --ci-only-on-alert \
+            "just bench"
+
+      - name: Track PR benchmarks with Bencher
+        if: steps.bencher-config.outputs.enabled == 'true' && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BENCHER_API_KEY: ${{ secrets.BENCHER_API_KEY }}
+          BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bencher run \
+            --project "$BENCHER_PROJECT" \
+            --key "$BENCHER_API_KEY" \
+            --branch "$GITHUB_HEAD_REF" \
+            --start-point "$GITHUB_BASE_REF" \
+            --start-point-hash "${{ github.event.pull_request.base.sha }}" \
+            --start-point-clone-thresholds \
+            --start-point-reset \
+            --testbed "$BENCHER_TESTBED" \
+            --adapter rust_criterion \
+            --github-actions "$GITHUB_TOKEN" \
+            --error-on-alert \
+            --ci-only-on-alert \
+            "just bench-pr"
+
+      - name: Run PR benchmarks without publishing
+        if: steps.bencher-config.outputs.enabled != 'true' && github.event_name == 'pull_request'
+        shell: bash
+        run: just bench-pr
+
+      - name: Run benchmarks without publishing (main / nightly)
+        if: steps.bencher-config.outputs.enabled != 'true' && github.event_name != 'pull_request'
+        shell: bash
+        run: just bench
+
+  archive-closed-pr:
+    name: Archive closed PR benchmark branch
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Install Bencher CLI
+        uses: bencherdev/bencher@24c333d7030390d2f3e130569386f4f1f8577113 # v0.6.15
+
+      - name: Archive PR benchmark branch
+        shell: bash
+        env:
+          BENCHER_API_KEY: ${{ secrets.BENCHER_API_KEY }}
+          BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+          BENCHER_BRANCH: ${{ github.head_ref }}
+        run: |
+          if [[ -z "$BENCHER_API_KEY" || -z "$BENCHER_PROJECT" ]]; then
+            echo "Bencher is not configured; there is no branch to archive."
+            exit 0
+          fi
+          set +e
+          output="$(bencher archive \
+            --project "$BENCHER_PROJECT" \
+            --key "$BENCHER_API_KEY" \
+            --branch "$BENCHER_BRANCH" 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [[ $status -eq 0 ]]; then
+            exit 0
+          fi
+          if grep -Fq 'Could not find an entry with name' <<<"$output"; then
+            echo "::notice::Bencher branch '$BENCHER_BRANCH' does not exist; nothing to archive."
+            exit 0
+          fi
+          exit "$status"

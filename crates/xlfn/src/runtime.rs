@@ -1,0 +1,2242 @@
+#[cfg(any(test, feature = "bench-internals"))]
+use crate::XllError;
+use crate::XllResult;
+use crate::addin::PhysicallyUnloadableAddin;
+#[cfg(feature = "async")]
+use crate::generation::ExecutionLease;
+#[cfg(test)]
+use crate::generation::OpenAttemptId;
+#[cfg(any(test, feature = "bench-internals"))]
+use crate::generation::OpeningGeneration;
+#[cfg(test)]
+use crate::generation::ShutdownGeneration;
+use crate::generation::{ExecutionGeneration, RemovalEpoch, RuntimeGeneration};
+use crate::ingress::AdmittedExport;
+#[cfg(any(test, feature = "bench-internals"))]
+use crate::registration::RegistrationId;
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(not(feature = "async"))]
+use std::sync::atomic::Ordering;
+
+use crate::lifecycle::{
+    GenerationAdmission, HostLifecycleIntent, LifecycleCoordinator, LifecyclePhase,
+};
+
+mod capabilities;
+mod observer;
+mod open;
+pub(crate) use open::OpenBoundaryRequest;
+mod open_txn;
+mod orchestration;
+mod recovery;
+mod residency;
+pub(crate) use residency::{OpenResidency, ResidencyRelease};
+mod rollback;
+mod shutdown;
+#[cfg(not(feature = "async"))]
+pub(crate) use shutdown::AsyncStopped;
+#[cfg(any(feature = "rtd", feature = "handles"))]
+pub(crate) use shutdown::CompletedResourceCertificates;
+pub(crate) use shutdown::{AddinQuiescence, GenerationCallbacksDetached, GenerationReclaimed};
+pub(crate) use shutdown::{
+    CanonicalCompletion, CertifiedRetirement, CompletedResources, FinalRemoval, OpenRollback,
+};
+mod transactions;
+mod unload;
+
+pub use unload::{LogicalUnload, PhysicalUnload, UnloadPolicy};
+
+#[cfg(any(feature = "bench-internals", test,))]
+use crate::runtime_components::GenerationServices;
+#[cfg(test)]
+use crate::runtime_components::SealedGenerationServices;
+use crate::runtime_components::{
+    HostLedger, ModuleResidency, QuarantineReason, QuarantineVault, ReturnProtocol,
+};
+use capabilities::{OpenDeps, ShutdownDeps};
+use observer::RuntimeObserver;
+#[cfg(any(test, feature = "bench-internals"))]
+use open_txn::LifecycleInstalled;
+pub(crate) use open_txn::{Begun, OpeningTxn};
+use xlfn_kernel::thread_affine::{ThreadAffineAccess, ThreadAffineError, ThreadAffineSlot};
+
+pub struct Runtime<A: crate::Addin, P: UnloadPolicy<A> = LogicalUnload> {
+    lifecycle: LifecycleCoordinator<A>,
+    addin_lifecycle: ThreadAffineSlot<A::LifecycleState>,
+    host: HostLedger,
+    return_protocol: ReturnProtocol,
+    diagnostics: crate::diagnostics::DiagnosticHistory,
+    #[cfg(feature = "async")]
+    async_runtime: crate::async_udf::AsyncRuntime<A::AsyncExecutor>,
+    residency: ModuleResidency,
+    _unload_policy: std::marker::PhantomData<P>,
+    quarantine: QuarantineVault<A>,
+    observer: RuntimeObserver,
+}
+
+impl<A: crate::Addin> Runtime<A, LogicalUnload> {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::with_policy()
+    }
+
+    /// Constructs a runtime whose terminal close may release the DLL's
+    /// physical residency lease. The unsafe contract is carried by the
+    /// `PhysicallyUnloadableAddin` implementation.
+    #[must_use]
+    pub const fn new_with_physical_unload() -> Runtime<A, PhysicalUnload>
+    where
+        A: PhysicallyUnloadableAddin,
+    {
+        Runtime::with_policy()
+    }
+}
+
+pub(crate) type AddinLifecycleAccess<'runtime, A> =
+    ThreadAffineAccess<'runtime, <A as crate::Addin>::LifecycleState>;
+
+impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
+    pub(in crate::runtime) fn lifecycle_control(
+        &self,
+    ) -> crate::lifecycle::LifecycleControl<'_, A> {
+        crate::lifecycle::LifecycleControl::new(&self.lifecycle)
+    }
+
+    pub(crate) fn request_explicit_removal(&self) {
+        self.lifecycle_control().request_explicit_removal();
+    }
+
+    pub(crate) fn complete_explicit_removal(&self) {
+        self.lifecycle_control().complete_explicit_removal();
+    }
+
+    pub(crate) fn clear_host_intent(&self) {
+        self.lifecycle_control().clear_host_intent();
+    }
+
+    pub(crate) fn open_addin_boundary(
+        &self,
+        lifecycle: &AddinLifecycleAccess<'_, A>,
+        callbacks: crate::host_callback::HostCallbackSession,
+        request: OpenBoundaryRequest<'_>,
+        attempted: &mut Option<crate::generation::OpenAttemptId>,
+    ) -> i32 {
+        open::open_addin_boundary(self, lifecycle, callbacks, request, attempted)
+    }
+
+    pub(crate) fn remove_addin(
+        &self,
+        lifecycle: &AddinLifecycleAccess<'_, A>,
+        callbacks: &mut crate::host_callback::HostCallbackSession,
+    ) -> i32 {
+        transactions::remove_addin(self, lifecycle, callbacks)
+    }
+
+    pub(crate) fn quarantine_runtime(&self) {
+        recovery::quarantine_runtime(self);
+    }
+
+    pub(crate) fn open_deps(&self) -> OpenDeps<'_, A> {
+        OpenDeps::from_runtime(self)
+    }
+
+    pub(crate) fn shutdown_deps(&self) -> ShutdownDeps<'_, A> {
+        ShutdownDeps::from_runtime(self)
+    }
+
+    pub(crate) fn lifecycle_orchestrator(&self) -> orchestration::LifecycleOrchestrator<'_, A> {
+        orchestration::LifecycleOrchestrator::new(self.open_deps())
+    }
+
+    pub(crate) fn begin_open_if_epoch(
+        &self,
+        expected_removal_epoch: RemovalEpoch,
+    ) -> XllResult<OpeningTxn<'_, A, Begun<A>>> {
+        OpeningTxn::acquire(self.open_deps(), expected_removal_epoch)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_open(&self) -> XllResult<OpeningTxn<'_, A, Begun<A>>> {
+        self.begin_open_if_epoch(self.removal_epoch())
+    }
+
+    pub(crate) fn acquire_open_rollback(
+        &self,
+    ) -> orchestration::OpenRollbackAcquisition<shutdown::RemovalOwner<'_, A, shutdown::OpenRollback>>
+    {
+        shutdown::RemovalOwner::acquire_rollback(self.shutdown_deps())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_final_removal(
+        &self,
+    ) -> Option<crate::runtime::shutdown::RemovalOwner<'_, A, shutdown::FinalRemoval>> {
+        shutdown::RemovalOwner::acquire_final(self.shutdown_deps())
+    }
+}
+
+impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
+    /// Constructs the resources for a statically selected, sealed policy.
+    const fn with_policy() -> Self {
+        Self {
+            lifecycle: LifecycleCoordinator::new(),
+            addin_lifecycle: ThreadAffineSlot::new(),
+            host: HostLedger::new(),
+            return_protocol: ReturnProtocol::new(),
+            diagnostics: crate::diagnostics::DiagnosticHistory::new(),
+            #[cfg(feature = "async")]
+            async_runtime: crate::async_udf::AsyncRuntime::new(),
+            residency: ModuleResidency::new(),
+            _unload_policy: std::marker::PhantomData,
+            quarantine: QuarantineVault::new(),
+            observer: RuntimeObserver::new(),
+        }
+    }
+
+    pub(crate) fn observer(&self) -> &RuntimeObserver {
+        &self.observer
+    }
+
+    #[cfg(test)]
+    pub(crate) fn composition_trace(&self) -> &crate::composition_refinement::CompositionTrace {
+        self.observer.composition_trace()
+    }
+
+    // This is called by the explicit removal boundary after the terminal
+    // teardown has returned AlreadyClosed; begin_final_removal only records its
+    // lifecycle request and does not claim the host call returned successfully.
+    pub(crate) fn record_composition_already_closed_return(&self) {
+        self.observer.mark_return_pending();
+        self.observer.finish_return();
+    }
+
+    #[must_use]
+    pub fn phase(&self) -> LifecyclePhase {
+        self.lifecycle.observed_phase()
+    }
+
+    /// Returns this runtime's bounded, synchronous worksheet failure history.
+    ///
+    /// History survives logical close and reopening of this runtime. Reading it
+    /// never changes UDF admission, calculation state, or asynchronous delivery.
+    #[must_use]
+    pub fn diagnostics(&self) -> &crate::diagnostics::DiagnosticHistory {
+        &self.diagnostics
+    }
+
+    pub(crate) fn host_intent(&self) -> HostLifecycleIntent {
+        self.lifecycle.access().host_intent()
+    }
+
+    /// Acquires the DLL's self-reference before a generated `xlAutoOpen`
+    /// enters the logical opening transaction.
+    #[cfg(test)]
+    pub(crate) fn ensure_module_residency(&self, anchor: *const ()) -> XllResult<bool> {
+        self.residency
+            .ensure(anchor)
+            .map(|acquisition| acquisition.is_newly_acquired())
+    }
+
+    /// Attempts physical release after logical removal. Returns false while
+    /// a native event registration (including an uncertain one) or COM hold
+    /// requires the DLL. Normal close and failed-open cleanup share this guard.
+    #[cfg(test)]
+    pub(crate) fn test_release_module_residency(&self) -> XllResult<bool> {
+        self.residency.test_release()
+    }
+
+    #[cfg(all(
+        test,
+        any(not(target_os = "windows"), feature = "async", feature = "handles")
+    ))]
+    pub(crate) fn ensure_calculation_events(
+        &self,
+        host: &crate::registration::RegistrationHost<'_>,
+        has_async_functions: bool,
+    ) -> XllResult<()> {
+        self.residency
+            .ensure_calculation_events(host, has_async_functions)
+    }
+
+    #[cfg(any(test, feature = "lifecycle-diagnostics"))]
+    pub(crate) fn resident_event_count(&self) -> usize {
+        self.residency.resident_event_count()
+    }
+
+    pub(crate) fn physical_unload_enabled(&self) -> bool {
+        P::PHYSICAL
+    }
+
+    pub(crate) fn quiesce_addin(
+        &self,
+        shared: &mut A::SharedState,
+        lifecycle: &mut A::LifecycleState,
+    ) -> XllResult<()> {
+        P::quiesce(shared, lifecycle).map_err(crate::error::IntoXllError::into_xll_error)
+    }
+
+    #[cfg(any(
+        test,
+        feature = "rtd",
+        feature = "handles",
+        feature = "lifecycle-diagnostics"
+    ))]
+    pub(crate) fn module_residency_held(&self) -> bool {
+        self.residency.is_held()
+    }
+
+    pub(crate) fn quarantine_snapshot(&self) -> Vec<(Option<RuntimeGeneration>, QuarantineReason)> {
+        self.quarantine.snapshot()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_committed_generation(&self) -> Option<RuntimeGeneration> {
+        self.lifecycle.access().last_committed_generation()
+    }
+
+    pub(crate) fn protocol_generation(&self) -> Option<RuntimeGeneration> {
+        self.lifecycle.access().protocol_generation()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_attempt(&self) -> Option<OpenAttemptId> {
+        self.lifecycle.access().open_attempt()
+    }
+
+    pub(crate) fn removal_epoch(&self) -> RemovalEpoch {
+        RemovalEpoch::new(self.lifecycle.access().removal_epoch())
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn publish<'runtime>(
+        &self,
+        opening: OpeningTxn<'runtime, A, Begun<A>>,
+        state: A::SharedState,
+        layers: A::Layers,
+    ) -> OpeningTxn<'runtime, A, LifecycleInstalled<A>>
+    where
+        A::LifecycleState: Default,
+    {
+        self.publish_with_lifecycle(opening, state, Default::default(), layers)
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn publish_with_lifecycle<'runtime>(
+        &self,
+        opening: OpeningTxn<'runtime, A, Begun<A>>,
+        state: A::SharedState,
+        lifecycle_state: A::LifecycleState,
+        layers: A::Layers,
+    ) -> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
+        let access = self
+            .bind_addin_lifecycle()
+            .expect("test runtime binds its lifecycle thread");
+        let generation = opening.attempt_id().into_runtime_generation();
+        let transaction = opening
+            .attach_host(crate::host_callback::HostCallbackSession::new())
+            .begin_initialization()
+            .initialized(
+                lifecycle_state,
+                crate::runtime_components::GenerationServiceInputs::empty_for_generation(
+                    generation,
+                ),
+            );
+        let transaction = match transaction.stage_opening_generation(OpeningGeneration {
+            shared_state: state,
+            layers,
+            init_config: crate::addin::RuntimeConfig::new(),
+        }) {
+            Ok(transaction) => transaction,
+            Err((_error, transaction, _opening)) => {
+                drop(transaction);
+                panic!("test runtime must stage its opening generation");
+            }
+        };
+        match transaction.install_lifecycle(&access) {
+            Ok(transaction) => transaction,
+            Err((reason, transaction)) => {
+                drop(transaction);
+                panic!("test runtime must install its lifecycle state: {reason:?}");
+            }
+        }
+    }
+
+    #[cfg(all(
+        test,
+        feature = "rtd",
+        any(feature = "handles", not(target_os = "windows"))
+    ))]
+    pub(crate) fn publish_with_sources<'runtime>(
+        &self,
+        opening: OpeningTxn<'runtime, A, Begun<A>>,
+        state: A::SharedState,
+        layers: A::Layers,
+        sources: crate::subscription::SourceArena<
+            crate::addin::AddinSubscription<A>,
+            crate::addin::AddinSources<A>,
+        >,
+    ) -> OpeningTxn<'runtime, A, LifecycleInstalled<A>>
+    where
+        A::LifecycleState: Default,
+    {
+        let access = self
+            .bind_addin_lifecycle()
+            .expect("test runtime binds its lifecycle thread");
+        let transaction = opening
+            .attach_host(crate::host_callback::HostCallbackSession::new())
+            .begin_initialization()
+            .initialized(
+                Default::default(),
+                crate::runtime_components::GenerationServiceInputs::with_rtd_sources(sources),
+            );
+        let transaction = match transaction.stage_opening_generation(OpeningGeneration {
+            shared_state: state,
+            layers,
+            init_config: crate::addin::RuntimeConfig::new(),
+        }) {
+            Ok(transaction) => transaction,
+            Err((_error, transaction, _opening)) => {
+                drop(transaction);
+                panic!("test runtime must stage its opening generation");
+            }
+        };
+        match transaction.install_lifecycle(&access) {
+            Ok(transaction) => transaction,
+            Err((reason, transaction)) => {
+                drop(transaction);
+                panic!("test runtime must install its lifecycle state: {reason:?}");
+            }
+        }
+    }
+
+    #[cfg(all(test, feature = "rtd", feature = "handles"))]
+    pub(crate) fn publish_with_lifecycle_and_sources<'runtime>(
+        &self,
+        opening: OpeningTxn<'runtime, A, Begun<A>>,
+        state: A::SharedState,
+        lifecycle_state: A::LifecycleState,
+        layers: A::Layers,
+        sources: crate::subscription::SourceArena<
+            crate::addin::AddinSubscription<A>,
+            crate::addin::AddinSources<A>,
+        >,
+    ) -> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
+        let access = self
+            .bind_addin_lifecycle()
+            .expect("test runtime binds its lifecycle thread");
+        let transaction = opening
+            .attach_host(crate::host_callback::HostCallbackSession::new())
+            .begin_initialization()
+            .initialized(
+                lifecycle_state,
+                crate::runtime_components::GenerationServiceInputs::with_rtd_sources(sources),
+            );
+        let transaction = match transaction.stage_opening_generation(OpeningGeneration {
+            shared_state: state,
+            layers,
+            init_config: crate::addin::RuntimeConfig::new(),
+        }) {
+            Ok(transaction) => transaction,
+            Err((_error, transaction, _opening)) => {
+                drop(transaction);
+                panic!("test runtime must stage its opening generation");
+            }
+        };
+        match transaction.install_lifecycle(&access) {
+            Ok(transaction) => transaction,
+            Err((reason, transaction)) => {
+                drop(transaction);
+                panic!("test runtime must install its lifecycle state: {reason:?}");
+            }
+        }
+    }
+
+    pub(crate) fn bind_addin_lifecycle(
+        &self,
+    ) -> Result<AddinLifecycleAccess<'_, A>, ThreadAffineError> {
+        self.addin_lifecycle.bind_current()
+    }
+
+    pub(in crate::runtime) fn with_addin_lifecycle<R>(
+        &self,
+        access: &AddinLifecycleAccess<'_, A>,
+        operation: impl FnOnce(&mut A::LifecycleState) -> R,
+    ) -> Result<R, ThreadAffineError> {
+        self.addin_lifecycle.with_mut(access, operation)
+    }
+
+    #[cfg(all(test, feature = "handles"))]
+    pub(in crate::runtime) fn take_addin_lifecycle(
+        &self,
+        access: &AddinLifecycleAccess<'_, A>,
+    ) -> Result<capabilities::TakenLifecycle<'_, A>, capabilities::LifecycleFailure<'_, A>> {
+        self.shutdown_deps().take_addin_lifecycle(access)
+    }
+
+    pub(in crate::runtime) fn release_empty_addin_lifecycle(
+        &self,
+        access: &AddinLifecycleAccess<'_, A>,
+    ) -> Result<(), ThreadAffineError> {
+        self.shutdown_deps().release_empty_addin_lifecycle(access)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_addin_lifecycle_for_test<R>(
+        &self,
+        access: &AddinLifecycleAccess<'_, A>,
+        operation: impl FnOnce(&mut A::LifecycleState) -> R,
+    ) -> Result<R, ThreadAffineError> {
+        self.with_addin_lifecycle(access, operation)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn has_opening_generation(&self) -> bool {
+        self.lifecycle.has_opening_generation()
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn has_current_generation(&self) -> bool {
+        self.lifecycle.has_current_generation()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_current_generation(&self) -> Option<Box<ExecutionGeneration<A>>> {
+        self.lifecycle.take_current_generation()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_generation_for_shutdown(&self) -> Option<ShutdownGeneration<A>> {
+        self.lifecycle.take_generation_for_shutdown()
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn finish_open(
+        &self,
+        attempt: &mut OpeningTxn<'_, A, LifecycleInstalled<A>>,
+        registrations: Vec<RegistrationId>,
+    ) -> XllResult<()> {
+        attempt.finish_in_place(registrations)
+    }
+
+    #[cfg(all(
+        test,
+        any(not(target_os = "windows"), feature = "async", feature = "handles")
+    ))]
+    pub(crate) fn merge_host_for_test(&self, journal: crate::registration::HostMutationJournal) {
+        self.host.merge(journal);
+    }
+
+    #[cfg(all(
+        test,
+        any(not(target_os = "windows"), feature = "async", feature = "handles")
+    ))]
+    pub(crate) fn metadata_debt_count_for_test(&self) -> usize {
+        self.host.metadata_debt_snapshot().len()
+    }
+
+    pub(crate) fn enter<'call>(
+        &'call self,
+        ingress: &'call AdmittedExport<'call>,
+    ) -> XllResult<CallGuard<'call, A>> {
+        ingress.assert_active();
+        let admission = self.lifecycle.try_admit()?;
+        let observation = self.observer().observe_call();
+        Ok(CallGuard {
+            diagnostics: &self.diagnostics,
+            admission,
+            _ingress: ingress,
+            _observation: observation,
+        })
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn enter_async<'call>(
+        &'static self,
+        ingress: &'call AdmittedExport<'call>,
+    ) -> XllResult<AsyncCallGuard<'call, A>> {
+        ingress.assert_active();
+        let admission = self.lifecycle.try_admit_async()?;
+        Ok(AsyncCallGuard {
+            async_runtime: &self.async_runtime,
+            returns: &self.return_protocol,
+            call: CallGuard {
+                diagnostics: &self.diagnostics,
+                admission,
+                _ingress: ingress,
+                _observation: self.observer().observe_call(),
+            },
+        })
+    }
+
+    #[inline]
+    #[cfg(test)]
+    pub(crate) fn outstanding_return_obligations(&self) -> usize {
+        self.return_protocol.outstanding_obligations()
+    }
+
+    #[inline]
+    pub(crate) fn enter_return_producer(
+        &'static self,
+    ) -> Option<crate::return_abi::ReturnProducerGuard<'static>> {
+        self.return_protocol.enter_producer()
+    }
+
+    #[inline]
+    #[cfg(test)]
+    pub(crate) fn wait_for_returns(&self) {
+        self.return_protocol.wait_for_returns();
+    }
+
+    #[inline]
+    #[cfg(test)]
+    pub(crate) fn returns_are_quiescent(&self) -> bool {
+        self.return_protocol.returns_are_quiescent()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disable_trace_for_test(&self) {
+        self.observer().disable_for_test();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shutdown_trace_json(&self) -> String {
+        self.observer()
+            .trace_handle()
+            .trace_json()
+            .expect("shutdown trace is not active")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn composition_trace_json(&self) -> String {
+        self.composition_trace()
+            .trace_json()
+            .expect("composition trace serialization")
+    }
+}
+
+impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
+    pub(crate) fn next_call_id(&self) -> u64 {
+        self.return_protocol.next_call_id()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn peek_next_call_id(&self) -> u64 {
+        self.return_protocol.peek_next_call_id()
+    }
+
+    pub(crate) fn calculation_id(&self) -> crate::execution::CalculationId {
+        #[cfg(feature = "async")]
+        {
+            self.async_runtime.current_epoch().into()
+        }
+        #[cfg(not(feature = "async"))]
+        {
+            crate::execution::CalculationId::new(
+                self.return_protocol.calculation_id.load(Ordering::Acquire),
+            )
+        }
+    }
+
+    pub(crate) fn finish_calculation(&self) {
+        #[cfg(feature = "async")]
+        let _ = self.async_runtime.advance_calculation();
+        #[cfg(not(feature = "async"))]
+        let _ = self.return_protocol.calculation_id.try_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| current.checked_add(1),
+        );
+    }
+
+    #[cfg(all(feature = "handles", any(test, feature = "bench-internals")))]
+    pub(crate) fn with_formula_handle_service<R>(
+        &self,
+        operation: impl FnOnce(&crate::handle::FormulaHandleService) -> R,
+    ) -> XllResult<R> {
+        self.lifecycle
+            .with_generation_services(|services| {
+                services
+                    .formula_handle_service()
+                    .map(|service| operation(&service))
+            })
+            .ok_or(XllError::Closing)?
+    }
+
+    #[cfg(any(feature = "bench-internals", all(test, feature = "rtd")))]
+    pub(crate) fn with_generation_services<R>(
+        &self,
+        operation: impl FnOnce(
+            &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+        ) -> R,
+    ) -> XllResult<R> {
+        self.lifecycle
+            .with_generation_services(operation)
+            .ok_or(XllError::Closing)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seal_generation_services(
+        &self,
+        subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
+    ) -> XllResult<SealedGenerationServices> {
+        SealedGenerationServices::seal_lifecycle(&self.lifecycle, subscriptions_stopped)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shutdown_handle_topics(&self) -> XllResult<()> {
+        self.lifecycle
+            .with_generation_services(GenerationServices::shutdown_handle_topics)
+            .unwrap_or(Ok(()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn finish_generation_services(
+        &self,
+        sealed: SealedGenerationServices,
+    ) -> XllResult<(
+        crate::shutdown::HandlesQuiescent,
+        crate::shutdown::SubscriptionsStopped,
+    )> {
+        sealed.finish()
+    }
+
+    #[inline]
+    #[cfg(all(
+        test,
+        feature = "rtd",
+        any(feature = "handles", not(target_os = "windows"))
+    ))]
+    pub(crate) fn with_subscriptions<R>(
+        &self,
+        operation: impl FnOnce(
+            &crate::subscription::SubscriptionRuntime<
+                crate::addin::AddinSubscription<A>,
+                crate::addin::AddinSources<A>,
+            >,
+        ) -> R,
+    ) -> XllResult<R> {
+        self.with_generation_services(|services| {
+            services
+                .rtd_call_access()
+                .read()
+                .map(|subscriptions| operation(&subscriptions))
+        })?
+    }
+
+    #[cfg(test)]
+    pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
+        #[cfg(not(feature = "rtd"))]
+        {
+            Ok(crate::excel_rtd_protocol::stopped_subscriptions(
+                self.protocol_generation(),
+            ))
+        }
+        #[cfg(feature = "rtd")]
+        {
+            let generation = self.protocol_generation();
+            let Some(result) = self
+                .lifecycle
+                .with_generation_services(|services| services.close_subscriptions(generation))
+            else {
+                #[cfg(test)]
+                {
+                    return Ok(crate::excel_rtd_protocol::stopped_subscriptions(generation));
+                }
+                #[cfg(not(test))]
+                {
+                    return Err(XllError::Closing);
+                }
+            };
+            result
+        }
+    }
+
+    #[cfg(all(test, feature = "async"))]
+    pub(crate) fn start_async(
+        &self,
+        executor: A::AsyncExecutor,
+        task_limit: crate::AsyncTaskLimit,
+    ) -> XllResult<()> {
+        self.async_runtime.start(executor, task_limit)
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn cancel_async(&self) {
+        self.async_runtime.cancel_current_calculation();
+    }
+
+    #[cfg(feature = "async")]
+    #[cfg(test)]
+    pub(crate) fn close_async(
+        &self,
+    ) -> XllResult<crate::shutdown::StopOutcome<crate::shutdown::AsyncStopped>> {
+        self.async_runtime.close()
+    }
+
+    #[cfg(all(test, feature = "async"))]
+    pub(crate) fn async_runtime(&self) -> &crate::async_udf::AsyncRuntime<A::AsyncExecutor> {
+        &self.async_runtime
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_test_module_lease(&self) {
+        drop(self.lifecycle.test_module_lease.lock().take());
+    }
+}
+
+impl<A: crate::Addin, P: UnloadPolicy<A>> Default for Runtime<A, P> {
+    fn default() -> Self {
+        Self::with_policy()
+    }
+}
+
+#[cfg(test)]
+impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
+    pub(crate) fn cleanup_test_runtime(&self) {
+        // A locally quarantined/unopened fixture does not own the global
+        // module epoch and must not close another test's active ingress.
+        let owns_module = self.lifecycle.test_module_lease.lock().is_some();
+        if owns_module && !matches!(self.phase(), LifecyclePhase::Closed) {
+            let ingress = crate::module_runtime::ingress();
+            if matches!(
+                ingress.phase(),
+                crate::ingress::PHASE_OPENING | crate::ingress::PHASE_OPEN
+            ) {
+                ingress.begin_close_with(|| {});
+            }
+            if ingress.phase() == crate::ingress::PHASE_CLOSING {
+                let _ = ingress.seal_and_drain();
+            }
+        }
+        drop(self.lifecycle.test_module_lease.lock().take());
+    }
+}
+
+#[cfg(test)]
+impl<A: crate::Addin, P: UnloadPolicy<A>> Drop for Runtime<A, P> {
+    fn drop(&mut self) {
+        self.cleanup_test_runtime();
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct StaticTestRuntime<A: crate::Addin, P: UnloadPolicy<A> = LogicalUnload> {
+    runtime: &'static Runtime<A, P>,
+}
+
+#[cfg(test)]
+impl<A: crate::Addin, P: UnloadPolicy<A>> StaticTestRuntime<A, P> {
+    pub(crate) fn new() -> Self {
+        let runtime = Box::leak(Box::new(Runtime::with_policy()));
+        Self { runtime }
+    }
+
+    pub(crate) fn from_static(runtime: &'static Runtime<A, P>) -> Self {
+        Self { runtime }
+    }
+
+    pub(crate) fn runtime(&self) -> &'static Runtime<A, P> {
+        self.runtime
+    }
+}
+
+#[cfg(test)]
+impl<A: crate::Addin, P: UnloadPolicy<A>> Drop for StaticTestRuntime<A, P> {
+    fn drop(&mut self) {
+        self.runtime.cleanup_test_runtime();
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) use super::open_txn::HostAttached;
+    pub(crate) use super::rollback::{active_runtime_generation, rollback_open};
+    pub(crate) use super::transactions::{
+        RemovalSuccess, initialize_addin, remove_addin, remove_addin_inner, rollback_active_open,
+    };
+}
+
+/// Async admission is available only from a process-lifetime runtime. Its
+/// private constructor retains the matching issuer inside the call admission.
+#[cfg(feature = "async")]
+pub(crate) struct AsyncCallGuard<'call, A: crate::Addin> {
+    call: CallGuard<'call, A>,
+    async_runtime: &'static crate::async_udf::AsyncRuntime<A::AsyncExecutor>,
+    returns: &'static crate::runtime_components::ReturnProtocol,
+}
+
+#[cfg(feature = "async")]
+impl<A: crate::Addin> AsyncCallGuard<'_, A> {
+    /// Task registration/cancellation and generation admission share the issuer
+    /// installed by enter_async; callers cannot substitute another registry.
+    pub(crate) fn async_runtime(
+        &self,
+    ) -> &'static crate::async_udf::AsyncRuntime<A::AsyncExecutor> {
+        self.async_runtime
+    }
+
+    pub(crate) fn next_call_id(&self) -> u64 {
+        self.returns.next_call_id()
+    }
+
+    pub(crate) fn try_execution_lease(&self) -> XllResult<ExecutionLease<A>> {
+        self.call.admission.try_execution_lease()
+    }
+}
+
+#[cfg(feature = "async")]
+impl<'call, A: crate::Addin> std::ops::Deref for AsyncCallGuard<'call, A> {
+    type Target = CallGuard<'call, A>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.call
+    }
+}
+
+pub struct CallGuard<'runtime, A: crate::Addin> {
+    diagnostics: &'runtime crate::diagnostics::DiagnosticHistory,
+    _ingress: &'runtime AdmittedExport<'runtime>,
+    admission: GenerationAdmission<'runtime, A>,
+    _observation: observer::CallObservation<'runtime>,
+}
+
+impl<A: crate::Addin> CallGuard<'_, A> {
+    pub(crate) fn diagnostics(&self) -> &crate::diagnostics::DiagnosticHistory {
+        self.diagnostics
+    }
+
+    #[must_use]
+    pub fn state(&self) -> &A::SharedState {
+        &self.generation().shared_state
+    }
+
+    #[must_use]
+    pub(crate) fn layers(&self) -> &A::Layers {
+        &self.generation().layers
+    }
+
+    #[cfg(feature = "handles")]
+    #[must_use]
+    pub(crate) fn handle_call_access(&self) -> crate::handle::FormulaHandleServiceResolver<'_> {
+        self.admission.services().handle_call_access()
+    }
+
+    #[cfg(feature = "rtd")]
+    #[must_use]
+    pub(crate) fn rtd_call_access(
+        &self,
+    ) -> crate::rtd::RtdGenerationAccess<
+        '_,
+        crate::addin::AddinSubscription<A>,
+        crate::addin::AddinSources<A>,
+    > {
+        self.admission.services().rtd_call_access()
+    }
+
+    fn generation(&self) -> &ExecutionGeneration<A> {
+        let generation = self.admission.generation();
+        let _ = generation.id();
+        generation
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::runtime::shutdown::{
+        FinalRemoval, OpenRollback, QuiescenceProof, RemovalClaimGuard, RemovalOwner,
+    };
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[derive(Clone)]
+    struct TestU32Addin;
+
+    impl crate::Addin for TestU32Addin {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = u32;
+        type LifecycleState = ();
+        type Error = XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(
+            _context: &crate::addin::OpenContext<Self>,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            Ok(crate::addin::Opened::new(0))
+        }
+    }
+
+    fn admitted_export() -> crate::ingress::AdmittedExport<'static> {
+        crate::module_runtime::ingress()
+            .enter_with(|| {})
+            .into_admitted()
+            .expect("test call enters during OPEN")
+    }
+
+    fn finish_test_close<A: crate::Addin>(
+        runtime: &Runtime<A, impl UnloadPolicy<A>>,
+        removal_attempt: RemovalOwner<'_, A, FinalRemoval>,
+    ) {
+        let (removal_attempt, module_closing) = removal_attempt.into_test_parts();
+        let drained = module_closing.seal_and_drain().unwrap();
+        let (module_quiescent, _exports) = drained.certify_for_test();
+        let module_epoch = module_quiescent.id();
+        let subscriptions_stopped = runtime
+            .close_subscriptions()
+            .expect("test subscriptions stop");
+        let _ = runtime.shutdown_handle_topics();
+        let sealed = runtime
+            .seal_generation_services(subscriptions_stopped)
+            .expect("test generation service seal");
+        let _ = runtime.finish_generation_services(sealed);
+        // This helper validates Runtime's close certificate in isolation. It
+        // deliberately does not synthesize lifecycle trace milestones; those
+        // are exercised by the real lifecycle close path.
+        runtime.disable_trace_for_test();
+        let _rtd =
+            crate::excel_rtd_protocol::wait_for_module_quiescence(runtime.module_residency_held())
+                .expect("RTD module quiescence");
+        let last_generation = runtime.lifecycle.access().last_committed_generation();
+        let certificate = removal_attempt
+            .certify::<FinalRemoval>(
+                QuiescenceProof::for_test(last_generation, module_epoch),
+                runtime.shutdown_deps(),
+            )
+            .map_err(|(error, _owner)| error)
+            .unwrap();
+        let (_witness, _removal_attempt) = certificate
+            .finish()
+            .unwrap_or_else(|(error, _certificate)| panic!("{error}"));
+        runtime.release_test_module_lease();
+    }
+
+    fn finish_test_open_rollback<'a, A: crate::Addin>(
+        runtime: &'a Runtime<A, impl UnloadPolicy<A>>,
+        rollback_attempt: RemovalOwner<'a, A, OpenRollback>,
+    ) -> RemovalClaimGuard<'a, A> {
+        let (rollback_attempt, module_closing) = rollback_attempt.into_test_parts();
+        let drained = module_closing.seal_and_drain().unwrap();
+        let (module_quiescent, _exports) = drained.certify_for_test();
+        let module_epoch = module_quiescent.id();
+        let certificate = rollback_attempt
+            .certify::<OpenRollback>(
+                QuiescenceProof::for_test(
+                    Some(crate::generation::RuntimeGeneration::new(1).unwrap()),
+                    module_epoch,
+                ),
+                runtime.shutdown_deps(),
+            )
+            .map_err(|(error, _owner)| error)
+            .unwrap();
+        let rollback_attempt = certificate
+            .finish()
+            .unwrap_or_else(|(error, _certificate)| panic!("{error}"));
+        runtime.release_test_module_lease();
+        rollback_attempt
+    }
+
+    pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct DrainPreparationAddin;
+
+    #[inline(never)]
+    fn drain_preparation_residency_anchor() {}
+
+    struct RetainedState {
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+        cleanups: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Drop for RetainedState {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    impl crate::Addin for DrainPreparationAddin {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = RetainedState;
+        type LifecycleState = RetainedState;
+        type Error = XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(
+            _: &crate::addin::OpenContext<Self>,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            unreachable!("drain tests publish their observed state directly")
+        }
+
+        fn cleanup(state: &mut RetainedState, _: &mut crate::shutdown::CleanupReporter<'_>) {
+            state.cleanups.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    fn assert_retained_drain<A: crate::Addin>(
+        runtime: &Runtime<A, impl UnloadPolicy<A>>,
+        epoch: crate::module_runtime::ModuleEpochId,
+    ) {
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        let access = runtime.lifecycle.access();
+        assert_eq!(access.module_epoch_id(), Some(epoch));
+        assert!(access.removal_attempt().is_none());
+        drop(access);
+        assert!(runtime.module_residency_held());
+        assert!(matches!(
+            runtime.lifecycle_control().take_module_cleanup_authority(),
+            crate::module_runtime::ModuleCleanupClaim::RetainedUndrained(retained) if retained == epoch
+        ));
+        assert_eq!(
+            crate::module_runtime::ingress().phase(),
+            crate::ingress::PHASE_CLOSING
+        );
+        assert!(!crate::excel_rtd_protocol::logical_quiescence_certified());
+    }
+
+    #[test]
+    fn export_drain_preparation_failure_retains_generation_without_retry() {
+        for wait in [1, 2] {
+            let fixture = StaticTestRuntime::<DrainPreparationAddin>::new();
+            let runtime = fixture.runtime();
+            let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let cleanups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let state = || RetainedState {
+                drops: Arc::clone(&drops),
+                cleanups: Arc::clone(&cleanups),
+            };
+            let opening = runtime.begin_open().unwrap();
+            let mut opening = runtime.publish_with_lifecycle(opening, state(), state(), ());
+            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            runtime
+                .ensure_module_residency(drain_preparation_residency_anchor as *const ())
+                .unwrap();
+            let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
+            let generation = runtime.last_committed_generation();
+            // The first failure must retain a genuinely live export. For the
+            // second, the first wait completes before preparation fails.
+            let entry =
+                (wait == 1).then(|| (admitted_export(), runtime.observer().observe_external()));
+            let call = entry
+                .as_ref()
+                .map(|(entry, _)| runtime.enter(entry).unwrap());
+            let fault = crate::ingress::DrainPreparationFault::at(wait);
+            assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+            assert_retained_drain(runtime, epoch);
+            assert!(runtime.has_current_generation());
+            assert!(runtime.protocol_generation().is_none());
+            assert_eq!(runtime.last_committed_generation(), generation);
+            assert_eq!(drops.load(Ordering::Acquire), 0);
+            assert_eq!(cleanups.load(Ordering::Acquire), 0);
+            let trace = runtime.shutdown_trace_json();
+            let document: serde_json::Value = serde_json::from_str(&trace).unwrap();
+            assert_eq!(document["outcome"], "quarantined");
+            assert!(trace.contains("rtdShutdownFailed"));
+            assert!(!trace.contains("callsDrained"));
+            assert!(!trace.contains("returnsDrained"));
+            assert!(!trace.contains("closedCommitted"));
+            if let Some(directory) = std::env::var_os("XLFN_EXPORT_DRAIN_TRACE_DIR") {
+                std::fs::write(
+                    std::path::Path::new(&directory)
+                        .join(format!("export-drain-preparation-{wait}.json")),
+                    &trace,
+                )
+                .unwrap();
+            }
+            drop(call);
+            drop(entry);
+            // Recovery and late host hints cannot retry the drain even after
+            // the last admission has left the retained generation.
+            recovery::quarantine_runtime_resources(runtime);
+            assert_eq!(crate::boundary::host::host_auto_close(runtime), 1);
+            assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+            assert_eq!(
+                crate::boundary::host::host_auto_open(
+                    runtime,
+                    &crate::diagnostics::AddinId::parse("drain-test").unwrap(),
+                    "0",
+                    "test",
+                    &[]
+                ),
+                0
+            );
+            assert_retained_drain(runtime, epoch);
+            assert_eq!(fault.attempts(), wait);
+            assert_eq!(drops.load(Ordering::Acquire), 0);
+            assert_eq!(cleanups.load(Ordering::Acquire), 0);
+            drop(fault);
+        }
+    }
+
+    #[test]
+    fn export_drain_preparation_quarantines_before_owner_release() {
+        let fixture = StaticTestRuntime::<TestU32Addin>::new();
+        let runtime = fixture.runtime();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, 23, ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        runtime
+            .ensure_module_residency(drain_preparation_residency_anchor as *const ())
+            .unwrap();
+        let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
+        let owner = runtime.begin_final_removal().unwrap();
+        runtime.observer().begin_close();
+        let fault = crate::ingress::DrainPreparationFault::at(1);
+        let Err(failure) = owner.drain() else {
+            panic!("injected drain preparation succeeded");
+        };
+        assert_eq!(
+            failure.hazard(),
+            crate::shutdown::UnloadHazard::ExportDrainPreparationFailed
+        );
+        // Quarantine is visible while the failed owner is still alive, before
+        // its returned capability becomes available and waiters are notified.
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert!(runtime.lifecycle.access().removal_attempt().is_some());
+        let waiter = thread::spawn(move || assert!(runtime.begin_final_removal().is_none()));
+        waiter.join().unwrap();
+        let hazard = failure.hazard();
+        drop(failure);
+        recovery::quarantine_for_hazard(runtime, hazard);
+        assert_retained_drain(runtime, epoch);
+        assert!(runtime.begin_final_removal().is_none());
+        assert_eq!(fault.attempts(), 1);
+        drop(fault);
+    }
+
+    #[test]
+    fn export_drain_preparation_recovery_retains_the_cleanup_authority() {
+        let fixture = StaticTestRuntime::<TestU32Addin>::new();
+        let runtime = fixture.runtime();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, 23, ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        runtime
+            .ensure_module_residency(drain_preparation_residency_anchor as *const ())
+            .unwrap();
+        let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
+        let entry = admitted_export();
+        let fault = crate::ingress::DrainPreparationFault::at(1);
+        // This path has no RemovalOwner: quarantine claims Closing cleanup
+        // authority directly, and must reinstall it if preparation fails.
+        runtime.quarantine_runtime();
+        assert_retained_drain(runtime, epoch);
+        drop(entry);
+        recovery::quarantine_runtime_resources(runtime);
+        assert_retained_drain(runtime, epoch);
+        assert_eq!(fault.attempts(), 1);
+        drop(fault);
+    }
+
+    #[test]
+    fn export_drain_preparation_rollback_returns_authority_before_recovery() {
+        let fixture = StaticTestRuntime::<TestU32Addin>::new();
+        let runtime = fixture.runtime();
+        let opening = runtime.begin_open().unwrap();
+        assert!(opening.fail_for_test().requires_rollback());
+        runtime
+            .ensure_module_residency(drain_preparation_residency_anchor as *const ())
+            .unwrap();
+        let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
+        let fault = crate::ingress::DrainPreparationFault::at(1);
+        let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+        let outcome = rollback::rollback_open(
+            runtime,
+            &lifecycle,
+            &mut crate::host_callback::HostCallbackSession::new(),
+            None,
+        );
+        assert!(!outcome.is_finalized());
+        assert_retained_drain(runtime, epoch);
+        recovery::quarantine_runtime_resources(runtime);
+        assert_eq!(fault.attempts(), 1);
+        drop(fault);
+    }
+
+    #[test]
+    fn miri_published_generation_remains_readable_through_close_transition() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Runtime::<TestU32Addin>::new();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, 23_u32, ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let admission = runtime.lifecycle.try_admit().unwrap();
+
+        // Closing moves the complete ownership bundle between lifecycle
+        // variants while previously admitted raw readers remain active.
+        let close = runtime.begin_final_removal().unwrap();
+        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+        assert_eq!(admission.generation().shared_state, 23);
+        #[cfg(feature = "handles")]
+        assert!(admission.services().formula_handle_service().is_ok());
+        drop(admission);
+
+        assert_eq!(runtime.take_current_generation().unwrap().shared_state, 23);
+        finish_test_close(&runtime, close);
+    }
+
+    #[cfg(feature = "handles")]
+    #[test]
+    fn runtime_can_open_close_and_reopen() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        struct TestHandle(u32);
+        impl crate::handle::ExcelHandleObject for TestHandle {}
+
+        let runtime = Runtime::<TestU32Addin>::new();
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, 1_u32, ());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        let ingress = admitted_export();
+        assert_eq!(runtime.enter(&ingress).unwrap().state(), &1);
+        let old_token = runtime
+            .with_formula_handle_service(|handles| {
+                handles.prepare(crate::handle::test_topic_key("old"), || Ok(TestHandle(1)))
+            })
+            .unwrap()
+            .unwrap()
+            .into_token();
+        drop(ingress);
+
+        let removal_attempt = runtime.begin_final_removal().unwrap();
+        assert_eq!(runtime.take_current_generation().unwrap().shared_state, 1);
+        finish_test_close(&runtime, removal_attempt);
+        let lifecycle = runtime
+            .bind_addin_lifecycle()
+            .expect("test runtime lifecycle remains bound to the test thread");
+        runtime
+            .take_addin_lifecycle(&lifecycle)
+            .expect("test close must release its lifecycle state")
+            .dispose()
+            .expect("test lifecycle disposal")
+            .release()
+            .expect("test close must release its lifecycle binding");
+
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, 2_u32, ());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        let ingress = admitted_export();
+        assert_eq!(runtime.enter(&ingress).unwrap().state(), &2);
+        runtime
+            .with_formula_handle_service(|new_handles| {
+                let new_token = new_handles
+                    .prepare(crate::handle::test_topic_key("new"), || Ok(TestHandle(2)))
+                    .unwrap()
+                    .into_token();
+                assert_eq!(
+                    crate::call::with_branded_call_scope_and_state(
+                        new_handles,
+                        |new_handles, storage, brand| {
+                            let mut context =
+                                crate::value::DecodeCallContext::with_storage(storage, brand);
+                            new_handles
+                                .lookup::<TestHandle>(&mut context, &new_token)
+                                .map(|value| value.0)
+                        }
+                    )
+                    .unwrap(),
+                    2
+                );
+                assert!(matches!(
+                    crate::call::with_branded_call_scope_and_state(
+                        new_handles,
+                        |new_handles, storage, brand| {
+                            let mut context =
+                                crate::value::DecodeCallContext::with_storage(storage, brand);
+                            new_handles
+                                .lookup::<TestHandle>(&mut context, &old_token)
+                                .map(|_| ())
+                        }
+                    ),
+                    Err(XllError::StaleHandle | XllError::InvalidHandle)
+                ));
+            })
+            .unwrap();
+        drop(ingress);
+
+        let removal_attempt = runtime.begin_final_removal().unwrap();
+        assert_eq!(runtime.take_current_generation().unwrap().shared_state, 2);
+        finish_test_close(&runtime, removal_attempt);
+    }
+
+    #[test]
+    fn close_on_closed_runtime_invalidates_an_older_open_epoch() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Runtime::<()>::new();
+        let stale_epoch = runtime.removal_epoch();
+
+        assert!(runtime.begin_final_removal().is_none());
+        assert!(runtime.begin_open_if_epoch(stale_epoch).is_err());
+
+        let current = runtime.begin_open().unwrap();
+        let mut current = runtime.publish(current, (), ());
+        runtime.finish_open(&mut current, Vec::new()).unwrap();
+        assert_eq!(runtime.phase(), LifecyclePhase::Open);
+    }
+
+    #[test]
+    fn a_failed_concurrent_open_cannot_rollback_the_active_attempt() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Runtime::<TestU32Addin>::new();
+        let first = runtime.begin_open().unwrap();
+
+        assert!(runtime.begin_open().is_err());
+        assert_eq!(runtime.phase(), LifecyclePhase::Opening);
+
+        let mut first = runtime.publish(first, 11_u32, ());
+        runtime.finish_open(&mut first, Vec::new()).unwrap();
+        assert_eq!(runtime.phase(), LifecyclePhase::Open);
+        let ingress = admitted_export();
+        assert_eq!(runtime.enter(&ingress).unwrap().state(), &11);
+        drop(ingress);
+        let close = runtime.begin_final_removal().unwrap();
+        let _ = runtime.take_current_generation();
+        finish_test_close(&runtime, close);
+    }
+
+    #[test]
+    fn dropping_open_attempt_quarantines_without_implicit_rollback() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Runtime::<()>::new();
+        let opening = runtime.begin_open().unwrap();
+
+        drop(opening);
+
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        let trace = runtime.composition_trace_json();
+        assert!(!trace.contains("\"failOpen\""));
+        assert!(matches!(
+            runtime.acquire_open_rollback(),
+            orchestration::OpenRollbackAcquisition::Unavailable
+        ));
+    }
+
+    #[test]
+    fn final_close_cancels_an_in_flight_open_commit() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Arc::new(Runtime::<TestU32Addin>::new());
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, 17_u32, ());
+
+        let removal_epoch = runtime.removal_epoch();
+        let closing_runtime = Arc::clone(&runtime);
+        let (closing_entered_tx, closing_entered_rx) = mpsc::channel();
+        let (closing_release_tx, closing_release_rx) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+        let closer = thread::spawn(move || {
+            let close = closing_runtime
+                .begin_final_removal()
+                .expect("the opening runtime requires final close");
+            closing_entered_tx.send(()).unwrap();
+            closing_release_rx.recv().unwrap();
+            let state = match closing_runtime
+                .take_generation_for_shutdown()
+                .expect("shutdown extracts generation")
+            {
+                ShutdownGeneration::Open(generation) => generation.shared_state,
+                ShutdownGeneration::Opening(opening) => opening.into_parts().0,
+            };
+            assert_eq!(state, 17);
+            finish_test_close(&closing_runtime, close);
+            closed_tx.send(()).unwrap();
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.phase() != LifecyclePhase::Closing && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+        assert_ne!(runtime.removal_epoch(), removal_epoch);
+        assert!(matches!(
+            runtime.finish_open(&mut opening, Vec::new()),
+            Err(XllError::Closing)
+        ));
+        assert_eq!(runtime.open_attempt(), None);
+
+        closing_entered_rx.recv().unwrap();
+        closing_release_tx.send(()).unwrap();
+
+        closed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        closer.join().unwrap();
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn unopened_quarantined_fixture_does_not_close_another_runtime() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let active = Runtime::<()>::new();
+        let opening = active.begin_open().unwrap();
+        let mut opening = active.publish(opening, (), ());
+        active.finish_open(&mut opening, Vec::new()).unwrap();
+        let unopened = Runtime::<()>::new();
+        unopened.lifecycle_orchestrator().quarantine();
+        drop(unopened);
+        assert_eq!(
+            crate::module_runtime::ingress().phase(),
+            crate::ingress::PHASE_OPEN
+        );
+    }
+
+    #[test]
+    fn logical_quiescence_certificate_survives_a_concurrent_removal_epoch_bump() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Arc::new(Runtime::<()>::new());
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        let removal_attempt = runtime.begin_final_removal().unwrap();
+        runtime.wait_for_returns();
+        let subscriptions_stopped = runtime.close_subscriptions().unwrap();
+        runtime.shutdown_handle_topics().unwrap();
+        let sealed = runtime
+            .seal_generation_services(subscriptions_stopped)
+            .unwrap();
+        runtime.finish_generation_services(sealed).unwrap();
+        assert!(runtime.take_current_generation().is_some());
+
+        let (removal_attempt, module_closing) = removal_attempt.into_test_parts();
+        let drained = module_closing.seal_and_drain().unwrap();
+        let (module_quiescent, _exports) = drained.certify_for_test();
+        let module_epoch = module_quiescent.id();
+        runtime.disable_trace_for_test();
+        let _rtd =
+            crate::excel_rtd_protocol::wait_for_module_quiescence(runtime.module_residency_held())
+                .expect("RTD module quiescence");
+        let certificate = removal_attempt
+            .certify::<FinalRemoval>(
+                QuiescenceProof::for_test(
+                    Some(crate::generation::RuntimeGeneration::new(1).unwrap()),
+                    module_epoch,
+                ),
+                runtime.shutdown_deps(),
+            )
+            .map_err(|(error, _owner)| error)
+            .unwrap();
+
+        // A second final-close invocation invalidates stale open attempts, but
+        // it must not invalidate the certificate held by the active close
+        // owner. The second caller waits until that owner is released.
+        let removal_epoch = runtime.removal_epoch();
+        let concurrent_runtime = Arc::clone(&runtime);
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let waiter = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            assert!(concurrent_runtime.begin_final_removal().is_none());
+        });
+        started_rx.recv().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while runtime.removal_epoch() == removal_epoch && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_ne!(runtime.removal_epoch(), removal_epoch);
+
+        let (_witness, removal_attempt) = certificate
+            .finish()
+            .unwrap_or_else(|(error, _certificate)| panic!("{error}"));
+        drop(removal_attempt);
+        waiter.join().unwrap();
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn close_waiter_is_not_lost_when_open_rollback_finishes() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Arc::new(Runtime::<()>::new());
+        let opening = runtime.begin_open().unwrap();
+        assert!(opening.fail_for_test().requires_rollback());
+        let orchestration::OpenRollbackAcquisition::Acquired(rollback) =
+            runtime.acquire_open_rollback()
+        else {
+            panic!("rollback owner available");
+        };
+
+        let closing_runtime = Arc::clone(&runtime);
+        let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+        let closer = thread::spawn(move || {
+            assert!(closing_runtime.begin_final_removal().is_none());
+            closed_tx.send(()).unwrap();
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while runtime.phase() != LifecyclePhase::Closing && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+        let rollback = finish_test_open_rollback(&runtime, rollback);
+        assert!(closed_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        drop(rollback);
+
+        closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        closer.join().unwrap();
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn abandoned_close_owner_notifies_and_allows_takeover() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Arc::new(Runtime::<()>::new());
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        let first = runtime.begin_final_removal().unwrap();
+        drop(first);
+
+        let second = runtime.begin_final_removal().unwrap();
+        let _ = runtime.take_current_generation();
+        finish_test_close(&runtime, second);
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn lifecycle_attempt_counter_refuses_exhaustion() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Runtime::<()>::new();
+        runtime.request_explicit_removal();
+        let intent = runtime.host_intent();
+        runtime
+            .lifecycle
+            .access()
+            .set_next_lifecycle_attempt_for_test(u64::MAX);
+        assert!(runtime.begin_open().is_err());
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+        assert_eq!(runtime.host_intent(), intent);
+        assert!(runtime.return_protocol.returns_closed_and_quiescent());
+    }
+
+    #[test]
+    fn logical_quiescence_certificate_refuses_to_publish_closed_before_state_is_released() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Runtime::<()>::new();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        let removal_attempt = runtime.begin_final_removal().unwrap();
+        runtime.wait_for_returns();
+        let subscriptions_stopped = runtime.close_subscriptions().unwrap();
+        runtime.shutdown_handle_topics().unwrap();
+        let sealed = runtime
+            .seal_generation_services(subscriptions_stopped)
+            .unwrap();
+        runtime.finish_generation_services(sealed).unwrap();
+        let (removal_attempt, module_closing) = removal_attempt.into_test_parts();
+        let drained = module_closing.seal_and_drain().unwrap();
+        let (module_quiescent, _exports) = drained.certify_for_test();
+        let module_epoch = module_quiescent.id();
+        let _rtd =
+            crate::excel_rtd_protocol::wait_for_module_quiescence(runtime.module_residency_held())
+                .expect("RTD module quiescence");
+        let removal_attempt = match removal_attempt.certify::<FinalRemoval>(
+            QuiescenceProof::for_test(
+                Some(crate::generation::RuntimeGeneration::new(1).unwrap()),
+                module_epoch,
+            ),
+            runtime.shutdown_deps(),
+        ) {
+            Err((_error, owner)) => owner,
+            Ok(_certificate) => panic!("quiescence certificate must reject a live generation"),
+        };
+        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+
+        assert!(runtime.take_current_generation().is_some());
+        runtime.disable_trace_for_test();
+        let certificate = removal_attempt
+            .certify::<FinalRemoval>(
+                QuiescenceProof::for_test(
+                    Some(crate::generation::RuntimeGeneration::new(1).unwrap()),
+                    module_epoch,
+                ),
+                runtime.shutdown_deps(),
+            )
+            .map_err(|(error, _)| error)
+            .unwrap();
+        let (_witness, _claim) = certificate
+            .finish()
+            .unwrap_or_else(|(error, _)| panic!("{error}"));
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn close_rejects_new_calls_and_waits_for_existing_call() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Arc::new(Runtime::<TestU32Addin>::new());
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+
+        let ingress = crate::module_runtime::ingress()
+            .enter_with(|| {})
+            .into_admitted()
+            .expect("test call enters during OPEN");
+        let guard = runtime.enter(&ingress).unwrap();
+        assert!(runtime.lifecycle_orchestrator().begin_close());
+        crate::module_runtime::ingress().begin_close_with(|| {});
+        assert!(matches!(runtime.enter(&ingress), Err(XllError::Closing)));
+
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ = crate::module_runtime::ingress().seal_and_drain();
+            sender.send(()).unwrap();
+        });
+
+        assert!(receiver.recv_timeout(Duration::from_millis(20)).is_err());
+        drop(guard);
+        drop(ingress);
+        receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn execution_lease_rejects_close_race_without_invalidating_existing_leases() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fixture = StaticTestRuntime::<TestU32Addin>::new();
+        let runtime = fixture.runtime();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, 7_u32, ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        let ingress = admitted_export();
+        let call = runtime.enter_async(&ingress).unwrap();
+        let lease = call.try_execution_lease().unwrap();
+        assert_eq!(*lease.state(), 7);
+        let (cancellation, token) = crate::cancellation::CancellationSource::new(
+            crate::cancellation::CancellationGuarantee::BestEffort,
+        );
+        let context =
+            crate::AsyncContext::<TestU32Addin>::new(lease.state(), &token, runtime.diagnostics());
+
+        // Model removal winning between call admission and async launch.
+        let removal = runtime.begin_final_removal().unwrap();
+        assert!(matches!(call.try_execution_lease(), Err(XllError::Closing)));
+        assert_eq!(*call.state(), 7);
+        drop(call);
+        drop(ingress);
+
+        // A lease issued before closing still owns its generation lifetime
+        // even after the original call has returned.
+        assert_eq!(*lease.state(), 7);
+        assert!(std::ptr::eq(context.diagnostics(), runtime.diagnostics()));
+        let (reclaimed, reclaimed_result) = mpsc::channel();
+        let taker = thread::spawn(move || {
+            reclaimed
+                .send(runtime.take_current_generation().unwrap().shared_state)
+                .unwrap();
+        });
+        assert!(
+            reclaimed_result
+                .recv_timeout(Duration::from_millis(20))
+                .is_err()
+        );
+        assert_eq!(*lease.state(), 7);
+        cancellation.cancel();
+        assert!(context.cancellation().is_cancelled());
+        let _ = context
+            .diagnostics()
+            .errors_since(crate::diagnostics::DiagnosticCursor::START, 1);
+        drop(lease);
+        assert_eq!(
+            reclaimed_result
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            7
+        );
+        taker.join().unwrap();
+        finish_test_close(runtime, removal);
+    }
+
+    #[test]
+    fn registration_snapshots_cannot_discharge_retained_obligations() {
+        use crate::registration::RegistrationCleanupState;
+        let runtime = Runtime::<()>::new();
+        runtime.host.merge(
+            crate::registration::HostMutationJournal::from_registrations([
+                RegistrationId {
+                    id: 1.0,
+                    excel_name: "FIRST",
+                },
+                RegistrationId {
+                    id: 2.0,
+                    excel_name: "SECOND",
+                },
+            ]),
+        );
+        let mut snapshot = runtime.host.registrations_snapshot();
+        assert_eq!(snapshot.len(), 2);
+        snapshot[1].state = RegistrationCleanupState::NameDeleted;
+        snapshot.clear();
+        assert_eq!(runtime.host.registrations_snapshot().len(), 2);
+        assert!(!runtime.host.generation_callbacks_detached());
+        assert!(!runtime.host.is_quiescent());
+    }
+
+    #[test]
+    fn module_residency_is_independent_from_logical_close() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _module = crate::ingress::acquire_test_module_lease();
+        // Windows identifies the resident image from an actual code address.
+        // Serialize with COM tests so their references cannot retain the lease.
+        #[inline(never)]
+        fn residency_anchor() {}
+        let anchor = residency_anchor as *const ();
+        let runtime = Runtime::<()>::new();
+        assert!(!runtime.module_residency_held());
+        assert!(runtime.ensure_module_residency(anchor).unwrap());
+        assert!(runtime.module_residency_held());
+        assert!(!runtime.ensure_module_residency(anchor).unwrap());
+
+        runtime.lifecycle_orchestrator().quarantine();
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert!(runtime.module_residency_held());
+        assert!(runtime.test_release_module_residency().unwrap());
+        assert!(!runtime.module_residency_held());
+    }
+
+    #[test]
+    fn metadata_debt_storage_is_queryable() {
+        let runtime = Runtime::<()>::new();
+        runtime.host.retain_metadata_debt(vec![
+            crate::registration::MetadataDebt::new(
+                RegistrationId {
+                    id: 1.0,
+                    excel_name: "TEST_DEBT",
+                },
+                XllError::Closing,
+            ),
+            crate::registration::MetadataDebt::new(
+                RegistrationId {
+                    id: 2.0,
+                    excel_name: "test_debt",
+                },
+                XllError::Panic,
+            ),
+        ]);
+        assert_eq!(runtime.host.metadata_debt_snapshot().len(), 1);
+        assert_eq!(
+            runtime
+                .host
+                .metadata_debt_snapshot()
+                .values()
+                .next()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            runtime
+                .host
+                .metadata_debt_snapshot()
+                .values()
+                .next()
+                .unwrap()[0]
+                .expected_registration_id(),
+            1.0
+        );
+        runtime
+            .host
+            .clear_metadata_debt_for_registrations(&[RegistrationId {
+                id: 1.0,
+                excel_name: "Test_Debt",
+            }]);
+        assert!(runtime.host.metadata_debt_snapshot().is_empty());
+    }
+
+    #[cfg(feature = "async-builtin")]
+    struct AsyncCalculationAddin;
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn opened_executor_is_stopped_before_state_rollback_after_start_or_registration_failure() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        struct Counts {
+            fail_start: AtomicBool,
+            starts: AtomicUsize,
+            stops: AtomicUsize,
+            executor_drops: AtomicUsize,
+            state_drops: AtomicUsize,
+        }
+        static COUNTS: Counts = Counts {
+            fail_start: AtomicBool::new(false),
+            starts: AtomicUsize::new(0),
+            stops: AtomicUsize::new(0),
+            executor_drops: AtomicUsize::new(0),
+            state_drops: AtomicUsize::new(0),
+        };
+        struct ProbeExecutor;
+        impl crate::AsyncExecutor for ProbeExecutor {
+            type Reservation = std::convert::Infallible;
+            fn start(&self) -> XllResult<()> {
+                COUNTS.starts.fetch_add(1, Ordering::Relaxed);
+                if COUNTS.fail_start.load(Ordering::Relaxed) {
+                    Err(XllError::Overloaded)
+                } else {
+                    Ok(())
+                }
+            }
+            fn reserve(&self) -> XllResult<Self::Reservation> {
+                Err(XllError::Closing)
+            }
+            fn submit<F>(&self, reservation: Self::Reservation, _: crate::AsyncTask<F>)
+            where
+                F: std::future::Future<Output = ()> + Send + 'static,
+            {
+                match reservation {}
+            }
+            fn shutdown(&self) -> XllResult<()> {
+                COUNTS.stops.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+        impl Drop for ProbeExecutor {
+            fn drop(&mut self) {
+                assert_eq!(COUNTS.stops.load(Ordering::Relaxed), 1);
+                COUNTS.executor_drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        struct ProbeState;
+        impl Drop for ProbeState {
+            fn drop(&mut self) {
+                assert_eq!(COUNTS.stops.load(Ordering::Relaxed), 1);
+                assert_eq!(COUNTS.executor_drops.load(Ordering::Relaxed), 1);
+                COUNTS.state_drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        struct ProbeAddin;
+        impl crate::Addin for ProbeAddin {
+            #[cfg(feature = "rtd")]
+            type RtdSubscription = ();
+            #[cfg(feature = "rtd")]
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+            type SharedState = ProbeState;
+            type LifecycleState = ProbeState;
+            type Error = XllError;
+            type Layers = ();
+            type AsyncExecutor = ProbeExecutor;
+            fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
+                Ok(crate::Opened::new(ProbeState)
+                    .with_lifecycle(ProbeState)
+                    .with_async_executor(ProbeExecutor))
+            }
+        }
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for fail_start in [true, false] {
+            COUNTS.fail_start.store(fail_start, Ordering::Relaxed);
+            COUNTS.starts.store(0, Ordering::Relaxed);
+            COUNTS.stops.store(0, Ordering::Relaxed);
+            COUNTS.executor_drops.store(0, Ordering::Relaxed);
+            COUNTS.state_drops.store(0, Ordering::Relaxed);
+            let runtime = Runtime::<ProbeAddin>::new();
+            let transaction = runtime
+                .begin_open()
+                .unwrap()
+                .attach_host(crate::host_callback::HostCallbackSession::new());
+            let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+            let context = crate::OpenContext::new(
+                std::path::PathBuf::from("test.xll"),
+                crate::BuildInfo::new(
+                    crate::diagnostics::AddinId::parse("test").unwrap(),
+                    "0",
+                    "test",
+                ),
+                runtime.protocol_generation().unwrap(),
+            );
+            let failure = match test_support::initialize_addin::<ProbeAddin>(context, transaction) {
+                Err(failure) => {
+                    assert!(fail_start);
+                    failure
+                }
+                Ok((transaction, _)) => {
+                    assert!(!fail_start);
+                    assert_eq!(COUNTS.stops.load(Ordering::Relaxed), 0);
+                    // Registration failures enter this same owning rollback path.
+                    transaction.failure(XllError::Overloaded)
+                }
+            };
+            assert!(matches!(failure.recover(&lifecycle), XllError::Overloaded));
+            assert!(runtime.async_runtime().is_stopped());
+            assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+            assert_eq!(COUNTS.starts.load(Ordering::Relaxed), 1);
+            assert_eq!(COUNTS.stops.load(Ordering::Relaxed), 1);
+            assert_eq!(COUNTS.executor_drops.load(Ordering::Relaxed), 1);
+            assert_eq!(COUNTS.state_drops.load(Ordering::Relaxed), 2);
+        }
+    }
+
+    #[cfg(feature = "async")]
+    struct AsyncStopProbe {
+        failing: Arc<std::sync::atomic::AtomicBool>,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(feature = "async")]
+    impl crate::AsyncExecutor for AsyncStopProbe {
+        type Reservation = std::convert::Infallible;
+
+        fn start(&self) -> XllResult<()> {
+            Ok(())
+        }
+
+        fn reserve(&self) -> XllResult<Self::Reservation> {
+            Err(XllError::Closing)
+        }
+
+        fn submit<F>(&self, permit: Self::Reservation, _: crate::AsyncTask<F>)
+        where
+            F: std::future::Future<Output = ()> + Send + 'static,
+        {
+            match permit {}
+        }
+
+        fn shutdown(&self) -> XllResult<()> {
+            if self.failing.load(Ordering::Acquire) {
+                Err(XllError::Panic)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(feature = "async")]
+    impl Drop for AsyncStopProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    #[cfg(feature = "async")]
+    struct AsyncStopFailureAddin;
+
+    #[cfg(feature = "async")]
+    impl crate::Addin for AsyncStopFailureAddin {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = RetainedState;
+        type LifecycleState = RetainedState;
+        type Error = XllError;
+        type Layers = ();
+        type AsyncExecutor = AsyncStopProbe;
+
+        fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
+            unreachable!("stop failure tests stage observed resources directly")
+        }
+
+        fn cleanup(state: &mut RetainedState, _: &mut crate::CleanupReporter<'_>) {
+            state.cleanups.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn failed_external_executor_shutdown_retains_generation_and_services() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fixture = StaticTestRuntime::<AsyncStopFailureAddin>::new();
+        let runtime = fixture.runtime();
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cleanups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = || RetainedState {
+            drops: Arc::clone(&drops),
+            cleanups: Arc::clone(&cleanups),
+        };
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish_with_lifecycle(opening, state(), state(), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let executor_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        runtime
+            .start_async(
+                AsyncStopProbe {
+                    failing: Arc::clone(&failing),
+                    drops: Arc::clone(&executor_drops),
+                },
+                crate::AsyncTaskLimit::DEFAULT,
+            )
+            .unwrap();
+
+        assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert!(runtime.has_current_generation());
+        assert!(!runtime.async_runtime().is_stopped());
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        assert_eq!(cleanups.load(Ordering::Acquire), 0);
+        assert_eq!(executor_drops.load(Ordering::Acquire), 0);
+        let trace = runtime.shutdown_trace_json();
+        assert!(trace.contains("asyncShutdownFailed"));
+        assert!(!trace.contains("stopAsyncExecutor"));
+        assert!(!trace.contains("subscriptionsDrained"));
+        assert!(!trace.contains("generationReclaimed"));
+
+        // A direct retry can discharge executor ownership without recovering
+        // the terminally quarantined add-in generation or sealing its services.
+        failing.store(false, Ordering::Release);
+        assert!(runtime.close_async().unwrap().issues.is_empty());
+        assert_eq!(executor_drops.load(Ordering::Acquire), 1);
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        assert_eq!(cleanups.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(feature = "async-builtin")]
+    impl crate::Addin for AsyncCalculationAddin {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ();
+        type LifecycleState = ();
+        type Error = XllError;
+        type Layers = ();
+        type AsyncExecutor = crate::BuiltinAsyncExecutor;
+
+        fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
+            Ok(crate::Opened::new(()).with_async_executor(one_poller()))
+        }
+    }
+
+    #[cfg(feature = "async-builtin")]
+    fn one_poller() -> crate::BuiltinAsyncExecutor {
+        crate::BuiltinAsyncExecutor::new(
+            crate::BuiltinExecutorConfig::new()
+                .with_poller_count(crate::AsyncPollerCount::new(1).unwrap()),
+        )
+    }
+
+    #[cfg(not(feature = "async"))]
+    #[test]
+    fn calculation_end_advances_synchronous_diagnostic_identity() {
+        let runtime = Runtime::<()>::new();
+        let first = runtime.calculation_id();
+        runtime.finish_calculation();
+        assert_eq!(runtime.calculation_id().get(), first.get() + 1);
+        runtime.finish_calculation();
+        assert_eq!(runtime.calculation_id().get(), first.get() + 2);
+    }
+
+    #[cfg(feature = "async-builtin")]
+    #[test]
+    fn calculation_end_advances_the_async_calculation_epoch() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Runtime::<AsyncCalculationAddin>::new();
+        runtime
+            .start_async(one_poller(), crate::AsyncTaskLimit::DEFAULT)
+            .unwrap();
+        let first = runtime.async_runtime().current_epoch();
+        let (first_source, first_token) = crate::cancellation::CancellationSource::new(
+            crate::cancellation::CancellationGuarantee::CalculationScoped,
+        );
+        runtime
+            .async_runtime()
+            .submit(first, std::future::pending(), first_source)
+            .unwrap();
+
+        runtime.finish_calculation();
+        let second = runtime.async_runtime().current_epoch();
+        assert_eq!(runtime.calculation_id().get(), first.get() + 1);
+        assert!(matches!(
+            runtime.async_runtime().submit(
+                first,
+                std::future::pending(),
+                crate::cancellation::CancellationSource::new(
+                    crate::cancellation::CancellationGuarantee::CalculationScoped,
+                )
+                .0,
+            ),
+            Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        ));
+
+        let (second_source, second_token) = crate::cancellation::CancellationSource::new(
+            crate::cancellation::CancellationGuarantee::CalculationScoped,
+        );
+        runtime
+            .async_runtime()
+            .submit(second, std::future::pending(), second_source)
+            .unwrap();
+        runtime.cancel_async();
+        assert!(second_token.is_cancelled());
+        assert!(!first_token.is_cancelled());
+
+        assert!(runtime.close_async().unwrap().issues.is_empty());
+        assert!(first_token.is_cancelled());
+    }
+
+    #[cfg(feature = "async-builtin")]
+    #[test]
+    fn published_async_calculation_already_has_a_registry_entry() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Arc::new(Runtime::<AsyncCalculationAddin>::new());
+        runtime
+            .start_async(one_poller(), crate::AsyncTaskLimit::DEFAULT)
+            .unwrap();
+        let first = runtime.calculation_id().get();
+        let (published_tx, published_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        runtime
+            .async_runtime()
+            .set_after_calculation_publish_hook(Some(Arc::new(move || {
+                published_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap();
+            })));
+
+        let advancing_runtime = Arc::clone(&runtime);
+        let advancing = thread::spawn(move || advancing_runtime.finish_calculation());
+        published_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let published = runtime.async_runtime().current_epoch();
+        assert_eq!(published.get(), first + 1);
+        let (spawned_tx, spawned_rx) = mpsc::sync_channel(1);
+        let spawning_runtime = Arc::clone(&runtime);
+        let spawning = thread::spawn(move || {
+            let source = crate::cancellation::CancellationSource::new(
+                crate::cancellation::CancellationGuarantee::CalculationScoped,
+            )
+            .0;
+            spawned_tx
+                .send(
+                    spawning_runtime
+                        .async_runtime()
+                        .submit(published, async {}, source),
+                )
+                .unwrap();
+        });
+
+        let spawn_result = spawned_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("submission should not wait for the calculation transition to return");
+        assert!(spawn_result.is_ok());
+        release_tx.send(()).unwrap();
+        advancing.join().unwrap();
+        spawning.join().unwrap();
+
+        runtime
+            .async_runtime()
+            .set_after_calculation_publish_hook(None);
+        assert!(runtime.close_async().unwrap().issues.is_empty());
+    }
+}

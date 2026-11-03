@@ -1,0 +1,38 @@
+[profile.default]
+retries = 0
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.ci]
+inherits = "default"
+fail-fast = false
+global-timeout = "20m"
+
+[test-groups]
+# This serialization applies to nextest runs only. Windows artifact CI
+# deliberately retains same-process libtest semantics; RTD tests also acquire
+# their process-global test lock, so this group is a scheduling optimization,
+# not a correctness precondition for the Windows-targeted job.
+windows-rtd = { max-threads = 1 }
+compile-ui = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(xlfn) and test(/^excel_rtd::windows::tests::/)'
+platform = 'cfg(windows)'
+test-group = 'windows-rtd'
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+[[profile.default.overrides]]
+# All trybuild suites share Cargo's fixture build directory. Keep them in
+# one scheduling group so a cold build cannot consume another suite's budget.
+filter = 'test(/(trait_driven_function_signatures_compile|invalid_macro_options_fail_to_compile|distribution_commit_requires_prepared_verification)/)'
+test-group = 'compile-ui'
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+# This one test compiles the full public API fixture suite. A cold Windows
+# runner was still compiling fixtures when the four-minute budget expired.
+# Keep runtime-test limits and the overall CI deadline unchanged.
+[[profile.ci.overrides]]
+filter = 'package(xlfn) and test(=trait_driven_function_signatures_compile)'
+platform = 'cfg(windows)'
+test-group = 'compile-ui'
+slow-timeout = { period = "60s", terminate-after = 8 }

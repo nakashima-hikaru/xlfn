@@ -1,0 +1,12 @@
+error[E0521]: borrowed data escapes outside of function
+ --> tests/ui/fail_async/handle_lease_thread_spawn.rs:7:5
+  |
+6 | fn move_to_thread<'a>(lease: HandleLease<'a, Dataset>) {
+  |                   --  ----- `lease` is a reference that is only valid in the function body
+  |                   |
+  |                   lifetime `'a` defined here
+7 |     std::thread::spawn(move || drop(lease));
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |     |
+  |     `lease` escapes the function body here
+  |     argument requires that `'a` must outlive `'static`

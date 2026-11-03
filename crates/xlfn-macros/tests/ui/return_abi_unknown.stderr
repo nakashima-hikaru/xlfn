@@ -1,0 +1,5 @@
+error: `return_abi` must be "xloper12" or "fp12"
+ --> tests/ui/return_abi_unknown.rs:4:17
+  |
+4 | fn invalid() -> f64 {
+  |                 ^^^

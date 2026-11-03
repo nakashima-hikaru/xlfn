@@ -1,0 +1,5 @@
+error: `return_abi = "fp12"` is only supported for synchronous Excel functions
+ --> tests/ui/return_abi_async.rs:4:23
+  |
+4 | async fn invalid() -> f64 {
+  |                       ^^^

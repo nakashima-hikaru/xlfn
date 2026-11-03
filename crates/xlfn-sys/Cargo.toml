@@ -1,0 +1,23 @@
+[package]
+name = "xlfn-sys"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Raw Excel 12 XLL ABI definitions and callback trampoline"
+readme = "README.md"
+
+[features]
+abi-probe = []
+
+[dependencies]
+smallvec.workspace = true
+static_assertions.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-link.workspace = true
+
+[lints]
+workspace = true

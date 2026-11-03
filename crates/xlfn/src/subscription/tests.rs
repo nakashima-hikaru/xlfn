@@ -1,0 +1,4464 @@
+#![allow(
+    unsafe_code,
+    reason = "RTD tests implement the audited non-owning subscription lifetime contract"
+)]
+
+use super::*;
+use crate::excel_rtd::{RtdNotifier, RtdSubscriptionHost};
+use crate::rtd::test_support::{TestNotifierState, TestNotifyOutcome};
+use crate::sync::Mutex;
+use crate::{XllError, XllResult};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+pub(crate) struct TestSubscription {
+    canceled: Arc<AtomicBool>,
+    disconnected: Arc<AtomicBool>,
+    on_disconnect: Option<Box<dyn FnOnce() + Send>>,
+}
+
+// SAFETY: any retained test sink is cleared by the disconnect callback before
+// this subscription reports quiescence; no background producer remains.
+unsafe impl RtdSubscription for TestSubscription {
+    fn request_cancel(&self) {
+        self.canceled.store(true, Ordering::Release);
+    }
+
+    fn disconnect_and_wait(mut self) -> XllResult<()> {
+        if let Some(on_disconnect) = self.on_disconnect.take() {
+            on_disconnect();
+        }
+        self.disconnected.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+pub(crate) struct PublishingSource<T = RtdValue, F = fn() -> XllResult<()>> {
+    initial: Option<T>,
+    sink_slot: Arc<Mutex<Option<RtdSink<T>>>>,
+    canceled: Arc<AtomicBool>,
+    disconnected: Arc<AtomicBool>,
+    on_subscribe: Option<F>,
+}
+
+// SAFETY: the source stores the sink in `sink_slot`; the returned subscription
+// clears that slot before disconnect completes.
+unsafe impl<T, F> RtdSource for PublishingSource<T, F>
+where
+    T: IntoRtdValue + Clone + Send + Sync + 'static,
+    F: Fn() -> XllResult<()> + Send + Sync + 'static,
+{
+    type Value = T;
+    type Subscription = TestSubscription;
+
+    fn subscribe(
+        &self,
+        _topic: &RtdTopic,
+        sink: RtdSink<Self::Value>,
+    ) -> XllResult<Self::Subscription> {
+        if let Some(on_sub) = &self.on_subscribe {
+            on_sub()?;
+        }
+        if let Some(initial) = self.initial.clone() {
+            sink.publish(initial)?;
+        }
+        *self.sink_slot.lock() = Some(sink);
+        let sink_slot = Arc::clone(&self.sink_slot);
+        Ok(TestSubscription {
+            canceled: Arc::clone(&self.canceled),
+            disconnected: Arc::clone(&self.disconnected),
+            on_disconnect: Some(Box::new(move || {
+                sink_slot.lock().take();
+            })),
+        })
+    }
+}
+
+pub(crate) struct SourceFixture {
+    registration: SourceRegistration<TestSubscription>,
+}
+
+impl SourceFixture {
+    pub(crate) fn new() -> Self {
+        Self {
+            registration: SourceRegistration::new(
+                crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+            ),
+        }
+    }
+
+    #[allow(
+        clippy::type_complexity,
+        reason = "test helper returns a tuple of handles and sinks"
+    )]
+    pub(crate) fn add<T: IntoRtdValue + Clone + Send + Sync + 'static>(
+        &self,
+        initial: Option<T>,
+    ) -> (
+        RtdSourceHandle<PublishingSource<T, fn() -> XllResult<()>>>,
+        Arc<Mutex<Option<RtdSink<T>>>>,
+        Arc<AtomicBool>,
+    ) {
+        let slot = Arc::new(Mutex::new(None));
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let source = self
+            .registration
+            .register(PublishingSource {
+                initial,
+                sink_slot: Arc::clone(&slot),
+                canceled: Arc::new(AtomicBool::new(false)),
+                disconnected: Arc::clone(&disconnected),
+                on_subscribe: None,
+            })
+            .expect("test source handle allocation must succeed");
+        (source, slot, disconnected)
+    }
+
+    pub(crate) fn finish(self) -> SourceArena<TestSubscription> {
+        self.registration.finish()
+    }
+}
+
+pub(crate) type PublishingSourceResult<T> = (
+    SourceArena<TestSubscription>,
+    RtdSourceHandle<PublishingSource<T, fn() -> XllResult<()>>>,
+    Arc<Mutex<Option<RtdSink<T>>>>,
+    Arc<AtomicBool>,
+);
+
+pub(crate) fn publishing_source<T: IntoRtdValue + Clone + Send + Sync + 'static>(
+    initial: Option<T>,
+) -> PublishingSourceResult<T> {
+    let fixture = SourceFixture::new();
+    let (source, slot, disconnected) = fixture.add(initial);
+    (fixture.finish(), source, slot, disconnected)
+}
+
+pub(crate) fn connected_sink<T: IntoRtdValue + Clone + Send + Sync + 'static>(
+    initial: Option<T>,
+    topic: &str,
+) -> (
+    Arc<SubscriptionRuntime<TestSubscription>>,
+    SubscriptionServerHandle<TestSubscription>,
+    RtdSink<T>,
+) {
+    let (arena, source, sink_slot, _) = publishing_source(initial);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single(topic).unwrap().borrowed())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    let sink = sink_slot.lock().clone().expect("source must capture sink");
+    (runtime, server, sink)
+}
+
+#[test]
+fn rtd_capacity_distinguishes_disabled_and_bounded_limits() {
+    assert_eq!(RtdCapacity::disabled_if_zero(0), RtdCapacity::Disabled);
+    assert!(RtdCapacity::disabled().is_disabled());
+
+    let bounded = RtdCapacity::disabled_if_zero(4);
+    assert_eq!(
+        bounded,
+        RtdCapacity::Bounded(NonZeroUsize::new(4).expect("test limit is non-zero"))
+    );
+    assert_eq!(bounded.get(), 4);
+    assert!(!bounded.is_disabled());
+}
+
+#[test]
+fn batched_publish_preserves_dedup_sequences_and_older_refresh_completion() {
+    let (_runtime, server, sink) = connected_sink::<i32>(None, "batched-sequence");
+    let notifier = Arc::new(TestNotifierState::new());
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&notifier)))
+        .unwrap();
+    let stopping = AtomicBool::new(false);
+    let publish = |values: &[i32]| {
+        sink.erased()
+            .publish_batch(
+                values
+                    .iter()
+                    .copied()
+                    .map(StoredRtdValue::Integer)
+                    .collect(),
+                &stopping,
+            )
+            .unwrap();
+    };
+    publish(&[1, 1, 2, 2, 3]);
+    assert_eq!(notifier.calls.load(Ordering::Acquire), 1);
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
+    let first = server.begin_refresh().unwrap();
+    assert_eq!(first.updates()[0].sequence, 2);
+    assert_eq!(first.updates()[0].value, StoredRtdValue::Integer(3));
+    publish(&[4, 4, 5]);
+    first.complete(RefreshOutcome::Delivered).unwrap();
+    let second = server.begin_refresh().unwrap();
+    assert_eq!(second.updates()[0].sequence, 4);
+    assert_eq!(second.updates()[0].value, StoredRtdValue::Integer(5));
+    second.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+    stopping.store(true, Ordering::Release);
+    publish(&[6, 7]);
+    assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
+fn batched_publish_rechecks_epoch_after_refresh_during_notification() {
+    let (_runtime, server, sink) = connected_sink::<i32>(None, "batch-reentrant-refresh");
+    let notifier = Arc::new(TestNotifierState::new());
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    *notifier.entered.lock() = Some(entered_tx);
+    *notifier.release.lock() = Some(release_rx);
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&notifier)))
+        .unwrap();
+    let publisher = std::thread::spawn(move || {
+        sink.erased().publish_batch(
+            [StoredRtdValue::Integer(1), StoredRtdValue::Integer(2)]
+                .into_iter()
+                .collect(),
+            &AtomicBool::new(false),
+        )
+    });
+    for value in [1, 2] {
+        entered_rx.recv().unwrap();
+        let refresh = server.begin_refresh().unwrap();
+        assert_eq!(refresh.updates().len(), 1);
+        assert_eq!(refresh.updates()[0].value, StoredRtdValue::Integer(value));
+        refresh.complete(RefreshOutcome::Delivered).unwrap();
+        release_tx.send(()).unwrap();
+    }
+    publisher.join().unwrap().unwrap();
+    assert_eq!(notifier.calls.load(Ordering::Acquire), 2);
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+}
+
+#[test]
+fn batched_publish_overflow_keeps_the_accepted_prefix_deliverable() {
+    let (_runtime, server, sink) = connected_sink::<i32>(None, "batch-overflow");
+    {
+        let mut shard = server.test_server().publish.lock_shard_for_test(1);
+        shard
+            .active_by_topic
+            .get_mut(&TopicId(1))
+            .unwrap()
+            .next_sequence = u64::MAX - 1;
+    }
+    let result = sink.erased().publish_batch(
+        [StoredRtdValue::Integer(1), StoredRtdValue::Integer(2)]
+            .into_iter()
+            .collect(),
+        &AtomicBool::new(false),
+    );
+    assert!(matches!(
+        result,
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_OVERFLOW,
+        })
+    ));
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates()[0].sequence, u64::MAX - 1);
+    assert_eq!(batch.updates()[0].value, StoredRtdValue::Integer(1));
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+}
+
+#[test]
+fn server_publish_isolation() {
+    let fixture = SourceFixture::new();
+    let (source_a, _sink_a, _) = fixture.add(Some(1.0f64));
+    let (source_b, sink_b, _) = fixture.add(Some(2.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
+
+    let server_a = runtime.register_test_server(1);
+    let server_b = runtime.register_test_server(2);
+
+    let prep_a = runtime
+        .prepare(&source_a, RtdTopic::single("a").unwrap().borrowed())
+        .unwrap();
+    let prep_b = runtime
+        .prepare(&source_b, RtdTopic::single("b").unwrap().borrowed())
+        .unwrap();
+
+    let id_a = prep_a.id();
+    let id_b = prep_b.id();
+    prep_a.commit();
+    prep_b.commit();
+
+    let conn_a = runtime
+        .connect_transaction(&server_a, TopicId(1), id_a)
+        .unwrap();
+    conn_a.commit().unwrap();
+    let conn_b = runtime
+        .connect_transaction(&server_b, TopicId(1), id_b)
+        .unwrap();
+    conn_b.commit().unwrap();
+
+    let sink_b = sink_b.lock().clone().unwrap();
+
+    let lock_guard = server_a.test_server().publish.lock_shard_for_test(0);
+
+    let b_published = Arc::new(AtomicBool::new(false));
+    let b_published_clone = Arc::clone(&b_published);
+    let handle_b = std::thread::spawn(move || {
+        sink_b.publish(100.0).unwrap();
+        b_published_clone.store(true, Ordering::Release);
+    });
+
+    handle_b.join().unwrap();
+    assert!(b_published.load(Ordering::Acquire));
+    drop(lock_guard);
+}
+
+#[test]
+fn notification_callback_isolation() {
+    let fixture = SourceFixture::new();
+    let (source_a, sink_a, _) = fixture.add(Some(1.0f64));
+    let (source_b, sink_b, _) = fixture.add(Some(2.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
+
+    let server_a = runtime.register_test_server(1);
+    let server_b = runtime.register_test_server(2);
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+    let state_a = Arc::new(TestNotifierState::default());
+    *state_a.entered.lock() = Some(entered_tx);
+    *state_a.release.lock() = Some(release_rx);
+
+    server_a
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state_a)))
+        .unwrap();
+
+    let state_b = Arc::new(TestNotifierState::default());
+    server_b
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state_b)))
+        .unwrap();
+
+    let prep_a = runtime
+        .prepare(&source_a, RtdTopic::single("a").unwrap().borrowed())
+        .unwrap();
+    let prep_b = runtime
+        .prepare(&source_b, RtdTopic::single("b").unwrap().borrowed())
+        .unwrap();
+    let id_a = prep_a.id();
+    let id_b = prep_b.id();
+    prep_a.commit();
+    prep_b.commit();
+
+    let conn_a = runtime
+        .connect_transaction(&server_a, TopicId(1), id_a)
+        .unwrap();
+    conn_a.commit().unwrap();
+    let conn_b = runtime
+        .connect_transaction(&server_b, TopicId(1), id_b)
+        .unwrap();
+    conn_b.commit().unwrap();
+
+    let sink_a = sink_a.lock().clone().unwrap();
+    let sink_b = sink_b.lock().clone().unwrap();
+
+    let thread_a = std::thread::spawn(move || {
+        sink_a.publish(10.0).unwrap();
+    });
+
+    entered_rx.recv().unwrap();
+
+    for i in 0..100 {
+        sink_b.publish(i as f64).unwrap();
+    }
+
+    assert!(state_b.calls.load(Ordering::SeqCst) > 0);
+
+    release_tx.send(()).unwrap();
+    thread_a.join().unwrap();
+}
+
+#[test]
+fn server_locality_refresh_lock_independence() {
+    let (arena, source_b, sink_b, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server_a = runtime.register_test_server(1);
+    let server_b = runtime.register_test_server(2);
+
+    let prep_b = runtime
+        .prepare(&source_b, RtdTopic::single("b-0").unwrap().borrowed())
+        .unwrap();
+    let id_b = prep_b.id();
+    prep_b.commit();
+    let conn_b = runtime
+        .connect_transaction(&server_b, TopicId(1), id_b)
+        .unwrap();
+    conn_b.commit().unwrap();
+
+    let sink_b = sink_b.lock().clone().unwrap();
+    sink_b.publish(42.0).unwrap();
+
+    // server A の shard mutex を保持した状態で server B.begin_refresh を実行
+    let _guard_a = server_a.test_server().publish.lock_shard_for_test(0);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let server_b_clone = server_b;
+    let handle = std::thread::spawn(move || {
+        let batch = server_b_clone.begin_refresh().unwrap();
+        let observed = (batch.updates().len(), batch.updates()[0].value.clone());
+        batch.complete(RefreshOutcome::Delivered).unwrap();
+        tx.send(observed).unwrap();
+    });
+
+    let (update_count, value) = rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("server_b.begin_refresh should not block on server_a state lock");
+
+    assert_eq!(update_count, 1);
+    assert_eq!(value, StoredRtdValue::Number(42.0));
+    handle.join().unwrap();
+}
+
+#[test]
+fn refresh_batch_borrows_server_lifetime() {
+    let runtime = Arc::new(SubscriptionRuntime::<()>::new());
+    let server = runtime.register_test_server(1);
+
+    let batch = server.begin_refresh().unwrap();
+    assert!(batch.updates().is_empty());
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn runtime_close_blocks_all_servers_immediately() {
+    let fixture = SourceFixture::new();
+    let (source_b, sink_b, _) = fixture.add(Some(0.0f64));
+    let (source_a, sink_a, _) = fixture.add(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
+
+    let server_a = runtime.register_test_server(1);
+    let server_b = runtime.register_test_server(2);
+
+    let prep_b = runtime
+        .prepare(&source_b, RtdTopic::single("b-0").unwrap().borrowed())
+        .unwrap();
+    let id_b = prep_b.id();
+    prep_b.commit();
+    let conn_b = runtime
+        .connect_transaction(&server_b, TopicId(1), id_b)
+        .unwrap();
+    conn_b.commit().unwrap();
+
+    let (callback_started_tx, callback_started_rx) = std::sync::mpsc::channel();
+    let (unblock_callback_tx, unblock_callback_rx) = std::sync::mpsc::channel();
+
+    let state_a = Arc::new(TestNotifierState::default());
+    *state_a.entered.lock() = Some(callback_started_tx);
+    *state_a.release.lock() = Some(unblock_callback_rx);
+
+    server_a
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state_a)))
+        .unwrap();
+
+    let prep_a = runtime
+        .prepare(&source_a, RtdTopic::single("a-0").unwrap().borrowed())
+        .unwrap();
+    let id_a = prep_a.id();
+    prep_a.commit();
+    let conn_a = runtime
+        .connect_transaction(&server_a, TopicId(1), id_a)
+        .unwrap();
+    conn_a.commit().unwrap();
+
+    let sink_a = sink_a.lock().clone().unwrap();
+    let publish_handle = std::thread::spawn(move || {
+        sink_a.publish(1.0).unwrap();
+    });
+
+    callback_started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+
+    let runtime_clone = Arc::clone(&runtime);
+    let close_handle = std::thread::spawn(move || {
+        runtime_clone.close().unwrap();
+    });
+
+    // server_a が close 処理に入り OperationGate が Closing になるまで待機
+    while server_a.test_server().enter_operation().is_ok() {
+        std::thread::yield_now();
+    }
+
+    let sink_b = sink_b.lock().clone().unwrap();
+    assert!(matches!(sink_b.publish(42.0), Err(XllError::Closing)));
+
+    unblock_callback_tx.send(()).unwrap();
+    publish_handle.join().unwrap();
+    close_handle.join().unwrap();
+}
+
+#[test]
+fn server_termination_clears_pending_and_allows_reconnect() {
+    let (arena, source, sink, disconnected) = publishing_source(Some(10.0));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server_a = runtime.register_test_server(1);
+
+    let prep = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("shared-topic").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prep.id();
+    prep.commit();
+
+    let conn_a = runtime
+        .connect_transaction(&server_a, TopicId(1), id)
+        .unwrap();
+    conn_a.commit().unwrap();
+
+    // server A を終了
+    server_a.terminate().unwrap();
+
+    // disconnect が呼ばれていること
+    assert!(disconnected.load(Ordering::SeqCst));
+    let server_b = runtime.register_test_server(2);
+    let prep_b = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("shared-topic").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id_b = prep_b.id();
+    prep_b.commit();
+
+    runtime.claim_server(server_b.generation(), id_b).unwrap();
+
+    let conn_b = runtime
+        .connect_transaction(&server_b, TopicId(1), id_b)
+        .unwrap();
+    conn_b.commit().unwrap();
+
+    let sink = sink.lock().clone().unwrap();
+    sink.publish(20.0).unwrap();
+
+    let batch = server_b.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(batch.updates()[0].value, StoredRtdValue::Number(20.0));
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn uncommitted_update_does_not_trigger_notification() {
+    let fixture = SourceFixture::new();
+    let (source_a, _, _) = fixture.add(Some(0.0f64));
+    let (source_b, sink_b, _) = fixture.add(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
+
+    let server = runtime.register_test_server(1);
+
+    let state = Arc::new(TestNotifierState::new());
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+
+    let prep_a = runtime
+        .prepare(&source_a, RtdTopic::single("a-0").unwrap().borrowed())
+        .unwrap();
+    let id_a = prep_a.id();
+    prep_a.commit();
+    let conn_a = runtime
+        .connect_transaction(&server, TopicId(1), id_a)
+        .unwrap();
+    conn_a.commit().unwrap();
+
+    let prep_b = runtime
+        .prepare(&source_b, RtdTopic::single("b-0").unwrap().borrowed())
+        .unwrap();
+    let id_b = prep_b.id();
+    prep_b.commit();
+    let _conn_b = runtime
+        .connect_transaction(&server, TopicId(2), id_b)
+        .unwrap();
+
+    state.calls.store(0, Ordering::SeqCst);
+
+    let sink_b = sink_b.lock().clone().unwrap();
+    sink_b.publish(100.0).unwrap();
+
+    server.pulse_notification().unwrap();
+
+    assert_eq!(state.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn publish_between_install_and_commit_prepares_notification() {
+    let (arena, source, sink, _) = publishing_source(Some(1.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let state = Arc::new(TestNotifierState::new());
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("known-update").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+
+    let connection = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+
+    let sink = sink.lock().clone().unwrap();
+    sink.publish(2.0).unwrap();
+
+    connection.commit().unwrap();
+
+    assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn deliverable_pending_accounting_tracks_connection_lifecycle() {
+    let (arena, source, sink, _) = publishing_source(Some(1.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("accounting").unwrap().borrowed())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+
+    let connection = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    // The source's initial publish and this update both belong to an
+    // uncommitted connection, so neither is deliverable yet.
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 0);
+    sink.publish(2.0).unwrap();
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 0);
+
+    connection.commit().unwrap();
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 1);
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+    assert_eq!(server.pending_update_count(), 0);
+
+    sink.publish(3.0).unwrap();
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    runtime.disconnect(&server, TopicId(1)).unwrap();
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+    assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
+fn first_empty_publish_is_deliverable() {
+    let (_runtime, server, sink) = connected_sink::<()>(None, "first-empty-publish");
+
+    sink.publish(()).unwrap();
+
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(batch.updates()[0].value, StoredRtdValue::Empty);
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+}
+
+#[test]
+fn repeated_empty_publish_is_suppressed() {
+    let (_runtime, server, sink) = connected_sink::<()>(None, "repeated-empty-publish");
+
+    sink.publish(()).unwrap();
+    sink.publish(()).unwrap();
+
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(batch.updates()[0].sequence, 0);
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn repeated_number_publish_is_suppressed() {
+    let (_runtime, server, sink) = connected_sink::<f64>(None, "repeated-number-publish");
+
+    sink.publish(12.5).unwrap();
+    sink.publish(12.5).unwrap();
+
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(batch.updates()[0].value, StoredRtdValue::Number(12.5));
+    assert_eq!(batch.updates()[0].sequence, 0);
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn repeated_string_publish_is_suppressed() {
+    let (_runtime, server, sink) = connected_sink::<String>(None, "repeated-string-publish");
+
+    sink.publish("same-value".to_owned()).unwrap();
+    sink.publish("same-value".to_owned()).unwrap();
+
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("same-value".into()),
+    );
+    assert_eq!(batch.updates()[0].sequence, 0);
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn changed_value_after_same_value_is_delivered() {
+    let (_runtime, server, sink) = connected_sink::<f64>(None, "changed-after-same");
+
+    sink.publish(10.0).unwrap();
+    let first = server.begin_refresh().unwrap();
+    assert_eq!(first.updates().len(), 1);
+    first.complete(RefreshOutcome::Delivered).unwrap();
+
+    sink.publish(10.0).unwrap();
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+    sink.publish(11.0).unwrap();
+
+    let changed = server.begin_refresh().unwrap();
+    assert_eq!(changed.updates().len(), 1);
+    assert_eq!(changed.updates()[0].value, StoredRtdValue::Number(11.0));
+    changed.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn same_value_after_successful_refresh_is_suppressed() {
+    let (_runtime, server, sink) = connected_sink::<f64>(None, "same-after-refresh");
+
+    sink.publish(21.0).unwrap();
+    let first = server.begin_refresh().unwrap();
+    first.complete(RefreshOutcome::Delivered).unwrap();
+
+    sink.publish(21.0).unwrap();
+
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+    assert_eq!(server.pending_update_count(), 0);
+    let empty = server.begin_refresh().unwrap();
+    assert!(empty.updates().is_empty());
+    empty.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn reconnect_does_not_inherit_previous_generation_latest() {
+    let (arena, source, sink_slot, _) = publishing_source(Some(100.0_f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server_a = runtime.register_test_server(1);
+
+    let prepared_a = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("generation-latest").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id_a = prepared_a.id();
+    prepared_a.commit();
+    let connection_a = runtime
+        .connect_transaction(&server_a, TopicId(1), id_a)
+        .unwrap();
+    assert_eq!(connection_a.value(), &StoredRtdValue::Number(100.0));
+    connection_a.commit().unwrap();
+
+    server_a.terminate().unwrap();
+
+    let server_b = runtime.register_test_server(2);
+    let prepared_b = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("generation-latest").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id_b = prepared_b.id();
+    prepared_b.commit();
+    runtime.claim_server(server_b.generation(), id_b).unwrap();
+    let connection_b = runtime
+        .connect_transaction(&server_b, TopicId(1), id_b)
+        .unwrap();
+    assert_eq!(connection_b.value(), &StoredRtdValue::Number(100.0));
+    connection_b.commit().unwrap();
+
+    assert_eq!(server_b.test_server().publish.queued_update_count(), 0);
+    let sink = sink_slot.lock().clone().expect("reconnected source sink");
+    sink.publish(100.0).unwrap();
+    assert_eq!(server_b.test_server().publish.queued_update_count(), 0);
+    let second = server_b.begin_refresh().unwrap();
+    assert!(second.updates().is_empty());
+    second.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn old_buffer_update_is_not_redelivered_after_newer_update() {
+    let (arena, source, sink, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("superseded").unwrap().borrowed())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    sink.publish(10.0).unwrap();
+    let first = server.begin_refresh().unwrap();
+    first.complete(RefreshOutcome::Failed).unwrap();
+
+    sink.publish(11.0).unwrap();
+    let latest = server.begin_refresh().unwrap();
+    assert_eq!(latest.updates().len(), 1);
+    assert_eq!(latest.updates()[0].value, StoredRtdValue::Number(11.0));
+    latest.complete(RefreshOutcome::Delivered).unwrap();
+
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+    assert_eq!(server.pending_update_count(), 0);
+    let empty = server.begin_refresh().unwrap();
+    assert!(empty.updates().is_empty());
+    empty.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn two_buffer_string_refresh_picks_newer_sequence_and_cleans_both() {
+    let (arena, source, sink, _) = publishing_source::<String>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("string-superseded").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    sink.publish("first-update".to_string()).unwrap();
+    let first = server.begin_refresh().unwrap();
+    first.complete(RefreshOutcome::Failed).unwrap();
+
+    sink.publish("second-update".to_string()).unwrap();
+    let latest = server.begin_refresh().unwrap();
+    assert_eq!(latest.updates().len(), 1);
+    assert_eq!(
+        latest.updates()[0].value,
+        StoredRtdValue::String("second-update".into())
+    );
+    latest.complete(RefreshOutcome::Delivered).unwrap();
+
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+    assert_eq!(server.pending_update_count(), 0);
+    let empty = server.begin_refresh().unwrap();
+    assert!(empty.updates().is_empty());
+    empty.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn newer_update_survives_completion_of_older_refresh() {
+    let (arena, source, sink, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("newer-survives").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    sink.publish(10.0).unwrap();
+    let older = server.begin_refresh().unwrap();
+    sink.publish(11.0).unwrap();
+    older.complete(RefreshOutcome::Delivered).unwrap();
+
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    let newer = server.begin_refresh().unwrap();
+    assert_eq!(newer.updates().len(), 1);
+    assert_eq!(newer.updates()[0].value, StoredRtdValue::Number(11.0));
+    newer.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn failed_refresh_keeps_pending_update() {
+    let (arena, source, sink, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("failed-refresh").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    sink.publish(10.0).unwrap();
+    let failed = server.begin_refresh().unwrap();
+    let sequence = failed.updates()[0].sequence;
+    failed.complete(RefreshOutcome::Failed).unwrap();
+
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
+    assert_eq!(server.pending_update_count(), 1);
+    let retry = server.begin_refresh().unwrap();
+    assert_eq!(retry.updates().len(), 1);
+    assert_eq!(retry.updates()[0].sequence, sequence);
+    retry.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn concurrent_publish_after_refresh_snapshot_is_delivered_later() {
+    let (arena, source, sink, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("concurrent-publish").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    sink.publish(10.0).unwrap();
+    let snapshot = server.begin_refresh().unwrap();
+    let concurrent_sink = sink.clone();
+    std::thread::spawn(move || concurrent_sink.publish(11.0).unwrap())
+        .join()
+        .unwrap();
+    snapshot.complete(RefreshOutcome::Delivered).unwrap();
+
+    let later = server.begin_refresh().unwrap();
+    assert_eq!(later.updates().len(), 1);
+    assert_eq!(later.updates()[0].value, StoredRtdValue::Number(11.0));
+    later.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn refresh_collection_skips_shards_without_deliverable_updates() {
+    let (arena, source, sink, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("ready-shard").unwrap().borrowed())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    sink.lock().clone().unwrap().publish(10.0).unwrap();
+
+    let unrelated_shard = server.test_server().publish.lock_shard_for_test(0);
+    let server_clone = server;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let batch = server_clone.begin_refresh().unwrap();
+        let count = batch.updates().len();
+        batch.complete(RefreshOutcome::Delivered).unwrap();
+        tx.send(count).unwrap();
+    });
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("refresh must not traverse a shard absent from its ready index"),
+        1,
+    );
+    drop(unrelated_shard);
+    handle.join().unwrap();
+}
+
+#[test]
+fn refresh_planning_does_not_traverse_topic_shards() {
+    let (arena, source, sink, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("planning-only").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    sink.lock().clone().unwrap().publish(10.0).unwrap();
+
+    let ready_shard = server.test_server().publish.lock_shard_for_test(1);
+    let planned = server.test_server().publish.plan_refresh().unwrap();
+    drop(ready_shard);
+    drop(planned);
+}
+
+#[test]
+fn sparse_refresh_after_dense_drain_reuses_storage_and_preserves_retries() {
+    let fixture = SourceFixture::new();
+    let sources = (0..64)
+        .map(|_| fixture.add::<i32>(None))
+        .collect::<Vec<_>>();
+    let runtime = SubscriptionRuntime::with_sources_for_internal(fixture.finish());
+    let server = runtime.register_test_server(1);
+    for (index, (source, _, _)) in sources.iter().enumerate() {
+        let topic = RtdTopic::single(format!("dense-{index}")).unwrap();
+        let prepared = runtime.prepare(source, topic.borrowed()).unwrap();
+        let id = prepared.id();
+        prepared.commit();
+        runtime
+            .connect_transaction(&server, TopicId((index as i32 + 1) * 32), id)
+            .unwrap()
+            .commit()
+            .unwrap();
+    }
+
+    let mut allocation = None;
+    for value in [-2, -1] {
+        for (_, slot, _) in &sources {
+            slot.lock().as_ref().unwrap().publish(value).unwrap();
+        }
+        let batch = server.begin_refresh().unwrap();
+        assert_eq!(batch.updates().len(), 64);
+        if let Some(previous) = allocation {
+            assert_eq!(batch.updates().as_ptr(), previous);
+        }
+        allocation = Some(batch.updates().as_ptr());
+        batch.complete(RefreshOutcome::Delivered).unwrap();
+    }
+
+    drop(server.test_server().publish.plan_refresh().unwrap());
+    for index in [3, 20, 62] {
+        sources[index]
+            .1
+            .lock()
+            .as_ref()
+            .unwrap()
+            .publish(index as i32)
+            .unwrap();
+    }
+    runtime.disconnect(&server, TopicId(21 * 32)).unwrap();
+    let failed = server.begin_refresh().unwrap();
+    assert_eq!(failed.updates().len(), 2);
+    assert_eq!(Some(failed.updates().as_ptr()), allocation);
+    drop(failed);
+    assert_eq!(server.pending_update_count(), 2);
+
+    sources[3].1.lock().as_ref().unwrap().publish(103).unwrap();
+    let retry = server.begin_refresh().unwrap();
+    assert_eq!(Some(retry.updates().as_ptr()), allocation);
+    let mut values = retry
+        .updates()
+        .iter()
+        .map(|update| (update.topic_id, update.value.clone()))
+        .collect::<Vec<_>>();
+    values.sort_by_key(|&(topic, _)| topic);
+    assert_eq!(
+        values,
+        vec![
+            (4 * 32, StoredRtdValue::Integer(103)),
+            (63 * 32, StoredRtdValue::Integer(62)),
+        ],
+    );
+    retry.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(server.pending_update_count(), 0);
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+}
+
+#[test]
+fn refresh_preserves_latest_update_for_each_topic() {
+    let fixture = SourceFixture::new();
+    let (source_one, sink_one, _) = fixture.add::<f64>(None);
+    let (source_two, sink_two, _) = fixture.add::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
+    let server = runtime.register_test_server(1);
+
+    for (source, topic_id, name) in [
+        (&source_one, TopicId(1), "reduction-one"),
+        (&source_two, TopicId(2), "reduction-two"),
+    ] {
+        let prepared = runtime
+            .prepare(source, RtdTopic::single(name).unwrap().borrowed())
+            .unwrap();
+        let id = prepared.id();
+        prepared.commit();
+        runtime
+            .connect_transaction(&server, topic_id, id)
+            .unwrap()
+            .commit()
+            .unwrap();
+    }
+
+    sink_two.lock().clone().unwrap().publish(20.0).unwrap();
+    sink_one.lock().clone().unwrap().publish(10.0).unwrap();
+
+    let batch = server.begin_refresh().unwrap();
+    let mut actual = batch
+        .updates()
+        .iter()
+        .map(|update| (update.topic_id, update.value.clone()))
+        .collect::<Vec<_>>();
+    actual.sort_by_key(|(topic_id, _)| *topic_id);
+    assert_eq!(
+        actual,
+        vec![
+            (1, StoredRtdValue::Number(10.0)),
+            (2, StoredRtdValue::Number(20.0)),
+        ]
+    );
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn server_standalone_termination() {
+    let (arena, source_b, sink_b, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server_a = runtime.register_test_server(1);
+    let server_b = runtime.register_test_server(2);
+
+    let prep_b = runtime
+        .prepare(&source_b, RtdTopic::single("b").unwrap().borrowed())
+        .unwrap();
+    let id_b = prep_b.id();
+    prep_b.commit();
+    let conn_b = runtime
+        .connect_transaction(&server_b, TopicId(1), id_b)
+        .unwrap();
+    conn_b.commit().unwrap();
+
+    let sink_b = sink_b.lock().clone().unwrap();
+
+    let server_a_clone = server_a;
+    let handle_term = std::thread::spawn(move || {
+        server_a_clone.terminate().unwrap();
+    });
+
+    sink_b.publish(1.0).unwrap();
+    let batch = server_b.begin_refresh().unwrap();
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    handle_term.join().unwrap();
+}
+
+#[test]
+fn stale_sink_returns_closing() {
+    let fixture = SourceFixture::new();
+    let (source_a, sink_a, _) = fixture.add(Some(0.0f64));
+    let (source_b, sink_b, _) = fixture.add(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
+
+    let server_a = runtime.register_test_server(1);
+    let server_b = runtime.register_test_server(2);
+
+    let prep_a = runtime
+        .prepare(&source_a, RtdTopic::single("a").unwrap().borrowed())
+        .unwrap();
+    let id_a = prep_a.id();
+    prep_a.commit();
+    let conn_a = runtime
+        .connect_transaction(&server_a, TopicId(1), id_a)
+        .unwrap();
+    conn_a.commit().unwrap();
+
+    let sink_a = sink_a.lock().clone().unwrap();
+
+    server_a.terminate().unwrap();
+
+    assert!(matches!(sink_a.publish(1.0), Err(XllError::Closing)));
+
+    let prep_b = runtime
+        .prepare(&source_b, RtdTopic::single("b").unwrap().borrowed())
+        .unwrap();
+    let id_b = prep_b.id();
+    prep_b.commit();
+    let conn_b = runtime
+        .connect_transaction(&server_b, TopicId(1), id_b)
+        .unwrap();
+    conn_b.commit().unwrap();
+
+    let sink_b = sink_b.lock().clone().unwrap();
+    assert!(sink_b.publish(2.0).is_ok());
+}
+
+#[test]
+fn global_quota_enforcement() {
+    let limits = RtdLimits {
+        max_queued_updates: RtdCapacity::disabled_if_zero(10),
+        ..RtdLimits::standard()
+    };
+    let fixture = SourceFixture::new();
+    let mut sources_a = Vec::new();
+    for _ in 0..6 {
+        sources_a.push(fixture.add(Some(0.0f64)));
+    }
+    let mut sources_b = Vec::new();
+    for _ in 0..5 {
+        sources_b.push(fixture.add(Some(0.0f64)));
+    }
+    let runtime = Arc::new(SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        limits,
+        RtdSubscriptionHost::default(),
+        fixture.finish(),
+    ));
+    let server_a = runtime.register_test_server(1);
+    let server_b = runtime.register_test_server(2);
+
+    let mut sinks_a = Vec::new();
+    for (i, (source, sink, _)) in sources_a.into_iter().enumerate() {
+        let prep = runtime
+            .prepare(
+                &source,
+                RtdTopic::single(format!("a-{}", i)).unwrap().borrowed(),
+            )
+            .unwrap();
+        let id = prep.id();
+        prep.commit();
+        let conn = runtime
+            .connect_transaction(&server_a, TopicId(i as i32), id)
+            .unwrap();
+        conn.commit().unwrap();
+        sinks_a.push(sink.lock().clone().unwrap());
+    }
+
+    let mut sinks_b = Vec::new();
+    for (i, (source, sink, _)) in sources_b.into_iter().enumerate() {
+        let prep = runtime
+            .prepare(
+                &source,
+                RtdTopic::single(format!("b-{}", i)).unwrap().borrowed(),
+            )
+            .unwrap();
+        let id = prep.id();
+        prep.commit();
+        let conn = runtime
+            .connect_transaction(&server_b, TopicId(i as i32), id)
+            .unwrap();
+        conn.commit().unwrap();
+        sinks_b.push(sink.lock().clone().unwrap());
+    }
+
+    for sink in &sinks_a[0..6] {
+        sink.publish(1.0).unwrap();
+    }
+    for sink in &sinks_b[0..4] {
+        sink.publish(1.0).unwrap();
+    }
+
+    assert!(matches!(sinks_b[4].publish(1.0), Err(XllError::Overloaded)));
+
+    let batch_a = server_a.begin_refresh().unwrap();
+    batch_a.complete(RefreshOutcome::Delivered).unwrap();
+
+    assert!(sinks_b[4].publish(1.0).is_ok());
+}
+
+#[test]
+fn key_binding_concurrency_rejection() {
+    let (arena, source, _, _) = publishing_source(Some(1.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server_a = runtime.register_test_server(1);
+    let server_b = runtime.register_test_server(2);
+
+    let prep = runtime
+        .prepare(&source, RtdTopic::single("shared").unwrap().borrowed())
+        .unwrap();
+    let id = prep.id();
+    prep.commit();
+
+    let conn_a = runtime
+        .connect_transaction(&server_a, TopicId(1), id)
+        .unwrap();
+    assert!(matches!(
+        runtime.connect_transaction(&server_b, TopicId(1), id),
+        Err(XllError::Internal { .. })
+    ));
+
+    conn_a.commit().unwrap();
+    assert!(matches!(
+        runtime.connect_transaction(&server_b, TopicId(1), id),
+        Err(XllError::Internal { .. })
+    ));
+}
+
+#[test]
+fn runtime_close_waits_for_inflight() {
+    let (arena, source_a, sink_a, _) = publishing_source(Some(1.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server_a = runtime.register_test_server(1);
+    let _server_b = runtime.register_test_server(2);
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+    let state_a = Arc::new(TestNotifierState::default());
+    *state_a.entered.lock() = Some(entered_tx);
+    *state_a.release.lock() = Some(release_rx);
+
+    server_a
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state_a)))
+        .unwrap();
+
+    let prep_a = runtime
+        .prepare(&source_a, RtdTopic::single("a").unwrap().borrowed())
+        .unwrap();
+    let id_a = prep_a.id();
+    prep_a.commit();
+    let conn_a = runtime
+        .connect_transaction(&server_a, TopicId(1), id_a)
+        .unwrap();
+    conn_a.commit().unwrap();
+
+    let sink_a = sink_a.lock().clone().unwrap();
+
+    let handle_a = std::thread::spawn(move || {
+        sink_a.publish(10.0).unwrap();
+    });
+
+    entered_rx.recv().unwrap();
+
+    let runtime_clone = Arc::clone(&runtime);
+    let closed_flag = Arc::new(AtomicBool::new(false));
+    let cf = Arc::clone(&closed_flag);
+
+    let handle_close = std::thread::spawn(move || {
+        runtime_clone.close().unwrap();
+        cf.store(true, Ordering::Release);
+    });
+
+    while !runtime.services.runtime_gate.is_closing() {
+        std::thread::yield_now();
+    }
+    assert!(!closed_flag.load(Ordering::Acquire));
+
+    release_tx.send(()).unwrap();
+    handle_a.join().unwrap();
+    handle_close.join().unwrap();
+    assert!(closed_flag.load(Ordering::Acquire));
+}
+
+#[test]
+fn inflight_register_waits_for_close() {
+    let runtime = Arc::new(SubscriptionRuntime::<()>::new());
+    let (enter_tx, enter_rx) = std::sync::mpsc::channel();
+    let (unblock_tx, unblock_rx) = std::sync::mpsc::channel();
+    let unblock_rx = Arc::new(Mutex::new(unblock_rx));
+
+    runtime.set_operation_enter_hook(Some(Arc::new(move || {
+        enter_tx.send(()).unwrap();
+        unblock_rx.lock().recv().unwrap();
+    })));
+
+    let runtime_clone = Arc::clone(&runtime);
+    let handle_reg = std::thread::spawn(move || {
+        // SAFETY: test thread joins before runtime reclamation.
+        unsafe {
+            runtime_clone
+                .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        }
+    });
+
+    enter_rx.recv().unwrap();
+
+    let runtime_close = Arc::clone(&runtime);
+    let closed_flag = Arc::new(AtomicBool::new(false));
+    let cf = Arc::clone(&closed_flag);
+    let handle_close = std::thread::spawn(move || {
+        runtime_close.close().unwrap();
+        cf.store(true, Ordering::Release);
+    });
+
+    while !runtime.services.runtime_gate.is_closing() {
+        std::thread::yield_now();
+    }
+    assert!(!closed_flag.load(Ordering::Acquire));
+
+    unblock_tx.send(()).unwrap();
+
+    let reg_res = handle_reg.join().unwrap();
+    handle_close.join().unwrap();
+
+    assert!(closed_flag.load(Ordering::Acquire));
+    let server = reg_res.unwrap();
+    assert!(matches!(
+        server.test_server().enter_operation(),
+        Err(XllError::Closing)
+    ));
+}
+
+#[test]
+fn inflight_prepare_waits_for_close() {
+    let (enter_tx, enter_rx) = std::sync::mpsc::channel();
+    let (unblock_tx, unblock_rx) = std::sync::mpsc::channel();
+    let unblock_rx = Arc::new(Mutex::new(unblock_rx));
+
+    let source_dropped = Arc::new(AtomicBool::new(false));
+    struct DroppingSource(Arc<AtomicBool>);
+    impl Drop for DroppingSource {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    // SAFETY: this source never retains or uses the supplied sink.
+    unsafe impl RtdSource for DroppingSource {
+        type Value = RtdValue;
+        type Subscription = TestSubscription;
+        fn subscribe(
+            &self,
+            _: &RtdTopic,
+            _: RtdSink<Self::Value>,
+        ) -> XllResult<Self::Subscription> {
+            Ok(TestSubscription {
+                canceled: Arc::new(AtomicBool::new(false)),
+                disconnected: Arc::new(AtomicBool::new(false)),
+                on_disconnect: None,
+            })
+        }
+    }
+
+    let (arena, source) = SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        DroppingSource(Arc::clone(&source_dropped)),
+    )
+    .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+
+    runtime.set_operation_enter_hook(Some(Arc::new(move || {
+        enter_tx.send(()).unwrap();
+        unblock_rx.lock().recv().unwrap();
+    })));
+
+    let runtime_clone = Arc::clone(&runtime);
+    let handle_prep = std::thread::spawn(move || {
+        let prep = runtime_clone.prepare(&source, RtdTopic::single("topic").unwrap().borrowed())?;
+        drop(prep);
+        Ok::<(), XllError>(())
+    });
+
+    enter_rx.recv().unwrap();
+
+    let runtime_close = Arc::clone(&runtime);
+    let closed_flag = Arc::new(AtomicBool::new(false));
+    let cf = Arc::clone(&closed_flag);
+    let handle_close = std::thread::spawn(move || {
+        runtime_close.close().unwrap();
+        cf.store(true, Ordering::Release);
+    });
+
+    while !runtime.services.runtime_gate.is_closing() {
+        std::thread::yield_now();
+    }
+    assert!(!closed_flag.load(Ordering::Acquire));
+
+    unblock_tx.send(()).unwrap();
+
+    let prep_res = handle_prep.join().unwrap();
+    handle_close.join().unwrap();
+
+    assert!(closed_flag.load(Ordering::Acquire));
+    assert!(prep_res.is_ok());
+
+    let catalog = runtime.catalog.lock();
+    assert!(catalog.entries.is_empty());
+    drop(catalog);
+    drop(runtime);
+
+    assert!(source_dropped.load(Ordering::Acquire));
+}
+
+#[test]
+fn reentrant_drop_safety() {
+    struct ReentrantSource {
+        runtime: Arc<SubscriptionRuntime<()>>,
+    }
+
+    impl Drop for ReentrantSource {
+        fn drop(&mut self) {
+            let _ = self.runtime.cleanup_result();
+        }
+    }
+
+    // SAFETY: this source never retains or uses the supplied sink.
+    unsafe impl RtdSource for ReentrantSource {
+        type Value = RtdValue;
+        type Subscription = TestSubscription;
+        fn subscribe(
+            &self,
+            _: &RtdTopic,
+            _: RtdSink<Self::Value>,
+        ) -> XllResult<Self::Subscription> {
+            Ok(TestSubscription {
+                canceled: Arc::new(AtomicBool::new(false)),
+                disconnected: Arc::new(AtomicBool::new(false)),
+                on_disconnect: None,
+            })
+        }
+    }
+
+    let fixture = SourceFixture::new();
+    let runtime_for_source = Arc::new(SubscriptionRuntime::<()>::new());
+    let source = fixture
+        .registration
+        .register(ReentrantSource {
+            runtime: Arc::clone(&runtime_for_source),
+        })
+        .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
+    let server = runtime.register_test_server(1);
+
+    let prep = runtime
+        .prepare(&source, RtdTopic::single("reentrant").unwrap().borrowed())
+        .unwrap();
+    let id = prep.id();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    conn.commit().unwrap();
+
+    runtime.close().unwrap();
+}
+
+#[test]
+fn server_lifecycle_rejects_mutations_when_closing() {
+    let (arena, source, _, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let prep = runtime
+        .prepare(&source, RtdTopic::single("test").unwrap().borrowed())
+        .unwrap();
+    let id = prep.id();
+
+    server.test_server().publish.mark_closing_for_test();
+
+    assert!(matches!(
+        server.attach_update_notifier(RtdNotifier::for_test(Arc::new(TestNotifierState::new()))),
+        Err(XllError::Closing)
+    ));
+    assert!(matches!(
+        server.pulse_notification(),
+        Err(XllError::Closing)
+    ));
+    assert!(matches!(server.begin_refresh(), Err(XllError::Closing)));
+    assert!(matches!(server.claim(id), Err(XllError::Closing)));
+    assert!(matches!(
+        server.disconnect(TopicId(1)),
+        Err(XllError::Closing)
+    ));
+}
+
+pub(crate) struct FailingDisconnectSubscription;
+// SAFETY: test subscription returns an error on disconnect without unsafe effects.
+unsafe impl RtdSubscription for FailingDisconnectSubscription {
+    fn request_cancel(&self) {}
+
+    fn disconnect_and_wait(self) -> XllResult<()> {
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL,
+        })
+    }
+}
+
+struct FailingDisconnectSource;
+
+// SAFETY: this fixture does not retain its sink or start any work; its typed
+// subscription only supplies the injected terminal cleanup error.
+unsafe impl RtdSource for FailingDisconnectSource {
+    type Value = f64;
+    type Subscription = FailingDisconnectSubscription;
+
+    fn subscribe(&self, _: &RtdTopic, _: RtdSink<f64>) -> XllResult<Self::Subscription> {
+        Ok(FailingDisconnectSubscription)
+    }
+}
+
+#[test]
+fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
+    let (arena, source) = SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        FailingDisconnectSource,
+    )
+    .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let prep = runtime
+        .prepare(&source, RtdTopic::single("test_err").unwrap().borrowed())
+        .unwrap();
+    let id = prep.id();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    conn.commit().unwrap();
+
+    let server_clone = server;
+    let handle = std::thread::spawn(move || server_clone.terminate());
+
+    let res_owner = server.terminate();
+    let res_waiter = handle.join().unwrap();
+
+    assert!(matches!(
+        res_owner,
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+        }) | Err(XllError::Panic)
+    ));
+    assert!(matches!(
+        res_waiter,
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+        }) | Err(XllError::Panic)
+    ));
+}
+
+#[test]
+fn server_terminate_callback_drop_failure_reaches_waiter() {
+    let runtime = Arc::new(SubscriptionRuntime::<()>::new());
+    let server = runtime.register_test_server(1);
+
+    let mut state = TestNotifierState::new();
+    state.panicking_drop = true;
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::new(state)))
+        .unwrap();
+
+    let admission = server.test_server().begin_termination(&runtime);
+    let TerminationAdmission::Owner(owner) = admission else {
+        panic!("expected Owner admission");
+    };
+
+    let handle = std::thread::spawn(move || server.terminate());
+
+    let owner = owner.request_cancel();
+    let res_owner = owner.finish();
+    assert!(matches!(res_owner, Err(XllError::Panic)));
+
+    let res_waiter = handle.join().unwrap();
+    assert!(matches!(res_waiter, Err(XllError::Panic)));
+}
+
+#[test]
+fn server_terminate_owner_unwind_notifies_waiter() {
+    let runtime = Arc::new(SubscriptionRuntime::<()>::new());
+    let server = runtime.register_test_server(1);
+
+    let admission = server.test_server().begin_termination(&runtime);
+    let TerminationAdmission::Owner(owner) = admission else {
+        panic!("expected Owner admission");
+    };
+
+    let handle = std::thread::spawn(move || server.terminate());
+
+    PANIC_AFTER_TERMINATION_GUARD.set(true);
+
+    let owner = owner.request_cancel();
+    let res_owner = catch_unwind(AssertUnwindSafe(|| owner.finish()));
+    assert!(res_owner.is_err(), "owner finish should have panicked");
+
+    let res_waiter = handle.join().unwrap();
+    assert!(matches!(res_waiter, Err(XllError::Panic)));
+}
+
+#[test]
+fn disconnect_propagates_subscription_cleanup_error() {
+    let (arena, source) = SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        FailingDisconnectSource,
+    )
+    .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let prep = runtime
+        .prepare(&source, RtdTopic::single("disc_err").unwrap().borrowed())
+        .unwrap();
+    let id = prep.id();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    conn.commit().unwrap();
+
+    let error = server.disconnect(TopicId(1)).unwrap_err();
+    assert!(matches!(
+        error,
+        XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+        }
+    ));
+}
+
+#[test]
+fn rollback_records_subscription_cleanup_error() {
+    let (arena, source) = SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        FailingDisconnectSource,
+    )
+    .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let prep = runtime
+        .prepare(&source, RtdTopic::single("roll_err").unwrap().borrowed())
+        .unwrap();
+    let id = prep.id();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+
+    conn.rollback();
+
+    assert!(matches!(
+        runtime.cleanup_result(),
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+        })
+    ));
+}
+
+struct PanickingCancelSubscription {
+    payload_drops: Arc<AtomicUsize>,
+    phases: Arc<AtomicUsize>,
+}
+// SAFETY: test subscription tests cancel panic handling without unsafe effects.
+unsafe impl RtdSubscription for PanickingCancelSubscription {
+    fn request_cancel(&self) {
+        self.phases.fetch_add(1, Ordering::AcqRel);
+        std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+            &self.payload_drops,
+        )));
+    }
+    fn disconnect_and_wait(self) -> XllResult<()> {
+        self.phases.fetch_add(1, Ordering::AcqRel);
+        std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+            &self.payload_drops,
+        )));
+    }
+}
+
+struct PanickingCancelSource {
+    payload_drops: Arc<AtomicUsize>,
+    phases: Arc<AtomicUsize>,
+}
+
+// SAFETY: this fixture discards its sink and owns no worker or callback. Its
+// cancellation/disconnect panics cannot leave a runtime capability alive.
+unsafe impl RtdSource for PanickingCancelSource {
+    type Value = f64;
+    type Subscription = PanickingCancelSubscription;
+
+    fn subscribe(&self, _: &RtdTopic, _: RtdSink<f64>) -> XllResult<Self::Subscription> {
+        Ok(PanickingCancelSubscription {
+            payload_drops: Arc::clone(&self.payload_drops),
+            phases: Arc::clone(&self.phases),
+        })
+    }
+}
+
+#[test]
+fn request_cancel_panic_propagates_to_termination() {
+    let payload_drops = Arc::new(AtomicUsize::new(0));
+    let phases = Arc::new(AtomicUsize::new(0));
+    let (arena, source) = SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        PanickingCancelSource {
+            payload_drops: Arc::clone(&payload_drops),
+            phases: Arc::clone(&phases),
+        },
+    )
+    .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    for index in 1..=2 {
+        let prepared = runtime
+            .prepare(
+                &source,
+                RtdTopic::single(format!("cancel_panic_{index}"))
+                    .unwrap()
+                    .borrowed(),
+            )
+            .unwrap();
+        server
+            .connect_transaction(TopicId(index), prepared.id())
+            .unwrap()
+            .commit()
+            .unwrap();
+        prepared.commit();
+    }
+
+    let res = server.terminate();
+    assert!(matches!(res, Err(XllError::Panic)));
+    assert_eq!(phases.load(Ordering::Acquire), 4);
+    assert_eq!(payload_drops.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn notifier_drop_retains_panicking_payload() {
+    struct Notifier(Arc<AtomicUsize>);
+    impl Drop for Notifier {
+        fn drop(&mut self) {
+            std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+                &self.0,
+            )));
+        }
+    }
+
+    let payload_drops = Arc::new(AtomicUsize::new(0));
+    let result = super::server::drop_notifier_no_unwind(Some(Notifier(Arc::clone(&payload_drops))));
+    assert!(matches!(result, Err(XllError::Panic)));
+    assert_eq!(payload_drops.load(Ordering::Acquire), 0);
+}
+
+struct DelayedSubscribeFailingSource {
+    tx_entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    rx_close: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+// SAFETY: this source only blocks before returning and never retains or uses
+// the supplied sink.
+unsafe impl RtdSource for DelayedSubscribeFailingSource {
+    type Value = f64;
+    type Subscription = FailingDisconnectSubscription;
+    fn subscribe(
+        &self,
+        _topic: &RtdTopic,
+        _sink: RtdSink<Self::Value>,
+    ) -> XllResult<Self::Subscription> {
+        if let Some(tx) = self.tx_entered.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        let rx = self.rx_close.lock();
+        let _ = rx.recv();
+        Ok(FailingDisconnectSubscription)
+    }
+}
+
+#[test]
+fn install_failure_during_closing_propagates_cleanup_error() {
+    let (tx_close, rx_close) = std::sync::mpsc::channel();
+    let (tx_enter, rx_enter) = std::sync::mpsc::channel();
+
+    let (arena, source) = SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        DelayedSubscribeFailingSource {
+            tx_entered: std::sync::Mutex::new(Some(tx_enter)),
+            rx_close: Mutex::new(rx_close),
+        },
+    )
+    .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let prep = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("delayed_fail").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prep.id();
+    prep.commit();
+
+    let runtime_clone = Arc::clone(&runtime);
+    let server_clone = server;
+    let id_clone = id;
+
+    let handle = std::thread::spawn(move || {
+        runtime_clone.connect_transaction(&server_clone, TopicId(1), id_clone)
+    });
+
+    rx_enter.recv().unwrap();
+
+    server.test_server().publish.mark_closing_for_test();
+
+    tx_close.send(()).unwrap();
+
+    let res = handle.join().unwrap();
+    assert!(matches!(
+        res,
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+        })
+    ));
+
+    assert!(matches!(
+        runtime.cleanup_result(),
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+        })
+    ));
+}
+
+#[test]
+fn same_handle_and_same_topic_reuse_pending_identity() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let topic = RtdTopic::single("shared").unwrap();
+
+    let first = runtime.prepare(&source, topic.borrowed()).unwrap();
+    let second = runtime.prepare(&source, topic.borrowed()).unwrap();
+
+    assert_eq!(first.key(), second.key());
+    assert!(first.has_reservation());
+    assert!(second.has_reservation());
+
+    second.rollback();
+    first.rollback();
+
+    assert!(runtime.catalog.lock().entries.is_empty());
+}
+
+#[test]
+fn distinct_handles_do_not_share_source_identity() {
+    let fixture = SourceFixture::new();
+    let (source_a, _, _) = fixture.add::<f64>(None);
+    let (source_b, _, _) = fixture.add::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
+    let topic = RtdTopic::single("shared").unwrap();
+
+    let first = runtime.prepare(&source_a, topic.borrowed()).unwrap();
+    let second = runtime.prepare(&source_b, topic.borrowed()).unwrap();
+
+    assert_ne!(first.key(), second.key());
+
+    first.rollback();
+    second.rollback();
+}
+
+#[test]
+fn same_handle_reuses_active_subscription_identity() {
+    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let topic = RtdTopic::single("shared-active").unwrap();
+
+    let first = runtime.prepare(&source, topic.borrowed()).unwrap();
+    let id = first.id();
+    let key = *first.key();
+    first.commit();
+
+    let connection = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    connection.commit().unwrap();
+
+    let second = runtime.prepare(&source, topic.borrowed()).unwrap();
+
+    assert_eq!(second.id(), id);
+    assert_eq!(second.key(), &key);
+    assert!(!second.has_reservation());
+
+    // ExistingActiveに対するrollbackは既存subscriptionを壊さない。
+    second.rollback();
+
+    assert!(
+        runtime
+            .catalog
+            .lock()
+            .entries
+            .get(&id)
+            .is_some_and(|entry| entry.is_active())
+    );
+}
+
+#[test]
+fn released_source_identity_returns_to_the_live_quota() {
+    let fixture = SourceFixture::new();
+    let (first_source, _, _) = fixture.add::<f64>(None);
+    let (second_source, _, _) = fixture.add::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        RtdLimits {
+            max_source_ids: RtdCapacity::disabled_if_zero(1),
+            ..RtdLimits::standard()
+        },
+        RtdSubscriptionHost::default(),
+        fixture.finish(),
+    ));
+
+    runtime
+        .prepare(&first_source, RtdTopic::single("first").unwrap().borrowed())
+        .unwrap()
+        .rollback();
+    let _ = first_source;
+
+    runtime
+        .prepare(
+            &second_source,
+            RtdTopic::single("second").unwrap().borrowed(),
+        )
+        .expect("a released source identity returns to the live quota")
+        .rollback();
+}
+
+#[test]
+fn live_source_reuses_identity_after_pending_subscription_is_removed() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let topic = RtdTopic::single("stable").unwrap();
+
+    let first = runtime.prepare(&source, topic.borrowed()).unwrap();
+
+    let first_key = *first.key();
+    first.rollback();
+
+    let second = runtime.prepare(&source, topic.borrowed()).unwrap();
+
+    assert_ne!(second.key(), &first_key);
+}
+
+#[test]
+fn failed_pending_admission_rolls_back_new_source_identity() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        RtdLimits {
+            max_pending: RtdCapacity::disabled(),
+            max_source_ids: RtdCapacity::disabled_if_zero(1),
+            ..RtdLimits::standard()
+        },
+        RtdSubscriptionHost::default(),
+        arena,
+    ));
+
+    assert!(matches!(
+        runtime.prepare(&source, RtdTopic::single("blocked").unwrap().borrowed()),
+        Err(XllError::Overloaded)
+    ));
+
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 0);
+}
+
+#[test]
+fn source_refcount_tracks_live_subscription_identities() {
+    let mut index = SubscriptionIdentityIndex::default();
+    let (_arena, source, _, _) = publishing_source::<f64>(None);
+    let first_identity =
+        SubscriptionIdentityKey::new(SourceId(source.id), &RtdTopic::single("first").unwrap());
+    let second_identity =
+        SubscriptionIdentityKey::new(SourceId(source.id), &RtdTopic::single("second").unwrap());
+    let first_id = SubscriptionId(1);
+    let second_id = SubscriptionId(2);
+
+    index.insert(first_identity, first_id, 16).unwrap();
+    index.insert(second_identity, second_id, 16).unwrap();
+    assert_eq!(
+        index.source_ref_count(source.id).map(|refs| refs.get()),
+        Some(2)
+    );
+    assert_eq!(index.distinct_source_count(), 1);
+
+    assert!(index.remove(first_identity, first_id));
+    assert_eq!(
+        index.source_ref_count(source.id).map(|refs| refs.get()),
+        Some(1)
+    );
+    assert!(index.remove(second_identity, second_id));
+    assert_eq!(index.distinct_source_count(), 0);
+    index.assert_invariants();
+}
+
+#[test]
+fn source_limit_counts_distinct_live_sources_not_topics() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        RtdLimits {
+            max_source_ids: RtdCapacity::disabled_if_zero(1),
+            ..RtdLimits::standard()
+        },
+        RtdSubscriptionHost::default(),
+        arena,
+    ));
+
+    let first = runtime
+        .prepare(&source, RtdTopic::single("first-topic").unwrap().borrowed())
+        .unwrap();
+    let second = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("second-topic").unwrap().borrowed(),
+        )
+        .unwrap();
+
+    let catalog = runtime.catalog.lock();
+    assert_eq!(catalog.identities.distinct_source_count(), 1);
+    assert_eq!(
+        catalog
+            .identities
+            .source_ref_count(source.id)
+            .map(|refs| refs.get()),
+        Some(2)
+    );
+    drop(catalog);
+
+    first.rollback();
+    second.rollback();
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 0);
+}
+
+#[test]
+fn source_limit_rejects_a_second_live_source() {
+    let fixture = SourceFixture::new();
+    let (source_a, _, _) = fixture.add::<f64>(None);
+    let (source_b, _, _) = fixture.add::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        RtdLimits {
+            max_source_ids: RtdCapacity::disabled_if_zero(1),
+            ..RtdLimits::standard()
+        },
+        RtdSubscriptionHost::default(),
+        fixture.finish(),
+    ));
+
+    let first = runtime
+        .prepare(
+            &source_a,
+            RtdTopic::single("first-source").unwrap().borrowed(),
+        )
+        .unwrap();
+    assert!(matches!(
+        runtime.prepare(
+            &source_b,
+            RtdTopic::single("second-source").unwrap().borrowed()
+        ),
+        Err(XllError::Overloaded)
+    ));
+
+    let catalog = runtime.catalog.lock();
+    assert_eq!(catalog.identities.distinct_source_count(), 1);
+    assert_eq!(
+        catalog
+            .identities
+            .source_ref_count(source_a.id)
+            .map(|n| n.get()),
+        Some(1)
+    );
+    assert_eq!(catalog.identities.source_ref_count(source_b.id), None);
+    drop(catalog);
+
+    first.rollback();
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 0);
+}
+
+#[test]
+fn duplicate_index_id_does_not_change_source_refcount() {
+    let mut index = SubscriptionIdentityIndex::default();
+    let (_arena, source, _, _) = publishing_source::<f64>(None);
+    let identity =
+        SubscriptionIdentityKey::new(SourceId(source.id), &RtdTopic::single("duplicate").unwrap());
+    let first_id = SubscriptionId(1);
+
+    index.insert(identity, first_id, 1).unwrap();
+    assert!(matches!(
+        index.insert(identity, first_id, 1),
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_DUPLICATE
+        })
+    ));
+    assert_eq!(index.source_ref_count(source.id).map(|n| n.get()), Some(1));
+    assert_eq!(index.ids_by_key.len(), 1);
+    index.assert_invariants();
+}
+
+#[test]
+fn colliding_topics_remain_distinct_and_survive_either_removal_order() {
+    for remove_first in [true, false] {
+        let (arena, source, _, _) = publishing_source::<f64>(None);
+        let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+        let topic = |name| RtdTopic::single(name).unwrap().with_test_identity_hash(42);
+        let first = runtime
+            .prepare(&source, topic("USDJPY").borrowed())
+            .unwrap();
+        let second = runtime
+            .prepare(&source, topic("EURUSD").borrowed())
+            .unwrap();
+        assert_ne!(first.id(), second.id());
+
+        for (name, id) in [("USDJPY", first.id()), ("EURUSD", second.id())] {
+            let repeated = runtime.prepare(&source, topic(name).borrowed()).unwrap();
+            assert_eq!(repeated.id(), id);
+            repeated.rollback();
+        }
+        {
+            let catalog = runtime.catalog.lock();
+            assert_eq!(catalog.identities.ids_by_key.len(), 1);
+            assert_eq!(
+                catalog
+                    .identities
+                    .source_ref_count(source.id)
+                    .unwrap()
+                    .get(),
+                2
+            );
+            catalog.assert_identity_invariants();
+        }
+
+        let (removed, survivor, removed_name, surviving_name) = if remove_first {
+            (first, second, "USDJPY", "EURUSD")
+        } else {
+            (second, first, "EURUSD", "USDJPY")
+        };
+        removed.rollback();
+        {
+            let catalog = runtime.catalog.lock();
+            assert!(
+                catalog
+                    .find_identity(SourceId(source.id), &topic(removed_name).borrowed())
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                catalog
+                    .identities
+                    .source_ref_count(source.id)
+                    .unwrap()
+                    .get(),
+                1
+            );
+            catalog.assert_identity_invariants();
+        }
+        let repeated = runtime
+            .prepare(&source, topic(surviving_name).borrowed())
+            .unwrap();
+        assert_eq!(repeated.id(), survivor.id());
+        repeated.rollback();
+        survivor.rollback();
+
+        let catalog = runtime.catalog.lock();
+        assert!(catalog.identities.ids_by_key.is_empty());
+        assert!(catalog.entries.is_empty());
+        assert_eq!(catalog.identities.distinct_source_count(), 0);
+        catalog.assert_identity_invariants();
+    }
+}
+
+#[test]
+fn missing_collision_candidate_does_not_change_source_refcount() {
+    let mut index = SubscriptionIdentityIndex::default();
+    let (_arena, source, _, _) = publishing_source::<f64>(None);
+    let key =
+        SubscriptionIdentityKey::new(SourceId(source.id), &RtdTopic::single("topic").unwrap());
+    index.insert(key, SubscriptionId(1), 1).unwrap();
+    index.insert(key, SubscriptionId(2), 1).unwrap();
+    assert!(!index.remove(key, SubscriptionId(3)));
+    assert_eq!(
+        index.candidates(key),
+        &[SubscriptionId(1), SubscriptionId(2)]
+    );
+    assert_eq!(index.source_ref_count(source.id).unwrap().get(), 2);
+    index.assert_invariants();
+    index.clear();
+    assert!(index.candidates(key).is_empty());
+    assert!(!index.remove(key, SubscriptionId(1)));
+    index.assert_invariants();
+}
+
+#[test]
+fn identity_lookup_reports_orphaned_candidate() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let topic = RtdTopic::single("orphan").unwrap();
+    let mut catalog = runtime.catalog.lock();
+    catalog
+        .identities
+        .insert(
+            SubscriptionIdentityKey::new(SourceId(source.id), &topic),
+            SubscriptionId(1),
+            1,
+        )
+        .unwrap();
+    assert!(matches!(
+        catalog.find_identity(SourceId(source.id), &topic.borrowed()),
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN
+        })
+    ));
+    catalog.identities.clear();
+}
+
+#[test]
+fn topic_part_boundaries_are_part_of_subscription_identity() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+
+    let topic_a = RtdTopic::new(["a\0b", "c"]).unwrap();
+    let topic_b = RtdTopic::new(["a", "b\0c"]).unwrap();
+
+    let prepared_a = runtime.prepare(&source, topic_a.borrowed()).unwrap();
+
+    let prepared_b = runtime.prepare(&source, topic_b.borrowed()).unwrap();
+
+    assert_ne!(prepared_a.key(), prepared_b.key());
+    runtime.catalog.lock().assert_identity_invariants();
+}
+
+#[test]
+fn structurally_equal_topics_share_transport_key() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+
+    let prepared_a = runtime
+        .prepare(
+            &source,
+            RtdTopic::new(["market", "USD\0JPY"]).unwrap().borrowed(),
+        )
+        .unwrap();
+
+    let prepared_b = runtime
+        .prepare(
+            &source,
+            RtdTopic::new(["market", "USD\0JPY"]).unwrap().borrowed(),
+        )
+        .unwrap();
+
+    assert_eq!(prepared_a.key(), prepared_b.key());
+    runtime.catalog.lock().assert_identity_invariants();
+}
+
+#[test]
+fn borrowed_preparation_owns_only_canonical_storage_and_outlives_input() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let first = {
+        let input = String::from("USD\0JPY");
+        let parts = ["market", input.as_str()];
+        let prepared = runtime
+            .prepare(&source, BorrowedTopicParts::new(&parts).unwrap())
+            .unwrap();
+        assert_ne!(
+            runtime.catalog.lock().entries[&prepared.id()]
+                .topic
+                .part(1)
+                .unwrap()
+                .as_ptr(),
+            input.as_ptr()
+        );
+        prepared
+    };
+    let id = first.id();
+    let canonical = runtime.catalog.lock().entries[&id]
+        .topic
+        .part(0)
+        .unwrap()
+        .as_ptr();
+    let repeated = runtime
+        .prepare(
+            &source,
+            BorrowedTopicParts::new(&["market", "USD\0JPY"]).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(repeated.id(), id);
+    assert_eq!(
+        runtime.catalog.lock().entries[&id]
+            .topic
+            .part(0)
+            .unwrap()
+            .as_ptr(),
+        canonical
+    );
+    repeated.rollback();
+    first.rollback();
+    let catalog = runtime.catalog.lock();
+    assert!(catalog.entries.is_empty());
+    catalog.assert_identity_invariants();
+}
+
+#[test]
+fn borrowed_collision_reuse_and_removal_preserve_source_isolation() {
+    let fixture = SourceFixture::new();
+    let (source, _, _) = fixture.add::<f64>(None);
+    let (other, _, _) = fixture.add::<f64>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(fixture.finish());
+    let usd_parts = ["market", "USD"];
+    let eur_parts = ["market", "EUR"];
+    let topic = |parts| {
+        BorrowedTopicParts::new(parts)
+            .unwrap()
+            .with_test_identity_hash(7)
+    };
+    let usd = runtime.prepare(&source, topic(&usd_parts)).unwrap();
+    let eur = runtime.prepare(&source, topic(&eur_parts)).unwrap();
+    assert_ne!(usd.id(), eur.id());
+    usd.rollback();
+    let repeated = runtime.prepare(&source, topic(&eur_parts)).unwrap();
+    assert_eq!(repeated.id(), eur.id());
+    let foreign = runtime.prepare(&other, topic(&eur_parts)).unwrap();
+    assert_ne!(foreign.id(), eur.id());
+    runtime.catalog.lock().assert_identity_invariants();
+    repeated.rollback();
+    foreign.rollback();
+    eur.rollback();
+    runtime.catalog.lock().assert_identity_invariants();
+}
+
+#[test]
+fn pending_count_follows_borrowed_connection_and_termination_transitions() {
+    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let server = runtime.register_test_server(1);
+    let first = runtime
+        .prepare(&source, BorrowedTopicParts::new(&["active"]).unwrap())
+        .unwrap();
+    let id = first.id();
+    assert_eq!(runtime.catalog.lock().pending_len(), 1);
+    let connection = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    let connecting = runtime
+        .prepare(&source, BorrowedTopicParts::new(&["active"]).unwrap())
+        .unwrap();
+    assert_eq!(connecting.id(), id);
+    assert!(!connecting.has_reservation());
+    connecting.rollback();
+    connection.commit().unwrap();
+    assert_eq!(
+        runtime.catalog.lock().pending_len(),
+        1,
+        "original reservation is live"
+    );
+    first.commit();
+    assert_eq!(runtime.catalog.lock().pending_len(), 0);
+    let active = runtime
+        .prepare(&source, BorrowedTopicParts::new(&["active"]).unwrap())
+        .unwrap();
+    assert_eq!(active.id(), id);
+    assert!(!active.has_reservation());
+    active.rollback();
+    runtime.catalog.lock().assert_identity_invariants();
+    runtime
+        .terminate_server(ServerGeneration::new(1).unwrap())
+        .unwrap();
+    let catalog = runtime.catalog.lock();
+    assert_eq!(catalog.pending_len(), 0);
+    assert!(catalog.entries.is_empty());
+    catalog.assert_identity_invariants();
+}
+
+#[test]
+fn miri_rejected_topic_admission_never_reads_parts_to_copy_them() {
+    struct CountedPart<'a> {
+        reads: &'a std::cell::Cell<usize>,
+        text: &'a str,
+    }
+    impl AsRef<str> for CountedPart<'_> {
+        fn as_ref(&self) -> &str {
+            self.reads.set(self.reads.get() + 1);
+            self.text
+        }
+    }
+    for case in ["pending", "bytes", "source", "id"] {
+        let (arena, source, _, _) = publishing_source::<f64>(None);
+        let mut runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+        runtime.limits = match case {
+            "pending" => RtdLimits::standard().with_max_pending(RtdCapacity::disabled()),
+            "bytes" => RtdLimits::standard().with_max_total_topic_bytes(RtdCapacity::disabled()),
+            "source" => RtdLimits::standard().with_max_source_ids(RtdCapacity::disabled()),
+            _ => RtdLimits::standard(),
+        };
+        if case == "id" {
+            runtime.catalog.lock().next_subscription_id = u64::MAX;
+        }
+        let next_id = runtime.catalog.lock().next_subscription_id;
+        let reads = std::cell::Cell::new(0);
+        let parts = [CountedPart {
+            reads: &reads,
+            text: "a non-inline topic name which must never be copied",
+        }];
+        let topic = BorrowedTopicParts::new(&parts).unwrap();
+        reads.set(0);
+        let result = runtime.prepare(&source, topic);
+        assert!(if case == "id" {
+            matches!(result, Err(XllError::Internal { .. }))
+        } else {
+            matches!(result, Err(XllError::Overloaded))
+        });
+        assert_eq!(reads.get(), 0, "rejected topic reached owned conversion");
+        let catalog = runtime.catalog.lock();
+        assert_eq!(catalog.next_subscription_id, next_id);
+        assert!(catalog.entries.is_empty());
+        assert_eq!(catalog.pending_topic_bytes, 0);
+        catalog.assert_identity_invariants();
+    }
+}
+
+#[test]
+fn existing_topic_reuse_precedes_all_new_admission_limits() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let mut runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let prepared = runtime
+        .prepare(&source, BorrowedTopicParts::new(&["reused"]).unwrap())
+        .unwrap();
+    let key = *prepared.key();
+    prepared.commit();
+    runtime.limits = RtdLimits::standard()
+        .with_max_pending(RtdCapacity::disabled())
+        .with_max_total_topic_bytes(RtdCapacity::disabled())
+        .with_max_source_ids(RtdCapacity::disabled());
+    let reused = runtime
+        .prepare(&source, BorrowedTopicParts::new(&["reused"]).unwrap())
+        .unwrap();
+    assert_eq!(*reused.key(), key);
+    reused.commit();
+    assert!(matches!(
+        runtime.prepare(&source, BorrowedTopicParts::new(&["new"]).unwrap()),
+        Err(XllError::Overloaded)
+    ));
+    runtime.catalog.lock().assert_identity_invariants();
+}
+
+#[test]
+fn borrowed_admission_rejection_preserves_counts_and_runtime_checks() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(1).unwrap(),
+        RtdLimits::standard().with_max_pending(RtdCapacity::disabled_if_zero(1)),
+        Default::default(),
+        arena,
+    );
+    let first = runtime
+        .prepare(&source, BorrowedTopicParts::new(&["a"]).unwrap())
+        .unwrap();
+    let next = runtime.catalog.lock().next_subscription_id;
+    assert!(matches!(
+        runtime.prepare(&source, BorrowedTopicParts::new(&["b"]).unwrap()),
+        Err(XllError::Overloaded)
+    ));
+    assert_eq!(runtime.catalog.lock().next_subscription_id, next);
+    runtime.catalog.lock().assert_identity_invariants();
+    first.rollback();
+    runtime
+        .prepare(&source, BorrowedTopicParts::new(&["b"]).unwrap())
+        .unwrap()
+        .rollback();
+    runtime.close().unwrap();
+    assert!(matches!(
+        runtime.prepare(&source, BorrowedTopicParts::new(&["a"]).unwrap()),
+        Err(XllError::Closing)
+    ));
+    runtime.catalog.lock().assert_identity_invariants();
+    let stale_runtime = SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(2).unwrap(),
+        RtdLimits::standard(),
+        Default::default(),
+        SourceArena::<()>::empty(RuntimeGeneration::new(2).unwrap()),
+    );
+    assert!(matches!(
+        stale_runtime.prepare(&source, BorrowedTopicParts::new(&["a"]).unwrap()),
+        Err(XllError::StaleHandle)
+    ));
+}
+
+#[test]
+fn topic_rejects_parts_larger_than_excel_string_limit() {
+    let part = "x".repeat(crate::utf16::EXCEL_STRING_LIMIT + 1);
+    assert!(RtdTopic::single(part).is_err());
+}
+
+#[test]
+fn large_logical_topic_uses_bounded_transport_key() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+
+    let topic = RtdTopic::single("x".repeat(16 * 1024)).unwrap();
+    let prepared = runtime.prepare(&source, topic.borrowed()).unwrap();
+
+    let transport = prepared.key().to_transport();
+    assert_eq!(transport.as_str().encode_utf16().count(), 43);
+    assert!(transport.as_str().starts_with("stream:v1:"));
+    runtime.catalog.lock().assert_identity_invariants();
+}
+
+#[test]
+fn distinct_identities_receive_distinct_transport_keys() {
+    let fixture = SourceFixture::new();
+    let (source_a, _, _) = fixture.add::<f64>(None);
+    let (source_b, _, _) = fixture.add::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
+
+    let topic = RtdTopic::single("same").unwrap();
+
+    let a = runtime.prepare(&source_a, topic.borrowed()).unwrap();
+    let b = runtime.prepare(&source_b, topic.borrowed()).unwrap();
+
+    assert_ne!(a.key(), b.key());
+    runtime.catalog.lock().assert_identity_invariants();
+}
+
+#[test]
+fn identity_index_is_removed_after_final_unbind() {
+    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("unbind_test").unwrap().borrowed())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    conn.commit().unwrap();
+
+    runtime.disconnect(&server, TopicId(1)).unwrap();
+
+    let catalog = runtime.catalog.lock();
+    assert!(catalog.entries.is_empty());
+    assert!(catalog.identities.ids_by_key.is_empty());
+    catalog.assert_identity_invariants();
+}
+
+#[test]
+fn catalog_entries_are_canonical_for_subscription_identity() {
+    let fixture = SourceFixture::new();
+    let (source_a, _, _) = fixture.add::<f64>(None);
+    let (source_b, _, _) = fixture.add::<f64>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(
+        fixture.finish(),
+    ));
+
+    let prep_a = runtime
+        .prepare(&source_a, RtdTopic::single("topic-a").unwrap().borrowed())
+        .unwrap();
+    let prep_b = runtime
+        .prepare(&source_b, RtdTopic::single("topic-b").unwrap().borrowed())
+        .unwrap();
+
+    let catalog = runtime.catalog.lock();
+    catalog.assert_identity_invariants();
+    assert_eq!(catalog.identities.ids_by_key.len(), 2);
+    assert_eq!(catalog.entries.len(), 2);
+
+    for (key, ids) in &catalog.identities.ids_by_key {
+        for id in ids {
+            let entry = catalog.entries.get(id).unwrap();
+            assert_eq!(entry.source_id, key.source_id);
+            assert_eq!(entry.topic.identity_hash(), key.topic_hash);
+        }
+    }
+    drop(catalog);
+
+    prep_a.rollback();
+    prep_b.rollback();
+
+    let catalog = runtime.catalog.lock();
+    assert!(catalog.entries.is_empty());
+    assert!(catalog.identities.ids_by_key.is_empty());
+    catalog.assert_identity_invariants();
+}
+
+#[test]
+fn transport_key_parser_rejects_noncanonical_keys() {
+    for invalid in [
+        "stream:",
+        "stream:v2:0000000000000001:0000000000000001",
+        "stream:v1:1:2",
+        "stream:v1:000000000000000g:0000000000000001",
+        "stream:v1:0000000000000001:0000000000000001:extra",
+    ] {
+        assert!(SubscriptionKey::parse_transport(invalid).is_err());
+    }
+}
+
+#[test]
+fn subscription_key_round_trips_through_transport() {
+    let key = SubscriptionKey::from_allocated_id(1, 42);
+    let transport = key.to_transport();
+
+    assert_eq!(
+        transport.as_str(),
+        "stream:v1:0000000000000001:000000000000002a"
+    );
+    assert_eq!(
+        SubscriptionKey::parse_transport(transport.as_str()).unwrap(),
+        key
+    );
+}
+
+#[test]
+fn transport_key_preserves_all_hex_digits_and_identifier_boundaries() {
+    let identifiers = [0, 1, 15, 16, 255, 256, 0x0123_4567_89ab_cdef, u64::MAX];
+    for runtime_id in identifiers {
+        for subscription_id in identifiers {
+            let key = SubscriptionKey::from_allocated_id(runtime_id, subscription_id);
+            let transport = key.to_transport();
+            assert_eq!(
+                transport.as_str(),
+                format!("stream:v1:{runtime_id:016x}:{subscription_id:016x}")
+            );
+            assert_eq!(
+                SubscriptionKey::parse_transport(transport.as_str()).unwrap(),
+                key
+            );
+        }
+    }
+}
+
+#[test]
+fn refresh_state_attach_prepare_commit_lifecycle() {
+    let mut state: RefreshState<u32> = RefreshState::default();
+    assert_eq!(state.attach_notifier(100), None);
+
+    let prepared = state.prepare_notification(true).unwrap().unwrap();
+    assert_eq!(prepared.ticket(), 0);
+    assert_eq!(*prepared.notifier(), 100);
+
+    let attempt = state.commit_notification(prepared);
+    assert_eq!(attempt.ticket(), 0);
+    assert_eq!(*attempt.notifier(), 100);
+
+    // While Calling, prepare_notification returns None
+    assert!(state.prepare_notification(true).unwrap().is_none());
+
+    // Calling signal can be inspected
+    assert!(state.signal_calling_mut(0).is_some());
+    assert!(state.signal_calling_mut(1).is_none());
+
+    // Detach notifier resets signal to Dormant
+    assert_eq!(state.detach_notifier(), Some(100));
+}
+
+#[test]
+fn server_notification_retry_sequence_eventually_succeeds() {
+    let (arena, source, sink, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let state = Arc::new(TestNotifierState::new());
+    state
+        .outcomes
+        .lock()
+        .push_back(TestNotifyOutcome::Error(XllError::Panic));
+    state
+        .outcomes
+        .lock()
+        .push_back(TestNotifyOutcome::Error(XllError::Panic));
+    state.outcomes.lock().push_back(TestNotifyOutcome::Success);
+
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+
+    let prep = runtime
+        .prepare(&source, RtdTopic::single("retry_test").unwrap().borrowed())
+        .unwrap();
+    let id = prep.id();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    conn.commit().unwrap();
+
+    let sink = sink.lock().clone().unwrap();
+    sink.publish(1.0).unwrap();
+
+    // 2 errors followed by 1 success -> 3 calls total
+    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn heartbeat_retries_accepted_notification_without_a_refresh() {
+    let (_runtime, server, sink) = connected_sink::<f64>(None, "missed-notification");
+    let state = Arc::new(TestNotifierState::new());
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+
+    // A successful UpdateNotify is not an acknowledgement that Excel pulled
+    // the value. Model Excel accepting the call without scheduling RefreshData.
+    sink.publish(1.0).unwrap();
+    sink.publish(2.0).unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 2);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(batch.updates()[0].value, StoredRtdValue::Number(2.0));
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
+fn heartbeat_recovers_updates_published_during_an_earlier_refresh() {
+    let fixture = SourceFixture::new();
+    let sources = (0..10)
+        .map(|_| fixture.add::<f64>(None))
+        .collect::<Vec<_>>();
+    let runtime = SubscriptionRuntime::with_sources_for_internal(fixture.finish());
+    let server = runtime.register_test_server(1);
+    let state = Arc::new(TestNotifierState::new());
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+    for (index, (source, _, _)) in sources.iter().enumerate() {
+        let topic = RtdTopic::single(format!("partial-pulse-{index}")).unwrap();
+        let prepared = runtime.prepare(source, topic.borrowed()).unwrap();
+        let id = prepared.id();
+        prepared.commit();
+        runtime
+            .connect_transaction(&server, TopicId(index as i32 + 1), id)
+            .unwrap()
+            .commit()
+            .unwrap();
+    }
+
+    // Excel pulls the first topic while the remaining pulse publications
+    // arrive. Its in-progress RefreshData cannot contain these later values.
+    sources[0]
+        .1
+        .lock()
+        .as_ref()
+        .unwrap()
+        .publish(1_000_000.0)
+        .unwrap();
+    let first = server.begin_refresh().unwrap();
+    assert_eq!(first.updates().len(), 1);
+    for (_, sink, _) in &sources[1..] {
+        sink.lock().as_ref().unwrap().publish(1_000_000.0).unwrap();
+    }
+    first.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(server.pending_update_count(), 9);
+
+    // The rearm returned success but Excel did not request a second batch.
+    // Heartbeat must notify again even with no further source publications.
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+    let remaining = server.begin_refresh().unwrap();
+    assert_eq!(remaining.updates().len(), 9);
+    for update in remaining.updates() {
+        assert!((2..=10).contains(&update.topic_id));
+        assert_eq!(update.value, StoredRtdValue::Number(1_000_000.0));
+    }
+    remaining.complete(RefreshOutcome::Delivered).unwrap();
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
+fn server_notification_heartbeat_recovers_after_bounded_retries() {
+    let (arena, source, sink, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let state = Arc::new(TestNotifierState::new());
+    for _ in 0..6 {
+        state
+            .outcomes
+            .lock()
+            .push_back(TestNotifyOutcome::Error(XllError::Panic));
+    }
+    state.outcomes.lock().push_back(TestNotifyOutcome::Success);
+
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+
+    let prep = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("suppress_test").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prep.id();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    conn.commit().unwrap();
+
+    let sink = sink.lock().clone().unwrap();
+    sink.publish(1.0).unwrap();
+
+    // Publishing cannot spin on a failed host. Each heartbeat provides a
+    // separate retry budget, and a later heartbeat can observe host recovery.
+    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+    sink.publish(2.0).unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 6);
+    sink.publish(3.0).unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 6);
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 7);
+    // A later heartbeat with no intervening RefreshData means delivery is
+    // still outstanding, even though the previous callback returned success.
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 8);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(batch.updates()[0].value, StoredRtdValue::Number(3.0));
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(server.pending_update_count(), 0);
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 8);
+}
+
+#[test]
+fn concurrent_heartbeat_does_not_duplicate_notification_retry() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (arena, source, sink, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let state = Arc::new(TestNotifierState::new());
+    for _ in 0..3 {
+        state
+            .outcomes
+            .lock()
+            .push_back(TestNotifyOutcome::Error(XllError::Panic));
+    }
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("concurrent-heartbeat").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    sink.lock().clone().unwrap().publish(1.0).unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *state.entered.lock() = Some(entered_tx);
+    *state.release.lock() = Some(release_rx);
+    let retry = std::thread::spawn(move || server.pulse_notification());
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let (pulsed_tx, pulsed_rx) = mpsc::channel();
+    let concurrent = std::thread::spawn(move || {
+        let result = server.pulse_notification();
+        pulsed_tx.send(()).unwrap();
+        result
+    });
+    let concurrent_completed = pulsed_rx.recv_timeout(Duration::from_secs(2));
+    let calls_while_retrying = state.calls.load(Ordering::SeqCst);
+    // Release both possible callbacks before asserting, so a duplicate-call
+    // regression cannot strand a worker and block runtime destruction.
+    release_tx.send(()).unwrap();
+    release_tx.send(()).unwrap();
+    retry.join().unwrap().unwrap();
+    concurrent.join().unwrap().unwrap();
+    state.release.lock().take();
+
+    concurrent_completed.unwrap();
+    assert_eq!(calls_while_retrying, 4);
+    assert_eq!(state.calls.load(Ordering::SeqCst), 4);
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 5);
+}
+
+#[test]
+fn server_notification_panic_records_cleanup_failure() {
+    let (arena, source, sink, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let state = Arc::new(TestNotifierState::new());
+    state.outcomes.lock().push_back(TestNotifyOutcome::Panic);
+
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+
+    let prep = runtime
+        .prepare(&source, RtdTopic::single("panic_test").unwrap().borrowed())
+        .unwrap();
+    let id = prep.id();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    conn.commit().unwrap();
+
+    let sink = sink.lock().clone().unwrap();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        sink.publish(1.0).unwrap();
+    }));
+    assert!(res.is_err());
+    assert!(runtime.cleanup_result().is_err());
+}
+
+#[test]
+fn runtime_close_causes_fail_closed_on_server() {
+    let runtime = Arc::new(SubscriptionRuntime::<()>::new());
+    let server = runtime.register_test_server(1);
+
+    runtime.close().unwrap();
+
+    assert!(matches!(
+        server.test_server().enter_operation(),
+        Err(XllError::Closing)
+    ));
+    assert!(matches!(
+        // SAFETY: the runtime was closed above, so this call can only fail
+        // before minting an owned operation and the server remains allocated.
+        unsafe { server.test_server().enter_owned_operation() },
+        Err(XllError::Closing)
+    ));
+    assert!(matches!(
+        server.test_server().publish.publish(
+            TopicId(1),
+            ConnectionGeneration::new(1).unwrap(),
+            RtdValue::Number(1.0).into_stored().unwrap(),
+        ),
+        Err(XllError::Closing)
+    ));
+}
+
+#[test]
+fn runtime_close_and_publish_race() {
+    let (arena, source, sink, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let prep = runtime
+        .prepare(&source, RtdTopic::single("race_test").unwrap().borrowed())
+        .unwrap();
+    let id = prep.id();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    conn.commit().unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    let sink_clone = sink.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (start_tx, start_rx) = std::sync::mpsc::channel::<()>();
+    let start_rx = Arc::new(Mutex::new(start_rx));
+
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let sink = sink_clone.clone();
+        let ready_tx = ready_tx.clone();
+        let start_rx = Arc::clone(&start_rx);
+        handles.push(std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let _ = start_rx.lock().recv();
+            for j in 0..100 {
+                let _ = sink.publish((i * 100 + j) as f64);
+            }
+        }));
+    }
+    drop(ready_tx);
+    for _ in 0..8 {
+        ready_rx.recv().unwrap();
+    }
+
+    let runtime_close = Arc::clone(&runtime);
+    let close_handle = std::thread::spawn(move || {
+        runtime_close.close().unwrap();
+    });
+
+    drop(start_tx);
+
+    for h in handles {
+        h.join().unwrap();
+    }
+    close_handle.join().unwrap();
+
+    assert!(matches!(sink.publish(999.0), Err(XllError::Closing)));
+}
+
+#[test]
+fn quota_permit_releases_on_drain() {
+    let (arena, source, sink_slot, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let prep = runtime
+        .prepare(&source, RtdTopic::single("quota_test").unwrap().borrowed())
+        .unwrap();
+    let id = prep.id();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    conn.commit().unwrap();
+    let sink = sink_slot.lock().clone().unwrap();
+
+    sink.publish(42.0).unwrap();
+    assert_eq!(runtime.services.queued_update_quota.used(), 1);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 1);
+    batch
+        .complete(crate::subscription::RefreshOutcome::Delivered)
+        .unwrap();
+    assert_eq!(runtime.services.queued_update_quota.used(), 0);
+}
+
+pub(crate) struct SinkHoldingSubscription<T> {
+    _sink: RtdSink<T>,
+}
+
+// SAFETY: test subscription holds an RtdSink and does not touch unsafe state.
+unsafe impl<T: Send + 'static> RtdSubscription for SinkHoldingSubscription<T> {
+    fn request_cancel(&self) {}
+
+    fn disconnect_and_wait(self) -> XllResult<()> {
+        Ok(())
+    }
+}
+
+struct SinkCapturingSource;
+
+// SAFETY: the returned subscription owns the sink and releases it only after
+// the runtime has completed disconnecting the subscription.
+unsafe impl RtdSource for SinkCapturingSource {
+    type Value = f64;
+    type Subscription = SinkHoldingSubscription<Self::Value>;
+    fn subscribe(
+        &self,
+        _topic: &RtdTopic,
+        sink: RtdSink<Self::Value>,
+    ) -> XllResult<Self::Subscription> {
+        Ok(SinkHoldingSubscription { _sink: sink })
+    }
+}
+
+#[test]
+fn publish_core_drops_cleanly_without_cycle_when_subscription_holds_sink() {
+    let (arena, source) = SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        SinkCapturingSource,
+    )
+    .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let prep = runtime
+        .prepare(&source, RtdTopic::single("cycle_test").unwrap().borrowed())
+        .unwrap();
+    let id = prep.id();
+    prep.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    conn.commit().unwrap();
+
+    // Terminate server, closing and disconnecting subscriptions
+    server.terminate().unwrap();
+
+    // After termination, server is marked closed/terminated
+    assert!(server.claim(id).is_err());
+}
+
+#[test]
+fn prepare_warm_path_reuses_registered_source_identity() {
+    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let topic = RtdTopic::single("warm-path-strong-count").unwrap();
+
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 0);
+
+    // 1. Initial prepare registers the handle identity and creates the pending subscription.
+    let first = runtime.prepare(&source, topic.borrowed()).unwrap();
+    assert!(first.has_reservation());
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 1);
+
+    // 2. ExistingPending prepare reuses the same handle identity and pending entry.
+    let second_pending = runtime.prepare(&source, topic.borrowed()).unwrap();
+    assert!(second_pending.has_reservation());
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 1);
+    second_pending.rollback();
+
+    // Commit and connect transaction to activate subscription.
+    // The pending catalog entry is consumed/removed.
+    let id = first.id();
+    first.commit();
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    conn.commit().unwrap();
+
+    // 3. ExistingActive prepare is a warm lookup without a new source identity.
+    let warm_prepared = runtime.prepare(&source, topic.borrowed()).unwrap();
+    assert!(!warm_prepared.has_reservation());
+    assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 1);
+    warm_prepared.rollback();
+}
+
+#[test]
+fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
+    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let topic = RtdTopic::single("existing-active-noop").unwrap();
+
+    let first = runtime.prepare(&source, topic.borrowed()).unwrap();
+    let id = first.id();
+    let key = *first.key();
+    first.commit();
+
+    let conn = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    conn.commit().unwrap();
+
+    // Prepare on existing active: warm lookup
+    let warm = runtime.prepare(&source, topic.borrowed()).unwrap();
+    assert_eq!(warm.id(), id);
+    assert_eq!(warm.key(), &key);
+    assert!(!warm.has_reservation());
+
+    // Rollback is a no-op: catalog active keys and pending are untouched
+    warm.rollback();
+    let catalog = runtime.catalog.lock();
+    assert!(
+        catalog
+            .entries
+            .get(&id)
+            .is_some_and(|entry| entry.is_active())
+    );
+    assert_eq!(catalog.pending_len(), 0);
+}
+
+#[test]
+fn resolve_transport_key_validates_runtime_identity() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime_a = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let runtime_b = Arc::new(SubscriptionRuntime::<()>::new());
+
+    let prep = runtime_a
+        .prepare(
+            &source,
+            RtdTopic::single("resolve-test").unwrap().borrowed(),
+        )
+        .unwrap();
+
+    let id = prep.id();
+    let key = *prep.key();
+
+    // 1. Valid current-runtime key resolves to SubscriptionId
+    assert_eq!(runtime_a.resolve_transport_key(key).unwrap(), id);
+
+    // 2. Key from another runtime fails with StaleHandle
+    assert!(matches!(
+        runtime_b.resolve_transport_key(key),
+        Err(XllError::StaleHandle)
+    ));
+
+    // 3. Round-trip transport string
+    let transport = key.to_transport();
+    let parsed_key = SubscriptionKey::parse_transport(transport.as_str()).unwrap();
+    assert_eq!(runtime_a.resolve_transport_key(parsed_key).unwrap(), id);
+}
+
+#[test]
+fn server_handle_cannot_cross_subscription_runtime_boundary() {
+    let runtime_a = Arc::new(SubscriptionRuntime::<()>::new());
+    let runtime_b = Arc::new(SubscriptionRuntime::<()>::new());
+    let server_a = runtime_a.register_test_server(1);
+
+    assert!(matches!(
+        runtime_b.connect_transaction(&server_a, TopicId(1), SubscriptionId(1)),
+        Err(XllError::StaleHandle)
+    ));
+    assert!(matches!(
+        runtime_b.disconnect(&server_a, TopicId(1)),
+        Err(XllError::StaleHandle)
+    ));
+}
+
+#[test]
+fn preparation_rejects_missing_source_without_catalog_reservation() {
+    let (arena, mut source, _, _) = publishing_source::<i32>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    source.id.sequence = u64::MAX;
+
+    assert!(matches!(
+        runtime.prepare(
+            &source,
+            RtdTopic::single("missing-source").unwrap().borrowed()
+        ),
+        Err(XllError::StaleHandle)
+    ));
+    let catalog = runtime.catalog.lock();
+    assert!(catalog.entries.is_empty());
+    assert_eq!(catalog.pending_topic_bytes, 0);
+    catalog.assert_identity_invariants();
+}
+
+#[test]
+fn rejected_connection_source_leaves_preparation_pending() {
+    let (arena, source, _, _) = publishing_source::<i32>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("source-resolution").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    // Inject a damaged identity after preparation to verify that the
+    // connection boundary rejects it before acquiring a catalog obligation.
+    runtime
+        .catalog
+        .lock()
+        .entries
+        .get_mut(&id)
+        .unwrap()
+        .source_id
+        .0
+        .sequence = u64::MAX;
+
+    assert!(matches!(
+        runtime.connect_transaction(&server, TopicId(1), id),
+        Err(XllError::StaleHandle)
+    ));
+    {
+        let mut catalog = runtime.catalog.lock();
+        let entry = catalog.entries.get_mut(&id).unwrap();
+        assert!(!entry.is_connected());
+        entry.source_id = SourceId(source.id);
+        catalog.assert_identity_invariants();
+    }
+    prepared.rollback();
+    assert!(runtime.catalog.lock().entries.is_empty());
+}
+
+#[test]
+fn double_slot_pending_metadata_and_values_invariants() {
+    // Invariants 2, 3, 4:
+    // - For any pending update in pending[b], active.values[b] exists with matching (generation, sequence)
+    // - latest_slot is Some and points to a Some value slot
+    let (_runtime, server, sink) = connected_sink::<String>(None, "double-slot-invariants");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        let latest_slot = active.latest_slot.expect("latest_slot must be Some") as usize;
+        assert!(matches!(active.values[latest_slot], ValueSlot::Resident(_)));
+
+        for b in [0, 1] {
+            if let Some(queued) = shard.pending[b].get(&topic_id) {
+                let ValueSlot::Resident(slot) = &active.values[b] else {
+                    panic!("values[b] must be Resident matching pending");
+                };
+                assert_eq!(slot.generation, queued.connection_generation);
+                assert_eq!(slot.sequence, queued.sequence);
+            }
+        }
+    }
+}
+
+#[test]
+fn refresh_failure_preserves_pending_and_values_for_retry() {
+    // Invariant 5: Refresh failure does not alter pending/value state.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "refresh-failure-retry");
+
+    sink.publish("retry-value".to_owned()).unwrap();
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("retry-value".into())
+    );
+    batch.complete(RefreshOutcome::Failed).unwrap();
+
+    // After failure, retry succeeds with identical value and sequence!
+    let retry_batch = server.begin_refresh().unwrap();
+    assert_eq!(retry_batch.updates().len(), 1);
+    assert_eq!(
+        retry_batch.updates()[0].value,
+        StoredRtdValue::String("retry-value".into())
+    );
+    retry_batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn successful_refresh_retains_latest_value_for_exact_dedup() {
+    // Invariant 7: Successful refresh retains the latest value in values[latest_slot] for exact dedup.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "retain-latest-dedup");
+
+    sink.publish("dedup-target".to_owned()).unwrap();
+    let batch = server.begin_refresh().unwrap();
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    // Publishing identical value must be suppressed (zero queued updates)
+    sink.publish("dedup-target".to_owned()).unwrap();
+    assert_eq!(server.pending_update_count(), 0);
+
+    // Publishing changed value produces an update
+    sink.publish("changed-target".to_owned()).unwrap();
+    assert_eq!(server.pending_update_count(), 1);
+    let batch2 = server.begin_refresh().unwrap();
+    assert_eq!(
+        batch2.updates()[0].value,
+        StoredRtdValue::String("changed-target".into())
+    );
+    batch2.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn non_latest_delivered_slot_is_reclaimed() {
+    // Invariant 8: Delivered slot that is not the latest_slot is reclaimed to None.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "non-latest-reclamation");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let planned = server.test_server().publish.plan_refresh().unwrap();
+    sink.publish("v2".to_owned()).unwrap();
+
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(active.values[0], ValueSlot::Resident(_)));
+        assert!(matches!(active.values[1], ValueSlot::Resident(_)));
+        assert_eq!(
+            active.latest_slot,
+            Some(super::delivery::BufferIndex::Second)
+        );
+    }
+
+    let batch = planned.collect();
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(
+            matches!(active.values[0], ValueSlot::Empty),
+            "non-latest delivered slot must be reclaimed to Empty"
+        );
+        assert!(
+            matches!(active.values[1], ValueSlot::Resident(_)),
+            "latest slot must be retained for dedup"
+        );
+        assert_eq!(
+            active.latest_slot,
+            Some(super::delivery::BufferIndex::Second)
+        );
+    }
+}
+
+#[test]
+fn inflight_refresh_batch_leases_value_without_double_ownership() {
+    // Invariants 1 & 2:
+    // - InFlight slot corresponds to exactly one in-flight lease entry.
+    // - Resident and lease never own the same value simultaneously.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "phase-b-inv-1-2");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(active.values[0], ValueSlot::Resident(_)));
+    }
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("v1".into())
+    );
+
+    // While batch is held, the slot in the shard MUST be InFlight, NOT Resident!
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert_eq!(
+            active.values[0],
+            ValueSlot::InFlight {
+                generation: batch.updates()[0].connection_generation,
+                sequence: batch.updates()[0].sequence,
+            }
+        );
+        assert!(!matches!(active.values[0], ValueSlot::Resident(_)));
+    }
+
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn publish_during_inflight_refresh_treats_same_value_conservatively() {
+    // Invariant 4: While InFlight is latest, same-value publish is treated conservatively
+    // as changed (does not dedup) and publishes to the other slot.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "phase-b-inv-4");
+
+    sink.publish("same-value".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("same-value".into())
+    );
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
+        assert_eq!(
+            active.latest_slot,
+            Some(super::delivery::BufferIndex::First)
+        );
+    }
+
+    // While slot 0 is InFlight, publishing the EXACT same value does NOT dedup:
+    // it conservatively publishes to slot 1!
+    sink.publish("same-value".to_owned()).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
+        assert!(matches!(active.values[1], ValueSlot::Resident(_)));
+        assert_eq!(
+            active.latest_slot,
+            Some(super::delivery::BufferIndex::Second)
+        );
+    }
+
+    // Complete first batch
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    // Next batch collects the conservatively published update
+    let next_batch = server.begin_refresh().unwrap();
+    assert_eq!(next_batch.updates().len(), 1);
+    assert_eq!(
+        next_batch.updates()[0].value,
+        StoredRtdValue::String("same-value".into())
+    );
+    next_batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    // Now slot 1 is Resident and latest. Publishing "same-value" again DOES exact-dedup!
+    sink.publish("same-value".to_owned()).unwrap();
+    assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
+fn delivered_refresh_restores_resident_value_for_subsequent_dedup() {
+    // Invariant 5: Successful completion restores value to Resident if still latest.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "phase-b-inv-5");
+
+    sink.publish("target-value".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("target-value".into())
+    );
+
+    // No intermediate publish occurs
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(
+            &active.values[0],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("target-value".into())
+        ));
+        assert_eq!(
+            active.latest_slot,
+            Some(super::delivery::BufferIndex::First)
+        );
+    }
+
+    // Since it was restored to Resident, subsequent publish of same value dedups!
+    sink.publish("target-value".to_owned()).unwrap();
+    assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
+fn failed_refresh_and_batch_drop_restore_resident_value_for_retry() {
+    // Invariant 6: Failed completion or batch drop restores value to Resident
+    // if slot is InFlight (enables lossless retry).
+    let (_runtime, server, sink) = connected_sink::<String>(None, "phase-b-inv-6");
+
+    // Test case 6a: Explicit failure
+    sink.publish("retry-val-1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    batch.complete(RefreshOutcome::Failed).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(
+            &active.values[0],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("retry-val-1".into())
+        ));
+    }
+
+    // Retry succeeds
+    let retry1 = server.begin_refresh().unwrap();
+    assert_eq!(
+        retry1.updates()[0].value,
+        StoredRtdValue::String("retry-val-1".into())
+    );
+    retry1.complete(RefreshOutcome::Delivered).unwrap();
+
+    // Test case 6b: Batch drop without complete (abort)
+    sink.publish("retry-val-2".to_owned()).unwrap();
+    let batch_drop = server.begin_refresh().unwrap();
+    assert_eq!(
+        batch_drop.updates()[0].value,
+        StoredRtdValue::String("retry-val-2".into())
+    );
+    drop(batch_drop); // aborted!
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        let slot = active.latest_slot.unwrap() as usize;
+        assert!(matches!(
+            &active.values[slot],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("retry-val-2".into())
+        ));
+    }
+
+    let retry2 = server.begin_refresh().unwrap();
+    assert_eq!(
+        retry2.updates()[0].value,
+        StoredRtdValue::String("retry-val-2".into())
+    );
+    retry2.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn dropped_refresh_batch_notifies_excel_to_retry() {
+    let (_runtime, server, sink) = connected_sink::<i32>(None, "drop-refresh-notification");
+    let notifier = Arc::new(TestNotifierState::new());
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&notifier)))
+        .unwrap();
+    sink.publish(42).unwrap();
+    assert_eq!(notifier.calls.load(Ordering::Acquire), 1);
+
+    drop(server.begin_refresh().unwrap());
+    assert_eq!(notifier.calls.load(Ordering::Acquire), 2);
+    let retry = server.begin_refresh().unwrap();
+    assert_eq!(retry.updates()[0].value, StoredRtdValue::Integer(42));
+    retry.complete(RefreshOutcome::Delivered).unwrap();
+    sink.publish(43).unwrap();
+    assert_eq!(notifier.calls.load(Ordering::Acquire), 3);
+}
+
+#[test]
+fn miri_runtime_drop_disconnects_subscriptions_before_reclaiming_sources() {
+    struct PublishOnCancel {
+        inner: TestSubscription,
+        sink: RtdSink<i32>,
+        rejected: Arc<AtomicBool>,
+    }
+
+    // SAFETY: this wrapper forwards the inner subscription's join protocol;
+    // its own sink is used only synchronously during cancellation.
+    unsafe impl RtdSubscription for PublishOnCancel {
+        fn request_cancel(&self) {
+            self.rejected.store(
+                matches!(self.sink.publish(99), Err(XllError::Closing)),
+                Ordering::Release,
+            );
+            self.inner.request_cancel();
+        }
+
+        fn disconnect_and_wait(self) -> XllResult<()> {
+            self.inner.disconnect_and_wait()
+        }
+    }
+
+    struct PublishOnCancelSource {
+        inner: PublishingSource<i32>,
+        rejected: Arc<AtomicBool>,
+    }
+
+    // SAFETY: the inner source transfers its sink to TestSubscription. The
+    // wrapper owns its extra sink and only publishes synchronously on cancel.
+    unsafe impl RtdSource for PublishOnCancelSource {
+        type Value = i32;
+        type Subscription = PublishOnCancel;
+
+        fn subscribe(&self, topic: &RtdTopic, sink: RtdSink<i32>) -> XllResult<Self::Subscription> {
+            let inner = self.inner.subscribe(topic, sink.clone())?;
+            Ok(PublishOnCancel {
+                inner,
+                sink,
+                rejected: Arc::clone(&self.rejected),
+            })
+        }
+    }
+
+    let sink_slot = Arc::new(Mutex::new(None));
+    let disconnected = Arc::new(AtomicBool::new(false));
+    let rejected = Arc::new(AtomicBool::new(false));
+    let (arena, source) = SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        PublishOnCancelSource {
+            inner: PublishingSource {
+                initial: None,
+                sink_slot: Arc::clone(&sink_slot),
+                canceled: Arc::new(AtomicBool::new(false)),
+                disconnected: Arc::clone(&disconnected),
+                on_subscribe: None,
+            },
+            rejected: Arc::clone(&rejected),
+        },
+    )
+    .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("runtime-drop").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    server
+        .connect_transaction(TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    sink_slot.lock().as_ref().unwrap().publish(42).unwrap();
+    assert_eq!(runtime.services.active_quota.used(), 1);
+    assert_eq!(runtime.services.queued_update_quota.used(), 1);
+
+    drop(runtime);
+    assert!(rejected.load(Ordering::Acquire));
+    assert!(disconnected.load(Ordering::Acquire));
+    assert!(sink_slot.lock().is_none());
+}
+
+#[test]
+fn refresh_drop_contains_hostile_notifier_panic_during_unwind() {
+    for collect in [false, true] {
+        let (arena, source, sink_slot, _) = publishing_source::<i32>(None);
+        let notifier = Arc::new(TestNotifierState::new());
+        let payload_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        notifier.outcomes.lock().extend([
+            TestNotifyOutcome::Success,
+            TestNotifyOutcome::PanicPayload(Arc::clone(&payload_drops)),
+        ]);
+        let runtime = super::runtime::SubscriptionRuntime::with_host(
+            crate::generation::RuntimeGeneration::new(1).unwrap(),
+            RtdLimits::standard(),
+            crate::excel_rtd::RtdSubscriptionHost::detached(),
+            arena,
+        );
+        let server = runtime.register_test_server(1);
+        let prepared = runtime
+            .prepare(
+                &source,
+                RtdTopic::single("drop-refresh-panic").unwrap().borrowed(),
+            )
+            .unwrap();
+        let id = prepared.id();
+        prepared.commit();
+        server
+            .connect_transaction(TopicId(1), id)
+            .unwrap()
+            .commit()
+            .unwrap();
+        server
+            .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&notifier)))
+            .unwrap();
+        sink_slot.lock().as_ref().unwrap().publish(42).unwrap();
+
+        let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            let planned = server.test_server().publish.plan_refresh().unwrap();
+            if collect {
+                let _batch = planned.collect();
+                panic!("caller failed while formatting the refresh");
+            }
+            let _planned = planned;
+            panic!("caller failed before collecting the refresh");
+        }));
+        assert!(result.is_err());
+        assert_eq!(notifier.calls.load(Ordering::Acquire), 2);
+        assert_eq!(payload_drops.load(Ordering::Acquire), 0);
+        assert!(runtime.cleanup_result().is_err());
+        let retry = server.begin_refresh().unwrap();
+        assert_eq!(retry.updates()[0].value, StoredRtdValue::Integer(42));
+        retry.complete(RefreshOutcome::Delivered).unwrap();
+    }
+}
+
+#[test]
+fn closing_disconnect_leaves_subscription_for_termination_to_join() {
+    let (arena, source, sink_slot, disconnected) = publishing_source::<i32>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("disconnect-closing").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    server
+        .connect_transaction(TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    runtime.set_operation_enter_hook(Some(Arc::new(move || {
+        // Model termination closing the publish plane after operation admission.
+        server.test_server().publish.mark_closing_for_test();
+    })));
+
+    assert!(matches!(
+        server.disconnect(TopicId(1)),
+        Err(XllError::Closing)
+    ));
+    runtime.set_operation_enter_hook(None);
+    assert!(!disconnected.load(Ordering::Acquire));
+    server.terminate().unwrap();
+    assert!(disconnected.load(Ordering::Acquire));
+    assert!(sink_slot.lock().is_none());
+}
+
+#[test]
+fn stale_connection_rollback_preserves_reused_topic_subscription() {
+    let fixture = SourceFixture::new();
+    let (old_source, _, old_disconnected) = fixture.add::<i32>(None);
+    let (new_source, new_sink_slot, new_disconnected) = fixture.add::<i32>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(fixture.finish());
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(&old_source, RtdTopic::single("old").unwrap().borrowed())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    let old_connection = server.connect_transaction(TopicId(1), id).unwrap();
+    server.disconnect(TopicId(1)).unwrap();
+    assert!(old_disconnected.load(Ordering::Acquire));
+
+    let prepared = runtime
+        .prepare(&new_source, RtdTopic::single("new").unwrap().borrowed())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    server
+        .connect_transaction(TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    drop(old_connection);
+
+    assert!(!new_disconnected.load(Ordering::Acquire));
+    new_sink_slot.lock().as_ref().unwrap().publish(42).unwrap();
+    server.disconnect(TopicId(1)).unwrap();
+    assert!(new_disconnected.load(Ordering::Acquire));
+}
+
+#[test]
+fn uncommitted_subscription_trace_balances_each_cleanup_path() {
+    use crate::shutdown_trace::{ActivityEvent, ShutdownResources, ShutdownTraceRecorder};
+
+    for cleanup in ["rollback", "disconnect", "server-close", "runtime-close"] {
+        let (arena, source, _, disconnected) = publishing_source::<i32>(None);
+        let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+        let trace = triomphe::Arc::new(ShutdownTraceRecorder::new());
+        trace
+            .begin(1, ShutdownResources::opened(0, 0, false))
+            .unwrap();
+        runtime.set_trace_sink(triomphe::Arc::clone(&trace));
+        let subscription_events = || {
+            trace
+                .activities()
+                .into_iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        ActivityEvent::AddSubscription | ActivityEvent::RemoveSubscription
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let server = runtime.register_test_server(1);
+        let prepared = runtime
+            .prepare(&source, RtdTopic::single(cleanup).unwrap().borrowed())
+            .unwrap();
+        let id = prepared.id();
+        prepared.commit();
+        let connection = server.connect_transaction(TopicId(1), id).unwrap();
+        // Even before commit, the installed source has a shutdown obligation.
+        assert_eq!(subscription_events(), vec![ActivityEvent::AddSubscription]);
+
+        match cleanup {
+            "rollback" => drop(connection),
+            "disconnect" => {
+                server.disconnect(TopicId(1)).unwrap();
+                drop(connection);
+            }
+            "server-close" => {
+                let TerminationAdmission::Owner(owner) =
+                    server.test_server().begin_termination(&runtime)
+                else {
+                    panic!("first termination caller must own cleanup");
+                };
+                let owner = owner.request_cancel();
+                drop(connection);
+                owner.finish().unwrap();
+            }
+            "runtime-close" => std::thread::scope(|scope| {
+                let closing = scope.spawn(|| runtime.close());
+                while !runtime.services.runtime_gate.is_closing() {
+                    std::thread::yield_now();
+                }
+                drop(connection);
+                closing.join().unwrap().unwrap();
+            }),
+            _ => unreachable!(),
+        }
+        runtime.close().unwrap();
+        assert!(disconnected.load(Ordering::Acquire));
+        assert_eq!(
+            subscription_events(),
+            vec![
+                ActivityEvent::AddSubscription,
+                ActivityEvent::RemoveSubscription
+            ],
+            "cleanup: {cleanup}"
+        );
+    }
+}
+
+#[test]
+fn newer_different_publish_supersedes_inflight_slot() {
+    // InFlight(latest) + different publish
+    let (_runtime, server, sink) = connected_sink::<String>(None, "sm-inflight-different");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("v1".into())
+    );
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
+        assert_eq!(
+            active.latest_slot,
+            Some(super::delivery::BufferIndex::First)
+        );
+    }
+
+    // Publish different value while InFlight is latest
+    sink.publish("v2".to_owned()).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
+        assert!(matches!(
+            &active.values[1],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
+        ));
+        assert_eq!(
+            active.latest_slot,
+            Some(super::delivery::BufferIndex::Second)
+        );
+    }
+
+    // Complete the first batch
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        // Slot 0 is reclaimed to Empty because latest_slot is 1
+        assert_eq!(active.values[0], ValueSlot::Empty);
+        assert!(matches!(
+            &active.values[1],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
+        ));
+        assert_eq!(
+            active.latest_slot,
+            Some(super::delivery::BufferIndex::Second)
+        );
+    }
+
+    let next_batch = server.begin_refresh().unwrap();
+    assert_eq!(next_batch.updates().len(), 1);
+    assert_eq!(
+        next_batch.updates()[0].value,
+        StoredRtdValue::String("v2".into())
+    );
+    next_batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn older_publish_is_ignored_when_slot_is_inflight() {
+    // InFlight(old) + publish:
+    // Slot 0 in-flight, slot 1 published, and then another publish arrives to slot 1 before delivery
+    let (_runtime, server, sink) = connected_sink::<String>(None, "sm-inflight-old-publish");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("v1".into())
+    );
+
+    // Newer publish writes to slot 1
+    sink.publish("v2".to_owned()).unwrap();
+    // Another publish writes to slot 1 again
+    sink.publish("v3".to_owned()).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        // Slot 0 must remain InFlight untouched
+        assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
+        // Slot 1 must hold v3
+        assert!(matches!(
+            &active.values[1],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v3".into())
+        ));
+        assert_eq!(
+            active.latest_slot,
+            Some(super::delivery::BufferIndex::Second)
+        );
+    }
+
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    let next_batch = server.begin_refresh().unwrap();
+    assert_eq!(
+        next_batch.updates()[0].value,
+        StoredRtdValue::String("v3".into())
+    );
+    next_batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn failed_refresh_does_not_overwrite_newer_published_value() {
+    // Failed after newer publish:
+    // Slot 0 in-flight, slot 1 published with newer value, then batch fails.
+    // Slot 0 is restored to Resident, but latest_slot remains 1. Next refresh delivers slot 1.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "sm-failed-after-newer");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("v1".into())
+    );
+
+    sink.publish("v2".to_owned()).unwrap();
+
+    // First batch fails!
+    batch.complete(RefreshOutcome::Failed).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        // Slot 0 is restored to Resident
+        assert!(matches!(
+            &active.values[0],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v1".into())
+        ));
+        // Slot 1 is Resident with v2
+        assert!(matches!(
+            &active.values[1],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
+        ));
+        // latest_slot is 1
+        assert_eq!(
+            active.latest_slot,
+            Some(super::delivery::BufferIndex::Second)
+        );
+        // Both updates are pending
+        assert!(shard.pending[0].contains_key(&topic_id));
+        assert!(shard.pending[1].contains_key(&topic_id));
+    }
+
+    // Next refresh picks newer sequence (slot 1, v2)!
+    let next_batch = server.begin_refresh().unwrap();
+    assert_eq!(next_batch.updates().len(), 1);
+    assert_eq!(
+        next_batch.updates()[0].value,
+        StoredRtdValue::String("v2".into())
+    );
+    next_batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        // Delivered sequence 1 retires both pending updates and reclaims slot 0 to Empty
+        assert_eq!(active.values[0], ValueSlot::Empty);
+        assert!(matches!(
+            &active.values[1],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
+        ));
+        assert_eq!(
+            active.latest_slot,
+            Some(super::delivery::BufferIndex::Second)
+        );
+        assert!(!shard.pending[0].contains_key(&topic_id));
+        assert!(!shard.pending[1].contains_key(&topic_id));
+    }
+}
+
+#[test]
+fn dropped_refresh_batch_preserves_newer_published_value() {
+    // lease Drop after newer publish:
+    // Slot 0 in-flight, slot 1 published with newer value, batch is dropped (aborted).
+    let (_runtime, server, sink) = connected_sink::<String>(None, "sm-drop-after-newer");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("v1".into())
+    );
+
+    sink.publish("v2".to_owned()).unwrap();
+
+    // Batch dropped without complete!
+    drop(batch);
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(
+            &active.values[0],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v1".into())
+        ));
+        assert!(matches!(
+            &active.values[1],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
+        ));
+        assert_eq!(
+            active.latest_slot,
+            Some(super::delivery::BufferIndex::Second)
+        );
+    }
+
+    // Next refresh picks newer update v2!
+    let next_batch = server.begin_refresh().unwrap();
+    assert_eq!(
+        next_batch.updates()[0].value,
+        StoredRtdValue::String("v2".into())
+    );
+    next_batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn runtime_close_reclaims_all_inflight_slots() {
+    // Delivery and rollback restore all five slots. Closing must wait for the
+    // final batch's admission before reclaiming its slots and queue permits.
+    let (arena, source, sink_slot, _) = publishing_source::<String>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+
+    let mut sinks = Vec::new();
+    for i in 1..=5 {
+        let topic_name = format!("orphan-topic-{i}");
+        let prepared = runtime
+            .prepare(&source, RtdTopic::single(&topic_name).unwrap().borrowed())
+            .unwrap();
+        let id = prepared.id();
+        prepared.commit();
+        runtime
+            .connect_transaction(&server, TopicId(i), id)
+            .unwrap()
+            .commit()
+            .unwrap();
+        let sink = sink_slot.lock().clone().expect("source must capture sink");
+        sinks.push(sink);
+    }
+
+    for sink in &sinks {
+        sink.publish("batch-val".to_owned()).unwrap();
+    }
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates().len(), 5);
+
+    // During active lease: all 5 topics have an InFlight slot
+    let check_inflight_count = || -> usize {
+        let mut inflight = 0;
+        for i in 0..TOPIC_SHARDS {
+            let shard = server.test_server().publish.lock_shard_for_test(i);
+            for active in shard.active_by_topic.values() {
+                for slot in &active.values {
+                    if matches!(slot, ValueSlot::InFlight { .. }) {
+                        inflight += 1;
+                    }
+                }
+            }
+        }
+        inflight
+    };
+
+    assert_eq!(check_inflight_count(), 5);
+
+    // Complete batch
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    // After completion: exactly ZERO slots across all shards may be InFlight!
+    assert_eq!(
+        check_inflight_count(),
+        0,
+        "no orphaned InFlight slots allowed after delivery"
+    );
+
+    // Second cycle with abort
+    for sink in &sinks {
+        sink.publish("batch-val-2".to_owned()).unwrap();
+    }
+    let batch2 = server.begin_refresh().unwrap();
+    assert_eq!(check_inflight_count(), 5);
+    drop(batch2); // abort!
+
+    // After abort: exactly ZERO slots may be InFlight!
+    assert_eq!(
+        check_inflight_count(),
+        0,
+        "no orphaned InFlight slots allowed after abort"
+    );
+
+    let held_batch = server.begin_refresh().unwrap();
+    assert_eq!(held_batch.updates().len(), 5);
+    assert_eq!(check_inflight_count(), 5);
+    assert_eq!(runtime.services.queued_update_quota.used(), 5);
+    let closing_runtime = Arc::clone(&runtime);
+    let (closed_tx, closed_rx) = std::sync::mpsc::sync_channel(1);
+    let closing = std::thread::spawn(move || {
+        closed_tx.send(closing_runtime.close()).unwrap();
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !runtime.services.runtime_gate.is_closing() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "close did not seal admission"
+        );
+        std::thread::yield_now();
+    }
+    assert!(matches!(
+        closed_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    assert_eq!(check_inflight_count(), 5);
+    assert!(matches!(server.begin_refresh(), Err(XllError::Closing)));
+
+    drop(held_batch);
+    closed_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    closing.join().unwrap();
+    assert_eq!(check_inflight_count(), 0);
+    assert_eq!(runtime.services.queued_update_quota.used(), 0);
+    assert_eq!(server.pending_update_count(), 0);
+    assert!(server.test_server().subscriptions.lock().is_empty());
+    for index in 0..TOPIC_SHARDS {
+        assert!(
+            server
+                .test_server()
+                .publish
+                .lock_shard_for_test(index)
+                .active_by_topic
+                .is_empty()
+        );
+    }
+    let catalog = runtime.catalog.lock();
+    assert!(catalog.entries.is_empty());
+    assert_eq!(catalog.pending_count, 0);
+    assert_eq!(catalog.pending_topic_bytes, 0);
+}
+
+#[test]
+fn refresh_batch_drop_on_unwind_does_not_deadlock() {
+    // AUDIT: Verify that dropping RtdRefreshBatch during panic unwind cleans up
+    // without deadlock and restores Resident state.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "drop-panic-safety");
+
+    sink.publish("unwind-val".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        let batch = server.begin_refresh().unwrap();
+        assert_eq!(batch.updates().len(), 1);
+        panic!("simulated failure during COM formatting / caller processing");
+    }));
+    assert!(res.is_err(), "closure panicked as expected");
+
+    // After panic unwind: batch was dropped safely without deadlock, and slot was restored!
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(
+            &active.values[0],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("unwind-val".into())
+        ));
+    }
+
+    // Subsequent refresh retry succeeds
+    let retry = server.begin_refresh().unwrap();
+    assert_eq!(
+        retry.updates()[0].value,
+        StoredRtdValue::String("unwind-val".into())
+    );
+    retry.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn server_handle_access_does_not_reenter_the_server_registry() {
+    let runtime = SubscriptionRuntime::<()>::new();
+    let server = runtime.register_test_server(1);
+    std::thread::scope(|scope| {
+        let registry = runtime.servers.lock();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = scope.spawn(move || {
+            sent.send(server.generation()).unwrap();
+        });
+        let result = received.recv_timeout(std::time::Duration::from_secs(5));
+        drop(registry);
+        worker.join().unwrap();
+        assert_eq!(result.unwrap(), ServerGeneration::new(1).unwrap());
+    });
+}

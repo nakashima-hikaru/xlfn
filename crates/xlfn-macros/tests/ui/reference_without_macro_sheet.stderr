@@ -1,0 +1,5 @@
+error: a reference argument requires `macro_sheet` or MacroSheetContext
+ --> tests/ui/reference_without_macro_sheet.rs:4:32
+  |
+4 | fn bad(#[excel_arg(reference)] value: f64) -> f64 {
+  |                                ^^^^^^^^^^

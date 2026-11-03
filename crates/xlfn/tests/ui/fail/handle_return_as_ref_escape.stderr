@@ -1,0 +1,17 @@
+error[E0515]: cannot return value referencing function parameter `handle`
+ --> tests/ui/fail/handle_return_as_ref_escape.rs:7:5
+  |
+7 |     handle.as_ref()
+  |     ------^^^^^^^^^
+  |     |
+  |     returns a value referencing data owned by the current function
+  |     `handle` is borrowed here
+
+error[E0515]: cannot return value referencing function parameter `lease`
+  --> tests/ui/fail/handle_return_as_ref_escape.rs:11:5
+   |
+11 |     lease.as_ref()
+   |     -----^^^^^^^^^
+   |     |
+   |     returns a value referencing data owned by the current function
+   |     `lease` is borrowed here

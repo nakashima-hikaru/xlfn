@@ -1,0 +1,442 @@
+//! Thread-affine ownership for lifecycle-local state.
+//!
+//! The slot is a cross-thread-safe root that never stores `T` itself. The
+//! payload lives in thread-local storage, while the slot records which thread
+//! owns the current binding. Access is represented by a non-`Send` capability,
+//! so lifecycle code must explicitly carry the owner-thread witness.
+//! Access alone cannot install, take or release the payload. Those operations
+//! require a unique [`BindingTxn`] whose occupancy state remains valid until
+//! consumed or abandoned. Abandonment keeps the TLS payload; forgetting the
+//! transaction also retains its exclusive claim.
+
+use std::any::Any;
+use std::cell::RefCell;
+use std::marker::PhantomData;
+use std::num::NonZeroUsize;
+use std::rc::Rc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread::{self, ThreadId};
+
+use crate::sync::Mutex;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThreadAffineError {
+    WrongThread,
+    Unbound,
+    StaleAccess,
+    MissingValue,
+    TypeMismatch,
+    Occupied,
+    ReentrantAccess,
+    TlsUnavailable,
+}
+
+#[derive(Debug)]
+pub struct ThreadAffineInstallError<T> {
+    pub value: T,
+    pub reason: ThreadAffineError,
+}
+
+impl<T> ThreadAffineInstallError<T> {
+    pub fn into_parts(self) -> (T, ThreadAffineError) {
+        (self.value, self.reason)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ThreadAffineSlotId(NonZeroUsize);
+
+struct ThreadAffineEntry {
+    slot_id: ThreadAffineSlotId,
+    value: Option<Box<dyn Any>>,
+}
+
+impl Drop for ThreadAffineEntry {
+    #[allow(
+        clippy::mem_forget,
+        reason = "TLS destruction is not an unload proof; leaking is safer than running add-in destruction"
+    )]
+    fn drop(&mut self) {
+        // TLS destruction is not an unload proof. A failed or abandoned
+        // lifecycle binding must never run add-in code from a thread-local
+        // destructor after the module boundary has become uncertain.
+        if let Some(value) = self.value.take() {
+            std::mem::forget(value);
+        }
+    }
+}
+
+thread_local! {
+    static THREAD_AFFINE_VALUES: RefCell<Vec<ThreadAffineEntry>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+static NEXT_SLOT_ID: AtomicUsize = AtomicUsize::new(1);
+
+fn allocate_slot_id() -> ThreadAffineSlotId {
+    let raw = NEXT_SLOT_ID
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+            next.checked_add(1)
+        })
+        .unwrap_or_else(|_| {
+            // Slot IDs are process-local identity. Reusing one after wraparound
+            // could make a stale TLS entry address a new runtime generation.
+            std::process::abort();
+        });
+    ThreadAffineSlotId(
+        NonZeroUsize::new(raw)
+            .expect("thread-affine slot IDs are allocated from a non-zero counter"),
+    )
+}
+
+fn with_values<R>(
+    operation: impl FnOnce(&mut Vec<ThreadAffineEntry>) -> Result<R, ThreadAffineError>,
+) -> Result<R, ThreadAffineError> {
+    THREAD_AFFINE_VALUES
+        .try_with(|values| {
+            let mut values = values
+                .try_borrow_mut()
+                .map_err(|_| ThreadAffineError::ReentrantAccess)?;
+            operation(&mut values)
+        })
+        .map_err(|_| ThreadAffineError::TlsUnavailable)?
+}
+
+struct AffinityControl {
+    owner: Option<ThreadId>,
+    binding: u64,
+    modifying: bool,
+}
+
+/// A cross-thread-safe root for one thread-affine payload type.
+pub struct ThreadAffineSlot<T: 'static> {
+    id: OnceLock<ThreadAffineSlotId>,
+    affinity: Mutex<AffinityControl>,
+    // TLS erases the payload type. Keep the exact concrete T invariant even
+    // when T has subtypes, without requiring the slot root's T to be Send/Sync.
+    _marker: PhantomData<fn(T) -> T>,
+}
+
+/// A non-copyable witness that the current thread owns one slot binding.
+pub struct ThreadAffineAccess<'slot, T: 'static> {
+    slot: &'slot ThreadAffineSlot<T>,
+    binding: u64,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl<T: 'static> ThreadAffineSlot<T> {
+    pub const fn new() -> Self {
+        Self {
+            id: OnceLock::new(),
+            affinity: Mutex::new(AffinityControl {
+                owner: None,
+                binding: 0,
+                modifying: false,
+            }),
+            _marker: PhantomData,
+        }
+    }
+
+    fn id(&self) -> ThreadAffineSlotId {
+        *self.id.get_or_init(allocate_slot_id)
+    }
+
+    pub fn bind_current(&self) -> Result<ThreadAffineAccess<'_, T>, ThreadAffineError> {
+        let current = thread::current().id();
+        let mut affinity = self.affinity.lock();
+        match affinity.owner {
+            Some(owner) if owner != current => return Err(ThreadAffineError::WrongThread),
+            Some(_) => {}
+            None => {
+                if affinity.modifying {
+                    return Err(ThreadAffineError::ReentrantAccess);
+                }
+                affinity.binding = affinity.binding.checked_add(1).unwrap_or_else(|| {
+                    std::process::abort();
+                });
+                affinity.owner = Some(current);
+            }
+        }
+        Ok(ThreadAffineAccess {
+            slot: self,
+            binding: affinity.binding,
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    fn verify_access(&self, access: &ThreadAffineAccess<'_, T>) -> Result<(), ThreadAffineError> {
+        if !std::ptr::eq(self, access.slot) {
+            return Err(ThreadAffineError::StaleAccess);
+        }
+        let current = thread::current().id();
+        let affinity = self.affinity.lock();
+        match affinity.owner {
+            None => Err(ThreadAffineError::Unbound),
+            Some(owner) if owner != current => Err(ThreadAffineError::WrongThread),
+            Some(_) if affinity.binding != access.binding => Err(ThreadAffineError::StaleAccess),
+            Some(_) => Ok(()),
+        }
+    }
+
+    pub fn with_mut<R>(
+        &self,
+        access: &ThreadAffineAccess<'_, T>,
+        operation: impl FnOnce(&mut T) -> R,
+    ) -> Result<R, ThreadAffineError> {
+        self.verify_access(access)?;
+        let slot_id = self.id();
+        with_values(|values| {
+            let entry = values
+                .iter_mut()
+                .find(|entry| entry.slot_id == slot_id)
+                .ok_or(ThreadAffineError::MissingValue)?;
+            let value = entry
+                .value
+                .as_mut()
+                .ok_or(ThreadAffineError::MissingValue)?;
+            let value = value
+                .downcast_mut::<T>()
+                .ok_or(ThreadAffineError::TypeMismatch)?;
+            Ok(operation(value))
+        })
+    }
+
+    pub fn has_value(&self, access: &ThreadAffineAccess<'_, T>) -> Result<bool, ThreadAffineError> {
+        self.verify_access(access)?;
+        let slot_id = self.id();
+        with_values(|values| Ok(values.iter().any(|entry| entry.slot_id == slot_id)))
+    }
+
+    #[cfg(test)]
+    fn install(
+        &self,
+        access: &ThreadAffineAccess<'_, T>,
+        value: T,
+    ) -> Result<(), ThreadAffineInstallError<T>> {
+        match self.binding(access) {
+            Ok(BindingState::Empty(txn)) => {
+                txn.install(value)
+                    .map(|_| ())
+                    .map_err(|e| ThreadAffineInstallError {
+                        value: e.value,
+                        reason: e.reason,
+                    })
+            }
+            Ok(BindingState::Occupied(_)) => Err(ThreadAffineInstallError {
+                value,
+                reason: ThreadAffineError::Occupied,
+            }),
+            Err(reason) => Err(ThreadAffineInstallError { value, reason }),
+        }
+    }
+    #[cfg(test)]
+    fn take(&self, access: &ThreadAffineAccess<'_, T>) -> Result<T, ThreadAffineError> {
+        match self.binding(access)? {
+            BindingState::Occupied(txn) => txn.take().map(|(value, _)| value).map_err(|e| e.reason),
+            BindingState::Empty(_) => Err(ThreadAffineError::MissingValue),
+        }
+    }
+    #[cfg(test)]
+    fn release_empty_binding(
+        &self,
+        access: &ThreadAffineAccess<'_, T>,
+    ) -> Result<(), ThreadAffineError> {
+        match self.binding(access)? {
+            BindingState::Empty(txn) => txn.release().map(|_| ()).map_err(|e| e.reason),
+            BindingState::Occupied(_) => Err(ThreadAffineError::Occupied),
+        }
+    }
+}
+
+impl<'slot, T: 'static> ThreadAffineAccess<'slot, T> {
+    /// Mutably access this witness's issuer-bound payload after revalidating the binding.
+    pub fn with_mut<R>(&self, operation: impl FnOnce(&mut T) -> R) -> Result<R, ThreadAffineError> {
+        self.slot.with_mut(self, operation)
+    }
+
+    /// Check TLS occupancy for this witness's current binding.
+    pub fn has_value(&self) -> Result<bool, ThreadAffineError> {
+        self.slot.has_value(self)
+    }
+
+    /// Acquire exclusive occupancy authority for this witness's issuer.
+    pub fn binding(&self) -> Result<BindingState<'slot, T>, ThreadAffineError> {
+        self.slot.binding(self)
+    }
+}
+
+impl<T: 'static> Default for ThreadAffineSlot<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+mod binding;
+pub use binding::{
+    BindingEmpty, BindingInstallError, BindingOccupied, BindingReleased, BindingState,
+    BindingTransitionError, BindingTxn,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use static_assertions::{assert_impl_all, assert_not_impl_any};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    type NonSendState = Rc<()>;
+
+    assert_impl_all!(ThreadAffineSlot<NonSendState>: Send, Sync);
+    assert_not_impl_any!(ThreadAffineAccess<'static, NonSendState>: Send, Sync);
+
+    #[derive(Clone, Debug)]
+    struct DropProbe {
+        drops: Arc<AtomicUsize>,
+        dropped_on: Arc<StdMutex<Option<ThreadId>>>,
+    }
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            *self.dropped_on.lock().expect("drop probe lock") = Some(thread::current().id());
+        }
+    }
+
+    #[test]
+    fn same_thread_install_with_take_and_release() {
+        let slot = ThreadAffineSlot::<NonSendState>::new();
+        let access = slot.bind_current().unwrap();
+        slot.install(&access, Rc::new(())).unwrap();
+        slot.with_mut(&access, |state| assert!(Rc::strong_count(state) >= 1))
+            .unwrap();
+        let _state = slot.take(&access).unwrap();
+        slot.release_empty_binding(&access).unwrap();
+    }
+
+    #[test]
+    fn wrong_thread_cannot_bind_or_drop_value() {
+        let slot = Arc::new(ThreadAffineSlot::<DropProbe>::new());
+        let drops = Arc::new(AtomicUsize::new(0));
+        let dropped_on = Arc::new(StdMutex::new(None));
+        let access = slot.bind_current().unwrap();
+        slot.install(
+            &access,
+            DropProbe {
+                drops: Arc::clone(&drops),
+                dropped_on: Arc::clone(&dropped_on),
+            },
+        )
+        .unwrap();
+
+        let other = Arc::clone(&slot);
+        let result = std::thread::spawn(move || other.bind_current().map(|_| ()))
+            .join()
+            .unwrap();
+        assert_eq!(result, Err(ThreadAffineError::WrongThread));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        let state = slot.take(&access).unwrap();
+        drop(state);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(*dropped_on.lock().unwrap(), Some(thread::current().id()));
+        slot.release_empty_binding(&access).unwrap();
+    }
+
+    #[test]
+    fn stale_access_is_rejected_after_binding_reuse() {
+        let slot = ThreadAffineSlot::<usize>::new();
+        let old = slot.bind_current().unwrap();
+        slot.install(&old, 1).unwrap();
+        assert_eq!(slot.take(&old).unwrap(), 1);
+        slot.release_empty_binding(&old).unwrap();
+
+        let current = slot.bind_current().unwrap();
+        assert_eq!(
+            slot.with_mut(&old, |_| ()),
+            Err(ThreadAffineError::StaleAccess)
+        );
+        slot.install(&current, 2).unwrap();
+        assert_eq!(slot.take(&current).unwrap(), 2);
+        slot.release_empty_binding(&current).unwrap();
+    }
+
+    #[test]
+    fn released_binding_can_move_to_another_thread() {
+        let slot = Arc::new(ThreadAffineSlot::<usize>::new());
+        let access = slot.bind_current().unwrap();
+        slot.install(&access, 1).unwrap();
+        assert_eq!(slot.take(&access).unwrap(), 1);
+        slot.release_empty_binding(&access).unwrap();
+
+        let other = Arc::clone(&slot);
+        std::thread::spawn(move || {
+            let access = other.bind_current().unwrap();
+            other.install(&access, 2).unwrap();
+            assert_eq!(other.take(&access).unwrap(), 2);
+            other.release_empty_binding(&access).unwrap();
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn duplicate_install_returns_the_second_value() {
+        let slot = ThreadAffineSlot::<usize>::new();
+        let access = slot.bind_current().unwrap();
+        slot.install(&access, 1).unwrap();
+        let error = slot.install(&access, 2).unwrap_err();
+        assert_eq!(error.reason, ThreadAffineError::Occupied);
+        assert_eq!(error.value, 2);
+        assert_eq!(slot.take(&access).unwrap(), 1);
+        slot.release_empty_binding(&access).unwrap();
+    }
+
+    #[test]
+    fn miri_reentrant_access_cannot_alias_or_remove_a_mutably_borrowed_value() {
+        let slot = ThreadAffineSlot::<usize>::new();
+        let access = slot.bind_current().unwrap();
+        slot.install(&access, 1).unwrap();
+        slot.with_mut(&access, |value| {
+            assert_eq!(
+                slot.with_mut(&access, |_| ()),
+                Err(ThreadAffineError::ReentrantAccess)
+            );
+            assert_eq!(slot.take(&access), Err(ThreadAffineError::ReentrantAccess));
+            assert_eq!(
+                slot.release_empty_binding(&access),
+                Err(ThreadAffineError::ReentrantAccess)
+            );
+            *value += 1;
+        })
+        .unwrap();
+        assert_eq!(slot.take(&access).unwrap(), 2);
+        slot.release_empty_binding(&access).unwrap();
+    }
+
+    #[test]
+    fn tls_destructor_forgets_unclaimed_value() {
+        let slot = Arc::new(ThreadAffineSlot::<DropProbe>::new());
+        let drops = Arc::new(AtomicUsize::new(0));
+        let dropped_on = Arc::new(StdMutex::new(None));
+        let thread_slot = Arc::clone(&slot);
+        let thread_drops = Arc::clone(&drops);
+        let thread_dropped_on = Arc::clone(&dropped_on);
+        std::thread::spawn(move || {
+            let access = thread_slot.bind_current().unwrap();
+            thread_slot
+                .install(
+                    &access,
+                    DropProbe {
+                        drops: thread_drops,
+                        dropped_on: thread_dropped_on,
+                    },
+                )
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(dropped_on.lock().unwrap().is_none());
+    }
+}

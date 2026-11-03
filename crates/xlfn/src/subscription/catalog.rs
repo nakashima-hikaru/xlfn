@@ -1,0 +1,641 @@
+use super::identity::SubscriptionIdentityIndex;
+use super::source::SourceHandleId;
+use super::topic::{
+    BorrowedTopicParts, RtdLimits, RtdTopic, SourceId, SubscriptionId, SubscriptionIdentityKey,
+    SubscriptionKey,
+};
+use crate::generation::{ConnectionGeneration, ServerGeneration};
+use crate::{XllError, XllResult};
+use rustc_hash::FxHashMap;
+use std::num::NonZeroUsize;
+
+use xlfn_kernel::invariant::checked_sub_or_abort;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingCommitment {
+    Uncommitted,
+    Committed,
+}
+
+struct ActiveReservation {
+    reservations: NonZeroUsize,
+}
+
+enum SubscriptionPhase {
+    Pending {
+        reservations: Option<NonZeroUsize>,
+        server: Option<ServerGeneration>,
+        commitment: PendingCommitment,
+    },
+    Connecting {
+        reservations: Option<NonZeroUsize>,
+        server: ServerGeneration,
+        connection: ConnectionGeneration,
+        commitment: PendingCommitment,
+    },
+    Active {
+        server: ServerGeneration,
+        connection: ConnectionGeneration,
+        reservation: Option<ActiveReservation>,
+    },
+}
+
+/// Affine authority issued only when a pending entry begins a connection.
+/// The transaction owns this ticket until commit or rollback; the generations
+/// still have to match because server termination can invalidate the entry.
+pub(super) struct ConnectionTicket {
+    server: ServerGeneration,
+    connection: ConnectionGeneration,
+}
+
+impl ConnectionTicket {
+    pub(super) fn generation(&self) -> ConnectionGeneration {
+        self.connection
+    }
+}
+
+pub(crate) enum PreparationFinish {
+    Keep,
+    Remove,
+}
+
+pub(crate) struct SubscriptionEntry {
+    pub(crate) source_id: SourceId,
+    pub(crate) topic: RtdTopic,
+    phase: SubscriptionPhase,
+}
+
+impl SubscriptionEntry {
+    pub(crate) fn is_connected(&self) -> bool {
+        matches!(
+            self.phase,
+            SubscriptionPhase::Connecting { .. } | SubscriptionPhase::Active { .. }
+        )
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        matches!(self.phase, SubscriptionPhase::Active { .. })
+    }
+
+    pub(crate) fn tracks_pending_bytes(&self) -> bool {
+        !matches!(
+            self.phase,
+            SubscriptionPhase::Active {
+                reservation: None,
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn can_remove(&self) -> bool {
+        matches!(
+            self.phase,
+            SubscriptionPhase::Pending {
+                reservations: None,
+                commitment: PendingCommitment::Uncommitted,
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn server_generation(&self) -> Option<ServerGeneration> {
+        match &self.phase {
+            SubscriptionPhase::Pending { server, .. } => *server,
+            SubscriptionPhase::Connecting { server, .. }
+            | SubscriptionPhase::Active { server, .. } => Some(*server),
+        }
+    }
+
+    pub(crate) fn connection_generation(&self) -> Option<ConnectionGeneration> {
+        match &self.phase {
+            SubscriptionPhase::Pending { .. } => None,
+            SubscriptionPhase::Connecting { connection, .. }
+            | SubscriptionPhase::Active { connection, .. } => Some(*connection),
+        }
+    }
+
+    pub(crate) fn add_reservation(&mut self) -> XllResult<()> {
+        let reservations = match &mut self.phase {
+            SubscriptionPhase::Pending { reservations, .. }
+            | SubscriptionPhase::Connecting { reservations, .. } => reservations,
+            SubscriptionPhase::Active { .. } => {
+                return Err(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::ACTIVE_KEY_DUPLICATE,
+                });
+            }
+        };
+        let next = reservations
+            .map_or(0, NonZeroUsize::get)
+            .checked_add(1)
+            .ok_or(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RESERVATION_OVERFLOW,
+            })?;
+        *reservations = Some(NonZeroUsize::new(next).expect("reservation count is non-zero"));
+        Ok(())
+    }
+
+    pub(crate) fn finish_preparation(&mut self, committed: bool) -> PreparationFinish {
+        match &mut self.phase {
+            SubscriptionPhase::Pending {
+                reservations,
+                commitment,
+                ..
+            }
+            | SubscriptionPhase::Connecting {
+                reservations,
+                commitment,
+                ..
+            } => {
+                if committed {
+                    *commitment = PendingCommitment::Committed;
+                }
+                if let Some(current) = reservations {
+                    if current.get() == 1 {
+                        *reservations = None;
+                    } else {
+                        *current = NonZeroUsize::new(current.get() - 1)
+                            .expect("a remaining reservation is non-zero");
+                    }
+                }
+                if !committed && self.can_remove() {
+                    PreparationFinish::Remove
+                } else {
+                    PreparationFinish::Keep
+                }
+            }
+            SubscriptionPhase::Active { reservation, .. } => {
+                let Some(active) = reservation else {
+                    return PreparationFinish::Keep;
+                };
+                if active.reservations.get() == 1 {
+                    *reservation = None;
+                    PreparationFinish::Keep
+                } else {
+                    active.reservations = NonZeroUsize::new(active.reservations.get() - 1)
+                        .expect("a remaining reservation is non-zero");
+                    PreparationFinish::Keep
+                }
+            }
+        }
+    }
+
+    pub(crate) fn claim_server(&mut self, generation: ServerGeneration) -> XllResult<()> {
+        let server = match &mut self.phase {
+            SubscriptionPhase::Pending { server, .. } => server,
+            SubscriptionPhase::Connecting { server, .. }
+            | SubscriptionPhase::Active { server, .. } => {
+                if *server != generation {
+                    return Err(XllError::Internal {
+                        diagnostic_id:
+                            crate::diagnostics::id::DiagnosticId::SERVER_GENERATION_MISMATCH,
+                    });
+                }
+                return Ok(());
+            }
+        };
+        if let Some(existing) = *server {
+            if existing != generation {
+                return Err(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::SERVER_GENERATION_MISMATCH,
+                });
+            }
+        } else {
+            *server = Some(generation);
+        }
+        Ok(())
+    }
+
+    pub(super) fn begin_connection(
+        &mut self,
+        server: ServerGeneration,
+        connection: ConnectionGeneration,
+    ) -> XllResult<ConnectionTicket> {
+        let (reservations, commitment, existing_server) = match &self.phase {
+            SubscriptionPhase::Pending {
+                reservations,
+                commitment,
+                server,
+            } => (*reservations, *commitment, *server),
+            SubscriptionPhase::Connecting { .. } => {
+                return Err(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CONNECTION_INFLIGHT,
+                });
+            }
+            SubscriptionPhase::Active { .. } => {
+                return Err(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::ACTIVE_KEY_DUPLICATE,
+                });
+            }
+        };
+        if let Some(existing) = existing_server
+            && existing != server
+        {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::SERVER_GENERATION_MISMATCH,
+            });
+        }
+        self.phase = SubscriptionPhase::Connecting {
+            reservations,
+            server,
+            connection,
+            commitment,
+        };
+        Ok(ConnectionTicket { server, connection })
+    }
+
+    pub(super) fn rollback_connection(&mut self, ticket: &ConnectionTicket) -> bool {
+        let (reservations, server, commitment) = match &self.phase {
+            SubscriptionPhase::Connecting {
+                reservations,
+                server,
+                connection: current,
+                commitment,
+            } if *current == ticket.connection && *server == ticket.server => {
+                (*reservations, *server, *commitment)
+            }
+            _ => return false,
+        };
+        self.phase = SubscriptionPhase::Pending {
+            reservations,
+            server: Some(server),
+            commitment,
+        };
+        true
+    }
+
+    pub(super) fn finish_connection(&mut self, ticket: &ConnectionTicket) -> bool {
+        let (reservations, server) = match &self.phase {
+            SubscriptionPhase::Connecting {
+                reservations,
+                server,
+                connection: current,
+                ..
+            } if *current == ticket.connection && *server == ticket.server => {
+                (*reservations, *server)
+            }
+            _ => return false,
+        };
+        let reservation = reservations.map(|reservations| ActiveReservation { reservations });
+        self.phase = SubscriptionPhase::Active {
+            server,
+            connection: ticket.connection,
+            reservation,
+        };
+        true
+    }
+
+    pub(crate) fn reset_for_server_termination(&mut self, server: ServerGeneration) -> bool {
+        match &mut self.phase {
+            SubscriptionPhase::Pending {
+                server: current,
+                commitment,
+                ..
+            } if *current == Some(server) => {
+                *current = None;
+                *commitment = PendingCommitment::Uncommitted;
+                true
+            }
+            SubscriptionPhase::Connecting {
+                reservations,
+                server: current,
+                commitment,
+                ..
+            } if *current == server => {
+                let reservations = *reservations;
+                *commitment = PendingCommitment::Uncommitted;
+                self.phase = SubscriptionPhase::Pending {
+                    reservations,
+                    server: None,
+                    commitment: PendingCommitment::Uncommitted,
+                };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn cleanup_connection(
+        &mut self,
+        server: ServerGeneration,
+        connection: ConnectionGeneration,
+    ) -> (bool, bool) {
+        match &mut self.phase {
+            SubscriptionPhase::Connecting {
+                reservations,
+                server: current_server,
+                connection: current_connection,
+                ..
+            } if *current_server == server && *current_connection == connection => {
+                let reservations = *reservations;
+                self.phase = SubscriptionPhase::Pending {
+                    reservations,
+                    server: None,
+                    commitment: PendingCommitment::Uncommitted,
+                };
+                (true, self.can_remove())
+            }
+            SubscriptionPhase::Active {
+                server: current_server,
+                connection: current_connection,
+                reservation,
+            } if *current_server == server && *current_connection == connection => {
+                let Some(active) = reservation.as_ref() else {
+                    return (true, true);
+                };
+                let reservations = active.reservations;
+                self.phase = SubscriptionPhase::Pending {
+                    reservations: Some(reservations),
+                    server: None,
+                    commitment: PendingCommitment::Uncommitted,
+                };
+                (true, false)
+            }
+            _ => (false, false),
+        }
+    }
+}
+
+pub(crate) struct SubscriptionCatalog {
+    pub(crate) entries: FxHashMap<SubscriptionId, SubscriptionEntry>,
+    pub(crate) pending_topic_bytes: usize,
+    pub(crate) pending_count: usize,
+    pub(crate) identities: SubscriptionIdentityIndex,
+    pub(crate) next_subscription_id: u64,
+}
+
+struct PendingInsertPlan<'catalog, 'parts, Part: AsRef<str>> {
+    entry: std::collections::hash_map::VacantEntry<'catalog, SubscriptionId, SubscriptionEntry>,
+    identity: super::identity::IdentityInsertion<'catalog>,
+    topic: BorrowedTopicParts<'parts, Part>,
+    id: SubscriptionId,
+    key: SubscriptionKey,
+    source_id: SourceId,
+    next_id: &'catalog mut u64,
+    pending_bytes: &'catalog mut usize,
+    pending_count: &'catalog mut usize,
+    next_subscription_id: u64,
+    pending_topic_bytes: usize,
+}
+impl<Part: AsRef<str>> PendingInsertPlan<'_, '_, Part> {
+    fn commit(self) -> (SubscriptionId, SubscriptionKey) {
+        // User-supplied AsRef conversion may unwind. No map/accounting mutation
+        // occurs until this owner has produced its exact canonical topic.
+        let topic = self.topic.into_owned();
+        self.identity.commit();
+        self.entry.insert(SubscriptionEntry {
+            source_id: self.source_id,
+            topic,
+            phase: SubscriptionPhase::Pending {
+                reservations: Some(NonZeroUsize::MIN),
+                server: None,
+                commitment: PendingCommitment::Uncommitted,
+            },
+        });
+        *self.next_id = self.next_subscription_id;
+        *self.pending_bytes = self.pending_topic_bytes;
+        *self.pending_count += 1;
+        (self.id, self.key)
+    }
+}
+
+impl SubscriptionCatalog {
+    pub(crate) fn find_identity<Part: AsRef<str>>(
+        &self,
+        source_id: SourceId,
+        topic: &BorrowedTopicParts<'_, Part>,
+    ) -> XllResult<Option<(SubscriptionId, &SubscriptionEntry)>> {
+        let key = topic.identity_key(source_id);
+        // Hashes only narrow the candidates; entries own the canonical topics.
+        for &id in self.identities.candidates(key) {
+            let entry = self.entries.get(&id).ok_or(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN,
+            })?;
+            if entry.source_id == source_id && topic.matches(&entry.topic) {
+                return Ok(Some((id, entry)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn plan_pending_insert<'catalog, 'parts, Part: AsRef<str>>(
+        &'catalog mut self,
+        runtime_id: u64,
+        source_id: SourceHandleId,
+        topic: BorrowedTopicParts<'parts, Part>,
+        limits: RtdLimits,
+    ) -> XllResult<PendingInsertPlan<'catalog, 'parts, Part>> {
+        if self.pending_count >= limits.max_pending.get() {
+            return Err(XllError::Overloaded);
+        }
+        let pending_topic_bytes = self
+            .pending_topic_bytes
+            .checked_add(topic.byte_len())
+            .filter(|&total| total <= limits.max_total_topic_bytes.get())
+            .ok_or(XllError::Overloaded)?;
+        let raw_id = self.next_subscription_id;
+        let next_subscription_id = raw_id.checked_add(1).ok_or(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
+        })?;
+        let id = SubscriptionId(raw_id);
+        let key = SubscriptionKey::from_internal(runtime_id, id);
+        let source_id = SourceId(source_id);
+        let identity_key = topic.identity_key(source_id);
+        let identity =
+            self.identities
+                .prepare_insert(identity_key, id, limits.max_source_ids.get())?;
+        let std::collections::hash_map::Entry::Vacant(entry) = self.entries.entry(id) else {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_DUPLICATE,
+            });
+        };
+        Ok(PendingInsertPlan {
+            entry,
+            identity,
+            topic,
+            id,
+            key,
+            source_id,
+            next_id: &mut self.next_subscription_id,
+            pending_bytes: &mut self.pending_topic_bytes,
+            pending_count: &mut self.pending_count,
+            next_subscription_id,
+            pending_topic_bytes,
+        })
+    }
+
+    pub(crate) fn insert_pending<Part: AsRef<str>>(
+        &mut self,
+        runtime_id: u64,
+        source_id: SourceHandleId,
+        topic: BorrowedTopicParts<'_, Part>,
+        limits: RtdLimits,
+    ) -> XllResult<(SubscriptionId, SubscriptionKey)> {
+        Ok(self
+            .plan_pending_insert(runtime_id, source_id, topic, limits)?
+            .commit())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending_count
+    }
+
+    pub(crate) fn with_entry<R>(
+        &mut self,
+        id: SubscriptionId,
+        update: impl FnOnce(&mut SubscriptionEntry) -> R,
+    ) -> Option<R> {
+        let (was_pending, is_pending, topic_bytes, result) = {
+            let entry = self.entries.get_mut(&id)?;
+            let was_pending = entry.tracks_pending_bytes();
+            let topic_bytes = entry.topic.byte_len();
+            let result = update(entry);
+            (
+                was_pending,
+                entry.tracks_pending_bytes(),
+                topic_bytes,
+                result,
+            )
+        };
+
+        match (was_pending, is_pending) {
+            (false, true) => {
+                self.pending_count += 1;
+                self.pending_topic_bytes = self
+                    .pending_topic_bytes
+                    .checked_add(topic_bytes)
+                    .expect("pending topic byte accounting overflow");
+            }
+            (true, false) => {
+                self.pending_count = checked_sub_or_abort(self.pending_count, 1);
+                self.pending_topic_bytes =
+                    checked_sub_or_abort(self.pending_topic_bytes, topic_bytes);
+            }
+            _ => {}
+        }
+
+        Some(result)
+    }
+
+    pub(crate) fn remove_entry(&mut self, id: SubscriptionId) -> Option<SubscriptionEntry> {
+        let removed = self.entries.remove(&id)?;
+        if removed.tracks_pending_bytes() {
+            self.pending_count = checked_sub_or_abort(self.pending_count, 1);
+            self.pending_topic_bytes =
+                checked_sub_or_abort(self.pending_topic_bytes, removed.topic.byte_len());
+        }
+        let identity_key = SubscriptionIdentityKey::new(removed.source_id, &removed.topic);
+        if !self.identities.remove(identity_key, id) {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        Some(removed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assert_identity_invariants(&self) {
+        self.identities.assert_invariants();
+
+        let mut seen_ids = rustc_hash::FxHashSet::default();
+        for (key, ids) in &self.identities.ids_by_key {
+            assert!(!ids.is_empty());
+            for (position, id) in ids.iter().enumerate() {
+                assert!(
+                    seen_ids.insert(*id),
+                    "each subscription is indexed exactly once"
+                );
+                let entry = self.entries.get(id).expect("indexed entry exists");
+                assert_eq!(entry.source_id, key.source_id);
+                assert_eq!(entry.topic.identity_hash(), key.topic_hash);
+                for other_id in &ids[..position] {
+                    assert_ne!(entry.topic, self.entries[other_id].topic);
+                }
+            }
+        }
+        assert_eq!(seen_ids.len(), self.entries.len());
+
+        let expected_pending_bytes = self
+            .entries
+            .values()
+            .filter(|entry| entry.tracks_pending_bytes())
+            .map(|entry| entry.topic.byte_len())
+            .sum::<usize>();
+        assert_eq!(self.pending_topic_bytes, expected_pending_bytes);
+        assert_eq!(
+            self.pending_count,
+            self.entries
+                .values()
+                .filter(|entry| entry.tracks_pending_bytes())
+                .count()
+        );
+
+        for entry in self.entries.values() {
+            match &entry.phase {
+                SubscriptionPhase::Pending {
+                    reservations,
+                    server: _,
+                    commitment,
+                } => {
+                    assert!(entry.connection_generation().is_none());
+                    if reservations.is_none() {
+                        assert_eq!(*commitment, PendingCommitment::Committed);
+                    }
+                }
+                SubscriptionPhase::Connecting {
+                    reservations: _,
+                    server: _,
+                    connection: _,
+                    commitment: _,
+                } => {
+                    assert!(entry.connection_generation().is_some());
+                }
+                SubscriptionPhase::Active {
+                    connection: _,
+                    server: _,
+                    reservation,
+                } => {
+                    assert!(entry.connection_generation().is_some());
+                    if let Some(reservation) = reservation {
+                        assert!(reservation.reservations.get() > 0);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "rtd"))]
+mod typestate_tests {
+    use super::*;
+    use crate::generation::RuntimeGeneration;
+
+    #[test]
+    fn connection_ticket_cannot_finish_or_rollback_a_new_server_attempt() {
+        let server = ServerGeneration::new(1).unwrap();
+        let next_server = ServerGeneration::new(2).unwrap();
+        // Reusing a connection generation here deliberately isolates the server
+        // identity check in addition to the normal connection-generation check.
+        let connection = ConnectionGeneration::new(1).unwrap();
+        let mut entry = SubscriptionEntry {
+            source_id: SourceId(SourceHandleId {
+                generation: RuntimeGeneration::new(1).unwrap(),
+                registration: 1,
+                sequence: 1,
+            }),
+            topic: RtdTopic::single("ticket-generation").unwrap(),
+            phase: SubscriptionPhase::Pending {
+                reservations: NonZeroUsize::new(1),
+                server: None,
+                commitment: PendingCommitment::Uncommitted,
+            },
+        };
+        let old = entry.begin_connection(server, connection).unwrap();
+        assert!(entry.reset_for_server_termination(server));
+        let current = entry.begin_connection(next_server, connection).unwrap();
+        assert!(!entry.finish_connection(&old));
+        assert!(!entry.rollback_connection(&old));
+        assert!(!entry.is_active());
+        assert_eq!(entry.server_generation(), Some(next_server));
+        assert!(entry.finish_connection(&current));
+        assert!(entry.is_active());
+    }
+}

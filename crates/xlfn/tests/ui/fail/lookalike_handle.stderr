@@ -1,0 +1,53 @@
+error[E0277]: `Handle` cannot be converted into an Excel return value
+ --> tests/ui/fail/lookalike_handle.rs:7:1
+  |
+7 | #[excel_function(name = "FAIL.LOOKALIKE")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Handle` does not implement `IntoExcel`
+  |
+help: the trait `IntoExcel` is not implemented for `Handle`
+ --> tests/ui/fail/lookalike_handle.rs:3:1
+  |
+3 | struct Handle;
+  | ^^^^^^^^^^^^^
+  = note: implement `IntoExcel` for `Handle` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelError`, or a custom handle)
+  = help: the following other types implement trait `IntoExcel`:
+            &str
+            Cow<'_, str>
+            ExcelCellOutput
+            ExcelError
+            ExcelSerialDate
+            bool
+            f32
+            f64
+          and $N others
+  = note: required for `Handle` to implement `xlfn::__private::v1::ExcelReturn`
+  = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Handle` cannot be returned from a main-thread Excel worksheet function
+ --> tests/ui/fail/lookalike_handle.rs:8:13
+  |
+8 | fn bad() -> Handle {
+  |             ^^^^^^ `Handle` is not a valid return type for a main-thread UDF
+  |
+help: the trait `IntoExcel` is not implemented for `Handle`
+ --> tests/ui/fail/lookalike_handle.rs:3:1
+  |
+3 | struct Handle;
+  | ^^^^^^^^^^^^^
+  = note: return a type that implements `IntoExcel`, or implement `IntoExcel` for `Handle`
+  = help: the following other types implement trait `IntoExcel`:
+            &str
+            Cow<'_, str>
+            ExcelCellOutput
+            ExcelError
+            ExcelSerialDate
+            bool
+            f32
+            f64
+          and $N others
+  = note: required for `Handle` to implement `xlfn::__private::v1::MainThreadReturn`
+note: required by a bound in `xlfn::__private::v1::assert_main_thread_return`
+ --> src/call_return/traits.rs
+  |
+  | pub fn assert_main_thread_return<T: MainThreadReturn>() {}
+  |                                     ^^^^^^^^^^^^^^^^ required by this bound in `assert_main_thread_return`

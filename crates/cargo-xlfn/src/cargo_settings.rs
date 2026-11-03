@@ -1,0 +1,201 @@
+//! Resolve the Cargo settings that the CRT wrapper needs.
+//! Cargo discovers configuration from its invocation directory, independently
+//! of `--manifest-path`. Keep source-relative paths while merging these keys.
+
+use super::*;
+use serde::Deserialize;
+use std::ffi::{OsStr, OsString};
+
+const MAX_CONFIG_INCLUDE_DEPTH: usize = 64;
+
+#[derive(Default)]
+pub(crate) struct CargoSettings {
+    pub(crate) rustc_wrapper: Option<PathBuf>,
+}
+
+impl CargoSettings {
+    pub(crate) fn load(cwd: &Path) -> Result<Self> {
+        let cargo_home = home::cargo_home_with_cwd(cwd).context("could not locate Cargo home")?;
+        Self::load_with(cwd, Some(&cargo_home), |key| std::env::var_os(key))
+    }
+
+    fn load_with(
+        cwd: &Path,
+        cargo_home: Option<&Path>,
+        environment: impl Fn(&str) -> Option<OsString>,
+    ) -> Result<Self> {
+        let mut directories = cwd
+            .ancestors()
+            .map(|directory| directory.join(".cargo"))
+            .collect::<Vec<_>>();
+        let canonical_home = cargo_home.and_then(|path| fs::canonicalize(path).ok());
+        if let Some(cargo_home) = cargo_home
+            && !directories.iter().any(|directory| {
+                directory == cargo_home
+                    || canonical_home.as_ref().is_some_and(|home| {
+                        fs::canonicalize(directory).is_ok_and(|directory| &directory == home)
+                    })
+            })
+        {
+            directories.push(cargo_home.to_path_buf());
+        }
+        let mut settings = Self::default();
+        for directory in directories.into_iter().rev() {
+            // Cargo prefers the extensionless file when both forms exist.
+            let legacy = directory.join("config");
+            let modern = directory.join("config.toml");
+            let path = if legacy.try_exists()? {
+                legacy
+            } else if modern.try_exists()? {
+                modern
+            } else {
+                continue;
+            };
+            settings.merge(Self::read_file(&path, &mut Vec::new())?);
+        }
+        let unicode_environment = |key| environment(key).filter(|value| value.to_str().is_some());
+        if let Some(wrapper) = unicode_environment("RUSTC_WRAPPER")
+            .or_else(|| unicode_environment("CARGO_BUILD_RUSTC_WRAPPER"))
+        {
+            // An explicitly empty RUSTC_WRAPPER disables configured wrappers.
+            settings.rustc_wrapper = Some(program_path(&wrapper, cwd));
+        }
+        Ok(settings)
+    }
+
+    fn merge(&mut self, higher: Self) {
+        if higher.rustc_wrapper.is_some() {
+            self.rustc_wrapper = higher.rustc_wrapper;
+        }
+    }
+
+    fn read_file(path: &Path, seen: &mut Vec<PathBuf>) -> Result<Self> {
+        Self::read_file_at_depth(path, seen, &mut Vec::new())
+    }
+
+    fn read_file_at_depth(
+        path: &Path,
+        seen: &mut Vec<PathBuf>,
+        active: &mut Vec<PathBuf>,
+    ) -> Result<Self> {
+        // Cargo tracks every included lexical path for this top-level file,
+        // including repeated siblings. Resolve physical identity separately:
+        // lexical paths still determine relative includes and wrapper origins.
+        let path = normalize_path(path);
+        if seen.iter().any(|previous| previous == &path) {
+            bail!("Cargo configuration include cycle at {path:?}");
+        }
+        if active.len() >= MAX_CONFIG_INCLUDE_DEPTH {
+            bail!(
+                "Cargo configuration include depth exceeds {MAX_CONFIG_INCLUDE_DEPTH} at {path:?}"
+            );
+        }
+        let identity = fs::canonicalize(&path)
+            .with_context(|| format!("could not resolve Cargo configuration {path:?}"))?;
+        if active.contains(&identity) {
+            bail!("Cargo configuration include cycle through a filesystem alias at {path:?}");
+        }
+        seen.push(path.clone());
+        active.push(identity);
+        let result = Self::read_active_file(&path, seen, active);
+        active.pop();
+        result
+    }
+
+    fn read_active_file(
+        path: &Path,
+        seen: &mut Vec<PathBuf>,
+        active: &mut Vec<PathBuf>,
+    ) -> Result<Self> {
+        let config: ConfigFile = toml::from_str(&fs::read_to_string(path)?)
+            .with_context(|| format!("could not parse Cargo configuration {path:?}"))?;
+        let directory = path.parent().context("Cargo configuration has no parent")?;
+        let root = directory
+            .parent()
+            .context("Cargo configuration has no path resolution root")?;
+        let mut settings = Self::default();
+        for include in config.include {
+            let (relative, optional) = match include {
+                ConfigInclude::Path(path) => (path, false),
+                ConfigInclude::Detailed { path, optional } => (path, optional),
+            };
+            let included = normalize_path(&directory.join(relative));
+            if included.extension() != Some(OsStr::new("toml")) {
+                bail!("Cargo configuration include must end with .toml: {included:?}");
+            }
+            if optional && !included.try_exists()? {
+                continue;
+            }
+            settings.merge(Self::read_file_at_depth(&included, seen, active)?);
+        }
+        settings.merge(Self {
+            rustc_wrapper: config
+                .build
+                .rustc_wrapper
+                .map(|wrapper| program_path(OsStr::new(&wrapper), root)),
+        });
+        Ok(settings)
+    }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component);
+                }
+            }
+            _ => normalized.push(component),
+        }
+    }
+    normalized
+}
+
+fn program_path(program: &OsStr, root: &Path) -> PathBuf {
+    // Cargo treats either separator as a path, even on Unix. Bare program names
+    // (and the empty disabling value) retain PATH lookup semantics.
+    if program
+        .as_encoded_bytes()
+        .iter()
+        .any(|byte| matches!(byte, b'/' | b'\\'))
+    {
+        root.join(program)
+    } else {
+        PathBuf::from(program)
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ConfigFile {
+    include: Vec<ConfigInclude>,
+    build: BuildConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ConfigInclude {
+    Path(String),
+    Detailed {
+        path: String,
+        #[serde(default)]
+        optional: bool,
+    },
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct BuildConfig {
+    rustc_wrapper: Option<String>,
+}
+
+#[cfg(test)]
+mod tests;

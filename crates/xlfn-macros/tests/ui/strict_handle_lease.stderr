@@ -1,0 +1,5 @@
+error: HandleLease arguments cannot use reference, strict, blank, missing, or default policies
+ --> tests/ui/strict_handle_lease.rs:4:39
+  |
+4 | async fn example(#[excel_arg(strict)] value: HandleLease<'_, Dataset>) -> f64 {
+  |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

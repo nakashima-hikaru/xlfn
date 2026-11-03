@@ -1,0 +1,83 @@
+mod binding;
+mod connection;
+mod domain;
+mod formula;
+#[allow(unsafe_code, reason = "Stable typed object pointers are audited here")]
+mod object;
+#[cfg(all(feature = "bench-internals", feature = "async"))]
+pub use object::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
+mod prepare;
+mod publication;
+#[cfg(any(test, feature = "refinement"))]
+mod refinement;
+mod refinement_hooks;
+mod refinement_wire;
+#[allow(
+    unsafe_code,
+    reason = "Registry object and domain capability management"
+)]
+mod registry;
+mod runtime;
+mod store;
+mod token;
+mod topic;
+#[allow(
+    unsafe_code,
+    reason = "Handle lease Send/Sync and pointer projection are audited here"
+)]
+mod typed;
+
+pub(crate) use crate::call::HandleDomainWitness;
+pub(crate) use crate::formula_lifetime::FormulaLifetimeGeneration;
+pub(crate) use connection::FormulaObserverId;
+pub(crate) use domain::{HandleDomainPermit, HandleReadDomain};
+#[cfg(any(feature = "bench-internals", all(test, feature = "handles")))]
+pub(crate) use formula::FormulaCaller;
+#[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
+pub(crate) use formula::FormulaRevisionKey;
+pub(crate) use formula::HandleTopicKey;
+#[cfg(feature = "handles")]
+pub(crate) use formula::formula_revision_key;
+pub(crate) use formula::fresh_invocation_inputs;
+#[cfg(feature = "bench-internals")]
+pub(crate) use formula::resolve_formula_caller;
+#[cfg(all(test, feature = "handles"))]
+pub(crate) use formula::test_topic_key;
+pub(crate) use prepare::HandlePrepareState;
+pub(crate) use refinement_hooks::HandleRefinementHooks;
+pub(crate) use refinement_wire::TokenWire;
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) use registry::HandleRegistry;
+#[cfg(feature = "handles")]
+pub(crate) use runtime::FormulaHandleServiceRead;
+#[cfg(feature = "handles")]
+pub(crate) use runtime::FormulaHandleServiceResolver;
+#[cfg(feature = "handles")]
+pub(crate) use runtime::FormulaHandleServiceSlot;
+pub(crate) use runtime::{FormulaHandleService, FormulaHandleServiceSealed, HandlesQuiescent};
+pub(crate) use store::HandleStore;
+#[cfg(any(test, feature = "refinement"))]
+pub(crate) use token::HandleToken;
+#[cfg(test)]
+pub(crate) use token::ObjectId;
+#[cfg(feature = "handles")]
+pub(crate) use token::with_utf16_handle_token;
+pub(crate) use topic::{
+    Initialization, InitializationPtr, PrepareDecision, PublishedTopic, PublishedTopicPtr,
+    PublishedTopicState, TopicRemoval, TopicTable,
+};
+#[cfg(all(feature = "async", feature = "handles"))]
+pub(crate) use typed::GenerationLeaseBrand;
+#[cfg(all(feature = "async", feature = "handles"))]
+pub use typed::PendingHandleLease;
+#[cfg(feature = "handles")]
+pub use typed::{ExcelHandleObject, Handle, HandleAlias, HandleLease, HandleObjectId};
+
+#[cfg(all(test, feature = "handles"))]
+mod refinement_tests;
+#[cfg(all(test, feature = "handles"))]
+#[allow(
+    unsafe_code,
+    reason = "Unsafe handle fixtures exercise the audited pointer boundary"
+)]
+mod tests;

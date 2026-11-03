@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/fail/unscoped_call_scope.rs:3:54
+  |
+3 |     let _storage = xlfn::__private::v1::CallStorage::new();
+  |                                                      ^^^ private associated function
+  |
+ ::: src/call.rs
+  |
+  |     fn new() -> Self {
+  |     ---------------- private associated function defined here

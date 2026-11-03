@@ -1,0 +1,11 @@
+error: thread_safe and macro_sheet cannot be combined with an injected context
+ --> tests/ui/context_redundant_modes.rs:4:19
+  |
+4 | fn thread_context(context: ThreadSafeContext<'_, State>) -> f64 {
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: thread_safe and macro_sheet cannot be combined with an injected context
+ --> tests/ui/context_redundant_modes.rs:9:18
+  |
+9 | fn macro_context(context: MacroSheetContext<'_, State>) -> f64 {
+  |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

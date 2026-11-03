@@ -1,0 +1,578 @@
+use super::calculation::{
+    CalculationAdmission, CalculationEpoch, CalculationPin, CalculationState,
+};
+#[path = "control.rs"]
+pub(super) mod control;
+#[cfg(all(test, feature = "async-builtin"))]
+use control::ControlPhase;
+use control::{CloseClaim, RegistryControl};
+mod transition;
+use super::task::{ActiveReservation, AsyncTask, TaskControl, TaskControlBatch, TrackedFuture};
+#[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
+use crate::cancellation::CancellationSource;
+use crate::cancellation::{TaskCancellationAuthority, TaskCancellationOwner};
+use crate::sync::{Condvar, Mutex};
+use crate::{XllError, XllResult};
+use std::future::Future;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use xlfn_kernel::drain_gate::DrainGate;
+use xlfn_kernel::published_owner::PublishedOwner;
+
+/// Framework task ownership, independent of any executor implementation.
+///
+/// Calculation pins retain their allocation, while active task accounting
+/// retains this registry. `activity` additionally drains the final release
+/// tail before its unique owner can reclaim the registry.
+pub(crate) struct TaskRegistry {
+    pub(super) active_tasks: AtomicUsize,
+    next_id: AtomicU64,
+    limit: AtomicUsize,
+    closing: AtomicBool,
+    current: AtomicPtr<CalculationState>,
+    // Scalar observation never dereferences a reclaimable calculation. Writers
+    // publish it with current under publication; snapshots still pin under that
+    // mutex and cannot observe the intermediate pointer/epoch update.
+    published_epoch: AtomicU64,
+    publication: Mutex<()>,
+    transition: Mutex<()>,
+    pub(super) control: Mutex<RegistryControl>,
+    pub(super) activity: DrainGate,
+    pub(super) idle_lock: Mutex<()>,
+    pub(super) idle: Condvar,
+    pub(crate) observer: crate::shutdown_trace::ObservationSink,
+    #[cfg(test)]
+    pub(crate) after_publish_hook: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    pub(crate) before_transition_hook: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    pub(crate) after_snapshot_hook: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    pub(crate) after_admission_hook: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RegistryPtr(NonNull<TaskRegistry>);
+
+impl RegistryPtr {
+    pub(crate) fn from_ref(registry: &TaskRegistry) -> Self {
+        Self(NonNull::from(registry))
+    }
+
+    /// # Safety
+    /// The registry's unique owner must remain alive through this borrow.
+    /// Task/reservation activity permits and runtime publication readers
+    /// establish that lifetime; shutdown drains them before reclamation.
+    pub(crate) unsafe fn get(self) -> &'static TaskRegistry {
+        // SAFETY: delegated to the caller's ownership witness.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+// SAFETY: TaskRegistry is Sync and the transferring task retains its activity permit.
+unsafe impl Send for RegistryPtr {}
+// SAFETY: shared access is synchronized; capabilities do not own/reclaim the registry.
+unsafe impl Sync for RegistryPtr {}
+
+/// One unregistered identity from this registry's monotonic allocator. Only a
+/// private reservation can carry it to its retained calculation admission.
+/// Numeric observations cannot reconstruct registration authority.
+pub(super) struct TaskRegistrationId(u64);
+impl TaskRegistrationId {
+    pub(super) fn value(&self) -> u64 {
+        self.0
+    }
+}
+
+pub(crate) struct TaskReservation<'a> {
+    registry: RegistryPtr,
+    id: TaskRegistrationId,
+    // Destruction releases admission before the allocation pin and activity.
+    admission: CalculationAdmission<'a>,
+    calculation: CalculationPin,
+    active: ActiveReservation<'a>,
+}
+
+/// Captures the calculation identity and its allocation in one publication read.
+///
+/// Preparation may reenter calculation transitions: this pin retains the
+/// allocation without entering calculation admission or registering a task.
+/// The registry borrow also prevents its unique owner from being reclaimed.
+pub(crate) struct CalculationSnapshot<'a> {
+    registry: &'a TaskRegistry,
+    calculation: CalculationPin,
+}
+
+impl<'a> CalculationSnapshot<'a> {
+    pub(crate) fn epoch(&self) -> CalculationEpoch {
+        self.calculation.get().epoch
+    }
+
+    pub(crate) fn preflight(&self) -> XllResult<()> {
+        if self.registry.preflight_available()? {
+            return Ok(());
+        }
+        let (admission, active, _) = self.registry.admit(self.calculation.get())?;
+        drop(active);
+        drop(admission);
+        Ok(())
+    }
+
+    pub(crate) fn reserve(self) -> XllResult<TaskReservation<'a>> {
+        let registry = self.registry;
+        let calculation = self.calculation;
+        // SAFETY: the pin is moved into the reservation after acquiring admission,
+        // and is dropped after its admission guard.
+        let current = unsafe { calculation.pointer().as_ref() };
+        let (admission, active, id) = registry.admit(current)?;
+        Ok(TaskReservation {
+            registry: RegistryPtr::from_ref(registry),
+            id,
+            admission,
+            calculation,
+            active,
+        })
+    }
+}
+
+impl TaskReservation<'_> {
+    #[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
+    pub(crate) fn commit<F>(
+        self,
+        future: F,
+        cancellation: CancellationSource,
+    ) -> AsyncTask<TrackedFuture<F>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let (cancellation, registration) = cancellation.into_task();
+        self.commit_parts(future, cancellation, registration)
+    }
+
+    pub(super) fn commit_owned<F>(
+        self,
+        future: F,
+        cancellation: TaskCancellationOwner,
+    ) -> AsyncTask<TrackedFuture<F>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let (cancellation, registration) = cancellation.into_parts();
+        self.commit_parts(future, cancellation, registration)
+    }
+
+    fn commit_parts<F>(
+        self,
+        future: F,
+        cancellation: TaskCancellationAuthority,
+        registration: crate::cancellation::TaskCancellationRegistration,
+    ) -> AsyncTask<TrackedFuture<F>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let id = self.id.value();
+        self.admission
+            .insert_task(self.id, TaskControl { cancellation });
+        let completion = self.active.commit(self.calculation, id);
+        // SAFETY: the completion guard now owns registry activity, and the
+        // reservation still owns calculation admission during this access.
+        let registry = unsafe { self.registry.get() };
+        registry
+            .observer
+            .record(crate::shutdown_trace::ShutdownEvent::StartAsyncTask);
+        drop(self.admission);
+        AsyncTask::new(TrackedFuture::new(future, registration, completion))
+    }
+}
+
+pub(crate) struct CancellationPending {
+    tasks: TaskControlBatch,
+}
+
+impl Drop for CancellationPending {
+    fn drop(&mut self) {
+        // Abandonment also cancels controls outside every registry lock.
+        cancel_tasks(std::mem::take(&mut self.tasks));
+    }
+}
+
+pub(crate) struct TasksCancelled;
+pub(crate) struct TasksDrained;
+
+/// Only cancellation followed by task/release-tail drain grants finish authority.
+#[must_use = "complete the close or drop it to leave Closing available for retry"]
+pub(crate) struct RegistryClose<'a, S> {
+    // Cancellation runs before relinquishing the unique attempt on Drop.
+    state: S,
+    claim: CloseClaim<'a>,
+}
+
+impl<'a> RegistryClose<'a, CancellationPending> {
+    pub(crate) fn cancel(self) -> RegistryClose<'a, TasksCancelled> {
+        let Self { state, claim } = self;
+        drop(state);
+        RegistryClose {
+            state: TasksCancelled,
+            claim,
+        }
+    }
+}
+
+impl<'a> RegistryClose<'a, TasksCancelled> {
+    pub(crate) fn wait(self) -> RegistryClose<'a, TasksDrained> {
+        self.claim.registry().wait_idle();
+        RegistryClose {
+            state: TasksDrained,
+            claim: self.claim,
+        }
+    }
+
+    #[cfg(all(test, feature = "async-builtin"))]
+    pub(crate) fn wait_timeout(
+        self,
+        timeout: std::time::Duration,
+    ) -> XllResult<RegistryClose<'a, TasksDrained>> {
+        if !self.claim.registry().wait_idle_timeout(timeout) {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_TIME,
+            });
+        }
+        Ok(RegistryClose {
+            state: TasksDrained,
+            claim: self.claim,
+        })
+    }
+}
+
+impl RegistryClose<'_, TasksDrained> {
+    pub(crate) fn finish(self) {
+        self.claim.finish();
+    }
+}
+
+impl TaskRegistry {
+    pub(crate) fn new() -> Self {
+        let initial = PublishedOwner::new(CalculationState::new(CalculationEpoch::INITIAL));
+        initial.seal_admission();
+        let current = NonNull::from(initial.as_ref());
+        Self {
+            active_tasks: AtomicUsize::new(0),
+            next_id: AtomicU64::new(1),
+            limit: AtomicUsize::new(0),
+            closing: AtomicBool::new(true),
+            current: AtomicPtr::new(current.as_ptr()),
+            published_epoch: AtomicU64::new(CalculationEpoch::INITIAL.get()),
+            publication: Mutex::new(()),
+            transition: Mutex::new(()),
+            control: Mutex::new(RegistryControl::new(initial)),
+            activity: DrainGate::new_sealed(),
+            idle_lock: Mutex::new(()),
+            idle: Condvar::new(),
+            observer: crate::shutdown_trace::ObservationSink::new(),
+            #[cfg(test)]
+            after_publish_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_transition_hook: Mutex::new(None),
+            #[cfg(test)]
+            after_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            after_admission_hook: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn current_epoch(&self) -> CalculationEpoch {
+        CalculationEpoch::new(self.published_epoch.load(Ordering::Acquire))
+            .expect("published calculation epochs are non-zero")
+    }
+
+    // The caller holds publication and has installed this state's owner in
+    // control. The scalar store is the epoch observation's linearization point;
+    // it grants no calculation admission or allocation lifetime authority.
+    fn publish_current(&self, pointer: NonNull<CalculationState>, epoch: CalculationEpoch) {
+        self.current.store(pointer.as_ptr(), Ordering::Release);
+        self.published_epoch.store(epoch.get(), Ordering::Release);
+    }
+
+    pub(crate) fn snapshot(&self) -> CalculationSnapshot<'_> {
+        let calculation = {
+            let _publication = self.publication.lock();
+            // SAFETY: publication excludes reclamation of the current owner.
+            let current = unsafe { &*self.current.load(Ordering::Acquire) };
+            // SAFETY: publication retains the owner while pinning, and the
+            // returned snapshot borrows the registry until the pin drops.
+            unsafe { CalculationPin::acquire(current) }
+        };
+        #[cfg(test)]
+        {
+            let hook = self.after_snapshot_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        CalculationSnapshot {
+            registry: self,
+            calculation,
+        }
+    }
+
+    pub(crate) fn preflight_available(&self) -> XllResult<bool> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(XllError::Closing);
+        }
+        Ok(self.active_tasks.load(Ordering::Relaxed) < self.limit.load(Ordering::Relaxed))
+    }
+
+    #[cfg(all(test, feature = "async-builtin"))]
+    pub(crate) fn preflight(&self, epoch: CalculationEpoch) -> XllResult<()> {
+        if self.preflight_available()? {
+            return Ok(());
+        }
+        // Only saturation takes authoritative calculation admission and
+        // capacity reservation before potentially expensive Excel conversion.
+        drop(self.reserve(epoch)?);
+        Ok(())
+    }
+
+    #[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
+    pub(crate) fn reserve(&self, epoch: CalculationEpoch) -> XllResult<TaskReservation<'_>> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(XllError::Closing);
+        }
+        let snapshot = self.snapshot();
+        if snapshot.epoch() != epoch {
+            return Err(cancelled_calculation_error());
+        }
+        snapshot.reserve()
+    }
+
+    // Saturated preflight needs only the error tag. Keep the admission tuple
+    // local to its caller instead of materializing a large Result on the stack.
+    #[inline(always)]
+    fn admit<'a>(
+        &'a self,
+        current: &'a CalculationState,
+    ) -> XllResult<(
+        CalculationAdmission<'a>,
+        ActiveReservation<'a>,
+        TaskRegistrationId,
+    )> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(XllError::Closing);
+        }
+        // Advance/cancel seals the old state before publishing its successor.
+        // Retaining a snapshot keeps the allocation alive, but never grants
+        // admission to a retired calculation.
+        let admission = current.enter_admission().map_err(|_| {
+            if self.closing.load(Ordering::Acquire) {
+                XllError::Closing
+            } else {
+                cancelled_calculation_error()
+            }
+        })?;
+        #[cfg(test)]
+        {
+            let hook = self.after_admission_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let active = ActiveReservation::try_acquire(self).ok_or(XllError::Overloaded)?;
+        let id = self
+            .next_id
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| XllError::Overloaded)?;
+        Ok((admission, active, TaskRegistrationId(id)))
+    }
+
+    pub(crate) fn cancel_calculation(&self, epoch: CalculationEpoch) -> TaskControlBatch {
+        let control = self.control.lock();
+        let Some(state) = control.calculations.get(&epoch) else {
+            return TaskControlBatch::new();
+        };
+        state.close_admission().wait().drain_tasks()
+    }
+
+    pub(crate) fn close_admission(&self) {
+        self.closing.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn request_close(&self) -> XllResult<RegistryClose<'_, CancellationPending>> {
+        // Declare the claim first so an unwind releases the control lock before
+        // abandoning the attempt. No lock is retained across cancellation callbacks.
+        let (claim, control) = CloseClaim::acquire(self)?;
+        self.closing.store(true, Ordering::Release);
+        drop(self.activity.control().seal());
+        for state in control.calculations.values() {
+            state.seal_admission();
+        }
+        let mut tasks = TaskControlBatch::new();
+        for state in control.calculations.values() {
+            tasks.extend(state.close_admission().wait().drain_tasks());
+        }
+        drop(control);
+        Ok(RegistryClose {
+            state: CancellationPending { tasks },
+            claim,
+        })
+    }
+
+    pub(crate) fn wait_idle(&self) {
+        let mut lock = self.idle_lock.lock();
+        while self.active_tasks.load(Ordering::Acquire) != 0 {
+            self.idle.wait(&mut lock);
+        }
+        drop(lock);
+        drop(self.activity.control().wait_idle());
+    }
+
+    #[cfg(all(test, feature = "async-builtin"))]
+    pub(crate) fn wait_idle_timeout(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut lock = self.idle_lock.lock();
+        while self.active_tasks.load(Ordering::Acquire) != 0 {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            self.idle.wait_for(&mut lock, deadline - now);
+        }
+        drop(lock);
+        drop(self.activity.control().wait_idle());
+        true
+    }
+
+    #[cfg(all(test, feature = "async-builtin"))]
+    pub(crate) fn is_closing(&self) -> bool {
+        self.closing.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_task_id(&self) -> u64 {
+        self.next_id.load(Ordering::Relaxed)
+    }
+    #[cfg(all(test, feature = "async-builtin"))]
+    pub(crate) fn exhaust_task_ids(&self) {
+        self.next_id.store(u64::MAX, Ordering::Relaxed);
+    }
+
+    #[cfg(all(test, feature = "async-builtin"))]
+    pub(crate) fn set_stopped_epoch(&self, epoch: CalculationEpoch) {
+        let mut control = self.control.lock();
+        assert_eq!(control.phase(), ControlPhase::Stopped);
+        let _publication = self.publication.lock();
+        assert!(
+            control
+                .calculations
+                .values()
+                .all(|state| state.pin_count() == 0)
+        );
+        let state = PublishedOwner::new(CalculationState::new(epoch));
+        state.seal_admission();
+        let pointer = NonNull::from(state.as_ref());
+        control.calculations.clear();
+        control.calculations.insert(epoch, state);
+        self.publish_current(pointer, epoch);
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.limit.load(Ordering::Relaxed)
+    }
+}
+
+pub(crate) fn cancelled_calculation_error() -> XllError {
+    XllError::ExcelValue(crate::ExcelError::NotAvailable)
+}
+
+pub(crate) fn cancel_tasks(tasks: TaskControlBatch) {
+    for TaskControl { cancellation } in tasks {
+        let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            cancellation.cancel()
+        }));
+        let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(cancellation);
+        }));
+    }
+}
+
+#[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
+pub(crate) fn cancel_source_no_unwind(source: &CancellationSource) {
+    let _ =
+        crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| source.cancel()));
+}
+
+#[cfg(test)]
+mod epoch_projection_tests {
+    use super::*;
+
+    fn assert_epoch(registry: &TaskRegistry, expected: CalculationEpoch) {
+        assert_eq!(registry.current_epoch(), expected);
+        assert_eq!(registry.snapshot().epoch(), expected);
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn epoch_observation_does_not_wait_for_publication_mutex() {
+        let registry = TaskRegistry::new();
+        let result = std::thread::scope(|scope| {
+            let publication = registry.publication.lock();
+            let (send, receive) = std::sync::mpsc::sync_channel(1);
+            let observed = &registry;
+            scope.spawn(move || send.send(observed.current_epoch()).unwrap());
+            let result = receive.recv_timeout(std::time::Duration::from_secs(5));
+            // Release before scoped joining, including the regression case.
+            drop(publication);
+            result
+        });
+        assert_eq!(result.unwrap(), CalculationEpoch::INITIAL);
+    }
+
+    #[test]
+    fn miri_epoch_projection_follows_stopped_running_and_restart_publications() {
+        let registry = TaskRegistry::new();
+        let initial = CalculationEpoch::INITIAL;
+        assert_epoch(&registry, initial);
+        assert!(registry.advance());
+        let stopped = initial.checked_next().unwrap();
+        assert_epoch(&registry, stopped);
+        registry.start(crate::AsyncTaskLimit::DEFAULT).unwrap();
+        assert_epoch(&registry, stopped);
+
+        let old_snapshot = registry.snapshot();
+        assert!(registry.advance());
+        let running = stopped.checked_next().unwrap();
+        assert_epoch(&registry, running);
+        assert_eq!(old_snapshot.epoch(), stopped);
+        drop(old_snapshot);
+
+        let retained = registry.snapshot();
+        registry.request_close().unwrap().cancel().wait().finish();
+        assert!(registry.start(crate::AsyncTaskLimit::DEFAULT).is_err());
+        assert_epoch(&registry, running);
+        drop(retained);
+        registry.start(crate::AsyncTaskLimit::DEFAULT).unwrap();
+        assert_epoch(&registry, running);
+        registry.request_close().unwrap().cancel().wait().finish();
+    }
+
+    #[cfg(feature = "async-builtin")]
+    #[test]
+    fn miri_epoch_projection_preserves_the_terminal_epoch_on_overflow() {
+        let registry = TaskRegistry::new();
+        let terminal = CalculationEpoch::new(u64::MAX).unwrap();
+        registry.set_stopped_epoch(terminal);
+        assert_epoch(&registry, terminal);
+        assert!(!registry.advance());
+        assert_epoch(&registry, terminal);
+        registry.start(crate::AsyncTaskLimit::DEFAULT).unwrap();
+        assert!(!registry.advance());
+        assert_epoch(&registry, terminal);
+        registry.request_close().unwrap().cancel().wait().finish();
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+mod drain_bench;
+#[cfg(feature = "bench-internals")]
+pub use drain_bench::AsyncTaskDrainBenchmark;
+#[cfg(test)]
+mod registration_tests;

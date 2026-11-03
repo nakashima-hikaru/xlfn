@@ -1,0 +1,26 @@
+target/
+/dist/
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.xll
+.DS_Store
+.cache
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.venv/
+
+# Keep machine-specific benchmark measurements out of the source tree.
+**/criterion/
+
+formal/.lake/
+
+guide/book/
+
+# Verification trace artifacts
+/*-trace*.json
+/rust-composition-*.json
+/windows-*-trace*.json
+/windows-handle-refinement-traces*/

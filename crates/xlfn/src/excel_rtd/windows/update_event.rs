@@ -1,0 +1,444 @@
+use super::IID_IRTD_UPDATE_EVENT;
+use super::global_interface_table::get_git;
+use super::module_lifetime;
+use super::server_gate::ServerOperationBarrier;
+use crate::excel_rtd::notification::NotificationPump;
+use crate::sync::Mutex;
+use crate::win32::{COINIT_MULTITHREADED, RPC_E_CHANGED_MODE, S_FALSE, S_OK};
+use crate::{XllError, XllResult};
+use std::ffi::c_void;
+use std::marker::PhantomData;
+use std::ptr::{self, NonNull};
+use std::rc::Rc;
+#[cfg(test)]
+use std::sync::Arc;
+use xlfn_kernel::published_owner::PublishedOwner;
+
+#[derive(Default)]
+pub(super) struct ServerCallbacks {
+    pub(super) active: Option<CallbackPtr>,
+    pub(super) records: Vec<PublishedOwner<RetainedUpdateCallback>>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) struct CallbackPtr(pub(super) NonNull<RetainedUpdateCallback>);
+
+// SAFETY: RetainedUpdateCallback is Send and Sync, and its address is stable on heap.
+unsafe impl Send for CallbackPtr {}
+// SAFETY: RetainedUpdateCallback is Send and Sync, and its address is stable on heap.
+unsafe impl Sync for CallbackPtr {}
+
+pub(crate) struct ComApartmentGuard {
+    should_uninit: bool,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl ComApartmentGuard {
+    pub(crate) fn enter() -> Result<Self, i32> {
+        use crate::win32::CoInitializeEx;
+
+        // SAFETY: the reserved pointer is null as required by CoInitializeEx.
+        let status = unsafe { CoInitializeEx(ptr::null_mut(), COINIT_MULTITHREADED as u32) };
+
+        match status {
+            S_OK | S_FALSE => Ok(Self {
+                should_uninit: true,
+                _not_send_or_sync: PhantomData,
+            }),
+            RPC_E_CHANGED_MODE => Ok(Self {
+                // The thread already owns a different COM apartment. This
+                // call did not add an initialization reference to balance.
+                should_uninit: false,
+                _not_send_or_sync: PhantomData,
+            }),
+            error => Err(error),
+        }
+    }
+}
+
+impl Drop for ComApartmentGuard {
+    fn drop(&mut self) {
+        if self.should_uninit {
+            use crate::win32::CoUninitialize;
+
+            // SAFETY: `should_uninit` is set only after a successful
+            // CoInitializeEx call, and this guard performs exactly one matching
+            // CoUninitialize call while being used on the initializing thread.
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
+pub(super) struct GitCookieLease {
+    cookie: Option<std::num::NonZeroU32>,
+}
+
+impl GitCookieLease {
+    pub(super) fn from_registered(cookie: std::num::NonZeroU32) -> Self {
+        module_lifetime().git_cookie_registered();
+        Self {
+            cookie: Some(cookie),
+        }
+    }
+
+    fn raw(&self) -> u32 {
+        self.cookie
+            .expect("live GIT cookie lease contains a cookie")
+            .get()
+    }
+}
+
+impl Drop for GitCookieLease {
+    fn drop(&mut self) {
+        let Some(cookie) = self.cookie.take() else {
+            return;
+        };
+
+        match revoke_git_cookie(cookie.get()) {
+            Ok(()) => module_lifetime().git_cookie_revoked(),
+            Err(error) => {
+                module_lifetime().git_cookie_revocation_deferred(cookie);
+                crate::diagnostics::report_no_unwind("RTD GIT callback revocation", &error);
+            }
+        }
+    }
+}
+
+pub(super) struct RetainedUpdateCallback {
+    pub(super) cookie: Option<GitCookieLease>,
+    pub(super) pump: Option<NotificationPump>,
+    #[cfg(test)]
+    pub(super) drop_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+fn revoke_git_cookie(cookie: u32) -> XllResult<()> {
+    if cookie == 0 {
+        return Ok(());
+    }
+
+    let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::WindowsApi {
+        function: "CoInitializeEx",
+        code,
+    })?;
+    // SAFETY: this thread has entered a COM apartment. `get_git` returns one
+    // owned GIT wrapper. Its COM reference is released exactly once after the
+    // synchronous revocation attempt.
+    unsafe {
+        let git = get_git().map_err(|status| XllError::WindowsApi {
+            function: "CoCreateInstance(IGlobalInterfaceTable)",
+            code: status,
+        })?;
+        let status = git.revoke(cookie);
+        if status >= 0 {
+            Ok(())
+        } else {
+            Err(XllError::WindowsApi {
+                function: "IGlobalInterfaceTable::RevokeInterfaceFromGlobal",
+                code: status,
+            })
+        }
+    }
+}
+
+pub(super) fn retry_git_revocation_debt() {
+    retry_git_revocation_debt_with(revoke_git_cookie);
+}
+
+pub(super) fn retry_git_revocation_debt_with(mut revoke: impl FnMut(u32) -> XllResult<()>) {
+    let claims = module_lifetime().claim_git_revocation_debt_batch();
+    for claim in claims {
+        match revoke(claim.raw()) {
+            Ok(()) => claim.resolve(),
+            Err(error) => {
+                crate::diagnostics::report_no_unwind("RTD GIT callback revocation retry", &error);
+                // The unresolved claim is requeued by Drop.
+            }
+        }
+    }
+}
+
+impl RetainedUpdateCallback {
+    pub(super) fn new(
+        cookie: GitCookieLease,
+        operations: triomphe::Arc<ServerOperationBarrier>,
+    ) -> XllResult<Self> {
+        let raw_cookie = cookie.raw();
+        let pump = NotificationPump::start(move || {
+            let _operation = operations.enter_notification().ok_or(XllError::Closing)?;
+            notify_cookie(raw_cookie)
+        })?;
+        Ok(Self {
+            cookie: Some(cookie),
+            pump: Some(pump),
+            #[cfg(test)]
+            drop_hook: None,
+        })
+    }
+
+    fn notify(&self) -> XllResult<()> {
+        self.pump.as_ref().map_or(Ok(()), NotificationPump::request)
+    }
+
+    pub(super) fn pending_notice(&self) -> Option<u64> {
+        self.pump.as_ref().and_then(NotificationPump::pending)
+    }
+
+    pub(super) fn acknowledge(&self, notice: Option<u64>) {
+        if let Some(pump) = &self.pump {
+            pump.acknowledge(notice);
+        }
+    }
+}
+
+fn notify_cookie(cookie: u32) -> XllResult<()> {
+    let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::WindowsApi {
+        function: "CoInitializeEx",
+        code,
+    })?;
+
+    // SAFETY: this thread has entered a COM apartment. `get_git` returns
+    // one live IGlobalInterfaceTable wrapper on success, and the wrapper
+    // validates the GIT output before returning its owned reference.
+    unsafe {
+        let git = get_git().map_err(|_| XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::GIT_NULL,
+        })?;
+        let proxy = git
+            .get_interface(cookie, &IID_IRTD_UPDATE_EVENT)
+            .map_err(|code| XllError::WindowsApi {
+                function: "IGlobalInterfaceTable::GetInterfaceFromGlobal",
+                code,
+            })?;
+        let event = OwnedRtdUpdateEvent::from_raw(proxy.cast());
+        let notify_status = event.notify();
+
+        if notify_status != S_OK {
+            return Err(XllError::WindowsApi {
+                function: "IRTDUpdateEvent::UpdateNotify",
+                code: notify_status,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+impl Drop for RetainedUpdateCallback {
+    fn drop(&mut self) {
+        // Server retirement seals/drains the notification barrier before
+        // reclaiming callbacks. Join the dormant worker before revoking the
+        // cookie or allowing the server's module lease to be released.
+        if let Some(mut pump) = self.pump.take() {
+            pump.stop();
+        }
+        // RevokeInterfaceFromGlobal must run before the test hook, matching
+        // the historical callback-drop ordering explicitly.
+        drop(self.cookie.take());
+
+        #[cfg(test)]
+        if let Some(drop_hook) = self.drop_hook.as_ref() {
+            drop_hook();
+        }
+    }
+}
+
+pub(super) fn install_callback(
+    callbacks: &Mutex<ServerCallbacks>,
+    callback: Box<RetainedUpdateCallback>,
+) -> CallbackPtr {
+    let callback = PublishedOwner::from_box(callback);
+    let mut callbacks = callbacks.lock();
+    let ptr = CallbackPtr(NonNull::from(&*callback));
+    callbacks.records.push(callback);
+    callbacks.active = Some(ptr);
+    ptr
+}
+
+pub(super) fn active_callback(callbacks: &Mutex<ServerCallbacks>) -> Option<CallbackPtr> {
+    callbacks.lock().active
+}
+
+pub(super) fn drain_callbacks(callbacks: &Mutex<ServerCallbacks>) {
+    let records = {
+        let mut callbacks = callbacks.lock();
+        callbacks.active = None;
+        std::mem::take(&mut callbacks.records)
+    };
+
+    // RetainedUpdateCallback::drop revokes a GIT cookie and can therefore run
+    // external, reentrant COM code. The callback mutex must not be held here.
+    drop(records);
+    retry_git_revocation_debt();
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Copy)]
+pub(crate) struct RtdNotifier {
+    callback: CallbackPtr,
+    operations: NonNull<ServerOperationBarrier>,
+}
+
+// SAFETY: RtdNotifier holds audited pointers into the server's stable lifetime.
+unsafe impl Send for RtdNotifier {}
+// SAFETY: RtdNotifier holds audited pointers into the server's stable lifetime.
+unsafe impl Sync for RtdNotifier {}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct RtdNotifier {
+    inner: RtdNotifierKind,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+enum RtdNotifierKind {
+    Production {
+        callback: CallbackPtr,
+        operations: NonNull<ServerOperationBarrier>,
+    },
+    #[cfg(feature = "rtd")]
+    Test(Arc<crate::rtd::test_support::TestNotifierState>),
+}
+
+impl RtdNotifier {
+    /// Constructs a notifier capability linked to the server's update callback and barrier.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `callback` and `operations` remain valid and
+    /// dereferenceable for the entire lifetime of this `RtdNotifier`.
+    pub(super) unsafe fn new(
+        callback: CallbackPtr,
+        operations: NonNull<ServerOperationBarrier>,
+    ) -> Self {
+        #[cfg(not(test))]
+        {
+            Self {
+                callback,
+                operations,
+            }
+        }
+        #[cfg(test)]
+        {
+            Self {
+                inner: RtdNotifierKind::Production {
+                    callback,
+                    operations,
+                },
+            }
+        }
+    }
+
+    #[cfg(all(test, feature = "rtd"))]
+    pub(crate) fn for_test(state: Arc<crate::rtd::test_support::TestNotifierState>) -> Self {
+        Self {
+            inner: RtdNotifierKind::Test(state),
+        }
+    }
+
+    pub(crate) fn notify(&self) -> XllResult<()> {
+        #[cfg(not(test))]
+        {
+            // SAFETY: operations points to the ServerOperationBarrier owned by RtdServer for the server lifetime.
+            let _operation = unsafe { self.operations.as_ref() }
+                .enter_notification()
+                .ok_or(XllError::Closing)?;
+            // SAFETY: callback.0 points to RetainedUpdateCallback pinned in ServerCallbacks.records.
+            unsafe { self.callback.0.as_ref() }.notify()
+        }
+        #[cfg(test)]
+        {
+            match &self.inner {
+                RtdNotifierKind::Production {
+                    callback,
+                    operations,
+                } => {
+                    // SAFETY: operations points to the ServerOperationBarrier owned by RtdServer for the server lifetime.
+                    let _operation = unsafe { operations.as_ref() }
+                        .enter_notification()
+                        .ok_or(XllError::Closing)?;
+                    // SAFETY: callback.0 points to RetainedUpdateCallback pinned in ServerCallbacks.records.
+                    unsafe { callback.0.as_ref() }.notify()
+                }
+                #[cfg(feature = "rtd")]
+                RtdNotifierKind::Test(state) => state.notify(),
+            }
+        }
+    }
+}
+
+#[repr(C)]
+pub(super) struct RtdUpdateEvent {
+    vtable: *const RtdUpdateEventVtable,
+}
+
+#[repr(C)]
+struct RtdUpdateEventVtable {
+    query_interface: unsafe extern "system" fn(
+        *mut RtdUpdateEvent,
+        *const crate::win32::GUID,
+        *mut *mut c_void,
+    ) -> i32,
+    add_ref: unsafe extern "system" fn(*mut RtdUpdateEvent) -> u32,
+    release: unsafe extern "system" fn(*mut RtdUpdateEvent) -> u32,
+    get_type_info_count: unsafe extern "system" fn(*mut RtdUpdateEvent, *mut u32) -> i32,
+    get_type_info:
+        unsafe extern "system" fn(*mut RtdUpdateEvent, u32, u32, *mut *mut c_void) -> i32,
+    get_ids_of_names: unsafe extern "system" fn(
+        *mut RtdUpdateEvent,
+        *const crate::win32::GUID,
+        *const *const u16,
+        u32,
+        u32,
+        *mut i32,
+    ) -> i32,
+    invoke: unsafe extern "system" fn(
+        *mut RtdUpdateEvent,
+        i32,
+        *const crate::win32::GUID,
+        u32,
+        u16,
+        *mut c_void,
+        *mut crate::win32::VARIANT,
+        *mut c_void,
+        *mut u32,
+    ) -> i32,
+    update_notify: unsafe extern "system" fn(*mut RtdUpdateEvent) -> i32,
+    get_heartbeat_interval: unsafe extern "system" fn(*mut RtdUpdateEvent, *mut i32) -> i32,
+    set_heartbeat_interval: unsafe extern "system" fn(*mut RtdUpdateEvent, i32) -> i32,
+    disconnect: unsafe extern "system" fn(*mut RtdUpdateEvent) -> i32,
+}
+
+/// Owns one `IRTDUpdateEvent` reference returned by either COM
+/// `QueryInterface` or the Global Interface Table.
+pub(super) struct OwnedRtdUpdateEvent {
+    pointer: NonNull<RtdUpdateEvent>,
+}
+
+impl OwnedRtdUpdateEvent {
+    /// # Safety
+    /// `pointer` must identify a live `IRTDUpdateEvent` interface and own one
+    /// COM reference that this value can release exactly once.
+    pub(super) unsafe fn from_raw(pointer: NonNull<RtdUpdateEvent>) -> Self {
+        Self { pointer }
+    }
+
+    pub(super) fn as_ptr(&self) -> *mut RtdUpdateEvent {
+        self.pointer.as_ptr()
+    }
+
+    fn notify(&self) -> i32 {
+        // SAFETY: the wrapper owns a live interface reference for this call.
+        unsafe { ((*(*self.pointer.as_ptr()).vtable).update_notify)(self.pointer.as_ptr()) }
+    }
+}
+
+impl Drop for OwnedRtdUpdateEvent {
+    fn drop(&mut self) {
+        // SAFETY: `pointer` is a live interface with exactly one owned
+        // reference, and Drop runs exactly once.
+        unsafe {
+            ((*(*self.pointer.as_ptr()).vtable).release)(self.pointer.as_ptr());
+        }
+    }
+}

@@ -1,0 +1,11 @@
+error[E0603]: module `distribution` is private
+ --> tests/ui/fail/raw_transaction_directory.rs:1:19
+  |
+1 | use xlfn_package::distribution::DistributionTransactionDirectory;
+  |                   ^^^^^^^^^^^^ private module
+  |
+note: the module `distribution` is defined here
+ --> src/lib.rs
+  |
+  | mod distribution;
+  | ^^^^^^^^^^^^^^^^

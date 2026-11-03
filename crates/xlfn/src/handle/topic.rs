@@ -1,0 +1,978 @@
+//! Runtime-owned topic publications and shared initializer coordination.
+//!
+//! Read-side maps publish non-owning pointers to topics. Retired topic owners
+//! are reclaimed only after the rotating read domain completes their grace
+//! period. Removers start rotation without waiting for active readers, and
+//! departing readers retry maintenance: newer readers cannot prolong an old
+//! grace period or leave the final retirement waiting for another deletion.
+//! Single-flight completion cells share a small synchronization
+//! allocation; the initializer reservation owns completion, and service close
+//! explicitly waits for it. Reference counts do not govern service, topic or
+//! object lifetime.
+
+#![allow(
+    unsafe_code,
+    reason = "topic publication uses stable non-owning pointers into table-owned arenas"
+)]
+#[cfg(any(target_os = "windows", test))]
+use super::FormulaLifetimeGeneration;
+use super::{FormulaObserverId, HandleTopicKey};
+use crate::generation::TopicGeneration;
+use crate::sync::{Condvar, Mutex, RwLock};
+#[cfg(test)]
+use crate::sync::{RwLockReadGuard, RwLockWriteGuard};
+use crate::{XllError, XllResult};
+use papaya::Guard;
+use rustc_hash::{FxBuildHasher, FxHashMap};
+use smallvec::SmallVec;
+use std::marker::PhantomData;
+use std::ops::Deref;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::thread::ThreadId;
+use triomphe::Arc;
+use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
+use xlfn_kernel::rotating_read_domain::{RotatingReadPermit, RotatingRetirementDomain};
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PublishedTopicState {
+    Provisional = 0,
+    Live = 1,
+    Stale = 2,
+    Closing = 3,
+}
+
+impl PublishedTopicState {
+    fn from_raw(raw: u8) -> Self {
+        match raw {
+            value if value == Self::Provisional as u8 => Self::Provisional,
+            value if value == Self::Live as u8 => Self::Live,
+            value if value == Self::Stale as u8 => Self::Stale,
+            value if value == Self::Closing as u8 => Self::Closing,
+            _ => Self::Stale,
+        }
+    }
+}
+
+pub(crate) struct PublishedTopic {
+    pub(crate) token: String,
+    pub(crate) lifetime_key: String,
+    state: AtomicU8,
+}
+
+impl PublishedTopic {
+    pub(crate) fn new(token: String, lifetime_key: String) -> Self {
+        Self {
+            token,
+            lifetime_key,
+            state: AtomicU8::new(PublishedTopicState::Provisional as u8),
+        }
+    }
+
+    pub(crate) fn state(&self) -> PublishedTopicState {
+        PublishedTopicState::from_raw(self.state.load(Ordering::Acquire))
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct PublishedTopicPtr(pub(crate) NonNull<PublishedTopic>);
+
+impl PublishedTopicPtr {
+    pub(crate) fn from_ref(topic: &PublishedTopic) -> Self {
+        Self(NonNull::from(topic))
+    }
+}
+
+// SAFETY: PublishedTopicPtr is an audited pointer to an immutable PublishedTopic.
+unsafe impl Send for PublishedTopicPtr {}
+// SAFETY: PublishedTopic is thread-safe and immutable borrows can be shared.
+unsafe impl Sync for PublishedTopicPtr {}
+
+/// A scoped read capability that protects published topics from being reclaimed
+/// while they are being inspected.
+pub(crate) struct TopicReadLease<'a> {
+    table: &'a TopicTable,
+    permit: Option<RotatingReadPermit<'a, DEFAULT_STRIPE_COUNT>>,
+}
+
+impl<'a> TopicReadLease<'a> {
+    pub(crate) fn load(&self, key: &HandleTopicKey) -> Option<PublishedTopicRef<'_>> {
+        let ptr = self.table.published.load(key)?;
+        Some(PublishedTopicRef {
+            ptr: ptr.0,
+            _marker: PhantomData,
+        })
+    }
+}
+
+impl Drop for TopicReadLease<'_> {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        // The table borrow protects this completion tail as well as the
+        // permit. FormulaHandleService also retains prepare admission until
+        // this drop returns, so close cannot recover the service mid-tail.
+        self.table.maintain_after_reader();
+    }
+}
+
+/// A borrowed reference to a `PublishedTopic` whose lifetime is tied to an active
+/// `TopicReadLease`.
+pub(crate) struct PublishedTopicRef<'a> {
+    ptr: NonNull<PublishedTopic>,
+    _marker: PhantomData<&'a PublishedTopic>,
+}
+
+impl<'a> Deref for PublishedTopicRef<'a> {
+    type Target = PublishedTopic;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: PublishedTopicRef is acquired from a live TopicReadLease,
+        // which holds an active read-domain permit. The read domain guarantees
+        // that PublishedTopic cannot be reclaimed until after the permit is dropped.
+        unsafe { self.ptr.as_ref() }
+    }
+}
+
+pub(crate) struct PublishedTopics {
+    entries: papaya::HashMap<HandleTopicKey, PublishedTopicPtr, FxBuildHasher>,
+}
+
+impl PublishedTopics {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: papaya::HashMap::with_hasher(FxBuildHasher),
+        }
+    }
+
+    pub(crate) fn load(&self, key: &HandleTopicKey) -> Option<PublishedTopicPtr> {
+        // Papaya protects only map slots while copying the pointer. The
+        // enclosing TopicReadLease protects the separately owned topic.
+        // Never retain a map guard across callbacks or Excel calls.
+        self.entries.pin().get(key).copied()
+    }
+
+    fn remove(&self, key: HandleTopicKey) {
+        self.entries.pin().remove(&key);
+    }
+
+    fn clear(&self) {
+        // The topic-table write lock excludes publishers/removers, so clear
+        // sees a stable set despite Papaya's weak concurrent iteration model.
+        let guard = self.entries.guard();
+        self.entries.clear(&guard);
+        guard.flush();
+    }
+}
+
+#[derive(Clone)]
+/// Shared rendezvous storage only. `PublicationReservation` is the logical
+/// initializer owner; it removes the marker and signals completion explicitly.
+/// Arc avoids keeping completed cells in a second table until waiters finish.
+pub(crate) struct InitializationPtr(Arc<Initialization>);
+
+impl InitializationPtr {
+    pub(crate) fn new(initialization: Initialization) -> Self {
+        Self(Arc::new(initialization))
+    }
+}
+
+impl Deref for InitializationPtr {
+    type Target = Initialization;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl PartialEq for InitializationPtr {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for InitializationPtr {}
+
+pub(crate) struct TopicTableState {
+    pub(crate) by_key: FxHashMap<HandleTopicKey, Topic>,
+    pub(crate) by_lifetime_key: FxHashMap<String, HandleTopicKey>,
+    pub(crate) by_observer_id: FxHashMap<FormulaObserverId, HandleTopicKey>,
+    pub(crate) initializing: FxHashMap<HandleTopicKey, InitializationPtr>,
+    pub(crate) generation: TopicGeneration,
+    pub(crate) closed: bool,
+}
+
+impl Default for TopicTableState {
+    fn default() -> Self {
+        Self {
+            by_key: FxHashMap::default(),
+            by_lifetime_key: FxHashMap::default(),
+            by_observer_id: FxHashMap::default(),
+            initializing: FxHashMap::default(),
+            generation: TopicGeneration::ONE,
+            closed: false,
+        }
+    }
+}
+
+mod ownership;
+use ownership::{PublishedTopicOwner, RetiredTopics};
+
+pub(crate) struct Topic {
+    publication: PublishedTopicOwner,
+    #[cfg(any(target_os = "windows", test))]
+    lifetime_generation: Option<FormulaLifetimeGeneration>,
+    observer: Option<FormulaObserverId>,
+    #[cfg(any(target_os = "windows", test))]
+    observer_committed: bool,
+}
+
+#[cfg(test)]
+impl Topic {
+    pub(super) fn publication(&self) -> &PublishedTopic {
+        &self.publication
+    }
+}
+
+pub(crate) struct TopicTable {
+    state: RwLock<TopicTableState>,
+    published: PublishedTopics,
+    read_domain: RotatingRetirementDomain<DEFAULT_STRIPE_COUNT, RetiredTopics>,
+    // Maintenance hint; registration and rotation synchronize through the
+    // retirement queue locks. Ordinary warm reads take the zero-debt path.
+    queued: AtomicUsize,
+    maintenance_requests: AtomicUsize,
+}
+
+impl TopicTable {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: RwLock::new(TopicTableState::default()),
+            published: PublishedTopics::new(),
+            read_domain: RotatingRetirementDomain::new(),
+            queued: AtomicUsize::new(0),
+            maintenance_requests: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn enter_read_lease(&self) -> XllResult<TopicReadLease<'_>> {
+        let permit = self
+            .read_domain
+            .enter_current_thread()
+            .map_err(|_| XllError::Closing)?;
+        Ok(TopicReadLease {
+            table: self,
+            permit: Some(permit),
+        })
+    }
+
+    fn enqueue_reclaim(&self, topic: PublishedTopicOwner) {
+        // Map withdrawal and retirement registration share the table writer
+        // lock with close. Rotation takes this
+        // queue lock before publishing its next generation, establishing the
+        // ordering needed by readers of copied, non-owning topic pointers.
+        self.read_domain.register_retired(|_, mut queue| {
+            queue.append(topic);
+            self.queued
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |queued| {
+                    queued.checked_add(1)
+                })
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read(&self) -> RwLockReadGuard<'_, TopicTableState> {
+        self.state.read()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write(&self) -> RwLockWriteGuard<'_, TopicTableState> {
+        self.state.write()
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.state.read().closed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn published(&self) -> &PublishedTopics {
+        &self.published
+    }
+
+    pub(crate) fn prepare_decision(
+        &self,
+        key: HandleTopicKey,
+        owner: ThreadId,
+        make_initialization: impl FnOnce() -> Initialization,
+    ) -> XllResult<PrepareDecision> {
+        let state = self.state.read();
+        if state.closed {
+            return Err(XllError::Closing);
+        }
+        if let Some(initialization) = state.initializing.get(&key) {
+            if initialization.owner == owner {
+                return Err(XllError::ReentrantCall);
+            }
+            return Ok(PrepareDecision::Wait {
+                initialization: initialization.clone(),
+            });
+        }
+        if let Some(topic) = state.by_key.get(&key) {
+            return Ok(PrepareDecision::Existing {
+                token: topic.publication.token.clone(),
+                lifetime_key: topic.publication.lifetime_key.clone(),
+                generation: state.generation,
+            });
+        }
+        drop(state);
+
+        let mut state = self.state.write();
+        if state.closed {
+            return Err(XllError::Closing);
+        }
+        if let Some(initialization) = state.initializing.get(&key) {
+            if initialization.owner == owner {
+                return Err(XllError::ReentrantCall);
+            }
+            return Ok(PrepareDecision::Wait {
+                initialization: initialization.clone(),
+            });
+        }
+        if let Some(topic) = state.by_key.get(&key) {
+            return Ok(PrepareDecision::Existing {
+                token: topic.publication.token.clone(),
+                lifetime_key: topic.publication.lifetime_key.clone(),
+                generation: state.generation,
+            });
+        }
+
+        let initialization = InitializationPtr::new(make_initialization());
+        let generation = state.generation;
+        state.initializing.insert(key, initialization.clone());
+        Ok(PrepareDecision::Initialize {
+            initialization,
+            generation,
+        })
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn claim_lifetime(
+        &self,
+        lifetime_key: &str,
+        lifetime_generation: FormulaLifetimeGeneration,
+    ) -> XllResult<HandleTopicKey> {
+        let mut state = self.state.write();
+        if state.closed {
+            return Err(XllError::Closing);
+        }
+        let key = state
+            .by_lifetime_key
+            .get(lifetime_key)
+            .copied()
+            .ok_or(XllError::StaleHandle)?;
+        let topic = state.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
+        if topic
+            .lifetime_generation
+            .is_some_and(|existing| existing != lifetime_generation)
+        {
+            return Err(XllError::InvalidHandle);
+        }
+        topic.lifetime_generation = Some(lifetime_generation);
+        Ok(key)
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn connect(
+        &self,
+        lifetime_generation: FormulaLifetimeGeneration,
+        owner: FormulaObserverId,
+        lifetime_key: &str,
+    ) -> XllResult<(HandleTopicKey, String, bool)> {
+        let mut state = self.state.write();
+        if state.closed {
+            return Err(XllError::Closing);
+        }
+        let key = state
+            .by_lifetime_key
+            .get(lifetime_key)
+            .copied()
+            .ok_or(XllError::StaleHandle)?;
+        if state
+            .by_observer_id
+            .get(&owner)
+            .is_some_and(|existing| existing != &key)
+        {
+            return Err(XllError::InvalidHandle);
+        }
+        let (token, created) = {
+            let topic = state.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
+            if topic
+                .lifetime_generation
+                .is_some_and(|existing| existing != lifetime_generation)
+            {
+                return Err(XllError::InvalidHandle);
+            }
+            topic.lifetime_generation = Some(lifetime_generation);
+            let created = if let Some(existing) = topic.observer {
+                if existing != owner {
+                    return Err(XllError::InvalidHandle);
+                }
+                if !topic.observer_committed {
+                    return Err(XllError::Overloaded);
+                }
+                false
+            } else {
+                topic.observer = Some(owner);
+                topic.observer_committed = false;
+                true
+            };
+            (topic.publication.token.clone(), created)
+        };
+        state.by_observer_id.insert(owner, key);
+        Ok((key, token, created))
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn commit_connection(
+        &self,
+        owner: FormulaObserverId,
+        key: HandleTopicKey,
+    ) -> XllResult<()> {
+        let mut state = self.state.write();
+        if state.closed {
+            return Err(XllError::Closing);
+        }
+        if state.by_observer_id.get(&owner) != Some(&key) {
+            return Err(XllError::StaleHandle);
+        }
+        let topic = state.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
+        if topic.observer != Some(owner) {
+            return Err(XllError::StaleHandle);
+        }
+        topic.observer_committed = true;
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn rollback_connection(
+        &self,
+        owner: FormulaObserverId,
+        key: HandleTopicKey,
+    ) -> bool {
+        let mut state = self.state.write();
+        if state.by_observer_id.get(&owner) != Some(&key)
+            || !state
+                .by_key
+                .get(&key)
+                .is_some_and(|topic| topic.observer == Some(owner) && !topic.observer_committed)
+        {
+            return false;
+        }
+        state.by_observer_id.remove(&owner);
+        if let Some(topic) = state.by_key.get_mut(&key) {
+            topic.observer = None;
+            topic.observer_committed = false;
+        }
+        true
+    }
+
+    pub(crate) fn insert_provisional(
+        &self,
+        key: HandleTopicKey,
+        generation: TopicGeneration,
+        publication: PublishedTopic,
+        on_linearized: impl FnOnce(PublishedTopicPtr),
+    ) -> XllResult<PublishedTopicPtr> {
+        let mut state = self.state.write();
+        if state.closed || state.generation != generation {
+            return Err(XllError::Closing);
+        }
+        if state.by_key.contains_key(&key)
+            || state
+                .by_lifetime_key
+                .contains_key(publication.lifetime_key.as_str())
+        {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_TOPIC_COLLISION,
+            });
+        }
+        let lifetime_key = publication.lifetime_key.clone();
+        let publication = PublishedTopicOwner::new(publication);
+        state.by_key.insert(
+            key,
+            Topic {
+                publication,
+                #[cfg(any(target_os = "windows", test))]
+                lifetime_generation: None,
+                observer: None,
+                #[cfg(any(target_os = "windows", test))]
+                observer_committed: false,
+            },
+        );
+        let pointer =
+            PublishedTopicPtr::from_ref(state.by_key.get(&key).unwrap().publication.as_ref());
+        state.by_lifetime_key.insert(lifetime_key, key);
+        on_linearized(pointer);
+        Ok(pointer)
+    }
+
+    pub(crate) fn commit_publication(
+        &self,
+        key: HandleTopicKey,
+        generation: TopicGeneration,
+        initialization: &InitializationPtr,
+        publication: PublishedTopicPtr,
+        on_linearized: impl FnOnce(),
+    ) -> XllResult<()> {
+        ownership::commit_publication(
+            self,
+            key,
+            generation,
+            initialization,
+            publication,
+            on_linearized,
+        )
+    }
+
+    pub(crate) fn finish_initialization(
+        &self,
+        key: HandleTopicKey,
+        initialization: &InitializationPtr,
+    ) -> bool {
+        let mut state = self.state.write();
+        if state.initializing.get(&key) == Some(initialization) {
+            state.initializing.remove(&key);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn is_current(
+        &self,
+        key: HandleTopicKey,
+        generation: TopicGeneration,
+        token: &str,
+    ) -> XllResult<()> {
+        let state = self.state.read();
+        if state.closed || state.generation != generation {
+            return Err(XllError::Closing);
+        }
+        if state
+            .by_key
+            .get(&key)
+            .is_some_and(|topic| topic.publication.token == token)
+        {
+            Ok(())
+        } else {
+            Err(XllError::StaleHandle)
+        }
+    }
+
+    fn remove_topic_locked(
+        &self,
+        state: &mut TopicTableState,
+        key: HandleTopicKey,
+    ) -> Option<(TopicRemoval, PublishedTopicOwner)> {
+        let topic = state.by_key.get(&key)?;
+        let was_provisional = topic.publication.state() == PublishedTopicState::Provisional;
+        let initialization_id = state
+            .initializing
+            .get(&key)
+            .map(|initialization| initialization.refinement_id);
+        topic
+            .publication
+            .state
+            .store(PublishedTopicState::Stale as u8, Ordering::Release);
+        self.published.remove(key);
+        let topic = state.by_key.remove(&key)?;
+        state
+            .by_lifetime_key
+            .remove(topic.publication.lifetime_key.as_str());
+        if let Some(owner) = topic.observer {
+            state.by_observer_id.remove(&owner);
+        }
+        Some((
+            TopicRemoval {
+                token: topic.publication.token.clone(),
+                key,
+                was_provisional,
+                initialization_id,
+            },
+            topic.publication,
+        ))
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn remove_by_observer(&self, owner: FormulaObserverId) -> Option<TopicRemoval> {
+        let mut state = self.state.write();
+        let key = state.by_observer_id.remove(&owner)?;
+        let (removal, retired) = self.remove_topic_locked(&mut state, key)?;
+        self.enqueue_reclaim(retired);
+        drop(state);
+        self.maintain();
+        Some(removal)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_by_lifetime_key(&self, lifetime_key: &str) -> Option<TopicRemoval> {
+        let mut state = self.state.write();
+        let key = state.by_lifetime_key.get(lifetime_key).copied()?;
+        let (removal, retired) = self.remove_topic_locked(&mut state, key)?;
+        self.enqueue_reclaim(retired);
+        drop(state);
+        self.maintain();
+        Some(removal)
+    }
+
+    pub(crate) fn remove_topic_if_token(
+        &self,
+        key: HandleTopicKey,
+        token: &str,
+        on_linearized: impl FnOnce(),
+    ) -> Option<TopicRemoval> {
+        let mut state = self.state.write();
+        if !state
+            .by_key
+            .get(&key)
+            .is_some_and(|topic| topic.publication.token == token)
+        {
+            return None;
+        }
+        let (removal, retired) = self.remove_topic_locked(&mut state, key)?;
+        self.enqueue_reclaim(retired);
+        drop(state);
+        on_linearized();
+        self.maintain();
+        Some(removal)
+    }
+
+    pub(crate) fn close(&self) -> Vec<InitializationPtr> {
+        self.close_impl(|| {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn close_with_reclaim_hook(
+        &self,
+        after_enqueue: impl Fn(),
+    ) -> Vec<InitializationPtr> {
+        self.close_impl(after_enqueue)
+    }
+
+    fn close_impl(&self, after_enqueue: impl Fn()) -> Vec<InitializationPtr> {
+        let mut state = self.state.write();
+        state.closed = true;
+        state.generation = state.generation.next().unwrap_or(state.generation);
+        // A remover may already be running reclamation outside the table lock.
+        // Unpublish every pointer before any owner enters a reclaim queue.
+        self.published.clear();
+        for (_, topic) in state.by_key.drain() {
+            topic
+                .publication
+                .state
+                .store(PublishedTopicState::Closing as u8, Ordering::Release);
+            self.enqueue_reclaim(topic.publication);
+            after_enqueue();
+        }
+        state.by_lifetime_key.clear();
+        state.by_observer_id.clear();
+        state
+            .initializing
+            .drain()
+            .map(|(_, initialization)| initialization)
+            .collect()
+    }
+
+    pub(crate) fn remove_all(&self) -> Vec<TopicRemoval> {
+        let mut state = self.state.write();
+        let mut removals = Vec::with_capacity(state.by_key.len());
+        // Withdraw every pointer before registering any retired owner. This
+        // is the same ordering as close; the queue never destroys payloads.
+        self.published.clear();
+        let TopicTableState {
+            by_key,
+            by_lifetime_key,
+            by_observer_id,
+            initializing,
+            ..
+        } = &mut *state;
+        for (key, topic) in by_key.drain() {
+            let was_provisional = topic.publication.state() == PublishedTopicState::Provisional;
+            topic
+                .publication
+                .state
+                .store(PublishedTopicState::Stale as u8, Ordering::Release);
+            removals.push(TopicRemoval {
+                token: topic.publication.token.clone(),
+                key,
+                was_provisional,
+                initialization_id: initializing
+                    .get(&key)
+                    .map(|initialization| initialization.refinement_id),
+            });
+            self.enqueue_reclaim(topic.publication);
+        }
+        by_lifetime_key.clear();
+        by_observer_id.clear();
+        drop(state);
+        self.maintain();
+        removals
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn remove_generation(
+        &self,
+        lifetime_generation: FormulaLifetimeGeneration,
+    ) -> Vec<TopicRemoval> {
+        let mut state = self.state.write();
+        let keys = state
+            .by_key
+            .iter()
+            .filter(|(_, topic)| topic.lifetime_generation == Some(lifetime_generation))
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>();
+        let mut removals = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Some((removal, retired)) = self.remove_topic_locked(&mut state, key) {
+                removals.push(removal);
+                self.enqueue_reclaim(retired);
+            }
+        }
+        drop(state);
+        self.maintain();
+        removals
+    }
+}
+
+pub(crate) struct TopicRemoval {
+    pub(crate) token: String,
+    pub(crate) key: HandleTopicKey,
+    pub(crate) was_provisional: bool,
+    pub(crate) initialization_id: Option<u64>,
+}
+
+pub(crate) struct Initialization {
+    pub(crate) owner: ThreadId,
+    pub(crate) owner_done: AtomicBool,
+    pub(crate) wait: Mutex<()>,
+    pub(crate) completed: Condvar,
+    pub(crate) refinement_id: u64,
+    #[cfg(test)]
+    pub(crate) waiters: AtomicUsize,
+}
+
+impl Initialization {
+    pub(crate) fn wait_until_done(&self) {
+        let mut wait = self.wait.lock();
+        while !self.owner_done.load(Ordering::Acquire) {
+            self.completed.wait(&mut wait);
+        }
+    }
+
+    pub(crate) fn wait_until_done_or_closed(&self, topics: &TopicTable) {
+        #[cfg(test)]
+        self.waiters.fetch_add(1, Ordering::AcqRel);
+        let mut wait = self.wait.lock();
+        while !self.owner_done.load(Ordering::Acquire) && !topics.is_closed() {
+            self.completed.wait(&mut wait);
+        }
+        #[cfg(test)]
+        self.waiters.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn complete(&self) {
+        let _wait = self.wait.lock();
+        self.owner_done.store(true, Ordering::Release);
+        self.completed.notify_all();
+    }
+
+    pub(crate) fn notify_closed(&self) {
+        let _wait = self.wait.lock();
+        self.completed.notify_all();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn waiter_count(&self) -> usize {
+        self.waiters.load(Ordering::Acquire)
+    }
+}
+
+pub(crate) enum PrepareDecision {
+    Existing {
+        token: String,
+        lifetime_key: String,
+        generation: TopicGeneration,
+    },
+    Wait {
+        initialization: InitializationPtr,
+    },
+    Initialize {
+        initialization: InitializationPtr,
+        generation: TopicGeneration,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PublishedTopic, TopicTable, ownership};
+    use crate::XllError;
+    use crate::handle::runtime::FormulaHandleService;
+    use crate::handle::{ExcelHandleObject, formula::test_topic_key};
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    #[test]
+    fn topic_reclamation_skips_busy_registration_without_publishing() {
+        let table = Arc::new(TopicTable::new());
+        table.enqueue_reclaim(ownership::PublishedTopicOwner::new(PublishedTopic::new(
+            "token".to_owned(),
+            "lifetime".to_owned(),
+        )));
+        let generation = table.read_domain.current_generation();
+        let (worker, outcome) = table
+            .read_domain
+            .observe_queue_len(generation.index(), |_| {
+                let (sent, received) = mpsc::sync_channel(1);
+                let worker_table = Arc::clone(&table);
+                let worker = std::thread::spawn(move || {
+                    let drained = worker_table.try_quiesce_and_drain();
+                    sent.send((drained.len(), worker_table.read_domain.current_generation()))
+                        .unwrap();
+                });
+                (worker, received.recv_timeout(Duration::from_secs(5)))
+            });
+        // The inspection lock is released before joining the worker.
+        worker.join().unwrap();
+        let (count, observed_generation) =
+            outcome.expect("topic reclamation must not wait for registration");
+        assert_eq!(count, 0);
+        assert_eq!(observed_generation, generation);
+        assert_eq!(table.try_quiesce_and_drain().len(), 1);
+    }
+
+    #[test]
+    fn miri_warm_observation_retirements_drain_without_a_followup_deletion() {
+        struct Payload;
+        impl ExcelHandleObject for Payload {}
+        const TOPICS: usize = if cfg!(miri) { 8 } else { 1_000 };
+        let runtime = FormulaHandleService::try_new(TOPICS as u32).unwrap();
+        for index in 0..TOPICS {
+            let key = test_topic_key(&format!("warm-retirement-{index}"));
+            runtime
+                .prepare_observed(key, || Ok(Payload), |_, _| Ok(()))
+                .unwrap();
+        }
+
+        let key = test_topic_key("warm-retirement-0");
+        let result = runtime.prepare_observed::<Payload, _>(
+            key,
+            || panic!("the warm path must not recreate its object"),
+            |_, _| {
+                runtime.terminate_all_topics();
+                assert_eq!(runtime.store.len(), 0);
+                assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), TOPICS);
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(XllError::StaleHandle)));
+        // The production warm path has released its final read lease. No
+        // further delete, prepare, explicit maintenance or close is needed.
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            runtime.topics.maintenance_requests.load(Ordering::Relaxed),
+            0
+        );
+        assert!(
+            runtime
+                .topics
+                .read_domain
+                .try_observe_queue_lengths(|lengths| lengths == [0, 0])
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn miri_last_old_topic_reader_reclaims_while_a_later_reader_remains() {
+        struct Payload;
+        impl ExcelHandleObject for Payload {}
+        let runtime = FormulaHandleService::try_new(1).unwrap();
+        let key = test_topic_key("later-topic-reader");
+        runtime
+            .prepare_observed(key, || Ok(Payload), |_, _| Ok(()))
+            .unwrap();
+        let old = runtime.topics.enter_read_lease().unwrap();
+        assert!(old.load(&key).is_some());
+        let initial = runtime.topics.read_domain.current_generation();
+        runtime.terminate_all_topics();
+        assert_ne!(runtime.topics.read_domain.current_generation(), initial);
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 1);
+        // Overlapping reads no longer require a globally idle moment. A later
+        // reader enters the new generation and cannot extend the old grace.
+        let later = runtime.topics.enter_read_lease().unwrap();
+        assert!(later.load(&key).is_none());
+        drop(old);
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            runtime.topics.maintenance_requests.load(Ordering::Relaxed),
+            0
+        );
+        drop(later);
+    }
+
+    #[test]
+    fn miri_nested_topic_reader_release_keeps_the_outer_reference_alive() {
+        struct Payload;
+        impl ExcelHandleObject for Payload {}
+        let runtime = FormulaHandleService::try_new(1).unwrap();
+        let key = test_topic_key("nested-topic-reader");
+        runtime
+            .prepare_observed(key, || Ok(Payload), |_, _| Ok(()))
+            .unwrap();
+        let outer = runtime.topics.enter_read_lease().unwrap();
+        let inner = runtime.topics.enter_read_lease().unwrap();
+        let publication = outer.load(&key).unwrap();
+        runtime.terminate_all_topics();
+        drop(inner);
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 1);
+        assert_eq!(publication.state(), super::PublishedTopicState::Stale);
+        drop(outer);
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn miri_cross_thread_topic_retirement_drains_on_the_last_reader_release() {
+        struct Payload;
+        impl ExcelHandleObject for Payload {}
+        let runtime = Arc::new(FormulaHandleService::try_new(1).unwrap());
+        let key = test_topic_key("cross-thread-topic-reader");
+        runtime
+            .prepare_observed(key, || Ok(Payload), |_, _| Ok(()))
+            .unwrap();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let reading = Arc::clone(&runtime);
+        let reader = std::thread::spawn(move || {
+            reading.prepare_observed::<Payload, _>(
+                key,
+                || panic!("the warm path must not recreate its object"),
+                |_, _| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                },
+            )
+        });
+        entered_rx.recv().unwrap();
+        runtime.terminate_all_topics();
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 1);
+        release_tx.send(()).unwrap();
+        assert!(matches!(reader.join().unwrap(), Err(XllError::StaleHandle)));
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            runtime.topics.maintenance_requests.load(Ordering::Relaxed),
+            0
+        );
+    }
+}

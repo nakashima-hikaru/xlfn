@@ -1,0 +1,1651 @@
+#[cfg(feature = "async")]
+use crate::cancellation::{CancellationGuarantee, CancellationToken};
+use crate::diagnostics::{AddinId, DiagnosticInitError, DiagnosticSink};
+use crate::error::IntoXllError;
+use crate::generation::RuntimeGeneration;
+use crate::host_api::ExcelHost;
+use crate::reference::ExcelReference;
+#[cfg(feature = "rtd")]
+use crate::rtd::RtdCallContext;
+use crate::shutdown::CleanupReporter;
+#[cfg(feature = "rtd")]
+use crate::subscription::RtdLimits;
+#[cfg(feature = "rtd")]
+use crate::subscription::{RtdSource, RtdSourceHandle};
+use crate::value::{ExcelValue, FromExcel, Matrix};
+use crate::{XllError, XllResult};
+use std::marker::PhantomData;
+#[cfg(feature = "handles")]
+use std::num::NonZeroU32;
+#[cfg(feature = "async")]
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+/// Identity, package version, and compilation target of the loaded add-in.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct BuildInfo {
+    addin_id: AddinId,
+    version: &'static str,
+    target: &'static str,
+}
+
+impl BuildInfo {
+    pub(crate) const fn new(
+        addin_id: AddinId,
+        version: &'static str,
+        target: &'static str,
+    ) -> Self {
+        Self {
+            addin_id,
+            version,
+            target,
+        }
+    }
+
+    #[must_use]
+    /// Returns the stable add-in identity used for diagnostics and installation.
+    pub const fn addin_id(&self) -> &AddinId {
+        &self.addin_id
+    }
+
+    #[must_use]
+    /// Returns the package version embedded at build time.
+    pub const fn version(&self) -> &str {
+        self.version
+    }
+
+    #[must_use]
+    /// Returns the Rust compilation target embedded at build time.
+    pub const fn target(&self) -> &str {
+        self.target
+    }
+}
+
+/// Installation information and setup capabilities for one [`Addin::open`].
+///
+/// Initialization runs on Excel's lifecycle thread. Read installed sidecars
+/// relative to [`Self::module_directory`] rather than Excel's working directory.
+pub struct OpenContext<A: Addin = ()> {
+    marker: PhantomData<fn() -> A>,
+    module_path: PathBuf,
+    module_directory: PathBuf,
+    build_info: BuildInfo,
+    #[cfg(feature = "rtd")]
+    source_registration: crate::subscription::SourceRegistration<
+        crate::addin::AddinSubscription<A>,
+        crate::addin::AddinSources<A>,
+    >,
+}
+
+impl<A: Addin> std::fmt::Debug for OpenContext<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenContext")
+            .field("module_path", &self.module_path)
+            .field("build_info", &self.build_info)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<A: Addin> OpenContext<A> {
+    pub(crate) fn new(
+        module_path: PathBuf,
+        build_info: BuildInfo,
+        generation: RuntimeGeneration,
+    ) -> Self {
+        let module_directory = module_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        #[cfg(not(feature = "rtd"))]
+        let _ = generation;
+        Self {
+            marker: PhantomData,
+            module_path,
+            module_directory,
+            build_info,
+            #[cfg(feature = "rtd")]
+            source_registration: crate::subscription::SourceRegistration::new(generation),
+        }
+    }
+
+    #[must_use]
+    /// Returns the complete path of the loaded XLL.
+    pub fn module_path(&self) -> &Path {
+        &self.module_path
+    }
+
+    #[must_use]
+    /// Returns the directory containing the loaded XLL.
+    pub fn module_directory(&self) -> &Path {
+        &self.module_directory
+    }
+
+    #[must_use]
+    /// Returns the identity and version embedded in this XLL.
+    pub const fn build_info(&self) -> &BuildInfo {
+        &self.build_info
+    }
+
+    #[must_use]
+    /// Provides diagnostic sink installation during initialization.
+    pub fn diagnostics(&self) -> DiagnosticsSetup<'_, A> {
+        DiagnosticsSetup { context: self }
+    }
+
+    /// Provides the RTD source-registration capability for this open.
+    #[cfg(feature = "rtd")]
+    #[must_use]
+    pub fn rtd(
+        &self,
+    ) -> RtdOpenContext<'_, crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>> {
+        RtdOpenContext {
+            registration: &self.source_registration,
+        }
+    }
+
+    pub(crate) fn into_service_inputs(
+        self,
+    ) -> crate::runtime_components::GenerationServiceInputs<
+        crate::addin::AddinSubscription<A>,
+        crate::addin::AddinSources<A>,
+    > {
+        #[cfg(feature = "rtd")]
+        {
+            crate::runtime_components::GenerationServiceInputs::with_rtd_sources(
+                self.source_registration.finish(),
+            )
+        }
+        #[cfg(not(feature = "rtd"))]
+        {
+            crate::runtime_components::GenerationServiceInputs::empty()
+        }
+    }
+}
+
+/// Capability for registering opaque RTD source identities during open.
+#[cfg(feature = "rtd")]
+pub struct RtdOpenContext<
+    'a,
+    E: crate::RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    registration: &'a crate::subscription::SourceRegistration<E, C>,
+}
+
+#[cfg(feature = "rtd")]
+impl<E: crate::RtdSubscription> RtdOpenContext<'_, E> {
+    /// Registers one source and returns the handle used by subscriptions.
+    pub fn register_source<S>(&self, source: S) -> XllResult<RtdSourceHandle<S>>
+    where
+        S: RtdSource,
+        S::Subscription: crate::IntoRtdSubscription<E>,
+    {
+        self.registration.register(source)
+    }
+}
+
+#[cfg(feature = "rtd")]
+impl RtdOpenContext<'_, crate::BoxedRtdSubscription> {
+    /// Registers a source while hiding its concrete source and subscription
+    /// types. The runtime retains its original cancellation and shutdown
+    /// barriers. Use `BoxedRtdSubscription` as the add-in's subscription owner.
+    pub fn register<S: RtdSource>(&self, source: S) -> XllResult<RtdSourceHandle> {
+        self.registration.register_erased(source)
+    }
+}
+
+#[cfg(feature = "rtd")]
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdOpenContext<'_, E, C> {
+    /// Registers the complete typed catalog once and returns its typed handles.
+    pub fn register_sources(&self, sources: C) -> XllResult<C::Handles> {
+        self.registration.register_sources(sources)
+    }
+}
+
+/// Process-wide diagnostic sink configuration capability available during add-in open.
+///
+/// This shared router is independent of each runtime's [`crate::diagnostics::DiagnosticHistory`].
+pub struct DiagnosticsSetup<'a, A: Addin = ()> {
+    context: &'a OpenContext<A>,
+}
+
+impl<A: Addin> DiagnosticsSetup<'_, A> {
+    /// Installs a process-wide failure log at `%LOCALAPPDATA%/<addin-id>/logs/diagnostics.log`.
+    /// Returns [`DiagnosticInitError::AlreadyInstalled`] if another sink exists.
+    pub fn install_file_sink(&self) -> Result<PathBuf, DiagnosticInitError> {
+        crate::diagnostics::install_file_diagnostic_sink(&self.context.build_info.addin_id)
+    }
+
+    /// Installs the process-wide sink, failing if another sink is already installed.
+    pub fn install_sink<S>(&self, sink: S) -> Result<(), DiagnosticInitError>
+    where
+        S: DiagnosticSink,
+    {
+        crate::diagnostics::install_diagnostic_sink(sink)
+    }
+
+    /// Explicitly replaces the process-wide sink, flushing and joining the previous worker.
+    pub fn replace_sink<S>(&self, sink: S) -> Result<(), DiagnosticInitError>
+    where
+        S: DiagnosticSink,
+    {
+        crate::diagnostics::set_diagnostic_sink(sink)
+    }
+
+    /// Installs or replaces the process-wide diagnostic sink with a custom implementation.
+    #[deprecated(note = "use install_sink or replace_sink to make shared ownership explicit")]
+    pub fn set_sink<S>(&self, sink: S) -> Result<(), DiagnosticInitError>
+    where
+        S: DiagnosticSink,
+    {
+        self.replace_sink(sink)
+    }
+}
+
+/// Handle-registry policy selected during one add-in open.
+#[cfg(feature = "handles")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HandleBindingLimit(NonZeroU32);
+
+#[cfg(feature = "handles")]
+impl HandleBindingLimit {
+    /// Validates a nonzero limit no greater than [`HandleConfig::MAX_SUPPORTED_BINDINGS`].
+    #[must_use]
+    pub const fn new(value: u32) -> Option<Self> {
+        match NonZeroU32::new(value) {
+            Some(value) if value.get() <= HandleConfig::MAX_SUPPORTED_BINDINGS => Some(Self(value)),
+            _ => None,
+        }
+    }
+
+    /// Returns the validated number of simultaneously live bindings.
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+#[cfg(feature = "handles")]
+impl TryFrom<u32> for HandleBindingLimit {
+    type Error = crate::XllError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or(crate::XllError::Domain {
+            code: crate::error::DomainErrorCode::InvalidInput,
+        })
+    }
+}
+
+#[cfg(feature = "handles")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Capacity policy for formula-owned handle bindings.
+pub struct HandleConfig {
+    maximum_bindings: HandleBindingLimit,
+}
+
+#[cfg(feature = "handles")]
+impl HandleConfig {
+    /// Default number of simultaneously live formula bindings.
+    pub const DEFAULT_MAX_BINDINGS: u32 = 16_384;
+    /// Upper bound for simultaneously live formula bindings.
+    ///
+    /// The publication table allocates fixed pages as slots are used. This
+    /// limit bounds the page directory and the maximum retained registry size
+    /// without eagerly allocating one pointer for every possible binding.
+    pub const MAX_SUPPORTED_BINDINGS: u32 = 1_048_576;
+
+    #[must_use]
+    /// Creates the default handle capacity policy.
+    pub const fn new() -> Self {
+        Self {
+            maximum_bindings: HandleBindingLimit::new(Self::DEFAULT_MAX_BINDINGS)
+                .expect("default handle limit is supported"),
+        }
+    }
+
+    #[must_use]
+    /// Sets the maximum number of simultaneously live bindings.
+    pub const fn with_binding_limit(mut self, maximum_bindings: HandleBindingLimit) -> Self {
+        self.maximum_bindings = maximum_bindings;
+        self
+    }
+
+    pub(crate) const fn maximum_bindings(self) -> u32 {
+        self.maximum_bindings.get()
+    }
+}
+
+#[cfg(feature = "handles")]
+impl Default for HandleConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// RTD, handle, and asynchronous runtime policy selected during one add-in open.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeConfig {
+    #[cfg(feature = "rtd")]
+    rtd: RtdConfig,
+    #[cfg(feature = "handles")]
+    handles: HandleConfig,
+    #[cfg(feature = "async")]
+    async_runtime: AsyncConfig,
+}
+
+impl RuntimeConfig {
+    #[must_use]
+    /// Creates the default policy for every enabled runtime service.
+    pub const fn new() -> Self {
+        Self {
+            #[cfg(feature = "rtd")]
+            rtd: RtdConfig::new(),
+            #[cfg(feature = "handles")]
+            handles: HandleConfig::new(),
+            #[cfg(feature = "async")]
+            async_runtime: AsyncConfig::new(),
+        }
+    }
+
+    #[cfg(feature = "rtd")]
+    #[must_use]
+    /// Sets the RTD service policy for this generation.
+    pub const fn with_rtd(mut self, rtd: RtdConfig) -> Self {
+        self.rtd = rtd;
+        self
+    }
+
+    #[cfg(feature = "handles")]
+    #[must_use]
+    /// Sets the formula-owned handle policy for this generation.
+    pub const fn with_handles(mut self, handles: HandleConfig) -> Self {
+        self.handles = handles;
+        self
+    }
+
+    #[cfg(feature = "async")]
+    #[must_use]
+    /// Sets the asynchronous task lifecycle policy for this generation.
+    pub const fn with_async(mut self, async_runtime: AsyncConfig) -> Self {
+        self.async_runtime = async_runtime;
+        self
+    }
+
+    #[cfg(feature = "rtd")]
+    pub(crate) const fn rtd_limits(self) -> RtdLimits {
+        self.rtd.limits()
+    }
+
+    #[cfg(feature = "handles")]
+    pub(crate) const fn handle_config(self) -> HandleConfig {
+        self.handles
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) const fn async_task_limit(self) -> AsyncTaskLimit {
+        self.async_runtime.task_limit
+    }
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// RTD-specific portion of [`RuntimeConfig`].
+#[cfg(feature = "rtd")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RtdConfig {
+    limits: RtdLimits,
+}
+
+#[cfg(feature = "rtd")]
+impl RtdConfig {
+    #[must_use]
+    /// Creates the standard finite RTD resource capacities.
+    pub const fn new() -> Self {
+        Self {
+            limits: RtdLimits::standard(),
+        }
+    }
+
+    #[must_use]
+    /// Sets RTD subscription, update-queue, source, and topic-byte capacities.
+    pub const fn with_limits(mut self, limits: RtdLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    pub(crate) const fn limits(self) -> RtdLimits {
+        self.limits
+    }
+}
+
+#[cfg(feature = "rtd")]
+impl Default for RtdConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Maximum number of framework-owned asynchronous tasks at one time.
+#[cfg(feature = "async")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AsyncTaskLimit(NonZeroUsize);
+
+#[cfg(feature = "async")]
+impl AsyncTaskLimit {
+    /// Default limit of 4096 framework-owned tasks.
+    pub const DEFAULT: Self =
+        Self(NonZeroUsize::new(4096).expect("default task limit is non-zero"));
+
+    #[must_use]
+    /// Creates a task limit from a nonzero capacity.
+    pub const fn new(task_limit: usize) -> Option<Self> {
+        match NonZeroUsize::new(task_limit) {
+            Some(limit) => Some(Self(limit)),
+            None => None,
+        }
+    }
+
+    #[must_use]
+    /// Returns the maximum number of pending tasks.
+    pub const fn get(self) -> usize {
+        self.0.get()
+    }
+}
+
+#[cfg(feature = "async")]
+impl TryFrom<usize> for AsyncTaskLimit {
+    type Error = crate::XllError;
+
+    fn try_from(task_limit: usize) -> Result<Self, Self::Error> {
+        Self::new(task_limit).ok_or(crate::XllError::Domain {
+            code: crate::error::DomainErrorCode::InvalidInput,
+        })
+    }
+}
+
+#[cfg(feature = "async")]
+impl Default for AsyncTaskLimit {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Asynchronous task lifecycle policy in [`RuntimeConfig`].
+#[cfg(feature = "async")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AsyncConfig {
+    task_limit: AsyncTaskLimit,
+}
+
+#[cfg(feature = "async")]
+impl AsyncConfig {
+    #[must_use]
+    /// Creates a policy using [`AsyncTaskLimit::DEFAULT`].
+    pub const fn new() -> Self {
+        Self {
+            task_limit: AsyncTaskLimit::DEFAULT,
+        }
+    }
+
+    #[must_use]
+    /// Sets the maximum number of framework-owned async tasks.
+    pub const fn with_task_limit(mut self, task_limit: AsyncTaskLimit) -> Self {
+        self.task_limit = task_limit;
+        self
+    }
+}
+
+#[cfg(feature = "async")]
+impl Default for AsyncConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The result of a successful [`Addin::open`] transaction.
+pub struct Opened<S, L = (), U = (), E = NoAsyncExecutor> {
+    shared_state: S,
+    lifecycle_state: L,
+    layers: U,
+    runtime: RuntimeConfig,
+    async_executor: E,
+}
+
+/// An add-in that does not submit native asynchronous tasks.
+///
+/// This is the default executor resource in [`Opened`]. With the `async`
+/// feature it implements the executor contract and rejects task admission.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NoAsyncExecutor;
+
+/// Complete initialization result for an [`Addin`] implementation.
+///
+/// This alias follows the implementation's shared state, lifecycle state,
+/// instrumentation layers, and error type, including when those types change.
+#[cfg(not(feature = "async"))]
+pub type OpenResult<A> = Result<
+    Opened<<A as Addin>::SharedState, <A as Addin>::LifecycleState, <A as Addin>::Layers>,
+    <A as Addin>::Error,
+>;
+
+/// Complete initialization result, including ownership of the selected executor.
+#[cfg(feature = "async")]
+pub type OpenResult<A> = Result<
+    Opened<
+        <A as Addin>::SharedState,
+        <A as Addin>::LifecycleState,
+        <A as Addin>::Layers,
+        <A as Addin>::AsyncExecutor,
+    >,
+    <A as Addin>::Error,
+>;
+
+impl<S> Opened<S, (), ()> {
+    /// Creates a new open transaction with default lifecycle state `()` and no layers `()`.
+    #[must_use]
+    pub const fn new(shared_state: S) -> Self {
+        Self {
+            shared_state,
+            lifecycle_state: (),
+            layers: (),
+            runtime: RuntimeConfig::new(),
+            async_executor: NoAsyncExecutor,
+        }
+    }
+}
+
+impl<S, L, U> Opened<S, L, U> {
+    /// Constructs an `Opened` value from all components explicitly.
+    #[must_use]
+    pub const fn from_parts(shared_state: S, lifecycle_state: L, layers: U) -> Self {
+        Self {
+            shared_state,
+            lifecycle_state,
+            layers,
+            runtime: RuntimeConfig::new(),
+            async_executor: NoAsyncExecutor,
+        }
+    }
+}
+
+impl<S, L, U, E> Opened<S, L, U, E> {
+    /// Attaches dedicated thread-affine lifecycle state.
+    #[must_use]
+    pub fn with_lifecycle<NewL>(self, lifecycle_state: NewL) -> Opened<S, NewL, U, E> {
+        Opened {
+            shared_state: self.shared_state,
+            lifecycle_state,
+            layers: self.layers,
+            runtime: self.runtime,
+            async_executor: self.async_executor,
+        }
+    }
+
+    /// Attaches UDF invocation layers.
+    #[must_use]
+    pub fn with_layers<NewU>(self, layers: NewU) -> Opened<S, L, NewU, E> {
+        Opened {
+            shared_state: self.shared_state,
+            lifecycle_state: self.lifecycle_state,
+            layers,
+            runtime: self.runtime,
+            async_executor: self.async_executor,
+        }
+    }
+
+    /// Attaches runtime configuration.
+    #[must_use]
+    pub const fn with_runtime_config(mut self, runtime: RuntimeConfig) -> Self {
+        self.runtime = runtime;
+        self
+    }
+
+    /// Transfers executor ownership into this open transaction.
+    #[cfg(feature = "async")]
+    #[must_use]
+    pub fn with_async_executor<NewE: crate::AsyncExecutor>(
+        self,
+        async_executor: NewE,
+    ) -> Opened<S, L, U, NewE> {
+        Opened {
+            shared_state: self.shared_state,
+            lifecycle_state: self.lifecycle_state,
+            layers: self.layers,
+            runtime: self.runtime,
+            async_executor,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (S, L, U, RuntimeConfig, E) {
+        (
+            self.shared_state,
+            self.lifecycle_state,
+            self.layers,
+            self.runtime,
+            self.async_executor,
+        )
+    }
+}
+
+/// Defines Add-in state and its Excel lifecycle hooks.
+///
+/// The framework invokes [`Self::open`] and [`Self::cleanup`] from Excel's main
+/// lifecycle thread, and all lifecycle hooks for one open generation run on
+/// that same thread. xlfn binds lifecycle-state access to that thread for the
+/// generation and quarantines the runtime if a lifecycle boundary is entered
+/// from another thread. `SharedState` is the state borrowed by UDF calls and
+/// is therefore required to be `Send + Sync`. `LifecycleState` is owned by the
+/// framework's thread-affine lifecycle slot and may be thread-affine or
+/// otherwise non-`Send`.
+///
+/// [`Self::quiesce`] must synchronously stop every execution source before
+/// best-effort lifecycle cleanup begins. The shared state is dropped only
+/// after quiescence; lifecycle cleanup receives the dedicated lifecycle state.
+///
+/// Apply [`crate::excel_addin`] to the implementation to generate the exports
+/// and supply empty RTD configuration when these types are omitted. The RTD
+/// associated types exist only with the `rtd` feature; add-ins using sources
+/// specify both concrete types in that attributed implementation.
+pub trait Addin: Sized + Send + Sync + 'static {
+    /// Concrete subscription owner, or `()` when this add-in has no RTD sources.
+    /// Use [`crate::rtd_subscriptions!`] to combine multiple source subscription types.
+    #[cfg(feature = "rtd")]
+    type RtdSubscription: crate::RtdSubscription;
+    /// Concrete source catalog, or DynamicRtdSources for incremental registration.
+    #[cfg(feature = "rtd")]
+    type RtdSources: crate::RtdSourceCatalog<Self::RtdSubscription>;
+    /// State shared by worksheet calls in this open generation.
+    type SharedState: Send + Sync + 'static;
+    /// State accessed and disposed only on Excel's lifecycle thread.
+    type LifecycleState: 'static;
+    /// Initialization and quiescence errors converted at the Excel boundary.
+    type Error: IntoXllError;
+    /// No layers (`()`) or a tuple of one to sixteen [`crate::execution::UdfLayer`] values.
+    type Layers: crate::execution::UdfLayers;
+    /// Executor resource owned by each successful open transaction.
+    #[cfg(feature = "async")]
+    type AsyncExecutor: crate::AsyncExecutor;
+
+    /// Opens one complete generation on Excel's main lifecycle thread.
+    ///
+    /// Shared state, lifecycle state, UDF layers, and runtime policy are
+    /// returned together so the framework can stage them as one transaction.
+    /// If a later registration step fails, none of the execution state is
+    /// published as an open generation.
+    ///
+    /// Returning an error or panicking before returning `Opened` quarantines
+    /// the runtime and retains DLL residency, including with physical unload
+    /// enabled. No state is available to call `quiesce`, so the framework
+    /// cannot prove that application-created execution sources have stopped.
+    /// That runtime cannot be opened again.
+    fn open(context: &OpenContext<Self>) -> OpenResult<Self>;
+
+    /// Stops every framework-visible Add-in callback, worker, and other
+    /// execution source before lifecycle cleanup.
+    ///
+    /// Returning `Ok(())` establishes logical quiescence for the generation.
+    /// Safe `Addin` implementations retain the DLL residency lease after
+    /// terminal removal, because arbitrary user-created threads and native
+    /// callbacks cannot be verified by the framework from this safe trait.
+    /// Implement [`PhysicallyUnloadableAddin`] to opt into physical unload
+    /// eligibility after accepting that stronger contract explicitly.
+    ///
+    /// Native calculation-event registrations have loaded-module lifetime.
+    /// Logical close shuts their generation admission and reclaims generation
+    /// resources while retaining the DLL. Reopening the same runtime reuses
+    /// confirmed registrations instead of registering another handler.
+    ///
+    /// Handle values are call-scoped and cannot be stored in either state.
+    /// Vendor operations must be canceled cooperatively; unload waits rather
+    /// than abandoning in-process code.
+    fn quiesce(
+        _shared: &mut Self::SharedState,
+        _lifecycle: &mut Self::LifecycleState,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Performs best-effort disposal after quiescence has been established.
+    ///
+    /// This hook must not start work or register callbacks. Disposal failures
+    /// should be recorded with `reporter`; they do not make unload unsafe.
+    /// `SharedState` is already quiesced and is dropped by the framework
+    /// separately after this hook returns.
+    fn cleanup(_lifecycle: &mut Self::LifecycleState, _reporter: &mut CleanupReporter<'_>) {}
+}
+
+/// Resolves the framework's transport types without requiring RTD configuration
+/// from add-ins when that public capability is disabled.
+#[doc(hidden)]
+pub trait AddinRtdTypes {
+    type Subscription: crate::subscription_owner::RtdSubscription;
+    type Sources: crate::source_catalog::RtdSourceCatalog<Self::Subscription>;
+}
+
+#[cfg(feature = "rtd")]
+impl<A: Addin> AddinRtdTypes for A {
+    type Subscription = A::RtdSubscription;
+    type Sources = A::RtdSources;
+}
+
+#[cfg(not(feature = "rtd"))]
+impl<A: Addin> AddinRtdTypes for A {
+    type Subscription = ();
+    type Sources = crate::source_catalog::DynamicRtdSources<()>;
+}
+
+pub(crate) type AddinSubscription<A> = <A as AddinRtdTypes>::Subscription;
+pub(crate) type AddinSources<A> = <A as AddinRtdTypes>::Sources;
+
+/// Explicit unsafe contract for Add-ins that permit physical DLL unload.
+///
+/// The framework can account for its own callbacks, executors, and service
+/// roots, but it cannot discover every executable source an Add-in may create
+/// through `std::thread`, vendor native callbacks, or other FFI. An
+/// implementation of this trait must synchronously stop *all* such sources
+/// before returning from [`Self::quiesce_for_physical_unload`]. Violating that
+/// contract can execute unmapped XLL code after `FreeLibrary`, so the opt-in
+/// is deliberately an `unsafe impl` rather than a safe configuration flag.
+///
+/// This opt-in permits release only when all framework-owned native event
+/// registration slots are empty and no COM references, server locks, calls, or
+/// GIT registrations remain. Confirmed, in-flight, or indeterminate calculation
+/// events and externally retained terminal RTD objects keep DLL residency even
+/// after successful logical close. The trait does not guarantee that Excel
+/// will unload the DLL.
+///
+/// # Safety
+///
+/// Implementors must ensure that no application-created thread, callback,
+/// future, native handle, or other executable source that can enter this XLL
+/// remains active after [`Self::quiesce_for_physical_unload`] returns successfully.
+/// They must also
+/// ensure that the hook itself synchronously establishes that condition before
+/// returning. The framework's own admission and executor accounting is not a
+/// substitute for this application-level guarantee. Conversely, satisfying
+/// this contract does not remove framework-owned native event or COM roots or
+/// permit releasing their residency hold.
+///
+/// If `Addin::open` fails before returning its state, the framework retains
+/// DLL residency and quarantines the runtime rather than invoking this hook.
+pub unsafe trait PhysicallyUnloadableAddin: Addin {
+    /// Performs the stronger quiescence required before releasing the DLL's
+    /// physical residency lease. Successful quiescence does not override a
+    /// residency hold for native calculation-event registrations or COM roots.
+    fn quiesce_for_physical_unload(
+        shared: &mut Self::SharedState,
+        lifecycle: &mut Self::LifecycleState,
+    ) -> Result<(), Self::Error> {
+        Self::quiesce(shared, lifecycle)
+    }
+}
+
+impl Addin for () {
+    #[cfg(feature = "rtd")]
+    type RtdSubscription = ();
+    #[cfg(feature = "rtd")]
+    type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+    type SharedState = ();
+    type LifecycleState = ();
+    type Error = XllError;
+    type Layers = ();
+    #[cfg(feature = "async")]
+    type AsyncExecutor = NoAsyncExecutor;
+
+    fn open(_context: &OpenContext<Self>) -> OpenResult<Self> {
+        Ok(Opened::new(()))
+    }
+}
+
+impl<A: Addin> AsRef<A::SharedState> for ThreadSafeContext<'_, A> {
+    fn as_ref(&self) -> &A::SharedState {
+        self.state
+    }
+}
+
+/// Call-scoped shared state for a worksheet function registered as thread-safe.
+///
+/// This context is `Copy`, `Send`, and `Sync`, but its state borrow cannot
+/// outlive the invocation. Every resource reached through that state must
+/// support the concurrency declared by the worksheet function.
+/// As the first by-value parameter of an [`crate::excel_function`], this type
+/// selects thread-safe execution without a function-level mode option.
+pub struct ThreadSafeContext<'call, A: Addin> {
+    state: &'call A::SharedState,
+    diagnostics: &'call crate::diagnostics::DiagnosticHistory,
+}
+
+impl<A: Addin> Clone for ThreadSafeContext<'_, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A: Addin> Copy for ThreadSafeContext<'_, A> {}
+
+/// Call-scoped Add-in state available to an asynchronous worksheet function.
+///
+/// The framework-owned async Future retains the open-generation lease and the
+/// cancellation token. This context borrows both for the duration of that
+/// Future, so a context cannot be moved into a detached task or thread that
+/// outlives the invocation. Long-lived state must be owned explicitly by the
+/// add-in rather than by escaping this capability.
+/// An [`crate::excel_function`] written as `async fn` may request this context
+/// as its first by-value parameter. `async fn` selects async execution even
+/// when no context is requested.
+#[cfg(feature = "async")]
+pub struct AsyncContext<'call, A: Addin> {
+    state: &'call A::SharedState,
+    cancellation: &'call CancellationToken,
+    diagnostics: &'call crate::diagnostics::DiagnosticHistory,
+}
+
+#[cfg(feature = "async")]
+impl<'call, A: Addin> AsyncContext<'call, A> {
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(
+        state: &'call A::SharedState,
+        cancellation: &'call CancellationToken,
+        diagnostics: &'call crate::diagnostics::DiagnosticHistory,
+    ) -> Self {
+        Self {
+            state,
+            cancellation,
+            diagnostics,
+        }
+    }
+
+    #[must_use]
+    /// Borrows shared state for the whole asynchronous invocation.
+    pub const fn state(&self) -> &'call A::SharedState {
+        self.state
+    }
+
+    #[must_use]
+    /// Returns this invocation's cooperative cancellation token.
+    pub const fn cancellation(&self) -> &'call CancellationToken {
+        self.cancellation
+    }
+
+    /// Returns this add-in runtime's bounded failure history.
+    ///
+    /// The borrow is limited to this asynchronous invocation, even though the
+    /// runtime retains its history across logical close and reopening. Reading
+    /// history pages synchronizes with writers and allocates snapshots; avoid
+    /// frequent history reads on an async poller.
+    #[must_use]
+    pub const fn diagnostics(&self) -> &'call crate::diagnostics::DiagnosticHistory {
+        self.diagnostics
+    }
+
+    /// Returns `#N/A` when this invocation has been cancelled.
+    pub fn check_cancelled(&self) -> XllResult<()> {
+        if self.cancellation.is_cancelled() {
+            Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[must_use]
+    /// Describes the cancellation support established for this invocation.
+    pub const fn cancellation_guarantee(&self) -> CancellationGuarantee {
+        self.cancellation.guarantee()
+    }
+}
+
+#[cfg(feature = "async")]
+impl<A: Addin> AsRef<A::SharedState> for AsyncContext<'_, A> {
+    fn as_ref(&self) -> &A::SharedState {
+        self.state
+    }
+}
+
+impl<A: Addin> AsRef<A::SharedState> for MainThreadContext<'_, A> {
+    fn as_ref(&self) -> &A::SharedState {
+        self.state
+    }
+}
+
+impl<'call, A: Addin> ThreadSafeContext<'call, A> {
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(
+        state: &'call A::SharedState,
+        diagnostics: &'call crate::diagnostics::DiagnosticHistory,
+    ) -> Self {
+        Self { state, diagnostics }
+    }
+
+    #[must_use]
+    /// Borrows shared state for the whole worksheet invocation.
+    pub const fn state(&self) -> &'call A::SharedState {
+        self.state
+    }
+
+    /// Returns this add-in runtime's bounded failure history.
+    #[must_use]
+    pub const fn diagnostics(&self) -> &'call crate::diagnostics::DiagnosticHistory {
+        self.diagnostics
+    }
+}
+
+/// Call-scoped state and host callbacks for a main-thread UDF.
+///
+/// The synchronous call guard already pins the published generation for the
+/// duration of this lifetime. Keeping the existing state borrow here avoids a
+/// second generation lease and makes the ownership relationship explicit.
+/// As the first by-value parameter of an [`crate::excel_function`], this type
+/// selects main-thread execution without a function-level mode option.
+pub struct MainThreadContext<'call, A: Addin> {
+    state: &'call A::SharedState,
+    diagnostics: &'call crate::diagnostics::DiagnosticHistory,
+    #[cfg(feature = "rtd")]
+    rtd: RtdCallContext<'call, crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl<A: Addin> Clone for MainThreadContext<'_, A> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state,
+            diagnostics: self.diagnostics,
+            #[cfg(feature = "rtd")]
+            rtd: self.rtd,
+            _not_send_or_sync: PhantomData,
+        }
+    }
+}
+
+/// Call-scoped state and host callbacks for a macro-sheet UDF.
+///
+/// This context is borrowed entirely from the active call. Unlike
+/// `AsyncContext`, it cannot outlive the callback scope and therefore does
+/// not need an owned generation lease.
+///
+/// Only the generated Excel entrypoint can supply this context. Clones share
+/// the same callback session: Abort or Uncalced suppresses all later callbacks
+/// for this invocation, including callbacks made through a clone.
+/// As the first by-value parameter of an [`crate::excel_function`], this type
+/// selects macro-sheet execution without a function-level mode option.
+pub struct MacroSheetContext<'call, A: Addin> {
+    state: &'call A::SharedState,
+    diagnostics: &'call crate::diagnostics::DiagnosticHistory,
+    host: ExcelHost<'call>,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl<A: Addin> Clone for MacroSheetContext<'_, A> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state,
+            diagnostics: self.diagnostics,
+            host: self.host,
+            _not_send_or_sync: PhantomData,
+        }
+    }
+}
+
+impl<A: Addin> AsRef<A::SharedState> for MacroSheetContext<'_, A> {
+    fn as_ref(&self) -> &A::SharedState {
+        self.state
+    }
+}
+
+impl<A: Addin> MacroSheetContext<'_, A> {
+    #[doc(hidden)]
+    #[must_use]
+    pub(crate) fn new<'ctx>(
+        state: &'ctx A::SharedState,
+        diagnostics: &'ctx crate::diagnostics::DiagnosticHistory,
+        host: ExcelHost<'ctx>,
+    ) -> MacroSheetContext<'ctx, A> {
+        MacroSheetContext {
+            state,
+            diagnostics,
+            host,
+            _not_send_or_sync: PhantomData,
+        }
+    }
+}
+
+impl<'call, A: Addin> MacroSheetContext<'call, A> {
+    /// Returns this add-in runtime's bounded failure history.
+    #[must_use]
+    pub const fn diagnostics(&self) -> &'call crate::diagnostics::DiagnosticHistory {
+        self.diagnostics
+    }
+
+    #[must_use]
+    /// Borrows shared state for the whole worksheet invocation.
+    pub const fn state(&self) -> &'call A::SharedState {
+        self.state
+    }
+
+    /// Resolves a reference through Excel into an owned value.
+    pub fn coerce(&self, reference: &ExcelReference<'_>) -> XllResult<ExcelValue> {
+        self.host.coerce(reference)
+    }
+
+    /// Resolves a reference through Excel and converts every cell into `T`.
+    pub fn coerce_matrix<T>(&self, reference: &ExcelReference<'_>) -> XllResult<Matrix<T>>
+    where
+        T: for<'value> FromExcel<'value>,
+    {
+        self.host.coerce_matrix(reference)
+    }
+
+    /// Returns Excel's sheet name for the referenced sheet.
+    pub fn sheet_name(&self, reference: &ExcelReference<'_>) -> XllResult<String> {
+        self.host.sheet_name(reference)
+    }
+
+    /// Queries the date system of the workbook containing `reference`.
+    ///
+    /// Requires an external reference with an explicit nonzero sheet identity.
+    /// Internal current-sheet references are rejected to avoid resolving a
+    /// different active workbook. Excel supplies the workbook name via
+    /// `xlSheetNm`, then receives it explicitly in `GET.DOCUMENT(20, name)`.
+    /// Callback rejection, unavailable settings, and unexpected results return
+    /// errors; there is no default date system. The setting is queried on each
+    /// call because it can change while the workbook remains open.
+    ///
+    /// This operation requires macro-sheet execution on Excel's calling thread.
+    /// Native Excel qualification of 1900/1904 and inactive workbooks is required
+    /// separately from mocked callback tests or Windows cross-compilation.
+    pub fn workbook_date_system(
+        &self,
+        reference: &ExcelReference<'_>,
+    ) -> XllResult<crate::value::ExcelDateSystem> {
+        self.host.workbook_date_system(reference)
+    }
+}
+
+impl<A: Addin> MainThreadContext<'_, A> {
+    #[doc(hidden)]
+    #[must_use]
+    #[cfg(feature = "rtd")]
+    pub(crate) fn new<'ctx>(
+        state: &'ctx A::SharedState,
+        diagnostics: &'ctx crate::diagnostics::DiagnosticHistory,
+        rtd: RtdCallContext<
+            'ctx,
+            crate::addin::AddinSubscription<A>,
+            crate::addin::AddinSources<A>,
+        >,
+    ) -> MainThreadContext<'ctx, A> {
+        MainThreadContext {
+            state,
+            diagnostics,
+            #[cfg(feature = "rtd")]
+            rtd,
+            _not_send_or_sync: PhantomData,
+        }
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    #[cfg(not(feature = "rtd"))]
+    pub(crate) fn new<'ctx>(
+        state: &'ctx A::SharedState,
+        diagnostics: &'ctx crate::diagnostics::DiagnosticHistory,
+    ) -> MainThreadContext<'ctx, A> {
+        MainThreadContext {
+            state,
+            diagnostics,
+            _not_send_or_sync: PhantomData,
+        }
+    }
+}
+
+impl<'call, A: Addin> MainThreadContext<'call, A> {
+    /// Returns this add-in runtime's bounded failure history.
+    #[must_use]
+    pub const fn diagnostics(&self) -> &'call crate::diagnostics::DiagnosticHistory {
+        self.diagnostics
+    }
+
+    #[must_use]
+    /// Borrows shared state for the whole worksheet invocation.
+    pub const fn state(&self) -> &'call A::SharedState {
+        self.state
+    }
+
+    #[cfg(feature = "rtd")]
+    #[must_use]
+    /// Returns the RTD subscription capability for this invocation.
+    pub fn rtd(
+        &self,
+    ) -> RtdCallContext<'call, crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>
+    {
+        self.rtd
+    }
+}
+
+#[cfg(feature = "rtd")]
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> Copy for RtdOpenContext<'_, E, C> {}
+#[cfg(feature = "rtd")]
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> Clone for RtdOpenContext<'_, E, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+#[cfg(feature = "rtd")]
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> std::fmt::Debug
+    for RtdOpenContext<'_, E, C>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RtdOpenContext")
+            .field("registration", &self.registration)
+            .finish()
+    }
+}
+
+impl<A: Addin> Copy for DiagnosticsSetup<'_, A> {}
+impl<A: Addin> Clone for DiagnosticsSetup<'_, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<A: Addin> std::fmt::Debug for DiagnosticsSetup<'_, A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiagnosticsSetup")
+            .field("context", &self.context)
+            .finish()
+    }
+}
+
+// Expansion takes place in the consumer's impl, but feature selection takes
+// place in xlfn. Consumer feature names need not match this dependency's flags.
+#[cfg(feature = "rtd")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __xlfn_addin_rtd_types {
+    (@default) => {
+        type RtdSubscription = ();
+        type RtdSources = $crate::DynamicRtdSources<Self::RtdSubscription>;
+    };
+    (@configured subscription: $subscription:ty, sources: $sources:ty) => {
+        type RtdSubscription = $subscription;
+        type RtdSources = $sources;
+    };
+}
+
+#[cfg(not(feature = "rtd"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __xlfn_addin_rtd_types {
+    (@default) => {};
+    (@configured subscription: $subscription:ty, sources: $sources:ty) => {
+        compile_error!("RTD configuration requires the xlfn `rtd` feature");
+    };
+}
+
+// Like RTD settings, executor configuration follows the dependency's features.
+#[cfg(feature = "async")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __xlfn_addin_async_type {
+    (@default) => {
+        type AsyncExecutor = $crate::NoAsyncExecutor;
+    };
+    (@configured $executor:ty) => {
+        type AsyncExecutor = $executor;
+    };
+}
+
+#[cfg(not(feature = "async"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __xlfn_addin_async_type {
+    (@default) => {};
+    (@configured $executor:ty) => {
+        compile_error!("async executor configuration requires the xlfn `async` feature");
+    };
+}
+
+#[cfg(test)]
+#[allow(
+    unsafe_code,
+    reason = "Add-in tests implement the audited non-owning RTD subscription contract"
+)]
+mod tests {
+    #[cfg(feature = "async")]
+    use super::{AsyncContext, NoAsyncExecutor};
+    use super::{
+        DiagnosticsSetup, MacroSheetContext, MainThreadContext, Opened, ThreadSafeContext,
+    };
+    use static_assertions::{assert_impl_all, assert_not_impl_any};
+    use std::rc::Rc;
+    #[cfg(any(feature = "async", all(feature = "rtd", not(target_os = "windows"))))]
+    use std::sync::Arc;
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn task_capacity_is_nonzero_and_independent_of_executor_configuration() {
+        assert_eq!(super::AsyncTaskLimit::DEFAULT.get(), 4096);
+        assert!(super::AsyncTaskLimit::new(0).is_none());
+        assert!(super::AsyncTaskLimit::try_from(0).is_err());
+        let limit = super::AsyncTaskLimit::new(1).unwrap();
+        let config = super::RuntimeConfig::new()
+            .with_async(super::AsyncConfig::new().with_task_limit(limit));
+        assert_eq!(config.async_task_limit(), limit);
+        assert_eq!(
+            super::AsyncTaskLimit::new(usize::MAX).unwrap().get(),
+            usize::MAX
+        );
+    }
+
+    assert_impl_all!(ThreadSafeContext<'static, ()>: Copy, Clone, Send, Sync);
+    assert_impl_all!(MainThreadContext<'static, ()>: Clone);
+    assert_impl_all!(MacroSheetContext<'static, ()>: Clone);
+    assert_impl_all!(DiagnosticsSetup<'static>: Copy, Clone, Send, Sync);
+    assert_not_impl_any!(super::OpenContext: Clone);
+    assert_not_impl_any!(MainThreadContext<'static, ()>: Send, Sync);
+    assert_not_impl_any!(MacroSheetContext<'static, ()>: Send, Sync);
+
+    struct NonSendLifecycleAddin;
+
+    impl crate::Addin for NonSendLifecycleAddin {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ();
+        type LifecycleState = Rc<()>;
+        type Error = crate::XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = NoAsyncExecutor;
+
+        fn open(
+            _: &crate::OpenContext<Self>,
+        ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>
+        {
+            Ok(Opened::new(()).with_lifecycle(Rc::new(())))
+        }
+    }
+
+    assert_impl_all!(crate::runtime::Runtime<NonSendLifecycleAddin>: Send, Sync);
+
+    struct TestU32Addin;
+
+    impl crate::Addin for TestU32Addin {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = u32;
+        type LifecycleState = ();
+        type Error = crate::XllError;
+        type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = NoAsyncExecutor;
+
+        fn open(
+            _: &crate::OpenContext<Self>,
+        ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>
+        {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn synchronous_contexts_expose_their_state_by_value() {
+        let state = 17_u32;
+        let runtime = crate::runtime::Runtime::<TestU32Addin>::new();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, state, ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let thread_safe = ThreadSafeContext::<TestU32Addin>::new(&state, runtime.diagnostics());
+        let callbacks = crate::host_callback::HostCallbackSession::new();
+        crate::call::with_excel_call_scope_and_state(&state, |state, _scope| {
+            #[cfg(feature = "rtd")]
+            runtime
+                .with_generation_services(|services| {
+                    let main_thread = MainThreadContext::<TestU32Addin>::new(
+                        state,
+                        runtime.diagnostics(),
+                        crate::rtd::RtdCallContext::new(
+                            services.rtd_call_access(),
+                            crate::host_api::ExcelHost::new(&callbacks),
+                        ),
+                    );
+                    let macro_sheet = MacroSheetContext::<TestU32Addin>::new(
+                        state,
+                        runtime.diagnostics(),
+                        crate::host_api::ExcelHost::new(&callbacks),
+                    );
+
+                    assert_eq!(thread_safe.state(), &17);
+                    assert_eq!(main_thread.state(), &17);
+                    assert_eq!(macro_sheet.state(), &17);
+                    assert!(std::ptr::eq(
+                        thread_safe.diagnostics(),
+                        runtime.diagnostics()
+                    ));
+                    assert!(std::ptr::eq(
+                        main_thread.diagnostics(),
+                        runtime.diagnostics()
+                    ));
+                    assert!(std::ptr::eq(
+                        macro_sheet.diagnostics(),
+                        runtime.diagnostics()
+                    ));
+
+                    let copied = main_thread.clone();
+                    assert_eq!(copied.state(), &17);
+                    assert_eq!(main_thread.state(), &17);
+                })
+                .unwrap();
+            #[cfg(not(feature = "rtd"))]
+            {
+                let main_thread =
+                    MainThreadContext::<TestU32Addin>::new(state, runtime.diagnostics());
+                let macro_sheet = MacroSheetContext::<TestU32Addin>::new(
+                    state,
+                    runtime.diagnostics(),
+                    crate::host_api::ExcelHost::new(&callbacks),
+                );
+
+                assert_eq!(thread_safe.state(), &17);
+                assert_eq!(main_thread.state(), &17);
+                assert_eq!(macro_sheet.state(), &17);
+                assert!(std::ptr::eq(
+                    thread_safe.diagnostics(),
+                    runtime.diagnostics()
+                ));
+                assert!(std::ptr::eq(
+                    main_thread.diagnostics(),
+                    runtime.diagnostics()
+                ));
+                assert!(std::ptr::eq(
+                    macro_sheet.diagnostics(),
+                    runtime.diagnostics()
+                ));
+
+                let copied = main_thread.clone();
+                assert_eq!(copied.state(), &17);
+                assert_eq!(main_thread.state(), &17);
+            }
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn nested_memory_scopes_and_clones_preserve_terminal_callback_suppression() {
+        use xlfn_sys::{
+            XL_SHEET_NM, XLOPER12, XLOPER12SRef, XLOPER12Value, XLREF12, XLRET_ABORT,
+            XLRET_UNCALCED, XLTYPE_SREF,
+        };
+
+        let _callback_guard = crate::test_callback::lock();
+        crate::test_callback::install();
+
+        let mut raw = XLOPER12 {
+            value: XLOPER12Value {
+                sref: XLOPER12SRef {
+                    count: 1,
+                    reference: XLREF12 {
+                        rw_first: 0,
+                        rw_last: 0,
+                        col_first: 0,
+                        col_last: 0,
+                    },
+                },
+            },
+            xltype: XLTYPE_SREF,
+        };
+        // SAFETY: `raw` remains live for every use of this reference.
+        let reference: crate::reference::ExcelReference<'_> =
+            unsafe { crate::reference::reference_from_raw("reference", &mut raw) }.unwrap();
+        let state = ();
+        let diagnostics = crate::diagnostics::DiagnosticHistory::new();
+        for status in [XLRET_ABORT, XLRET_UNCALCED] {
+            crate::test_callback::reset();
+            crate::test_callback::set_terminal(XL_SHEET_NM, status);
+            let callbacks = crate::host_callback::HostCallbackSession::new();
+            let context = MacroSheetContext::<()>::new(
+                &state,
+                &diagnostics,
+                crate::host_api::ExcelHost::new(&callbacks),
+            );
+            let cloned_before_terminal = context.clone();
+            assert!(context.sheet_name(&reference).is_err());
+            assert_eq!(crate::test_callback::total_calls(), 2);
+            assert_eq!(crate::test_callback::free_calls(), 1);
+
+            // Both safe lifetime helpers can be nested inside a UDF. They
+            // allocate input storage but cannot reset its callback authority.
+            crate::call::with_excel_call_scope(|_scope| {
+                assert!(cloned_before_terminal.coerce(&reference).is_err());
+                crate::call::with_excel_call_scope_and_state(&state, |_state, _scope| {
+                    let cloned_after_terminal = context.clone();
+                    assert!(cloned_after_terminal.sheet_name(&reference).is_err());
+                });
+            });
+            assert!(context.coerce(&reference).is_err());
+            assert_eq!(crate::test_callback::total_calls(), 2);
+            assert_eq!(crate::test_callback::free_calls(), 1);
+            assert_eq!(
+                callbacks.terminal_status(),
+                Some(crate::ExcelCallbackStatus::from_raw(status))
+            );
+        }
+    }
+
+    #[cfg(all(feature = "rtd", not(target_os = "windows")))]
+    #[test]
+    fn failed_rtd_observation_preserves_the_existing_shared_subscription() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TestSubscription {
+            disconnected: Arc<AtomicBool>,
+        }
+
+        // SAFETY: test subscription does not access host or async runtimes.
+        unsafe impl crate::subscription::RtdSubscription for TestSubscription {
+            fn request_cancel(&self) {}
+            fn disconnect_and_wait(self) -> crate::XllResult<()> {
+                self.disconnected.store(true, Ordering::Release);
+                Ok(())
+            }
+        }
+
+        struct TestSource {
+            disconnected: Arc<AtomicBool>,
+        }
+
+        // SAFETY: this test source publishes synchronously and does not retain
+        // the sink after `subscribe` returns.
+        unsafe impl crate::subscription::RtdSource for TestSource {
+            type Value = f64;
+            type Subscription = TestSubscription;
+
+            fn subscribe(
+                &self,
+                _topic: &crate::subscription::RtdTopic,
+                sink: crate::subscription::RtdSink<Self::Value>,
+            ) -> crate::XllResult<Self::Subscription> {
+                sink.publish(17.5)?;
+                Ok(TestSubscription {
+                    disconnected: Arc::clone(&self.disconnected),
+                })
+            }
+        }
+
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let generation = crate::generation::RuntimeGeneration::new(1).unwrap();
+        let (arena, source) = crate::subscription::SourceArena::with_source(
+            generation,
+            TestSource {
+                disconnected: Arc::clone(&disconnected),
+            },
+        )
+        .unwrap();
+
+        let runtime = crate::runtime::Runtime::<
+            crate::rtd::test_support::TestRtdAddin<TestSubscription>,
+        >::new();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish_with_sources(opening, (), (), arena);
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        let topic = crate::subscription::RtdTopic::single("shared-observation").unwrap();
+        let server = runtime
+            .with_subscriptions(|subscriptions| {
+                let prepared = subscriptions.prepare(&source, topic.borrowed()).unwrap();
+                // SAFETY: `runtime` owns `subscriptions` and outlives `server` for the test duration.
+                let server = unsafe {
+                    subscriptions
+                        .register_server(
+                            crate::subscription::ServerGeneration::new(51)
+                                .expect("non-zero test server generation"),
+                        )
+                        .unwrap()
+                };
+                let id = prepared.id();
+                let key_obj = *prepared.key();
+                let conn = subscriptions
+                    .connect_transaction(&server, crate::subscription::TopicId(7), id)
+                    .unwrap();
+                assert_eq!(
+                    conn.value(),
+                    &crate::subscription::StoredRtdValue::Number(17.5)
+                );
+                conn.commit().unwrap();
+
+                let repeated = subscriptions.prepare(&source, topic.borrowed()).unwrap();
+                assert_eq!(repeated.id(), id);
+                assert_eq!(repeated.key(), &key_obj);
+                assert!(!repeated.has_reservation());
+                repeated.rollback();
+                server
+            })
+            .unwrap();
+
+        let _state = ();
+        let callbacks = crate::host_callback::HostCallbackSession::new();
+        crate::call::with_excel_call_scope(|_scope| {
+            runtime
+                .with_generation_services(|services| {
+                    let context = MainThreadContext::<
+                        crate::rtd::test_support::TestRtdAddin<TestSubscription>,
+                    >::new(
+                        &_state,
+                        runtime.diagnostics(),
+                        crate::rtd::RtdCallContext::new(
+                            services.rtd_call_access(),
+                            crate::host_api::ExcelHost::new(&callbacks),
+                        ),
+                    );
+                    assert!(matches!(
+                        context.rtd().subscribe(&source, &topic),
+                        Err(crate::XllError::ExcelApi {
+                            function: crate::ExcelApiFunction::Rtd,
+                            failure: crate::ExcelApiFailure::Status(
+                                crate::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED,)
+                            ),
+                        })
+                    ));
+                })
+                .unwrap();
+        });
+
+        let batch = server.begin_refresh().unwrap();
+        assert!(batch.updates().is_empty());
+        batch
+            .complete(crate::subscription::RefreshOutcome::Delivered)
+            .unwrap();
+
+        assert!(!disconnected.load(Ordering::Acquire));
+
+        let _ = server.disconnect(crate::subscription::TopicId(7));
+        assert!(disconnected.load(Ordering::Acquire));
+    }
+
+    #[cfg(feature = "async")]
+    struct AsyncTestAddin;
+
+    #[cfg(feature = "async")]
+    impl crate::Addin for AsyncTestAddin {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = u32;
+        type LifecycleState = ();
+        type Error = crate::XllError;
+        type Layers = ();
+        type AsyncExecutor = NoAsyncExecutor;
+
+        fn open(
+            _context: &crate::OpenContext<Self>,
+        ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>
+        {
+            Ok(Opened::new(23))
+        }
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn async_context_checks_and_exposes_cancellation() {
+        let (source, token) = crate::cancellation::CancellationSource::new(
+            crate::cancellation::CancellationGuarantee::CalculationScoped,
+        );
+        let generation = Arc::new(crate::generation::ExecutionGeneration::<AsyncTestAddin> {
+            id: crate::generation::RuntimeGeneration::new(1).unwrap(),
+            shared_state: 23_u32,
+            layers: (),
+        });
+        let diagnostics = crate::diagnostics::DiagnosticHistory::new();
+        let context: AsyncContext<'_, AsyncTestAddin> =
+            AsyncContext::new(&generation.shared_state, &token, &diagnostics);
+
+        assert_eq!(context.state(), &23);
+        assert!(std::ptr::eq(context.diagnostics(), &diagnostics));
+        assert!(!context.cancellation().is_cancelled());
+        assert!(context.check_cancelled().is_ok());
+
+        source.cancel();
+        assert!(context.cancellation().is_cancelled());
+        assert!(std::ptr::eq(context.diagnostics(), &diagnostics));
+        assert!(matches!(
+            context.check_cancelled(),
+            Err(crate::XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        ));
+    }
+
+    #[test]
+    fn open_context_exposes_diagnostics_setup() {
+        let build_info = crate::addin::BuildInfo::new(
+            crate::diagnostics::AddinId::parse("test-addin").unwrap(),
+            "0.1.0",
+            "x86_64-pc-windows-msvc",
+        );
+        let context = crate::OpenContext::<()>::new(
+            std::path::PathBuf::from("/test/module.xll"),
+            build_info,
+            super::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+        );
+        let diag = context.diagnostics();
+        assert!(std::ptr::eq(diag.context, &context));
+        assert_eq!(diag.context.build_info().addin_id().as_str(), "test-addin");
+        assert_eq!(diag.context.build_info().version(), "0.1.0");
+        assert_eq!(diag.context.build_info().target(), "x86_64-pc-windows-msvc");
+        assert_eq!(
+            diag.context.module_path(),
+            std::path::Path::new("/test/module.xll")
+        );
+        assert_eq!(
+            diag.context.module_directory(),
+            std::path::Path::new("/test")
+        );
+    }
+}

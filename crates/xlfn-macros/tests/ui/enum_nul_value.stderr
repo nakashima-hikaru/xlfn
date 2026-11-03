@@ -1,0 +1,5 @@
+error: invalid Excel enum value: Excel counted string must not contain NUL
+ --> tests/ui/enum_nul_value.rs:4:5
+  |
+4 |     Item,
+  |     ^^^^

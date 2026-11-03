@@ -1,0 +1,8 @@
+[package]
+name = "lifecycle-stack-model"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+
+[dev-dependencies]
+smallvec = { version = "=1.16.3", features = ["const_new"] }

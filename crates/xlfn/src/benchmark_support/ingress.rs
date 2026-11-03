@@ -1,0 +1,719 @@
+use super::handle::benchmark_revision_key;
+use super::*;
+
+fn observe_dynamic_value(value: crate::value::ExcelValueRef<'_>, accessed_cells: usize) {
+    if let crate::value::ExcelValueRef::Array(array) = value {
+        for index in 0..accessed_cells.min(array.len()) {
+            std::hint::black_box(
+                array
+                    .get(index / array.columns(), index % array.columns())
+                    .unwrap(),
+            );
+        }
+    }
+    std::hint::black_box(value);
+}
+
+/// Benchmark harness for measuring raw Excel argument ingress conversion costs
+/// with and without semantic identity fingerprinting.
+pub struct RawArgumentIngressBenchmark {
+    runtime: &'static crate::runtime::Runtime<super::BenchmarkAddin>,
+    raw: xlfn_sys::XLOPER12,
+    // Cell arrays stay Vec-backed: moving a Box<[XLOPER12]> into this owner
+    // would retag its allocation after raw pointers had already been derived.
+    _storage: Option<Box<dyn std::any::Any>>,
+}
+
+/// Numeric optional collection representation selected by the input benchmarks.
+#[derive(Clone, Copy, Debug)]
+pub enum OptionalNumericInputKind {
+    /// An owned matrix with missing/blank values mapped to None.
+    Owned,
+    /// An owned matrix retaining missing/blank as distinct variants.
+    Presence,
+    /// A call-scoped typed matrix borrowed from scratch only on a miss.
+    Borrowed,
+}
+
+impl RawArgumentIngressBenchmark {
+    /// Valid numerical cells interspersed with omitted and blank cells.
+    pub fn optional_number_matrix(cells: usize) -> Self {
+        let mut storage = (0..cells)
+            .map(|index| match index % 5 {
+                0 => xlfn_sys::XLOPER12::number(-0.0),
+                1 => xlfn_sys::XLOPER12::integer(index as i32),
+                2 => xlfn_sys::XLOPER12::nil(),
+                3 => xlfn_sys::XLOPER12::missing(),
+                _ => xlfn_sys::XLOPER12::number(f64::from_bits(1)),
+            })
+            .collect::<Vec<_>>();
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                array: xlfn_sys::XLOPER12Array {
+                    rows: cells as i32,
+                    columns: 1,
+                    values: storage.as_mut_ptr(),
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        };
+        Self {
+            runtime: get_benchmark_runtime(),
+            raw,
+            _storage: Some(Box::new(storage)),
+        }
+    }
+
+    /// Prepare/identity/discard models a warm hit; materialization models a miss.
+    pub fn run_optional_numeric_prepared(
+        &mut self,
+        kind: OptionalNumericInputKind,
+        materialize: bool,
+    ) -> [u8; 32] {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, token, 1,
+                );
+            // SAFETY: fixture-owned cells remain immutable throughout the call.
+            let raw = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }.unwrap();
+            macro_rules! run {
+                ($ty:ty) => {{
+                    let prepared = arguments.prepare::<$ty>(0, "arg", raw).unwrap();
+                    let digest = arguments.finish().unwrap().unwrap();
+                    if materialize {
+                        std::hint::black_box(prepared.materialize().unwrap());
+                    } else {
+                        std::hint::black_box(prepared);
+                    }
+                    digest
+                }};
+            }
+            match kind {
+                OptionalNumericInputKind::Owned => run!(crate::value::Matrix<Option<f64>>),
+                OptionalNumericInputKind::Presence => {
+                    run!(crate::value::Matrix<crate::value::OptionalExcelValue<f64>>)
+                }
+                OptionalNumericInputKind::Borrowed => {
+                    run!(crate::value::MatrixRef<'_, Option<f64>>)
+                }
+            }
+        })
+    }
+
+    pub fn number(value: f64) -> Self {
+        Self {
+            runtime: get_benchmark_runtime(),
+            raw: xlfn_sys::XLOPER12::number(value),
+            _storage: None,
+        }
+    }
+
+    pub fn string(value: &str) -> Self {
+        let encoded = value.encode_utf16().collect::<Vec<_>>();
+        let mut u16_chars: Vec<u16> = Vec::with_capacity(encoded.len() + 1);
+        u16_chars.push(encoded.len() as u16);
+        u16_chars.extend(encoded);
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                string: u16_chars.as_ptr() as *mut u16,
+            },
+            xltype: xlfn_sys::XLTYPE_STR,
+        };
+        Self {
+            runtime: get_benchmark_runtime(),
+            raw,
+            _storage: Some(Box::new(u16_chars)),
+        }
+    }
+
+    pub fn string_matrix(values: &[&str]) -> Self {
+        let mut strings = values
+            .iter()
+            .map(|value| {
+                std::iter::once(value.encode_utf16().count() as u16)
+                    .chain(value.encode_utf16())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut cells = strings
+            .iter_mut()
+            .map(|string| xlfn_sys::XLOPER12 {
+                value: xlfn_sys::XLOPER12Value {
+                    string: string.as_mut_ptr(),
+                },
+                xltype: xlfn_sys::XLTYPE_STR,
+            })
+            .collect::<Vec<_>>();
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                array: xlfn_sys::XLOPER12Array {
+                    rows: 1,
+                    columns: cells.len() as i32,
+                    values: cells.as_mut_ptr(),
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        };
+        Self {
+            runtime: get_benchmark_runtime(),
+            raw,
+            _storage: Some(Box::new((cells, strings))),
+        }
+    }
+
+    pub fn mixed_cells() -> Self {
+        let mut text = vec![3_u16, '猫' as u16, 'A' as u16, 'B' as u16];
+        let mut cells = vec![
+            xlfn_sys::XLOPER12::number(1.0),
+            xlfn_sys::XLOPER12 {
+                value: xlfn_sys::XLOPER12Value {
+                    string: text.as_mut_ptr(),
+                },
+                xltype: xlfn_sys::XLTYPE_STR,
+            },
+            xlfn_sys::XLOPER12::nil(),
+        ];
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                array: xlfn_sys::XLOPER12Array {
+                    rows: 1,
+                    columns: cells.len() as i32,
+                    values: cells.as_mut_ptr(),
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        };
+        Self {
+            runtime: get_benchmark_runtime(),
+            raw,
+            _storage: Some(Box::new((cells, text))),
+        }
+    }
+
+    /// Mirrors the five-cell pattern used by the live Excel M05 workload.
+    /// The fixture retains counted UTF-16 source storage for every call.
+    pub fn mixed_matrix(rows: usize, columns: usize, text: &str) -> Self {
+        let mut encoded = std::iter::once(text.encode_utf16().count() as u16)
+            .chain(text.encode_utf16())
+            .collect::<Vec<_>>();
+        let mut cells = (0..rows * columns)
+            .map(|index| match index % 5 {
+                0 => xlfn_sys::XLOPER12::number(1.0),
+                1 => xlfn_sys::XLOPER12 {
+                    value: xlfn_sys::XLOPER12Value {
+                        string: encoded.as_mut_ptr(),
+                    },
+                    xltype: xlfn_sys::XLTYPE_STR,
+                },
+                2 => xlfn_sys::XLOPER12::boolean(true),
+                3 => xlfn_sys::XLOPER12::nil(),
+                _ => xlfn_sys::XLOPER12::error(crate::ExcelError::NotAvailable.code()),
+            })
+            .collect::<Vec<_>>();
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                array: xlfn_sys::XLOPER12Array {
+                    rows: rows as i32,
+                    columns: columns as i32,
+                    values: cells.as_mut_ptr(),
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        };
+        Self {
+            runtime: get_benchmark_runtime(),
+            raw,
+            _storage: Some(Box::new((cells, encoded))),
+        }
+    }
+
+    pub fn number_matrix(rows: usize, columns: usize) -> Self {
+        let len = rows * columns;
+        let mut cells = (0..len)
+            .map(|i| xlfn_sys::XLOPER12::number(i as f64))
+            .collect::<Vec<_>>();
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                array: xlfn_sys::XLOPER12Array {
+                    rows: rows as i32,
+                    columns: columns as i32,
+                    values: cells.as_mut_ptr(),
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        };
+        Self {
+            runtime: get_benchmark_runtime(),
+            raw,
+            _storage: Some(Box::new(cells)),
+        }
+    }
+
+    pub fn number_vec(len: usize) -> Self {
+        // Excel worksheet rows support up to 1,048,576 elements while columns support up to 16,384.
+        // We use an N x 1 column vector representation so 100k+ element 1D vectors fit within Excel dimensions.
+        Self::number_matrix(len, 1)
+    }
+
+    pub fn handle() -> Self {
+        let runtime = get_benchmark_runtime();
+        let key = benchmark_revision_key("BENCH.INGRESS.HANDLE", 1);
+        let token = runtime
+            .with_formula_handle_service(|handle_runtime| {
+                handle_runtime.prepare_observed(
+                    key,
+                    || Ok(BenchHandleObject { _payload: 42 }),
+                    |_, _| Ok(()),
+                )
+            })
+            .expect("benchmark handle runtime must initialize")
+            .expect("benchmark handle preparation must succeed")
+            .into_token();
+        let mut u16_chars: Vec<u16> = Vec::with_capacity(token.len() + 1);
+        u16_chars.push(token.len() as u16);
+        u16_chars.extend(token.encode_utf16());
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                string: u16_chars.as_ptr() as *mut u16,
+            },
+            xltype: xlfn_sys::XLTYPE_STR,
+        };
+        Self {
+            runtime,
+            raw,
+            _storage: Some(Box::new(u16_chars)),
+        }
+    }
+
+    pub fn run_plain<T>(&mut self)
+    where
+        T: for<'call> ExcelParameter<'call, crate::value::PlainInputMode>,
+    {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<crate::value::PlainInputMode, T>(
+                    &mut arguments,
+                    0,
+                    "arg",
+                    &mut self.raw,
+                )
+            }
+            .expect("benchmark raw argument ingress must succeed");
+            std::hint::black_box(&value);
+            let _ = arguments.finish();
+        })
+    }
+
+    pub fn run_with_identity<T>(&mut self) -> [u8; 32]
+    where
+        T: for<'call> ExcelParameter<'call, crate::value::FormulaInputMode>,
+    {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, token, 1,
+                );
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value =
+                unsafe {
+                    crate::value::argument_from_raw_with_arguments::<
+                        crate::value::FormulaInputMode,
+                        T,
+                    >(&mut arguments, 0, "arg", &mut self.raw)
+                }
+                .expect("benchmark raw argument ingress with identity must succeed");
+            std::hint::black_box(&value);
+            arguments
+                .finish()
+                .expect("formula revision fingerprint must finish")
+                .expect("formula revision return must produce fingerprint")
+        })
+    }
+
+    pub fn run_prepared_with_identity<T>(&mut self) -> [u8; 32]
+    where
+        T: for<'call> ExcelParameter<'call, crate::value::FormulaInputMode>,
+    {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, token, 1,
+                );
+            // SAFETY: self.raw points into fixture storage retained for the call.
+            let raw = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }
+                .expect("benchmark prepared input must be well formed");
+            let value = arguments
+                .prepare::<T>(0, "arg", raw)
+                .expect("benchmark input preparation must succeed");
+            std::hint::black_box(&value);
+            arguments
+                .finish()
+                .expect("formula revision fingerprint must finish")
+                .expect("formula revision return must produce fingerprint")
+        })
+    }
+
+    pub fn run_borrowed_str(&mut self) {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value =
+                unsafe {
+                    crate::value::argument_from_raw_with_arguments::<
+                        crate::value::PlainInputMode,
+                        &str,
+                    >(&mut arguments, 0, "arg", &mut self.raw)
+                }
+                .expect("benchmark borrowed string ingress must succeed");
+            std::hint::black_box(value);
+            let _ = arguments.finish();
+        })
+    }
+
+    /// Decodes two borrowed strings in one call, retaining both borrows.
+    pub fn run_borrowed_str_pair(&mut self, other: &mut Self) {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 2,
+            );
+            // SAFETY: both fixtures own live, distinct raw string arguments.
+            let first =
+                unsafe {
+                    crate::value::argument_from_raw_with_arguments::<
+                        crate::value::PlainInputMode,
+                        &str,
+                    >(&mut arguments, 0, "first", &mut self.raw)
+                }
+                .expect("first string is valid");
+            // SAFETY: the other fixture remains live during the same call.
+            let second =
+                unsafe {
+                    crate::value::argument_from_raw_with_arguments::<
+                        crate::value::PlainInputMode,
+                        &str,
+                    >(&mut arguments, 1, "second", &mut other.raw)
+                }
+                .expect("second string is valid");
+            std::hint::black_box((first, second));
+            let _ = arguments.finish();
+        });
+    }
+
+    /// Numeric typed borrowed-matrix preparation, with materialization only
+    /// when requested. Dropping prepared state models the warm lookup path;
+    /// materializing models the additional input work on a cold lookup.
+    pub fn run_borrowed_numeric_matrix_prepared(&mut self, materialize: bool) -> [u8; 32] {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, token, 1,
+                );
+            // SAFETY: the fixture owns the root and cells for the complete call.
+            let raw = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }
+                .expect("benchmark prepared input must be well formed");
+            let prepared = arguments
+                .prepare::<crate::value::MatrixRef<'_, f64>>(0, "arg", raw)
+                .expect("benchmark borrowed matrix preparation must succeed");
+            let identity = arguments.finish().unwrap().unwrap();
+            if materialize {
+                let matrix = prepared
+                    .materialize()
+                    .expect("benchmark borrowed matrix materialization must succeed");
+                std::hint::black_box(matrix);
+            } else {
+                std::hint::black_box(prepared);
+            }
+            identity
+        })
+    }
+
+    pub fn run_borrowed_numeric_matrix_plain(&mut self) {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
+            // SAFETY: the fixture owns the root and cells for the complete call.
+            let matrix = unsafe {
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::PlainInputMode,
+                    crate::value::MatrixRef<'_, f64>,
+                >(&mut arguments, 0, "arg", &mut self.raw)
+            }
+            .expect("benchmark borrowed numeric matrix ingress must succeed");
+            std::hint::black_box(matrix);
+            arguments.finish().unwrap();
+        })
+    }
+
+    pub fn run_borrowed_string_matrix_prepared(&mut self) -> [u8; 32] {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, token, 1,
+                );
+            // SAFETY: the fixture retains its root, cells and UTF-16 payloads.
+            let raw = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }
+                .expect("benchmark prepared text input must be well formed");
+            let prepared = arguments
+                .prepare::<crate::value::MatrixRef<'_, &str>>(0, "arg", raw)
+                .expect("benchmark borrowed text matrix preparation must succeed");
+            std::hint::black_box(prepared);
+            arguments.finish().unwrap().unwrap()
+        })
+    }
+
+    pub fn run_borrowed_array_with_identity(&mut self) -> [u8; 32] {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, token, 1,
+                );
+            // SAFETY: the fixture owns the root, cells, and UTF-16 payloads.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::FormulaInputMode,
+                    crate::value::XlArrayRef<'_>,
+                >(&mut arguments, 0, "arg", &mut self.raw)
+            }
+            .expect("raw array identity must encode");
+            std::hint::black_box(value);
+            arguments.finish().unwrap().unwrap()
+        })
+    }
+
+    pub fn run_borrowed_matrix_str(&mut self) {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::PlainInputMode,
+                    crate::value::MatrixRef<'_, &str>,
+                >(&mut arguments, 0, "arg", &mut self.raw)
+            }
+            .expect("benchmark borrowed string matrix ingress must succeed");
+            std::hint::black_box(value);
+            let _ = arguments.finish();
+        })
+    }
+
+    pub fn run_borrowed_mixed_cells(&mut self) {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::PlainInputMode,
+                    crate::value::MatrixRef<'_, crate::value::ExcelCellRef<'_>>,
+                >(&mut arguments, 0, "arg", &mut self.raw)
+            }
+            .expect("benchmark borrowed mixed-cell ingress must succeed");
+            std::hint::black_box(value);
+            let _ = arguments.finish();
+        })
+    }
+
+    /// Validates a dynamic input, then decodes only the requested prefix of cells.
+    pub fn run_borrowed_value_plain(&mut self, accessed_cells: usize) {
+        let ingress = benchmark_ingress();
+        let call = self.runtime.enter(&ingress).unwrap();
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
+            // SAFETY: the fixture retains its root, cells and text for the entire call.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::PlainInputMode,
+                    crate::value::ExcelValueRef<'_>,
+                >(&mut arguments, 0, "arg", &mut self.raw)
+            }
+            .unwrap();
+            observe_dynamic_value(value, accessed_cells);
+            arguments.finish().unwrap();
+        });
+    }
+
+    /// Preparation/discard models a cache hit; optional access models a miss.
+    pub fn run_borrowed_value_prepared(
+        &mut self,
+        materialize: bool,
+        accessed_cells: usize,
+    ) -> [u8; 32] {
+        let ingress = benchmark_ingress();
+        let call = self.runtime.enter(&ingress).unwrap();
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, token, 1,
+                );
+            // SAFETY: the fixture retains its root, cells and text for the entire call.
+            let raw = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }.unwrap();
+            let prepared = arguments
+                .prepare::<crate::value::ExcelValueRef<'_>>(0, "arg", raw)
+                .unwrap();
+            let identity = arguments.finish().unwrap().unwrap();
+            if materialize {
+                observe_dynamic_value(prepared.materialize().unwrap(), accessed_cells);
+            } else {
+                std::hint::black_box(prepared);
+            }
+            identity
+        })
+    }
+
+    pub fn run_handle_plain<T>(&mut self)
+    where
+        T: ExcelHandleObject,
+    {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::PlainInputMode,
+                    crate::handle::Handle<'_, T>,
+                >(&mut arguments, 0, "arg", &mut self.raw)
+            }
+            .expect("benchmark raw handle ingress must succeed");
+            std::hint::black_box(&value);
+            let _ = arguments.finish();
+        })
+    }
+
+    #[cfg(feature = "async")]
+    pub fn run_handle_pending<T>(&mut self)
+    where
+        T: ExcelHandleObject,
+    {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter_async(&ingress)
+            .expect("benchmark runtime must be open");
+        let lease = call
+            .try_execution_lease()
+            .expect("benchmark execution generation must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }
+                .expect("benchmark handle value must be well formed");
+            let pending = arguments
+                .decode_pending_handle::<T>(0, "arg", value, lease.generation())
+                .expect("benchmark pending handle ingress must succeed");
+            std::hint::black_box(&pending);
+            let _ = arguments.finish();
+        })
+    }
+
+    pub fn run_handle_with_identity<T>(&mut self) -> [u8; 32]
+    where
+        T: ExcelHandleObject,
+    {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, token, 1,
+                );
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::FormulaInputMode,
+                    crate::handle::Handle<'_, T>,
+                >(&mut arguments, 0, "arg", &mut self.raw)
+            }
+            .expect("benchmark raw handle ingress with identity must succeed");
+            std::hint::black_box(&value);
+            arguments
+                .finish()
+                .expect("formula revision fingerprint must finish")
+                .expect("formula revision return must produce fingerprint")
+        })
+    }
+}

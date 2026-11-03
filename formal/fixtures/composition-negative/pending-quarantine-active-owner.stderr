@@ -1,0 +1,7 @@
+invalid composition trace: event #3 rejected: XlFnFormal.Composition.Event.quarantineOpen 1 (XlFnFormal.Shutdown.Failure.addinShutdownFailed); state: { lifecycle := { phase := XlFnFormal.Lifecycle.Phase.openRollbackPending,
+                 closeEpoch := 0,
+                 openAttempt := none,
+                 cleanupOwner := some (XlFnFormal.Lifecycle.CleanupOwner.openRollback),
+                 generation := 0 },
+  currentShutdown := none,
+  logicalQuiescenceCertified := false }

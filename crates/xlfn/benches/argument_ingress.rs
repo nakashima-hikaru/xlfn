@@ -1,0 +1,325 @@
+use criterion::{Criterion, criterion_group, criterion_main};
+use xlfn::benchmark_support::{
+    BenchHandleObject, NativeArgumentIngressBenchmark, NumericMatrixIngressBenchmark,
+    RawArgumentIngressBenchmark, benchmark_measurement_time,
+};
+use xlfn::value::{ExcelCellValue, ExcelValue, Matrix};
+
+fn argument_ingress_benchmarks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("argument_ingress");
+    group.measurement_time(benchmark_measurement_time());
+
+    for (label, mut fixture) in [
+        ("f64_1", NativeArgumentIngressBenchmark::numbers(1)),
+        ("f64_2", NativeArgumentIngressBenchmark::numbers(2)),
+        ("f64_4", NativeArgumentIngressBenchmark::numbers(4)),
+        ("f64_8", NativeArgumentIngressBenchmark::numbers(8)),
+        ("bool", NativeArgumentIngressBenchmark::boolean()),
+        ("i32", NativeArgumentIngressBenchmark::integer()),
+        (
+            "unicode_short",
+            NativeArgumentIngressBenchmark::string("日本語💡"),
+        ),
+        (
+            "unicode_long",
+            NativeArgumentIngressBenchmark::string(&"日本語💡".repeat(800)),
+        ),
+    ] {
+        for (mode, identity, materialize) in [
+            ("plain", false, true),
+            ("prepare_identity", true, false),
+            ("materialize_identity", true, true),
+        ] {
+            for (abi, native) in [("q", false), ("native", true)] {
+                group.bench_function(format!("native_abi/{label}/{mode}/{abi}"), |b| {
+                    b.iter(|| fixture.run(native, identity, materialize));
+                });
+            }
+        }
+    }
+
+    for (rows, columns) in [(1, 1), (10, 10), (1000, 10), (100, 100), (10, 1000)] {
+        let mut numeric = NumericMatrixIngressBenchmark::new(rows, columns);
+        group.bench_function(format!("numeric_matrix_shape/{rows}x{columns}"), |b| {
+            b.iter(|| numeric.run_plain());
+        });
+    }
+
+    // 1. Scalar f64
+    let mut f64_bench = RawArgumentIngressBenchmark::number(42.0);
+    group.bench_function("f64/plain", |b| {
+        b.iter(|| f64_bench.run_plain::<f64>());
+    });
+    group.bench_function("f64/with_identity", |b| {
+        b.iter(|| f64_bench.run_with_identity::<f64>());
+    });
+
+    // 2. Short string
+    let mut str_short = RawArgumentIngressBenchmark::string("short_str");
+    group.bench_function("string_short/plain", |b| {
+        b.iter(|| str_short.run_plain::<String>());
+    });
+    group.bench_function("string_short/with_identity", |b| {
+        b.iter(|| str_short.run_with_identity::<String>());
+    });
+    group.bench_function("string_short/borrowed", |b| {
+        b.iter(|| str_short.run_borrowed_str());
+    });
+    for (label, text) in [
+        ("empty", String::new()),
+        ("ascii_23", "a".repeat(23)),
+        ("ascii_24", "a".repeat(24)),
+        ("unicode_23", format!("{}x", "é".repeat(11))),
+        ("unicode_24", "日".repeat(8)),
+    ] {
+        let mut input = RawArgumentIngressBenchmark::string(&text);
+        group.bench_function(format!("string_inline_{label}/borrowed"), |b| {
+            b.iter(|| input.run_borrowed_str());
+        });
+    }
+
+    // 3. Unicode string
+    let mut pair_first = RawArgumentIngressBenchmark::string("short_str");
+    let mut pair_second = RawArgumentIngressBenchmark::string("日本語💡");
+    group.bench_function("string_pair/borrowed", |b| {
+        b.iter(|| pair_first.run_borrowed_str_pair(&mut pair_second));
+    });
+    let mut str_unicode = RawArgumentIngressBenchmark::string("日本語💡");
+    group.bench_function("string_unicode/owned", |b| {
+        b.iter(|| str_unicode.run_plain::<String>());
+    });
+    group.bench_function("string_unicode/borrowed", |b| {
+        b.iter(|| str_unicode.run_borrowed_str());
+    });
+
+    // 4. Long string
+    let long_text = "a".repeat(1000);
+    let mut str_long = RawArgumentIngressBenchmark::string(&long_text);
+    group.bench_function("string_1k/plain", |b| {
+        b.iter(|| str_long.run_plain::<String>());
+    });
+    group.bench_function("string_1k/with_identity", |b| {
+        b.iter(|| str_long.run_with_identity::<String>());
+    });
+    group.bench_function("string_1k/borrowed", |b| {
+        b.iter(|| str_long.run_borrowed_str());
+    });
+    let mut unicode_long = RawArgumentIngressBenchmark::string(&"日本語💡".repeat(80));
+    group.bench_function("string_unicode_1k/owned", |b| {
+        b.iter(|| unicode_long.run_plain::<String>());
+    });
+    group.bench_function("string_unicode_1k/borrowed", |b| {
+        b.iter(|| unicode_long.run_borrowed_str());
+    });
+    let mut unicode_limit = RawArgumentIngressBenchmark::string(&"あ".repeat(32_767));
+    group.bench_function("string_unicode_limit/owned", |b| {
+        b.iter(|| unicode_limit.run_plain::<String>());
+    });
+    let mut japanese_4k = RawArgumentIngressBenchmark::string(&"日".repeat(4_096));
+    group.bench_function("string_japanese_4k/owned", |b| {
+        b.iter(|| japanese_4k.run_plain::<String>());
+    });
+    group.bench_function("string_japanese_4k/borrowed", |b| {
+        b.iter(|| japanese_4k.run_borrowed_str());
+    });
+    let mut unicode_sparse =
+        RawArgumentIngressBenchmark::string(&format!("{}é", "a".repeat(1_000)));
+    group.bench_function("string_unicode_sparse/borrowed", |b| {
+        b.iter(|| unicode_sparse.run_borrowed_str());
+    });
+
+    let mut ascii_4k = RawArgumentIngressBenchmark::string(&"a".repeat(4096));
+    group.bench_function("string_ascii_4k/owned", |b| {
+        b.iter(|| ascii_4k.run_plain::<String>())
+    });
+
+    // 5. String matrices
+    for (size, label) in [(100, "100"), (1_000, "1k"), (10_000, "10k")] {
+        let values = vec!["日本語💡"; size];
+        let mut owned = RawArgumentIngressBenchmark::string_matrix(&values);
+        group.bench_function(format!("matrix_string_{label}/owned"), |b| {
+            b.iter(|| owned.run_plain::<Matrix<String>>());
+        });
+        let mut borrowed = RawArgumentIngressBenchmark::string_matrix(&values);
+        group.bench_function(format!("matrix_string_{label}/borrowed"), |b| {
+            b.iter(|| borrowed.run_borrowed_matrix_str());
+        });
+        group.bench_function(format!("matrix_string_{label}/raw_identity"), |b| {
+            b.iter(|| borrowed.run_borrowed_array_with_identity());
+        });
+        group.bench_function(format!("matrix_ref_str_{label}/prepare_identity"), |b| {
+            b.iter(|| borrowed.run_borrowed_string_matrix_prepared());
+        });
+    }
+
+    // 6. Matrix<f64> 100k
+    let mut mat_100k = RawArgumentIngressBenchmark::number_matrix(10, 10_000);
+    group.bench_function("matrix_f64_100k/plain", |b| {
+        b.iter(|| mat_100k.run_plain::<Matrix<f64>>());
+    });
+    let mut numeric_100k = NumericMatrixIngressBenchmark::new(10, 10_000);
+    group.bench_function("numeric_matrix_ref_100k/plain", |b| {
+        b.iter(|| numeric_100k.run_plain());
+    });
+    for cells in [1, 16, 4_096, 100_000] {
+        let mut numeric = NumericMatrixIngressBenchmark::new(cells, 1);
+        println!(
+            "fp12_identity_digest_{cells} {:02x?}",
+            numeric.run_identity()
+        );
+        group.bench_function(format!("numeric_matrix_ref_{cells}/with_identity"), |b| {
+            b.iter(|| std::hint::black_box(numeric.run_identity()));
+        });
+    }
+    group.bench_function("matrix_f64_100k/with_identity", |b| {
+        b.iter(|| mat_100k.run_with_identity::<Matrix<f64>>());
+    });
+
+    for (cells, label) in [(1, "1"), (16, "16"), (1_000, "1k"), (100_000, "100k")] {
+        let mut prepared = RawArgumentIngressBenchmark::number_matrix(cells, 1);
+        group.bench_function(format!("matrix_f64_{label}/prepare_identity"), |b| {
+            b.iter(|| prepared.run_prepared_with_identity::<Matrix<f64>>());
+        });
+        group.bench_function(format!("matrix_ref_f64_{label}/prepare_identity"), |b| {
+            b.iter(|| prepared.run_borrowed_numeric_matrix_prepared(false));
+        });
+        group.bench_function(format!("matrix_ref_f64_{label}/prepare_materialize"), |b| {
+            b.iter(|| prepared.run_borrowed_numeric_matrix_prepared(true));
+        });
+        group.bench_function(format!("matrix_ref_f64_{label}/plain"), |b| {
+            b.iter(|| prepared.run_borrowed_numeric_matrix_plain());
+        });
+    }
+
+    for cells in [1, 1_000, 100_000] {
+        for (kind, label) in [
+            (
+                xlfn::benchmark_support::OptionalNumericInputKind::Owned,
+                "option",
+            ),
+            (
+                xlfn::benchmark_support::OptionalNumericInputKind::Presence,
+                "presence",
+            ),
+            (
+                xlfn::benchmark_support::OptionalNumericInputKind::Borrowed,
+                "borrowed_option",
+            ),
+        ] {
+            let mut input = RawArgumentIngressBenchmark::optional_number_matrix(cells);
+            let digest = input.run_optional_numeric_prepared(kind, false);
+            assert_eq!(digest, input.run_optional_numeric_prepared(kind, true));
+            println!("optional_identity_digest_{label}_{cells} {digest:02x?}");
+            for (materialize, phase) in [(false, "prepare"), (true, "materialize")] {
+                group.bench_function(format!("optional_numeric/{label}/{cells}/{phase}"), |b| {
+                    b.iter(|| {
+                        std::hint::black_box(input.run_optional_numeric_prepared(kind, materialize))
+                    });
+                });
+            }
+        }
+    }
+
+    // 7. Vec<f64> 100k
+    let mut vec_100k = RawArgumentIngressBenchmark::number_vec(100_000);
+    group.bench_function("vec_f64_100k/plain", |b| {
+        b.iter(|| vec_100k.run_plain::<Vec<f64>>());
+    });
+    group.bench_function("vec_f64_100k/with_identity", |b| {
+        b.iter(|| vec_100k.run_with_identity::<Vec<f64>>());
+    });
+
+    // 8. ExcelCellValue
+    let mut cell_num = RawArgumentIngressBenchmark::number(42.0);
+    group.bench_function("cell_value_number/plain", |b| {
+        b.iter(|| cell_num.run_plain::<ExcelCellValue>());
+    });
+    group.bench_function("cell_value_number/with_identity", |b| {
+        b.iter(|| cell_num.run_with_identity::<ExcelCellValue>());
+    });
+
+    // 9. ExcelValue
+    let mut val_scalar = RawArgumentIngressBenchmark::number(42.0);
+    group.bench_function("excel_value_scalar/plain", |b| {
+        b.iter(|| val_scalar.run_plain::<ExcelValue>());
+    });
+    group.bench_function("excel_value_scalar/with_identity", |b| {
+        b.iter(|| val_scalar.run_with_identity::<ExcelValue>());
+    });
+
+    let mut val_arr = RawArgumentIngressBenchmark::number_matrix(10, 10_000);
+    group.bench_function("excel_value_matrix_100k/plain", |b| {
+        b.iter(|| val_arr.run_plain::<ExcelValue>());
+    });
+    group.bench_function("excel_value_matrix_100k/with_identity", |b| {
+        b.iter(|| val_arr.run_with_identity::<ExcelValue>());
+    });
+
+    // 10. Mixed cells
+    let mut mixed_owned = RawArgumentIngressBenchmark::mixed_cells();
+    group.bench_function("matrix_cells/matrix_owned", |b| {
+        b.iter(|| mixed_owned.run_plain::<Matrix<ExcelCellValue>>());
+    });
+    let mut mixed_borrowed = RawArgumentIngressBenchmark::mixed_cells();
+    group.bench_function("matrix_cells/matrix_borrowed", |b| {
+        b.iter(|| mixed_borrowed.run_borrowed_mixed_cells());
+    });
+    for (cells, size) in [(100, "100"), (10_000, "10k"), (100_000, "100k")] {
+        let columns = cells.min(10_000);
+        let rows = cells / columns;
+        for (text, label) in [("text", "ascii"), ("日本語💡", "unicode")] {
+            let mut owned = RawArgumentIngressBenchmark::mixed_matrix(rows, columns, text);
+            group.bench_function(format!("matrix_cells_{size}/{label}/owned"), |b| {
+                b.iter(|| owned.run_plain::<Matrix<ExcelCellValue>>());
+            });
+            let mut borrowed = RawArgumentIngressBenchmark::mixed_matrix(rows, columns, text);
+            group.bench_function(format!("matrix_cells_{size}/{label}/borrowed"), |b| {
+                b.iter(|| borrowed.run_borrowed_mixed_cells());
+            });
+        }
+    }
+
+    // Dynamic input: validate all cells, decode only the accessed prefix.
+    for cells in [1_000, 100_000] {
+        let mut input = RawArgumentIngressBenchmark::mixed_matrix(cells / 1_000, 1_000, "日本語💡");
+        let expected = input.run_prepared_with_identity::<ExcelValue>();
+        assert_eq!(expected, input.run_borrowed_value_prepared(false, 0));
+        for (mode, accessed) in [("none", 0), ("first_text", 2), ("all", cells)] {
+            group.bench_function(format!("dynamic_value/{cells}/borrowed/{mode}"), |b| {
+                b.iter(|| input.run_borrowed_value_plain(accessed));
+            });
+        }
+        group.bench_function(format!("dynamic_value/{cells}/owned"), |b| {
+            b.iter(|| input.run_plain::<ExcelValue>());
+        });
+        group.bench_function(format!("dynamic_value/{cells}/matrix_ref"), |b| {
+            b.iter(|| input.run_borrowed_mixed_cells());
+        });
+        group.bench_function(format!("dynamic_value/{cells}/prepare_owned"), |b| {
+            b.iter(|| input.run_prepared_with_identity::<ExcelValue>());
+        });
+        group.bench_function(format!("dynamic_value/{cells}/prepare_borrowed"), |b| {
+            b.iter(|| input.run_borrowed_value_prepared(false, 0));
+        });
+        group.bench_function(
+            format!("dynamic_value/{cells}/materialize_first_text"),
+            |b| {
+                b.iter(|| input.run_borrowed_value_prepared(true, 2));
+            },
+        );
+    }
+
+    // 11. Handle
+    let mut handle_bench = RawArgumentIngressBenchmark::handle();
+    group.bench_function("handle/plain", |b| {
+        b.iter(|| handle_bench.run_handle_plain::<BenchHandleObject>());
+    });
+    group.bench_function("handle/with_identity", |b| {
+        b.iter(|| handle_bench.run_handle_with_identity::<BenchHandleObject>());
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, argument_ingress_benchmarks);
+criterion_main!(benches);

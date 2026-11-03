@@ -1,0 +1,19 @@
+[package]
+name = "xlfn-excel-comparison"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+xlfn = { path = "../../../crates/xlfn", features = ["async-builtin", "rtd", "lifecycle-diagnostics"] }
+futures-timer = "3.0.4"
+futures-channel = "0.3.34"
+
+[workspace]
+
+# Preserve optimized code while shipping matching native debugging symbols.
+[profile.release]
+debug = 2

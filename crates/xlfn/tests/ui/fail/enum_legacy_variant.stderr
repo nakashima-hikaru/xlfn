@@ -1,0 +1,5 @@
+error: cannot find attribute `excel_value` in this scope
+ --> tests/ui/fail/enum_legacy_variant.rs:3:7
+  |
+3 |     #[excel_value(name = "fast")]
+  |       ^^^^^^^^^^^

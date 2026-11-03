@@ -1,0 +1,606 @@
+use quote::{format_ident, quote};
+use xlfn_common::{ArgumentAbi, ReturnAbi};
+
+use crate::model;
+
+pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenStream {
+    let function = &plan.function;
+    let krate = &plan.crate_path;
+    let gating = &plan.gating;
+    let return_type = &plan.return_type;
+    let numeric_return = plan.return_abi == ReturnAbi::NumericArray12;
+    let (return_abi, return_pointer, sync_boundary, export_boundary, return_trait) =
+        if numeric_return {
+            (
+                quote!(#krate::__private::v1::ReturnAbi::NumericArray12),
+                quote!(*mut #krate::__private::v1::FP12),
+                quote!(sync_udf_fp12_with_mode),
+                quote!(export_numeric_boundary),
+                quote!(NumericReturn),
+            )
+        } else {
+            (
+                quote!(#krate::__private::v1::ReturnAbi::Value12),
+                quote!(*mut #krate::__private::v1::XLOPER12),
+                quote!(sync_udf_with_mode),
+                quote!(export_value_boundary),
+                quote!(ExcelReturn),
+            )
+        };
+    let function_ident = &function.sig.ident;
+    let udf_id = plan.metadata.id.as_str();
+    let excel_name = &plan.metadata.excel_name;
+    let category = &plan.metadata.category;
+    let description = &plan.metadata.description;
+    let help_topic = &plan.metadata.help_topic;
+    let export_ident = &plan.symbols.export_ident;
+    let descriptor_ident = &plan.symbols.descriptor_ident;
+    let export_manifest_entry_ident = &plan.symbols.manifest_ident;
+    let export_name_bytes = syn::LitByteStr::new(
+        &plan.symbols.export_name_bytes,
+        proc_macro2::Span::call_site(),
+    );
+    let execution = &plan.execution;
+    let is_async = execution.is_async();
+    let context = execution.context();
+    let context_type = execution.context_type();
+    let arguments = &plan.arguments;
+    let has_handle_lease = arguments
+        .iter()
+        .any(|argument| argument.conversion.is_handle_lease());
+    let raw_parameters = arguments
+        .iter()
+        .map(|argument| {
+            let raw = &argument.raw_ident;
+            let ty = match argument.abi() {
+                ArgumentAbi::Value12 | ArgumentAbi::Reference12 => {
+                    quote!(*mut #krate::__private::v1::XLOPER12)
+                }
+                ArgumentAbi::NumericArray12 => quote!(*const #krate::__private::v1::FP12),
+                ArgumentAbi::Float64 => quote!(::core::primitive::f64),
+                ArgumentAbi::Boolean16 => quote!(::core::primitive::i16),
+                ArgumentAbi::Integer32 => quote!(::core::primitive::i32),
+                ArgumentAbi::CountedUtf16 => quote!(*const ::core::primitive::u16),
+            };
+            quote!(#raw: #ty)
+        })
+        .collect::<Vec<_>>();
+    let converted_names = arguments
+        .iter()
+        .map(|argument| argument.local_ident.clone())
+        .collect::<Vec<_>>();
+    let argument_name_literals = arguments
+        .iter()
+        .map(|argument| argument.excel_name.clone())
+        .collect::<Vec<_>>();
+    let argument_descriptions = arguments
+        .iter()
+        .map(|argument| argument.description.clone())
+        .collect::<Vec<_>>();
+    let argument_count = arguments.len();
+    let generated_context_expression = context.map(|context| {
+        let expression = match execution {
+            model::ExecutionSpec::ThreadSafe { .. } => {
+                quote!(#krate::__private::v1::thread_safe_context(__frame.environment(), __state))
+            }
+            model::ExecutionSpec::MainThread { .. } => {
+                quote!(#krate::__private::v1::main_thread_context(
+                    __frame.environment(),
+                    __state,
+                ))
+            }
+            model::ExecutionSpec::MacroSheet { .. } => {
+                quote!(#krate::__private::v1::macro_sheet_context(
+                    __frame.environment(),
+                    __state,
+                ))
+            }
+            model::ExecutionSpec::Async { .. } => quote!(#krate::__private::v1::async_context(
+                &__lease,
+                &__cancellation,
+                &crate::__XLFN_RUNTIME,
+            )),
+        };
+        (context.ty(), expression)
+    });
+    let hidden = plan.hidden;
+    let invocation = if generated_context_expression.is_some() {
+        quote!(#function_ident(__context, #(#converted_names),*))
+    } else {
+        quote!(#function_ident(#(#converted_names),*))
+    };
+    let async_result_expression = quote! {
+        let __result = #invocation.await;
+        ::core::result::Result::Ok(__result)
+    };
+    let context_setup = generated_context_expression.map(|(ty, expression)| {
+        quote! {
+            let __generated_context = #expression;
+            let __context: #ty = __generated_context;
+        }
+    });
+    let volatile = plan.volatile;
+    let handle_reuse = plan.handle_reuse.map(|reuse_inputs| {
+        quote! {
+            __return_context.set_handle_reuse(#reuse_inputs)?;
+        }
+    });
+    let execution_mode = match execution {
+        model::ExecutionSpec::MainThread { .. } => quote!(#krate::__private::v1::MainThreadMode),
+        model::ExecutionSpec::ThreadSafe { .. } => quote!(#krate::__private::v1::ThreadSafeMode),
+        model::ExecutionSpec::MacroSheet { .. } => quote!(#krate::__private::v1::MacroSheetMode),
+        model::ExecutionSpec::Async { .. } => quote!(#krate::__private::v1::AsyncLaunchMode),
+    };
+    let execution_kind = quote!(<#execution_mode as #krate::__private::v1::ExecutionMode>::KIND);
+    let visibility = if hidden {
+        quote!(#krate::__private::v1::FunctionVisibility::Hidden)
+    } else {
+        quote!(#krate::__private::v1::FunctionVisibility::Public)
+    };
+    let mode_assertion = match execution {
+        model::ExecutionSpec::Async { .. } => {
+            quote!(#krate::__private::v1::assert_async_return::<#return_type>();)
+        }
+        model::ExecutionSpec::MacroSheet { .. } => {
+            quote!(#krate::__private::v1::assert_macro_sheet_return::<#return_type>();)
+        }
+        model::ExecutionSpec::ThreadSafe { .. } => {
+            quote!(#krate::__private::v1::assert_thread_safe_return::<#return_type>();)
+        }
+        model::ExecutionSpec::MainThread { .. } => {
+            quote!(#krate::__private::v1::assert_main_thread_return::<#return_type>();)
+        }
+    };
+    let volatile_assertion =
+        volatile.then(|| quote!(#krate::__private::v1::assert_volatile_return::<#return_type>();));
+    let return_assertion = quote! {
+        #mode_assertion
+        #volatile_assertion
+    };
+    let conversions = arguments
+        .iter()
+        .map(|argument| {
+            let index = argument.index;
+            let ty = &argument.ty;
+            let converted = &argument.local_ident;
+            let raw = &argument.raw_ident;
+            let argument_name = &argument.excel_name;
+            let binding_type = if !is_async && matches!(argument.conversion, model::ArgumentConversion::Reference | model::ArgumentConversion::NumericMatrix) { quote!(#krate::__private::v1::ReadyArgument<#ty>) } else if is_async { quote!(#ty) } else {
+                quote!(#krate::__private::v1::PreparedArgument<#ty, _, _>)
+            };
+            let default_method = if is_async { quote!(default_argument) } else { quote!(prepare_default) };
+            let conversion = match &argument.conversion {
+                model::ArgumentConversion::Reference if !is_async => quote! {
+                    unsafe { #krate::__private::v1::convert_reference(&mut __frame, #argument_name, #raw) }
+                        .map(#krate::__private::v1::PreparedArgument::Ready)
+                },
+                model::ArgumentConversion::Reference => quote! {
+                    // SAFETY: Excel supplies the live reference pointer for this ABI call.
+                    unsafe {
+                        #krate::__private::v1::convert_reference(&mut __frame, #argument_name, #raw)
+                    }
+                },
+                model::ArgumentConversion::NumericMatrix => quote! {
+                    // SAFETY: Excel supplies a live FP12 numeric-array argument.
+                    unsafe { __frame.prepare_numeric_matrix(#index, #argument_name, #raw) }
+                },
+                model::ArgumentConversion::Native(native) => {
+                    let suffix = native.method_suffix();
+                    let method = format_ident!("{}native_{suffix}", if is_async { "" } else { "prepare_" });
+                    let convert = quote!(__frame.#method(#index, #argument_name, #raw));
+                    let convert = if native.abi() == ArgumentAbi::CountedUtf16 {
+                        quote! {
+                            // SAFETY: Excel supplies a live length-prefixed UTF-16 buffer for this call.
+                            unsafe { #convert }
+                        }
+                    } else {
+                        convert
+                    };
+                    let async_assertion = is_async.then(|| {
+                        quote!(#krate::__private::v1::assert_async_parameter::<#return_type, #ty>();)
+                    });
+                    quote! {
+                        {
+                            #async_assertion
+                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty, _, _, _>(&__frame);
+                            #convert
+                        }
+                    }
+                }
+                model::ArgumentConversion::Value(_) => {
+                    let convert = if is_async {
+                        quote!(#krate::__private::v1::convert_argument::<#return_type, #ty, _, _, _>(&mut __frame, #index, #argument_name, #raw))
+                    } else {
+                        quote!(__frame.prepare_argument::<#ty>(#index, #argument_name, #raw))
+                    };
+                    let async_assertion = is_async.then(|| {
+                        quote!(#krate::__private::v1::assert_async_parameter::<#return_type, #ty>();)
+                    });
+                    quote! {
+                        {
+                            #async_assertion
+                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty, _, _, _>(&__frame);
+                            // SAFETY: Excel supplies the live XLOPER12 pointer for this ABI call.
+                            unsafe {
+                                #convert
+                            }
+                        }
+                    }
+                }
+                model::ArgumentConversion::HandleLease { object } => quote! {
+                    // The pending pin is acquired while the Excel call is
+                    // admitted and branded only inside the async task builder.
+                    unsafe {
+                        __frame.convert_handle_pending::<_, #object>(
+                            #index,
+                            #argument_name,
+                            #raw,
+                            &__lease,
+                        )
+                    }
+                },
+            };
+
+            if let Some(value) = argument.conversion.checked_presence() {
+                let blank = &value.blank;
+                let missing = &value.missing;
+                let blank_arm = match blank {
+                    model::PresenceAction::Convert => quote!(),
+                    model::PresenceAction::Error => quote!(
+                        #krate::__private::v1::CellPresence::Blank => return ::core::result::Result::Err(
+                            #krate::error::XllError::input(
+                                #argument_name,
+                                #krate::error::InputError::Malformed("blank cell is not allowed"),
+                            )
+                        ),
+                    ),
+                    model::PresenceAction::Default(default) => quote!(
+                        #krate::__private::v1::CellPresence::Blank => {
+                            #krate::__private::v1::CallFrame::#default_method(
+                                &mut __frame,
+                                #index,
+                                #argument_name,
+                                #default,
+                            )?
+                        },
+                    ),
+                };
+                let missing_arm = match missing {
+                    model::PresenceAction::Convert => quote!(),
+                    model::PresenceAction::Error => quote!(
+                        #krate::__private::v1::CellPresence::Missing => return ::core::result::Result::Err(
+                            #krate::error::XllError::input(
+                                #argument_name,
+                                #krate::error::InputError::Malformed("missing argument is not allowed"),
+                            )
+                        ),
+                    ),
+                    model::PresenceAction::Default(default) => quote!(
+                        #krate::__private::v1::CellPresence::Missing => {
+                            #krate::__private::v1::CallFrame::#default_method(
+                                &mut __frame,
+                                #index,
+                                #argument_name,
+                                #default,
+                            )?
+                        },
+                    ),
+                };
+                quote! {
+                    // SAFETY: the raw argument belongs to the current Excel
+                    // call and is validated by the conversion boundary.
+                    let #converted: #binding_type = match unsafe {
+                        #krate::__private::v1::argument_presence(&__frame, #argument_name, #raw)
+                    }? {
+                        #blank_arm
+                        #missing_arm
+                        _ => #conversion?,
+                    };
+                }
+            } else {
+                if argument.conversion.is_handle_lease() {
+                    quote! {
+                        let #converted = #conversion?;
+                    }
+                } else {
+                    quote! {
+                        let #converted: #binding_type = #conversion?;
+                    }
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let materializations = arguments
+        .iter()
+        .map(|argument| {
+            let converted = &argument.local_ident;
+            quote!(let #converted = #converted.materialize()?;)
+        })
+        .collect::<Vec<_>>();
+
+    let handle_bindings = arguments
+        .iter()
+        .filter_map(|argument| {
+            if !argument.conversion.is_handle_lease() {
+                return None;
+            }
+            let converted = &argument.local_ident;
+            Some(quote! {
+                let #converted = #krate::__private::v1::bind_handle_lease(
+                    #converted,
+                    __scope,
+                )?;
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let builder_ident = syn::Ident::new("__XlfnHandleTaskBuilder", proc_macro2::Span::mixed_site());
+    let mut builder_struct_fields = Vec::with_capacity(arguments.len() + 2);
+    for argument in arguments {
+        let name = &argument.local_ident;
+        let ty = &argument.ty;
+        let field_type =
+            if let model::ArgumentConversion::HandleLease { object } = &argument.conversion {
+                quote!(#krate::__private::v1::PendingHandleLease<#object>)
+            } else {
+                quote!(#ty)
+            };
+        builder_struct_fields.push(quote!(#name: #field_type,));
+    }
+    let context_addin_type = context.map(model::ValidatedContext::addin);
+    let builder_lease_field = context_addin_type
+        .map(|addin| quote!(__lease: #krate::__private::v1::ExecutionLease<#addin>,));
+    if let Some(field) = builder_lease_field {
+        builder_struct_fields.push(field);
+    }
+    if context_type.is_some() {
+        builder_struct_fields
+            .push(quote!(__cancellation: #krate::__private::v1::CancellationToken,));
+    }
+    let builder_argument_moves = arguments
+        .iter()
+        .map(|argument| {
+            let name = &argument.local_ident;
+            quote!(let #name = self.#name;)
+        })
+        .collect::<Vec<_>>();
+    let builder_lease_move = if context_type.is_some() {
+        quote!(let __lease = self.__lease;)
+    } else {
+        quote!()
+    };
+    let builder_cancellation_move = context_type
+        .map(|_| quote!(let __cancellation = self.__cancellation;))
+        .unwrap_or_else(|| quote!());
+    let mut builder_initializers = arguments
+        .iter()
+        .map(|argument| {
+            let name = &argument.local_ident;
+            quote!(#name: #name,)
+        })
+        .collect::<Vec<_>>();
+    if context_type.is_some() {
+        builder_initializers.push(quote!(__lease: __lease,));
+    }
+    if context_type.is_some() {
+        builder_initializers.push(quote!(__cancellation: __cancellation,));
+    }
+    let builder_context_setup = context.map(|context| {
+        let addin = context.addin();
+        let context = context.ty();
+        quote! {
+            let __generated_context = #krate::__private::v1::async_context::<#addin>(
+                &__lease,
+                &__cancellation,
+                &crate::__XLFN_RUNTIME,
+            );
+            let __context: #context = __generated_context;
+        }
+    });
+    let builder_context_setup = builder_context_setup.unwrap_or_else(|| quote!());
+    let builder_definition = if has_handle_lease {
+        quote! {
+            struct #builder_ident {
+                #(#builder_struct_fields)*
+            }
+
+            impl
+                #krate::__private::v1::HandleScopedBuilder<#return_type>
+                for #builder_ident
+            {
+                fn build<'generation>(
+                    self,
+                    __scope: #krate::__private::v1::AsyncTaskScope<'generation>,
+                ) -> impl ::std::future::Future<
+                    Output = #krate::error::XllResult<#return_type>,
+                > + Send + 'generation {
+                    #(#builder_argument_moves)*
+                    #builder_lease_move
+                    #builder_cancellation_move
+                    async move {
+                        #(#handle_bindings)*
+                        #builder_context_setup
+                        #return_assertion
+                        #async_result_expression
+                    }
+                }
+            }
+        }
+    } else {
+        quote!()
+    };
+
+    let boundary = if is_async {
+        if has_handle_lease {
+            quote! {
+                #krate::__private::v1::__xlfn_async_only! {
+                    const { #krate::__private::v1::assert_async_executor(&crate::__XLFN_RUNTIME); }
+                    // SAFETY: `__async_handle` is provided by Excel via the extern "system"
+                    // entry point generated by this macro and points to a valid async handle.
+                    unsafe {
+                        #krate::__private::v1::async_udf_handle::<_, #return_type, _, _>(
+                            &crate::__XLFN_RUNTIME,
+                            #udf_id,
+                            #excel_name,
+                            #argument_count,
+                            __async_handle,
+                            |__call, __lease, __cancellation, mut __frame| {
+                                #builder_definition
+                                #(#conversions)*
+                                let _ = __frame.finish_arguments()?;
+                                ::core::result::Result::Ok(#builder_ident {
+                                    #(#builder_initializers)*
+                                })
+                            },
+                        )
+                    }
+                }
+            }
+        } else {
+            quote! {
+                #krate::__private::v1::__xlfn_async_only! {
+                    const { #krate::__private::v1::assert_async_executor(&crate::__XLFN_RUNTIME); }
+                    // SAFETY: `__async_handle` is provided by Excel via the extern "system"
+                    // entry point generated by this macro and points to a valid async handle.
+                    unsafe {
+                        #krate::__private::v1::async_udf::<_, #return_type, _, _>(
+                            &crate::__XLFN_RUNTIME,
+                            #udf_id,
+                            #excel_name,
+                            #argument_count,
+                            __async_handle,
+                            |__call, __lease, __cancellation, mut __frame| {
+                                #(#conversions)*
+                                let _ = __frame.finish_arguments()?;
+                                ::core::result::Result::Ok(async move {
+                                    #context_setup
+                                    #return_assertion
+                                    #async_result_expression
+                                })
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {
+            // SAFETY: the generated wrapper is invoked by Excel using the
+            // registered execution mode and starts this invocation exactly once.
+            unsafe {
+                #krate::__private::v1::#sync_boundary::<_, #return_type, #execution_mode, _>(
+                &crate::__XLFN_RUNTIME,
+                #udf_id,
+                #excel_name,
+                #argument_count,
+                |__state, mut __frame| {
+                    #return_assertion
+                    #context_setup
+                    #(#conversions)*
+                    let mut __return_context =
+                        __frame.return_context(#udf_id)?;
+                    #handle_reuse
+                    #krate::__private::v1::#return_trait::invoke(
+                        &mut __return_context,
+                        || {
+                            #(#materializations)*
+                            ::core::result::Result::Ok(#invocation)
+                        },
+                    )
+                },
+                )
+            }
+        }
+    };
+    let wrapper = if is_async {
+        quote! {
+            #(#gating)*
+            #[doc = concat!("Excel async ABI wrapper for `", #excel_name, "`.")]
+            #[doc = ""]
+            #[doc = "# Safety"]
+            #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument must match its registered ABI; argument pointers must remain live for this call, and the async handle must be a live XLOPER12 supplied by Excel. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
+            #[unsafe(no_mangle)]
+            pub unsafe extern "system" fn #export_ident(
+                #(#raw_parameters,)*
+                __async_handle: *mut #krate::__private::v1::XLOPER12,
+            ) {
+                #krate::__private::v1::export_void_boundary(|| { #boundary });
+            }
+        }
+    } else {
+        quote! {
+            #(#gating)*
+            #[doc = concat!("Excel ABI wrapper for `", #excel_name, "`.")]
+            #[doc = ""]
+            #[doc = "# Safety"]
+            #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument must match its registered ABI; pointer arguments must refer to live XLOPER12, FP12, or counted UTF-16 storage as registered for this call. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
+            #[unsafe(no_mangle)]
+            pub unsafe extern "system" fn #export_ident(
+                #(#raw_parameters),*
+            ) -> #return_pointer {
+                #krate::__private::v1::#export_boundary(|| { #boundary })
+            }
+        }
+    };
+
+    let argument_abi_tokens = arguments.iter().map(|argument| {
+        let variant = match argument.abi() {
+            ArgumentAbi::Value12 => quote!(Value12),
+            ArgumentAbi::Reference12 => quote!(Reference12),
+            ArgumentAbi::Float64 => quote!(Float64),
+            ArgumentAbi::Boolean16 => quote!(Boolean16),
+            ArgumentAbi::Integer32 => quote!(Integer32),
+            ArgumentAbi::CountedUtf16 => quote!(CountedUtf16),
+            ArgumentAbi::NumericArray12 => quote!(NumericArray12),
+        };
+        quote!(#krate::__private::v1::ArgumentAbi::#variant)
+    });
+
+    quote! {
+        #function
+
+        #(#gating)*
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals, reason = "Generated registration descriptor identifier")]
+        static #descriptor_ident: #krate::__private::v1::FunctionRegistration =
+            #krate::__private::v1::FunctionRegistration::new(
+                stringify!(#export_ident),
+                #excel_name,
+                #category,
+                #description,
+                #help_topic,
+                &[
+                    #(
+                        #krate::__private::v1::ArgumentDescriptor {
+                            name: #argument_name_literals,
+                            description: #argument_descriptions,
+                        },
+                    )*
+                ],
+                &[
+                    #(#argument_abi_tokens),*
+                ],
+                #return_abi,
+                #execution_kind,
+                #volatile,
+                #visibility,
+            );
+
+        #(#gating)*
+        #krate::__private::v1::submit_registration! {
+            #descriptor_ident
+        }
+
+        #(#gating)*
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals, reason = "Generated export symbol identifier")]
+        #[used]
+        #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
+        #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
+        static #export_manifest_entry_ident: [u8; #export_name_bytes.len()] =
+            *#export_name_bytes;
+
+        #wrapper
+    }
+}

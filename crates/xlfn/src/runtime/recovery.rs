@@ -1,0 +1,138 @@
+//! Runtime recovery and unload-hazard policy.
+//!
+//! This module coordinates lifecycle quarantine with the owned runtime
+//! resources. The lifecycle state machine reports transitions; it does not
+//! decide how host failures are reported or how resources are retained after
+//! an incomplete shutdown.
+
+use crate::XllError;
+use crate::addin::Addin;
+use crate::boundary::{fail_stop_invariant, report_boundary_error};
+use crate::generation::RuntimeGeneration;
+use crate::panic_boundary::catch_no_unwind;
+use crate::runtime::Runtime;
+use crate::runtime::transactions::{RemovalControl, RemovalSuccess};
+use std::panic::AssertUnwindSafe;
+
+#[cold]
+pub(crate) fn handle_unload_hazard<A: Addin>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    hazard: crate::shutdown::UnloadHazard,
+    boundary: &'static str,
+    error: &XllError,
+) -> RemovalControl {
+    let _ = catch_no_unwind(AssertUnwindSafe(|| {
+        tracing::error!(?hazard, %error, "unload safety could not be established");
+    }));
+    if hazard == crate::shutdown::UnloadHazard::CloseInvariantViolation {
+        runtime.observer().fail_stop(hazard.shutdown_failure());
+        fail_stop_invariant(boundary, error);
+    }
+
+    report_boundary_error(boundary, error);
+    RemovalControl::Quarantine {
+        hazard,
+        boundary,
+        error: error.clone(),
+    }
+}
+
+pub(crate) fn commit_removal_control<A: Addin>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    control: RemovalControl,
+) -> RemovalSuccess<'_, A> {
+    match control {
+        RemovalControl::Quarantine {
+            hazard,
+            boundary: _boundary,
+            error: _error,
+        } => {
+            quarantine_for_hazard(runtime, hazard);
+            RemovalSuccess::Quarantined
+        }
+    }
+}
+
+pub(crate) fn quarantine_runtime<A: Addin>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+) {
+    runtime
+        .lifecycle_orchestrator()
+        .quarantine_for_reason(crate::shutdown_trace::ShutdownFailure::BoundaryPanic);
+    quarantine_runtime_resources(runtime);
+}
+
+pub(crate) fn quarantine_for_hazard<A: Addin>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    hazard: crate::shutdown::UnloadHazard,
+) {
+    runtime
+        .lifecycle_orchestrator()
+        .quarantine_for_reason(hazard.shutdown_failure());
+    quarantine_runtime_resources(runtime);
+}
+
+pub(crate) fn quarantine_runtime_resources<A: Addin>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+) {
+    // Claiming the existing authority is itself an invariant boundary. Keep
+    // it outside the best-effort cleanup catch so a missing authority cannot
+    // be swallowed as an ordinary quarantine cleanup failure.
+    use crate::module_runtime::ModuleCleanupClaim;
+    let module_cleanup_authority = match runtime.lifecycle_control().take_module_cleanup_authority()
+    {
+        ModuleCleanupClaim::Ready(authority) => Some(authority),
+        ModuleCleanupClaim::DeferredOwner => {
+            // A quarantine request does not seize authority from a live
+            // opening/finalization owner or retry its drain. Its resolution
+            // moves the retained canonical resources into quarantine.
+            return;
+        }
+        ModuleCleanupClaim::RetainedUndrained(epoch) => {
+            // The terminal export drain was not certified. Its capability and
+            // generation roots remain in terminal quarantine; never retry it
+            // from recovery, Drop, or a later host lifecycle hint.
+            if !epoch.is_current() {
+                fail_stop_invariant("retained module epoch changed", &XllError::Closing);
+            }
+            return;
+        }
+        ModuleCleanupClaim::NoModuleAuthority => None,
+        ModuleCleanupClaim::Unavailable => fail_stop_invariant(
+            "active module epoch lacks affine close authority",
+            &XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
+            },
+        ),
+    };
+    let _ = catch_no_unwind(AssertUnwindSafe(|| {
+        if let Some(module_cleanup_authority) = module_cleanup_authority
+            && let Err((error, authority)) = module_cleanup_authority.finish()
+        {
+            runtime.lifecycle_orchestrator().quarantine();
+            if let Err(rejected) = runtime
+                .lifecycle_control()
+                .retain_failed_module_cleanup(authority)
+            {
+                runtime
+                    .open_deps()
+                    .quarantine()
+                    .retain_module_authority(rejected);
+            }
+            runtime.observer().quarantine(
+                crate::shutdown::UnloadHazard::ExportDrainPreparationFailed.shutdown_failure(),
+            );
+            report_boundary_error("quarantine execution drain preparation", &error);
+            return;
+        }
+        let quarantined = runtime.quarantine_snapshot();
+        if let Some((generation, reason)) = quarantined.last() {
+            tracing::error!(
+                generation = generation.map_or(0, RuntimeGeneration::get),
+                ?reason,
+                resource_count = quarantined.len(),
+                "runtime resources retained in quarantine vault"
+            );
+        }
+    }));
+}

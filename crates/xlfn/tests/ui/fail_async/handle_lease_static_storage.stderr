@@ -1,0 +1,16 @@
+error[E0521]: borrowed data escapes outside of function
+  --> tests/ui/fail_async/handle_lease_static_storage.rs:10:6
+   |
+ 9 | fn stash<'a>(lease: HandleLease<'a, Dataset>) {
+   |          --  ----- `lease` is a reference that is only valid in the function body
+   |          |
+   |          lifetime `'a` defined here
+10 |     *SAVED.lock().unwrap() = Some(lease);
+   |      ^^^^^^^^^^^^
+   |      |
+   |      `lease` escapes the function body here
+   |      argument requires that `'a` must outlive `'static`
+   |
+   = note: requirement occurs because of the type `std::sync::Mutex<Option<xlfn::handle::HandleLease<'_, Dataset>>>`, which makes the generic argument `Option<xlfn::handle::HandleLease<'_, Dataset>>` invariant
+   = note: the struct `std::sync::Mutex<T>` is invariant over the parameter `T`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
