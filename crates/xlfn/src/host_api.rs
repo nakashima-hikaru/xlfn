@@ -267,13 +267,13 @@ impl<'call> ExcelHost<'call> {
                 CallerLocation::External { row, column } => {
                     // The caller result remains live while Excel resolves its
                     // external sheet identity.
-                    let caller_arguments = [caller.raw_pointer()?];
+                    let caller_arguments = [caller.raw_pointer()];
                     let sheet_id = self.invoke(
                         XL_SHEET_NM,
                         ExcelApiFunction::SheetName,
                         &caller_arguments,
                         |sheet| {
-                            let sheet_name_arguments = [sheet.raw_pointer()?];
+                            let sheet_name_arguments = [sheet.raw_pointer()];
                             self.invoke(
                                 XL_SHEET_ID,
                                 ExcelApiFunction::SheetId,

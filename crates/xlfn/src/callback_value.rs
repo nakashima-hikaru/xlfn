@@ -62,7 +62,7 @@ fn state_after_call(
 /// statuses suppress read access but still allow `xlFree` cleanup once per value
 /// during the active invocation lifetime. Once cleanup is indeterminate,
 /// Excel is no longer called.
-pub(crate) struct ExcelCallbackValue<'session> {
+struct CallbackOwner<'session> {
     raw: XLOPER12,
     release_required: bool,
     #[cfg(test)]
@@ -75,6 +75,11 @@ pub(crate) struct ExcelCallbackValue<'session> {
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
+/// Read access exists only while the underlying owner has not begun release.
+pub(crate) struct ExcelCallbackValue<'session> {
+    owner: CallbackOwner<'session>,
+}
+
 /// Dynamic callback evidence is classified once; terminal results carry
 /// cleanup authority without exposing a readable owner.
 pub(crate) enum CallbackResult<'session> {
@@ -83,7 +88,7 @@ pub(crate) enum CallbackResult<'session> {
     Empty,
 }
 pub(crate) struct CleanupOnlyValue<'session> {
-    owner: ExcelCallbackValue<'session>,
+    owner: CallbackOwner<'session>,
 }
 impl<'session> CallbackResult<'session> {
     #[cfg(test)]
@@ -92,11 +97,11 @@ impl<'session> CallbackResult<'session> {
         status: ExcelCallbackStatus,
         release: ReleaseCallback,
     ) -> Self {
-        let owner = ExcelCallbackValue::from_callback_for_test(raw, status, release);
+        let owner = CallbackOwner::from_callback_for_test(raw, status, release);
         if status.is_terminal() {
             Self::CleanupOnly(CleanupOnlyValue { owner })
         } else {
-            Self::Readable(owner)
+            Self::Readable(ExcelCallbackValue { owner })
         }
     }
     pub(crate) fn readable(&mut self) -> XllResult<&mut ExcelCallbackValue<'session>> {
@@ -122,7 +127,7 @@ impl CleanupOnlyValue<'_> {
     }
 }
 
-impl ExcelCallbackValue<'static> {
+impl CallbackOwner<'static> {
     #[cfg(test)]
     pub(crate) const fn from_raw_for_test(raw: XLOPER12) -> Self {
         Self {
@@ -156,7 +161,7 @@ impl ExcelCallbackValue<'static> {
     }
 }
 
-impl<'session> ExcelCallbackValue<'session> {
+impl<'session> CallbackOwner<'session> {
     #[cfg(test)]
     fn from_callback_for_test_with_session(
         raw: XLOPER12,
@@ -195,6 +200,15 @@ impl<'session> ExcelCallbackValue<'session> {
             _not_send_or_sync: PhantomData,
         }
     }
+}
+
+impl<'session> ExcelCallbackValue<'session> {
+    #[cfg(test)]
+    pub(crate) const fn from_raw_for_test(raw: XLOPER12) -> Self {
+        Self {
+            owner: CallbackOwner::from_raw_for_test(raw),
+        }
+    }
 
     pub(crate) unsafe fn call_with_session(
         function: i32,
@@ -213,7 +227,7 @@ impl<'session> ExcelCallbackValue<'session> {
         }
         // Classification constructs the fresh owner itself. A value whose
         // cleanup already started cannot be supplied to this issuing path.
-        let make_owner = |state| Self {
+        let make_owner = |state| CallbackOwner {
             raw,
             release_required: true,
             #[cfg(test)]
@@ -232,43 +246,32 @@ impl<'session> ExcelCallbackValue<'session> {
                 }),
             })
         } else {
-            CallbackResult::Readable(make_owner(CallbackValueReleaseState::Live))
+            CallbackResult::Readable(ExcelCallbackValue {
+                owner: make_owner(CallbackValueReleaseState::Live),
+            })
         };
         Ok((status, result))
     }
 
-    fn ensure_live(&self) -> XllResult<()> {
-        if matches!(self.state, CallbackValueReleaseState::Live) {
-            Ok(())
-        } else {
-            Err(XllError::input(
-                "callback",
-                crate::error::InputError::Malformed(
-                    "callback result is unavailable after release suppression or cleanup",
-                ),
-            ))
-        }
-    }
-
     pub(crate) fn borrow(&mut self) -> XllResult<XlValueRef<'_>> {
-        self.ensure_live()?;
-        // SAFETY: `Live` means this guard still owns a readable callback result.
-        unsafe { XlValueRef::from_raw(&mut self.raw) }
+        // SAFETY: only a fresh, readable callback result constructs this wrapper.
+        // Releasing consumes it, and returned borrows cannot outlive that move.
+        unsafe { XlValueRef::from_raw(&mut self.owner.raw) }
     }
 
-    pub(crate) fn raw_pointer(&mut self) -> XllResult<NonNull<XLOPER12>> {
-        self.ensure_live()?;
-        Ok(NonNull::from_mut(&mut self.raw))
+    /// The returned raw pointer is valid only while this owner remains live and
+    /// stationary, including the whole synchronous callback that consumes it.
+    /// The pointer itself carries no lifetime and must not be retained.
+    pub(crate) fn raw_pointer(&mut self) -> NonNull<XLOPER12> {
+        NonNull::from_mut(&mut self.owner.raw)
     }
 
-    pub(crate) fn raw(&self) -> XllResult<&XLOPER12> {
-        self.ensure_live()?;
-        Ok(&self.raw)
+    pub(crate) fn raw(&self) -> &XLOPER12 {
+        &self.owner.raw
     }
 
     pub(crate) fn value_type(&self) -> XllResult<XlValueType> {
-        self.ensure_live()?;
-        XlValueType::from_raw(self.raw.base_type()).ok_or_else(|| {
+        XlValueType::from_raw(self.owner.raw.base_type()).ok_or_else(|| {
             XllError::input(
                 "<callback>",
                 crate::error::InputError::Malformed("unknown base xltype"),
@@ -276,14 +279,14 @@ impl<'session> ExcelCallbackValue<'session> {
         })
     }
 
-    #[must_use]
-    pub(crate) const fn release_state(&self) -> CallbackValueReleaseState {
-        self.state
+    /// Consumes readable authority even if cleanup fails.
+    pub(crate) fn release(self) -> XllResult<()> {
+        self.owner.release()
     }
+}
 
-    /// Consumes the only explicit cleanup authority, even when host cleanup
-    /// fails. The error never returns a readable value or a retry owner.
-    pub(crate) fn release(mut self) -> XllResult<()> {
+impl CallbackOwner<'_> {
+    fn release(mut self) -> XllResult<()> {
         self.release_in_place()
     }
 
@@ -353,7 +356,7 @@ impl<'session> ExcelCallbackValue<'session> {
     }
 }
 
-impl<'session> Drop for ExcelCallbackValue<'session> {
+impl Drop for CallbackOwner<'_> {
     fn drop(&mut self) {
         if let Err(error) = self.release_in_place() {
             crate::diagnostics::report_no_unwind("Excel callback result cleanup", &error);
@@ -370,19 +373,54 @@ mod tests {
         let _test_guard = TEST_LOCK.lock().unwrap();
         for status in [
             ExcelCallbackStatus::Success,
+            ExcelCallbackStatus::Failed(XLRET_FAILED),
             ExcelCallbackStatus::Abort,
             ExcelCallbackStatus::Uncalced,
         ] {
             FREE_CALLS.store(0, Ordering::Relaxed);
             let mut result =
                 CallbackResult::callback_for_test(XLOPER12::integer(7), status, successful_free);
-            assert_eq!(
-                result.readable().is_ok(),
-                status == ExcelCallbackStatus::Success
-            );
+            assert_eq!(result.readable().is_ok(), !status.is_terminal());
             result.release().unwrap();
             assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
         }
+    }
+
+    #[test]
+    fn miri_decoder_panic_drops_readable_owner_once() {
+        let _test_guard = TEST_LOCK.lock().unwrap();
+        FREE_CALLS.store(0, Ordering::Relaxed);
+        let thread = std::thread::spawn(|| {
+            let mut result = CallbackResult::callback_for_test(
+                XLOPER12::integer(7),
+                ExcelCallbackStatus::Success,
+                successful_free,
+            );
+            let _readable = result.readable().unwrap();
+            panic!("decoder panic");
+        });
+        assert!(thread.join().is_err());
+        assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn miri_panicking_xlfree_is_never_retried() {
+        unsafe fn panicking_free(_: &mut XLOPER12) -> i32 {
+            FREE_CALLS.fetch_add(1, Ordering::Relaxed);
+            panic!("release panic");
+        }
+        let _test_guard = TEST_LOCK.lock().unwrap();
+        FREE_CALLS.store(0, Ordering::Relaxed);
+        let thread = std::thread::spawn(|| {
+            let value = CallbackResult::callback_for_test(
+                XLOPER12::integer(7),
+                ExcelCallbackStatus::Success,
+                panicking_free,
+            );
+            let _ = value.release();
+        });
+        assert!(thread.join().is_err());
+        assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -456,18 +494,15 @@ mod tests {
         let _test_guard = TEST_LOCK.lock().unwrap();
         for status in [XLRET_ABORT, XLRET_UNCALCED] {
             FREE_CALLS.store(0, Ordering::Relaxed);
-            let mut value = ExcelCallbackValue::from_callback_for_test(
+            let mut value = CallbackOwner::from_callback_for_test(
                 XLOPER12::integer(1),
                 ExcelCallbackStatus::from_raw(status),
                 successful_free,
             );
             assert!(matches!(
-                value.release_state(),
+                value.state,
                 CallbackValueReleaseState::TerminalSuppressed { .. }
             ));
-            assert!(value.borrow().is_err());
-            assert!(value.raw().is_err());
-            assert!(value.raw_pointer().is_err());
             value.release_in_place().unwrap();
             assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
             drop(value);
@@ -479,7 +514,7 @@ mod tests {
     fn indeterminate_cleanup_is_attempted_once_and_cannot_be_borrowed() {
         let _test_guard = TEST_LOCK.lock().unwrap();
         FREE_CALLS.store(0, Ordering::Relaxed);
-        let mut value = ExcelCallbackValue::from_callback_for_test(
+        let mut value = CallbackOwner::from_callback_for_test(
             XLOPER12::integer(1),
             ExcelCallbackStatus::Success,
             failed_free,
@@ -488,15 +523,11 @@ mod tests {
         assert!(value.release_in_place().is_err());
         assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
         assert!(matches!(
-            value.release_state(),
+            value.state,
             CallbackValueReleaseState::Indeterminate {
                 status: ExcelCallbackStatus::Failed(XLRET_FAILED)
             }
         ));
-        assert!(value.borrow().is_err());
-        assert!(value.raw().is_err());
-        assert!(value.raw_pointer().is_err());
-        assert!(value.value_type().is_err());
         assert!(value.release_in_place().is_err());
         drop(value);
         assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
@@ -508,7 +539,7 @@ mod tests {
         let script = crate::registration::host::test_support::CallbackScript::install([]);
         FREE_CALLS.store(0, Ordering::Relaxed);
         let session = HostCallbackSession::new();
-        let mut register_result = ExcelCallbackValue::from_callback_for_test_with_session(
+        let mut register_result = CallbackOwner::from_callback_for_test_with_session(
             XLOPER12::number(42.0),
             ExcelCallbackStatus::Success,
             aborting_free,
@@ -532,7 +563,7 @@ mod tests {
         let script = crate::registration::host::test_support::CallbackScript::install([]);
         FREE_CALLS.store(0, Ordering::Relaxed);
         let session = HostCallbackSession::new();
-        let mut unregister_result = ExcelCallbackValue::from_callback_for_test_with_session(
+        let mut unregister_result = CallbackOwner::from_callback_for_test_with_session(
             XLOPER12::boolean(true),
             ExcelCallbackStatus::Success,
             uncalced_free,
@@ -555,7 +586,7 @@ mod tests {
         let _test_guard = TEST_LOCK.lock().unwrap();
         FREE_CALLS.store(0, Ordering::Relaxed);
         let session = HostCallbackSession::new();
-        let caller = ExcelCallbackValue::from_callback_for_test_with_session(
+        let caller = CallbackOwner::from_callback_for_test_with_session(
             XLOPER12::integer(1),
             ExcelCallbackStatus::Success,
             successful_free,
@@ -571,19 +602,19 @@ mod tests {
         let _test_guard = TEST_LOCK.lock().unwrap();
         FREE_CALLS.store(0, Ordering::Relaxed);
         let session = HostCallbackSession::new();
-        let mut first = ExcelCallbackValue::from_callback_for_test_with_session(
+        let mut first = CallbackOwner::from_callback_for_test_with_session(
             XLOPER12::integer(1),
             ExcelCallbackStatus::Success,
             aborting_free,
             &session,
         );
-        let second = ExcelCallbackValue::from_callback_for_test_with_session(
+        let second = CallbackOwner::from_callback_for_test_with_session(
             XLOPER12::integer(2),
             ExcelCallbackStatus::Success,
             successful_free,
             &session,
         );
-        let third = ExcelCallbackValue::from_callback_for_test_with_session(
+        let third = CallbackOwner::from_callback_for_test_with_session(
             XLOPER12::integer(3),
             ExcelCallbackStatus::Success,
             successful_free,
@@ -617,7 +648,7 @@ mod tests {
         ACTIVE_DURING_FREE.store(usize::MAX, Ordering::Relaxed);
         let permit = crate::callback_gate::enter_callback().expect("open gate admits");
         let session = HostCallbackSession::new();
-        let mut value = ExcelCallbackValue::from_callback_for_test_with_permit(
+        let mut value = CallbackOwner::from_callback_for_test_with_permit(
             XLOPER12::integer(42),
             ExcelCallbackStatus::Success,
             observe_free,

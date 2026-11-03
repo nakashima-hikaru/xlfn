@@ -238,7 +238,7 @@ pub(crate) fn registration_result(
 
 fn scalar_result(result: &crate::callback_value::ExcelCallbackValue<'_>) -> Option<Value> {
     use xlfn_sys::{XLTYPE_BOOL, XLTYPE_ERR, XLTYPE_INT, XLTYPE_NUM};
-    let raw = result.raw().ok()?;
+    let raw = result.raw();
     let value = match raw.base_type() {
         // SAFETY: each inline union member is selected by its exact base type.
         XLTYPE_BOOL => json!(unsafe { raw.value.boolean }),

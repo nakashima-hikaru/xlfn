@@ -449,7 +449,7 @@ fn decode_registration_id_result(
 }
 
 fn error_code(result: &ExcelCallbackValue<'_>) -> XllResult<i32> {
-    let raw = result.raw()?;
+    let raw = result.raw();
     // SAFETY: the caller checked that the result has XLTYPE_ERR.
     Ok(unsafe { raw.value.error })
 }
@@ -458,7 +458,7 @@ fn read_excel_bool(result: &ExcelCallbackValue<'_>, function: ExcelApiFunction) 
     if result.value_type()? != XlValueType::Boolean {
         return Err(unexpected_result(function));
     }
-    let raw = result.raw()?;
+    let raw = result.raw();
     // SAFETY: XLTYPE_BOOL selects the boolean union member.
     Ok(unsafe { raw.value.boolean } != 0)
 }
@@ -475,7 +475,7 @@ fn decode_event_registration_id(result: &ExcelCallbackValue<'_>) -> XllResult<i3
     if result.value_type()? != XlValueType::Integer {
         return Err(unexpected_result(ExcelApiFunction::EventRegister));
     }
-    let raw = result.raw()?;
+    let raw = result.raw();
     // SAFETY: XLTYPE_INT selects the integer union member.
     let value = unsafe { raw.value.integer };
     // Although the documented success value is positive, live Excel has
