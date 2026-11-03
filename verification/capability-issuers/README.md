@@ -23,8 +23,8 @@ checks with a one-time type conversion.
   still checks the source arena matches the destination, returning StaleHandle
   otherwise; rollback and topic ownership remain on the reservation's runtime.
 - Registration preflight snapshots a validated signature after descriptor
-  validation. Encoding that immutable value does not revalidate. Public raw
-  signature construction and validation still reject invalid values. Validation
+  validation. Encoding that immutable value does not revalidate. Raw internal
+  signature validation still rejects invalid values. Validation
   order remains descriptor-wide before metadata preparation. A temporary SmallVec
   can allocate above 16 definitions; registration is not a pricing hot path.
 
