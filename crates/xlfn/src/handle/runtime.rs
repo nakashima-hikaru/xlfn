@@ -533,13 +533,13 @@ impl FormulaHandleService {
 
     pub(crate) fn lookup<'call, T>(
         &'call self,
-        scope: &'call crate::call::CallScope<'call>,
+        context: &mut crate::value::DecodeCallContext<'_, 'call>,
         token: &str,
     ) -> XllResult<Handle<'call, T>>
     where
         T: ExcelHandleObject,
     {
-        self.store.lookup(scope, token)
+        self.store.lookup(context, token)
     }
 
     pub(crate) fn seal(&self) -> XllResult<HandleRegistrySealed<'_>> {

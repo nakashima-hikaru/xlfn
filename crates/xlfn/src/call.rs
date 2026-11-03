@@ -8,6 +8,9 @@
 //! not belong in this call-local storage.
 
 use crate::XllResult;
+use ghost_cell::GhostToken;
+#[cfg(feature = "handles")]
+use ghost_cell::GhostCell;
 use std::cell::{Cell, OnceCell};
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
@@ -117,8 +120,8 @@ enum HandleWitnessSource<'scope> {
     Permit(&'scope crate::handle::HandleDomainPermit),
 }
 
-/// A real borrow of the append-only call scope or the owning permit.
-/// Scope construction stays private to the code that retains its permits.
+/// Borrows the scratch field in permit-retaining storage, or an owning test permit.
+/// Witness construction stays private to the code that retains its permits.
 #[derive(Clone, Copy)]
 #[cfg(feature = "handles")]
 pub(crate) struct HandleDomainWitness<'scope> {
@@ -149,76 +152,86 @@ impl<'scope> HandleDomainWitness<'scope> {
 #[doc(hidden)]
 pub struct CallScope<'call> {
     scratch: CallScratch,
-    #[cfg(feature = "handles")]
-    handle_permits: std::cell::RefCell<HandlePermits>,
     lifetime: PhantomData<&'call mut &'call ()>,
 }
 
 impl<'call> CallScope<'call> {
     fn new() -> Self {
+        Self { scratch: CallScratch::new(), lifetime: PhantomData }
+    }
+    pub(crate) fn scratch(&'call self) -> &'call CallScratch { &self.scratch }
+}
+
+/// Invocation-owned permits and scratch, with private construction and fields.
+/// Permits are append-only and drop before scratch, including during unwinding.
+/// The fresh GhostCell brand is independent of the invariant call lifetime.
+#[doc(hidden)]
+pub struct CallStorage<'brand, 'call> {
+    #[cfg(feature = "handles")]
+    handle_permits: GhostCell<'brand, HandlePermits>,
+    #[cfg(not(feature = "handles"))]
+    brand: PhantomData<&'brand mut &'brand ()>,
+    scope: CallScope<'call>,
+}
+impl<'brand, 'call> CallStorage<'brand, 'call> {
+    fn new() -> Self {
         Self {
-            scratch: CallScratch::new(),
             #[cfg(feature = "handles")]
-            handle_permits: std::cell::RefCell::new(HandlePermits::Empty),
-            lifetime: PhantomData,
+            handle_permits: GhostCell::new(HandlePermits::Empty),
+            #[cfg(not(feature = "handles"))]
+            brand: PhantomData,
+            scope: CallScope::new(),
         }
     }
-
-    pub(crate) fn scratch(&'call self) -> &'call CallScratch {
-        &self.scratch
-    }
-
-    /// Enters the handle read domain for this call scope and returns a witness
-    /// valid for the scope's invariant `'call` lifetime.
-    ///
-    /// Scopes can only be constructed by the generative closure entry points
-    /// below. Requiring the domain for that entire brand prevents owners
-    /// created inside the closure from being admitted: they could otherwise
-    /// be destroyed before the scope releases its retained reader permits.
+    pub(crate) fn scope(&'call self) -> &'call CallScope<'call> { &self.scope }
+    /// The result borrows storage, never the short mutable token borrow.
     #[inline]
     #[cfg(feature = "handles")]
     pub(crate) fn enter_handle_domain(
         &'call self,
+        token: &mut GhostToken<'brand>,
         domain: &'call crate::handle::HandleReadDomain,
     ) -> XllResult<crate::handle::HandleDomainWitness<'call>> {
         let domain_ptr = std::ptr::NonNull::from(domain);
-        let mut permits = self.handle_permits.borrow_mut();
-        match &*permits {
-            HandlePermits::Empty => {}
-            HandlePermits::Single(permit) => {
-                if permit.domain() == domain_ptr {
-                    return Ok(HandleDomainWitness {
-                        source: HandleWitnessSource::Scope {
-                            _scope: self,
-                            domain: domain_ptr,
-                        },
-                    });
-                }
-            }
-            HandlePermits::Multiple(list) => {
-                if list.iter().any(|p| p.domain() == domain_ptr) {
-                    return Ok(HandleDomainWitness {
-                        source: HandleWitnessSource::Scope {
-                            _scope: self,
-                            domain: domain_ptr,
-                        },
-                    });
-                }
+        {
+            let permits = self.handle_permits.borrow_mut(token);
+            let retained = match &*permits {
+                HandlePermits::Empty => false,
+                HandlePermits::Single(permit) => permit.domain() == domain_ptr,
+                HandlePermits::Multiple(list) => list.iter().any(|p| p.domain() == domain_ptr),
+            };
+            if !retained {
+                // SAFETY: private generative construction and invariant 'call
+                // exclude operation-local domain owners. The enclosing owner
+                // outlives storage and all permits, including their maintenance
+                // tails. No operation removes a retained permit before teardown.
+                let permit = unsafe { domain.enter_owned()? };
+                permits.insert(permit);
             }
         }
-        // SAFETY: the generative scope constructors keep this scope inside the
-        // operation's enclosing owner frame. Requiring `domain` for the
-        // invariant brand excludes owners local to that operation. The domain
-        // therefore remains alive until the constructor drops every permit.
-        let permit = unsafe { domain.enter_owned()? };
-        permits.insert(permit);
-        Ok(HandleDomainWitness {
-            source: HandleWitnessSource::Scope {
-                _scope: self,
-                domain: domain_ptr,
-            },
-        })
+        // The only production scope-witness construction. Borrowing the scope
+        // field through this storage borrow keeps the entire owner alive.
+        Ok(HandleDomainWitness { source: HandleWitnessSource::Scope {
+            _scope: &self.scope, domain: domain_ptr,
+        } })
     }
+}
+
+/// Runs decoding under fresh independent GhostCell and call lifetime brands.
+#[doc(hidden)]
+pub fn with_branded_call_scope<R>(
+    operation: impl for<'brand, 'call> FnOnce(&'call CallStorage<'brand, 'call>, GhostToken<'brand>) -> R,
+) -> R {
+    GhostToken::new(|token| { let storage = CallStorage::new(); operation(&storage, token) })
+}
+
+/// Reborrows an enclosing owner for the invariant lifetime of call storage.
+#[doc(hidden)]
+pub fn with_branded_call_scope_and_state<S, R>(
+    state: &S,
+    operation: impl for<'brand, 'call> FnOnce(&'call S, &'call CallStorage<'brand, 'call>, GhostToken<'brand>) -> R,
+) -> R {
+    GhostToken::new(|token| { let storage = CallStorage::new(); operation(state, &storage, token) })
 }
 
 /// Runs an operation under a fresh lifetime that cannot escape in its result.
@@ -249,29 +262,28 @@ pub fn with_excel_call_scope_and_state<S, R>(
 #[cfg(feature = "bench-internals")]
 pub(crate) fn with_excel_call_scope_and_call<A: crate::Addin, R>(
     call: &crate::runtime::CallGuard<'_, A>,
-    operation: impl for<'scope> FnOnce(
-        &'scope crate::runtime::CallGuard<'_, A>,
-        &'scope CallScope<'scope>,
+    operation: impl for<'brand, 'call> FnOnce(
+        &'call crate::runtime::CallGuard<'_, A>,
+        &'call CallStorage<'brand, 'call>,
+        GhostToken<'brand>,
     ) -> R,
 ) -> R {
-    let scope = CallScope::new();
-    operation(call, &scope)
+    GhostToken::new(|token| { let storage = CallStorage::new(); operation(call, &storage, token) })
 }
 
-/// Reborrows existing entrypoint authority alongside a fresh memory scope.
-/// Unlike the public lifetime helpers, this cannot be invoked without the
-/// private session already issued by the Excel entrypoint.
+/// Reborrows entrypoint authority alongside a fresh invocation-owned token.
+/// This cannot be entered without the session issued by the Excel entrypoint.
 pub(crate) fn with_excel_callback_scope_and_call<A: crate::Addin, R>(
     call: &crate::runtime::CallGuard<'_, A>,
     callbacks: &crate::host_callback::HostCallbackSession,
-    operation: impl for<'scope> FnOnce(
-        &'scope crate::runtime::CallGuard<'_, A>,
-        &'scope CallScope<'scope>,
-        &'scope crate::host_callback::HostCallbackSession,
+    operation: impl for<'brand, 'call> FnOnce(
+        &'call crate::runtime::CallGuard<'_, A>,
+        &'call CallStorage<'brand, 'call>,
+        GhostToken<'brand>,
+        &'call crate::host_callback::HostCallbackSession,
     ) -> R,
 ) -> R {
-    let scope = CallScope::new();
-    operation(call, &scope, callbacks)
+    GhostToken::new(|token| { let storage = CallStorage::new(); operation(call, &storage, token, callbacks) })
 }
 
 #[cfg(test)]

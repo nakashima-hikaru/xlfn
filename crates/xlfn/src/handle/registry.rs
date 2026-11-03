@@ -318,7 +318,7 @@ impl HandleRegistry {
 
     pub(crate) fn lookup_handle<'call, T>(
         &'call self,
-        scope: &'call crate::call::CallScope<'call>,
+        context: &mut crate::value::DecodeCallContext<'_, 'call>,
         token: &str,
     ) -> XllResult<Handle<'call, T>>
     where
@@ -330,7 +330,7 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        let witness = scope.enter_handle_domain(self.bindings.read_domain())?;
+        let witness = context.enter_handle_domain(self.bindings.read_domain())?;
         let binding = self.bindings.read_scoped(verified.id, witness)?;
         #[cfg(test)]
         {

@@ -133,6 +133,7 @@ harness = false
 required-features = ["bench-internals"]
 
 [dependencies]
+ghost-cell.workspace = true
 xlfn-macros.workspace = true
 xlfn-sys.workspace = true
 inventory.workspace = true

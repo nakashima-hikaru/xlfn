@@ -400,7 +400,7 @@ fn miri_streamed_numeric_preparation_keeps_late_validation_and_error_order() {
             );
             crate::call::with_excel_call_scope_and_state(&root, |root, scope| {
                 let value = XlValueRef::from_array_cell(root).unwrap();
-                let context = CallContext::from_scope(scope);
+                let context = DecodeCallContext::from_scope(scope);
                 let mut fingerprint = crate::input_identity::InputFingerprintBuilder::new(1);
                 // Even a caller that ignores the failed preparation cannot
                 // finalize the prefix as a valid formula input identity.
@@ -458,7 +458,7 @@ fn prepared_matrix_preserves_shape_integer_conversion_and_signed_zero() {
     let mut encoder = InputIdentityEncoder::new("arg");
     crate::call::with_excel_call_scope_and_state(&root, |root, scope| {
         let raw = XlValueRef::from_array_cell(root).unwrap();
-        let context = CallContext::from_scope(scope);
+        let context = DecodeCallContext::from_scope(scope);
         let prepared = <Matrix<f64> as ExcelParameter<FormulaInputMode>>::prepare(
             raw,
             "arg",

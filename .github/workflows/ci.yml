@@ -84,6 +84,9 @@ jobs:
             - name: Build the public API reference without warnings
               run: just doc
 
+            - name: Check GhostCell invocation lifetime model
+              run: just ghostcell-model
+
             - name: Check private lifecycle typestate contracts
               run: just typestate
 

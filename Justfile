@@ -78,6 +78,8 @@ miri-setup:
     rustup toolchain install {{miri-toolchain}} --profile minimal --component miri,rust-src
 
 miri:
+    cargo +{{miri-toolchain}} miri test --manifest-path probes/ghostcell-call-model/Cargo.toml --locked
+    MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test --manifest-path probes/ghostcell-call-model/Cargo.toml --locked
     # Layer metadata reads wall-clock time, so run these reentry cases without isolation.
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --lib --locked -- scalar_publication_survives --test-threads=1
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-kernel --lib --locked -- miri_
@@ -339,3 +341,7 @@ bench-check:
 miri-cache-residency:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib cache::residency_tests --locked
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib cache::residency_tests --locked
+
+# Standalone lifetime model, including compile-fail escape and brand checks.
+ghostcell-model:
+    cargo test --manifest-path probes/ghostcell-call-model/Cargo.toml --locked

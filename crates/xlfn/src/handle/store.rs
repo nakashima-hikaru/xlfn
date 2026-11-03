@@ -57,10 +57,10 @@ impl HandleStore {
 
     pub(crate) fn lookup<'call, T: ExcelHandleObject>(
         &'call self,
-        scope: &'call crate::call::CallScope<'call>,
+        context: &mut crate::value::DecodeCallContext<'_, 'call>,
         token: &str,
     ) -> XllResult<Handle<'call, T>> {
-        self.registry.lookup_handle(scope, token)
+        self.registry.lookup_handle(context, token)
     }
 
     pub(crate) fn remove_and_drop_with_observer(
