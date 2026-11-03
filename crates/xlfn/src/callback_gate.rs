@@ -97,6 +97,13 @@ impl ModuleCallbackAdmission {
         Ok(ModuleCallbackPermit { _permit: permit })
     }
 
+    #[cfg(test)]
+    pub(crate) fn enter_for_test(
+        &'static self,
+    ) -> Result<ModuleCallbackPermit, CallbackAdmissionSuppressed> {
+        self.enter()
+    }
+
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn lifecycle(&self) -> ModuleCallbackLifecycle {
         if self.phase.load(Ordering::Acquire) == ModuleCallbackLifecycle::Open as u8 {

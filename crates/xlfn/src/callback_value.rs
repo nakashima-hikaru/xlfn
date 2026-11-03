@@ -404,6 +404,35 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::mem_forget,
+        reason = "verify abandoned cleanup keeps admission pinned"
+    )]
+    fn miri_forgotten_value_retains_its_module_permit() {
+        use crate::callback_gate::{ModuleCallbackAdmission, ModuleCallbackLifecycle};
+        static GATE: ModuleCallbackAdmission =
+            ModuleCallbackAdmission::new(ModuleCallbackLifecycle::Open);
+        let _test_guard = TEST_LOCK.lock().unwrap();
+        FREE_CALLS.store(0, Ordering::Relaxed);
+        let session = HostCallbackSession::new();
+        let permit = GATE.enter_for_test().unwrap();
+        let value = ExcelCallbackValue {
+            owner: CallbackOwner::from_callback_for_test_with_permit(
+                XLOPER12::integer(7),
+                ExcelCallbackStatus::Success,
+                successful_free,
+                &session,
+                Some(permit),
+            ),
+        };
+        std::mem::forget(value);
+        GATE.close();
+        assert_eq!(GATE.active(), 1);
+        assert_eq!(GATE.lifecycle(), ModuleCallbackLifecycle::Closing);
+        assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn miri_panicking_xlfree_is_never_retried() {
         unsafe fn panicking_free(_: &mut XLOPER12) -> i32 {
             FREE_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -511,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn indeterminate_cleanup_is_attempted_once_and_cannot_be_borrowed() {
+    fn indeterminate_cleanup_is_attempted_once_and_never_retried() {
         let _test_guard = TEST_LOCK.lock().unwrap();
         FREE_CALLS.store(0, Ordering::Relaxed);
         let mut value = CallbackOwner::from_callback_for_test(

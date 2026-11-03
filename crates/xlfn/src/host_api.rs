@@ -444,6 +444,22 @@ mod date_tests {
     }
 
     #[test]
+    fn miri_decoder_panic_still_frees_host_result_once() {
+        let script = CallbackScript::install([Reply::success(
+            xlfn_sys::XLF_EVALUATE,
+            XLOPER12::number(7.0),
+        )]);
+        let callbacks = HostCallbackSession::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: HostInvocation<()> =
+                ExcelHost::new(&callbacks)
+                    .invoke_protocol(xlfn_sys::XLF_EVALUATE, &[], |_| panic!("decoder panic"));
+        }));
+        assert!(result.is_err());
+        script.assert_calls(&[xlfn_sys::XLF_EVALUATE]);
+    }
+
+    #[test]
     fn decoder_error_keeps_precedence_over_result_cleanup_failure() {
         let script = CallbackScript::install([Reply::success(
             xlfn_sys::XLF_EVALUATE,
