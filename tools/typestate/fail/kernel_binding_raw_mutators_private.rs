@@ -1,7 +1,7 @@
 // module: kernel/lib
-use crate::thread_affine::{ThreadAffineSlot, ThreadAffineAccess};
-fn invalid(slot: &ThreadAffineSlot<usize>, access: &ThreadAffineAccess<'_, usize>) {
-    let _ = slot.install(access, 1); // error: E0624
-    let _ = slot.take(access); // error: E0624
-    let _ = slot.release_empty_binding(access); // error: E0624
+use crate::thread_affine::{ThreadAffineSlot};
+fn invalid(slot: &ThreadAffineSlot<usize>) {
+    let _ = slot.install_claimed(1); // error: E0599
+    let _ = slot.take_claimed(); // error: E0599
+    let _ = slot.release_empty_claimed(); // error: E0599
 }

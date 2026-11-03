@@ -179,41 +179,6 @@ impl<T: 'static> ThreadAffineSlot<T> {
         }
     }
 
-    fn install(
-        &self,
-        access: &ThreadAffineAccess<'_, T>,
-        value: T,
-    ) -> Result<(), ThreadAffineInstallError<T>> {
-        if let Err(reason) = self.verify_access(access) {
-            return Err(ThreadAffineInstallError { value, reason });
-        }
-
-        let slot_id = self.id();
-        let mut value = Some(value);
-        let result = with_values(|values| {
-            if values.iter().any(|entry| entry.slot_id == slot_id) {
-                return Err(ThreadAffineError::Occupied);
-            }
-            values.push(ThreadAffineEntry {
-                slot_id,
-                value: Some(Box::new(
-                    value
-                        .take()
-                        .expect("thread-affine install value is present"),
-                )),
-            });
-            Ok(())
-        });
-
-        match result {
-            Ok(()) => Ok(()),
-            Err(reason) => Err(ThreadAffineInstallError {
-                value: value.expect("failed thread-affine install retains its value"),
-                reason,
-            }),
-        }
-    }
-
     pub fn with_mut<R>(
         &self,
         access: &ThreadAffineAccess<'_, T>,
@@ -243,65 +208,61 @@ impl<T: 'static> ThreadAffineSlot<T> {
         with_values(|values| Ok(values.iter().any(|entry| entry.slot_id == slot_id)))
     }
 
-    fn take(&self, access: &ThreadAffineAccess<'_, T>) -> Result<T, ThreadAffineError> {
-        self.verify_access(access)?;
-        let slot_id = self.id();
-        with_values(|values| {
-            let index = values
-                .iter()
-                .position(|entry| entry.slot_id == slot_id)
-                .ok_or(ThreadAffineError::MissingValue)?;
-            let value = values[index]
-                .value
-                .as_ref()
-                .ok_or(ThreadAffineError::MissingValue)?;
-            if !value.is::<T>() {
-                return Err(ThreadAffineError::TypeMismatch);
+    #[cfg(test)]
+    fn install(
+        &self,
+        access: &ThreadAffineAccess<'_, T>,
+        value: T,
+    ) -> Result<(), ThreadAffineInstallError<T>> {
+        match self.binding(access) {
+            Ok(BindingState::Empty(txn)) => {
+                txn.install(value)
+                    .map(|_| ())
+                    .map_err(|e| ThreadAffineInstallError {
+                        value: e.value,
+                        reason: e.reason,
+                    })
             }
-            let mut entry = values.swap_remove(index);
-            let value = entry.value.take().ok_or(ThreadAffineError::MissingValue)?;
-            #[allow(
-                clippy::mem_forget,
-                reason = "entry.value was extracted; dropping the empty entry wrapper must not invoke TLS fallback cleanup"
-            )]
-            std::mem::forget(entry);
-            match value.downcast::<T>() {
-                Ok(value) => Ok(*value),
-                Err(value) => {
-                    #[allow(
-                        clippy::mem_forget,
-                        reason = "type mismatch on dynamic downcast; avoid invoking add-in Drop if type is unexpected"
-                    )]
-                    std::mem::forget(value);
-                    Err(ThreadAffineError::TypeMismatch)
-                }
-            }
-        })
+            Ok(BindingState::Occupied(_)) => Err(ThreadAffineInstallError {
+                value,
+                reason: ThreadAffineError::Occupied,
+            }),
+            Err(reason) => Err(ThreadAffineInstallError { value, reason }),
+        }
     }
-
+    #[cfg(test)]
+    fn take(&self, access: &ThreadAffineAccess<'_, T>) -> Result<T, ThreadAffineError> {
+        match self.binding(access)? {
+            BindingState::Occupied(txn) => txn.take().map(|(value, _)| value).map_err(|e| e.reason),
+            BindingState::Empty(_) => Err(ThreadAffineError::MissingValue),
+        }
+    }
+    #[cfg(test)]
     fn release_empty_binding(
         &self,
         access: &ThreadAffineAccess<'_, T>,
     ) -> Result<(), ThreadAffineError> {
-        self.verify_access(access)?;
-        let slot_id = self.id();
-        let occupied =
-            with_values(|values| Ok(values.iter().any(|entry| entry.slot_id == slot_id)))?;
-        if occupied {
-            return Err(ThreadAffineError::Occupied);
+        match self.binding(access)? {
+            BindingState::Empty(txn) => txn.release().map(|_| ()).map_err(|e| e.reason),
+            BindingState::Occupied(_) => Err(ThreadAffineError::Occupied),
         }
+    }
+}
 
-        let current = thread::current().id();
-        let mut affinity = self.affinity.lock();
-        match affinity.owner {
-            Some(owner) if owner == current && affinity.binding == access.binding => {
-                affinity.owner = None;
-                Ok(())
-            }
-            Some(owner) if owner != current => Err(ThreadAffineError::WrongThread),
-            Some(_) => Err(ThreadAffineError::StaleAccess),
-            None => Err(ThreadAffineError::Unbound),
-        }
+impl<'slot, T: 'static> ThreadAffineAccess<'slot, T> {
+    /// Mutably access this witness's issuer-bound payload after revalidating the binding.
+    pub fn with_mut<R>(&self, operation: impl FnOnce(&mut T) -> R) -> Result<R, ThreadAffineError> {
+        self.slot.with_mut(self, operation)
+    }
+
+    /// Check TLS occupancy for this witness's current binding.
+    pub fn has_value(&self) -> Result<bool, ThreadAffineError> {
+        self.slot.has_value(self)
+    }
+
+    /// Acquire exclusive occupancy authority for this witness's issuer.
+    pub fn binding(&self) -> Result<BindingState<'slot, T>, ThreadAffineError> {
+        self.slot.binding(self)
     }
 }
 

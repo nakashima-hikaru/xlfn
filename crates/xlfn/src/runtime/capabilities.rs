@@ -686,6 +686,71 @@ mod tests {
     use crate::registration::host::test_support::{CallbackScript, Reply};
 
     #[test]
+    fn miri_foreign_runtime_access_is_rejected_without_mutating_issuer_or_source() {
+        let issuer = Runtime::<()>::new();
+        let foreign = Runtime::<()>::new();
+        let access = foreign.bind_addin_lifecycle().unwrap();
+        let calls = std::cell::Cell::new(0);
+
+        // Even though a valid capability can operate on its own issuer, a
+        // runtime-facing operation must first reject a different issuer.
+        assert_eq!(
+            issuer.with_addin_lifecycle(&access, |_| calls.set(1)),
+            Err(ThreadAffineError::StaleAccess)
+        );
+        let shutdown = issuer.shutdown_deps();
+        assert_eq!(
+            shutdown.with_addin_lifecycle(&access, |_| calls.set(2)),
+            Err(ThreadAffineError::StaleAccess)
+        );
+        assert_eq!(
+            shutdown.has_addin_lifecycle(&access),
+            Err(ThreadAffineError::StaleAccess)
+        );
+        assert!(matches!(
+            shutdown.empty_addin_lifecycle(&access),
+            Err(ThreadAffineError::StaleAccess)
+        ));
+        assert_eq!(
+            shutdown.release_empty_addin_lifecycle(&access),
+            Err(ThreadAffineError::StaleAccess)
+        );
+        assert!(shutdown.take_addin_lifecycle(&access).is_err());
+        let install = issuer
+            .open_deps()
+            .install_addin_lifecycle(&access, ())
+            .err()
+            .expect("foreign issuer");
+        assert_eq!(install.reason, ThreadAffineError::StaleAccess);
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            foreign.shutdown_deps().has_addin_lifecycle(&access),
+            Ok(false)
+        );
+
+        let installed = foreign
+            .open_deps()
+            .install_addin_lifecycle(&access, ())
+            .unwrap();
+        assert_eq!(
+            shutdown.has_addin_lifecycle(&access),
+            Err(ThreadAffineError::StaleAccess)
+        );
+        assert!(shutdown.take_addin_lifecycle(&access).is_err());
+        assert_eq!(
+            foreign.shutdown_deps().has_addin_lifecycle(&access),
+            Ok(true)
+        );
+        installed
+            .take()
+            .unwrap()
+            .dispose()
+            .unwrap()
+            .release()
+            .unwrap();
+    }
+
+    #[test]
     fn rollback_request_rejects_foreign_installed_binding_before_side_effects() {
         let issuer = Runtime::<()>::new();
         let other = Runtime::<()>::new();
@@ -827,7 +892,7 @@ mod binding_tests {
     fn lifecycle_disposal_panic_keeps_binding_bound_for_recovery() {
         let slot = ThreadAffineSlot::<OnDrop>::new();
         let access = slot.bind_current().unwrap();
-        let BindingState::Empty(empty) = slot.binding(&access).unwrap() else {
+        let BindingState::Empty(empty) = access.binding().unwrap() else {
             panic!("empty")
         };
         let binding = empty
@@ -838,14 +903,14 @@ mod binding_tests {
             .unwrap_or_else(|_| panic!("take"));
         let failure = taken.dispose().err().expect("destructor panic");
         assert!(matches!(
-            slot.binding(&access),
+            access.binding(),
             Err(ThreadAffineError::ReentrantAccess)
         ));
         drop(failure);
         // Disposition failed, so no successful release proof escaped. Recovery
         // can still observe and handle the same bound, empty slot.
-        assert_eq!(slot.has_value(&access), Ok(false));
-        let BindingState::Empty(binding) = slot.binding(&access).unwrap() else {
+        assert_eq!(access.has_value(), Ok(false));
+        let BindingState::Empty(binding) = access.binding().unwrap() else {
             panic!("empty")
         };
         binding.release().unwrap();
@@ -860,7 +925,7 @@ mod binding_tests {
     fn forgotten_taken_lifecycle_retains_payload_and_excludes_rebinding() {
         let slot = ThreadAffineSlot::<OnDrop>::new();
         let access = slot.bind_current().unwrap();
-        let BindingState::Empty(empty) = slot.binding(&access).unwrap() else {
+        let BindingState::Empty(empty) = access.binding().unwrap() else {
             panic!("empty")
         };
         let destroyed = Rc::new(Cell::new(false));
@@ -874,7 +939,7 @@ mod binding_tests {
         std::mem::forget(taken);
         assert!(!destroyed.get());
         assert!(matches!(
-            slot.binding(&access),
+            access.binding(),
             Err(ThreadAffineError::ReentrantAccess)
         ));
     }
@@ -883,7 +948,7 @@ mod binding_tests {
     fn lifecycle_disposal_retains_exact_empty_claim_through_reentrant_destructor() {
         let slot = Rc::new(ThreadAffineSlot::<OnDrop>::new());
         let access = slot.bind_current().unwrap();
-        let BindingState::Empty(empty) = slot.binding(&access).unwrap() else {
+        let BindingState::Empty(empty) = access.binding().unwrap() else {
             panic!("empty")
         };
         let observed = Rc::new(Cell::new(false));
@@ -892,7 +957,7 @@ mod binding_tests {
         let value = OnDrop(Box::new(move || {
             let sibling = reentrant.bind_current().unwrap();
             observed_in_drop.set(matches!(
-                reentrant.binding(&sibling),
+                sibling.binding(),
                 Err(ThreadAffineError::ReentrantAccess)
             ));
         }));
@@ -903,12 +968,12 @@ mod binding_tests {
         let empty = taken.dispose().unwrap_or_else(|_| panic!("dispose"));
         assert!(observed.get());
         assert!(matches!(
-            slot.binding(&access),
+            access.binding(),
             Err(ThreadAffineError::ReentrantAccess)
         ));
         empty.release().unwrap();
         assert!(matches!(
-            slot.has_value(&access),
+            access.has_value(),
             Err(ThreadAffineError::Unbound)
         ));
     }
