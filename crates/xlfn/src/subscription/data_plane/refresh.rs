@@ -55,7 +55,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             let mut current = first_update;
             loop {
                 let topic_id = TopicId(current.topic_id);
-                let slot = current.buffer as usize;
+                let slot = current.buffer.index();
 
                 match outcome {
                     RefreshOutcome::Delivered => {

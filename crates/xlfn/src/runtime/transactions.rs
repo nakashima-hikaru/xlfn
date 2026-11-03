@@ -90,7 +90,7 @@ where
     }
     let has_async_functions = prepared_set
         .iter()
-        .any(|descriptor| descriptor.signature.execution.is_async());
+        .any(|descriptor| descriptor.signature.execution().is_async());
     if !prepared_set.as_slice().is_empty() {
         let event_result = {
             let host = RegistrationHost::new(transaction.callbacks_mut());

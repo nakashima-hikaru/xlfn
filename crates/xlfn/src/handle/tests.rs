@@ -3727,8 +3727,6 @@ fn miri_pending_publication_uses_its_original_registry() {
     let first = HandleRegistry::from_entropy(2, [7; 40]);
     let second = HandleRegistry::from_entropy(2, [9; 40]);
     let pending = first.new_object(DataRecord(42)).unwrap();
-    assert!(pending.belongs_to(&first));
-    assert!(!pending.belongs_to(&second));
     let (token, ..) = pending.publish().unwrap();
     assert_eq!(first.len(), 1);
     assert_eq!(second.len(), 0);
@@ -3744,20 +3742,29 @@ fn miri_pending_publication_uses_its_original_registry() {
 }
 
 #[test]
-fn miri_pending_publication_rejects_foreign_store_before_publication() {
-    let first = HandleStore::try_new(2).unwrap();
-    let second = HandleStore::try_new(2).unwrap();
-    let drops = Arc::new(AtomicUsize::new(0));
-    let pending = first.erase(CountedDataRecord(Arc::clone(&drops))).unwrap();
-    assert!(matches!(
-        second.insert_pending(pending),
-        Err(XllError::StaleHandle)
-    ));
-    assert_eq!(first.len(), 0);
-    assert_eq!(second.len(), 0);
-    assert_eq!(drops.load(Ordering::Relaxed), 1);
-    first.seal().unwrap().finish_quiescence().unwrap();
-    second.seal().unwrap().finish_quiescence().unwrap();
+fn miri_foreign_runtime_alias_rejected_before_topic_publication() {
+    let first = FormulaHandleService::new(4);
+    let second = FormulaHandleService::new(4);
+    let source = first
+        .prepare(test_topic_key("foreign_alias_source"), || {
+            Ok(DataRecord(42))
+        })
+        .unwrap()
+        .into_token();
+    let target = test_topic_key("foreign_alias_destination");
+    with_decode_scope_and_state(&first, |first, context| {
+        let handle = first.lookup::<DataRecord>(context, &source).unwrap();
+        assert_eq!(handle.0, 42);
+        assert!(matches!(
+            second.prepare_observed_alias::<DataRecord, _>(target, handle.alias(), |_, _| Ok(())),
+            Err(XllError::StaleHandle)
+        ));
+    });
+    assert_eq!(second.store.len(), 0);
+    assert_eq!(second.topics.read().by_key.len(), 0);
+    with_decode_scope_and_state(&first, |first, context| {
+        assert_eq!(first.lookup::<DataRecord>(context, &source).unwrap().0, 42);
+    });
 }
 
 #[test]
@@ -3766,7 +3773,7 @@ fn miri_typed_pending_alias_rejects_foreign_store_and_keeps_source_live() {
     let second = HandleStore::try_new(4).unwrap();
     let drops = Arc::new(AtomicUsize::new(0));
     let pending = first.erase(CountedDataRecord(Arc::clone(&drops))).unwrap();
-    let source = first.insert_pending(pending).unwrap().0;
+    let source = pending.publish().unwrap().0;
 
     let alias = with_decode_scope_and_state(&first, |first, scope| {
         let handle = first.lookup::<CountedDataRecord>(scope, &source).unwrap();
@@ -3777,7 +3784,7 @@ fn miri_typed_pending_alias_rejects_foreign_store_and_keeps_source_live() {
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         let handle = first.lookup::<CountedDataRecord>(scope, &source).unwrap();
         let pending = handle.alias().into_pending_object_binding(first).unwrap();
-        first.insert_pending(pending).unwrap().0
+        pending.publish().unwrap().0
     });
     assert_ne!(source, alias);
     first.registry.remove::<CountedDataRecord>(&source).unwrap();
@@ -4096,7 +4103,7 @@ fn sealed_registry_finishes_its_owner_while_another_store_stays_open() {
     assert!(matches!(first.erase(DataRecord(1)), Err(XllError::Closing)));
     assert_eq!(second.registry.phase(), HandleRegistryPhase::Open);
     let pending = second.erase(DataRecord(2)).unwrap();
-    second.insert_pending(pending).unwrap();
+    pending.publish().unwrap();
     assert_eq!(second.len(), 1);
     second.seal().unwrap().finish_quiescence().unwrap();
 }

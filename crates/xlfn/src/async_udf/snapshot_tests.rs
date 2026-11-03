@@ -133,6 +133,9 @@ fn stale_snapshot_retains_calculation_until_rejected_reservation_releases_it() {
     let snapshot = runtime.snapshot_calculation();
     let old = snapshot.epoch();
     assert_eq!(old, CalculationEpoch::INITIAL);
+    // A successful optimistic preflight cannot admit the snapshot: the
+    // calculation can still advance before the authoritative reservation.
+    assert!(snapshot.preflight().is_ok());
     assert_unregistered(&runtime);
 
     assert!(runtime.advance_calculation());
@@ -141,7 +144,7 @@ fn stale_snapshot_retains_calculation_until_rejected_reservation_releases_it() {
         assert_eq!(control.calculations()[&old].pin_count(), 1);
     }
     assert_eq!(snapshot.epoch(), old);
-    assert_cancelled(runtime.reserve_snapshot(snapshot));
+    assert_cancelled(snapshot.reserve());
     assert_unregistered(&runtime);
     assert_eq!(state.reserves.load(Ordering::Relaxed), 1);
     assert_eq!(state.permit_drops.load(Ordering::Relaxed), 1);
@@ -167,7 +170,7 @@ fn cancelled_snapshot_cannot_register_a_task() {
     let (runtime, state) = start_runtime(AsyncTaskLimit::DEFAULT);
     let snapshot = runtime.snapshot_calculation();
     runtime.cancel_current_calculation();
-    assert_cancelled(runtime.reserve_snapshot(snapshot));
+    assert_cancelled(snapshot.reserve());
     assert_unregistered(&runtime);
     assert_eq!(state.submitted.load(Ordering::Relaxed), 0);
     assert_eq!(state.permit_drops.load(Ordering::Relaxed), 1);
@@ -219,7 +222,7 @@ fn snapshot_does_not_block_close_but_prevents_same_epoch_owner_replacement() {
         .start(HoldingExecutor(Arc::clone(&state)), AsyncTaskLimit::DEFAULT)
         .unwrap();
     let fresh = runtime.snapshot_calculation();
-    let reservation = runtime.reserve_snapshot(fresh).unwrap();
+    let reservation = fresh.reserve().unwrap();
     assert_eq!(runtime.registry().active_tasks.load(Ordering::Acquire), 1);
     drop(reservation);
     assert_eq!(runtime.registry().active_tasks.load(Ordering::Acquire), 0);
@@ -229,25 +232,17 @@ fn snapshot_does_not_block_close_but_prevents_same_epoch_owner_replacement() {
 }
 
 #[test]
-fn snapshot_from_another_registry_never_registers_a_task() {
-    let (first, _) = start_runtime(AsyncTaskLimit::DEFAULT);
+fn snapshot_reservation_uses_its_own_runtime() {
+    let (first, first_state) = start_runtime(AsyncTaskLimit::DEFAULT);
     let (second, second_state) = start_runtime(AsyncTaskLimit::DEFAULT);
-    let foreign = first.snapshot_calculation();
-    assert!(matches!(
-        second.preflight_snapshot(&foreign),
-        Err(XllError::Closing)
-    ));
-    assert!(matches!(
-        second.reserve_snapshot(foreign),
-        Err(XllError::Closing)
-    ));
-    assert_unregistered(&first);
+    let snapshot = first.snapshot_calculation();
+    assert!(snapshot.preflight().is_ok());
+    let reservation = snapshot.reserve().unwrap();
+    assert_eq!(first.registry().active_tasks.load(Ordering::Acquire), 1);
     assert_unregistered(&second);
-    assert_eq!(second_state.submitted.load(Ordering::Relaxed), 0);
-    assert_eq!(
-        second_state.permit_drops.load(Ordering::Relaxed),
-        second_state.reserves.load(Ordering::Relaxed)
-    );
+    assert_eq!(first_state.reserves.load(Ordering::Relaxed), 1);
+    assert_eq!(second_state.reserves.load(Ordering::Relaxed), 0);
+    drop(reservation);
     assert!(first.close().is_ok());
     assert!(second.close().is_ok());
 }
@@ -270,7 +265,7 @@ fn executor_reservation_reentry_invalidates_snapshot_before_registration() {
             }
         }));
         let snapshot = runtime.snapshot_calculation();
-        assert_cancelled(runtime.reserve_snapshot(snapshot));
+        assert_cancelled(snapshot.reserve());
         assert_unregistered(&runtime);
         assert_eq!(state.reserves.load(Ordering::Relaxed), 1);
         assert_eq!(state.permit_drops.load(Ordering::Relaxed), 1);
@@ -291,48 +286,33 @@ fn snapshot_saturation_preserves_cancelled_and_closing_error_priority() {
     let (runtime, state) = start_runtime(AsyncTaskLimit::new(1).unwrap());
     let future_drops = Arc::new(AtomicUsize::new(0));
     let retained = CountDrop(Arc::clone(&future_drops));
-    runtime
-        .reserve_snapshot(runtime.snapshot_calculation())
-        .unwrap()
-        .commit(
-            async move {
-                let _retained = retained;
-                std::future::pending::<()>().await;
-            },
-            source(),
-        );
+    runtime.snapshot_calculation().reserve().unwrap().commit(
+        async move {
+            let _retained = retained;
+            std::future::pending::<()>().await;
+        },
+        source(),
+    );
     assert_eq!(state.submitted.load(Ordering::Relaxed), 1);
     assert_eq!(future_drops.load(Ordering::Relaxed), 0);
 
     let saturated = runtime.snapshot_calculation();
-    assert!(matches!(
-        runtime.preflight_snapshot(&saturated),
-        Err(XllError::Overloaded)
-    ));
-    assert!(matches!(
-        runtime.reserve_snapshot(saturated),
-        Err(XllError::Overloaded)
-    ));
+    assert!(matches!(saturated.preflight(), Err(XllError::Overloaded)));
+    assert!(matches!(saturated.reserve(), Err(XllError::Overloaded)));
     assert_eq!(state.reserves.load(Ordering::Relaxed), 2);
     assert_eq!(state.permit_drops.load(Ordering::Relaxed), 2);
 
     let old = runtime.snapshot_calculation();
     assert!(runtime.advance_calculation());
-    assert_cancelled(runtime.preflight_snapshot(&old));
-    assert_cancelled(runtime.reserve_snapshot(old));
+    assert_cancelled(old.preflight());
+    assert_cancelled(old.reserve());
     assert_eq!(state.reserves.load(Ordering::Relaxed), 3);
     assert_eq!(state.permit_drops.load(Ordering::Relaxed), 3);
 
     let closing = runtime.snapshot_calculation();
     runtime.registry().close_admission();
-    assert!(matches!(
-        runtime.preflight_snapshot(&closing),
-        Err(XllError::Closing)
-    ));
-    assert!(matches!(
-        runtime.reserve_snapshot(closing),
-        Err(XllError::Closing)
-    ));
+    assert!(matches!(closing.preflight(), Err(XllError::Closing)));
+    assert!(matches!(closing.reserve(), Err(XllError::Closing)));
     assert_eq!(runtime.registry().next_task_id(), 2);
     assert_eq!(runtime.registry().active_tasks.load(Ordering::Acquire), 1);
     assert_eq!(

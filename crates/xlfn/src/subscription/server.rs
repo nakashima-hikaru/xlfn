@@ -70,6 +70,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         }
     }
 
+    #[cfg(test)]
     #[inline]
     pub(super) fn belongs_to(&self, runtime: &SubscriptionRuntime<H, E, C>) -> bool {
         self.runtime == NonNull::from(runtime)
@@ -82,7 +83,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     }
 
     #[inline]
-    fn runtime(&self) -> &SubscriptionRuntime<H, E, C> {
+    pub(super) fn runtime(&self) -> &SubscriptionRuntime<H, E, C> {
         // SAFETY: the COM/server lifecycle contract drains every handle use
         // before the runtime service is sealed and reclaimed.
         unsafe { self.runtime.as_ref() }
@@ -151,7 +152,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         topic_id: TopicId,
         id: SubscriptionId,
     ) -> XllResult<SubscriptionConnection<H, E, C>> {
-        self.runtime().connect_transaction(self, topic_id, id)
+        SubscriptionRuntime::connect_from_handle(self, topic_id, id)
     }
 
     #[cfg_attr(
@@ -162,7 +163,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         )
     )]
     pub(crate) fn disconnect(&self, topic_id: TopicId) -> XllResult<()> {
-        self.runtime().disconnect(self, topic_id)
+        SubscriptionRuntime::disconnect_from_handle(self, topic_id)
     }
 
     pub(crate) fn disconnect_deferred(
@@ -170,8 +171,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         topic_id: TopicId,
         completion: impl Into<H::DisconnectCompletion>,
     ) -> XllResult<()> {
-        self.runtime()
-            .disconnect_deferred(self, topic_id, completion.into())
+        SubscriptionRuntime::disconnect_deferred_from_handle(self, topic_id, completion.into())
     }
 
     pub(crate) fn terminate(&self) -> XllResult<()> {

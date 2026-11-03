@@ -7,7 +7,7 @@
 
 use super::object::PendingObjectBinding;
 use super::registry::{HandleRegistry, HandleRegistrySealed};
-use super::{ExcelHandleObject, Handle, HandleId, ObjectId};
+use super::{ExcelHandleObject, Handle};
 #[cfg(any(test, feature = "refinement"))]
 use super::{HandleToken, TokenWire};
 use crate::XllResult;
@@ -43,16 +43,6 @@ impl HandleStore {
 
     pub(crate) const fn session(&self) -> u64 {
         self.registry.codec.session
-    }
-
-    pub(crate) fn insert_pending<'store, T: ExcelHandleObject>(
-        &'store self,
-        value: PendingObjectBinding<'store, T>,
-    ) -> XllResult<(String, HandleId, ObjectId, bool)> {
-        if !value.belongs_to(&self.registry) {
-            return Err(crate::XllError::StaleHandle);
-        }
-        value.publish()
     }
 
     pub(crate) fn lookup<'call, T: ExcelHandleObject>(

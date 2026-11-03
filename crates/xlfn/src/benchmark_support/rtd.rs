@@ -207,9 +207,8 @@ where
             .collect();
         let mut operation = || {
             for (index, prepared) in prepared.iter().enumerate() {
-                runtime
+                server_handle
                     .connect_transaction(
-                        &server_handle,
                         crate::subscription::TopicId(index as i32 + 1),
                         prepared.id(),
                     )
@@ -471,8 +470,8 @@ impl RtdPublishNumberBenchmark {
             .prepare(&source, topic.borrowed())
             .expect("prepare must succeed");
         let id = prepared.id();
-        let conn = runtime
-            .connect_transaction(&server, crate::subscription::TopicId(1), id)
+        let conn = server
+            .connect_transaction(crate::subscription::TopicId(1), id)
             .expect("connect_transaction must succeed");
         conn.commit().expect("connection commit must succeed");
         prepared.commit();
@@ -562,8 +561,8 @@ impl RtdPublishStringBenchmark {
             .prepare(&source, topic.borrowed())
             .expect("prepare must succeed");
         let id = prepared.id();
-        let conn = runtime
-            .connect_transaction(&server, crate::subscription::TopicId(2), id)
+        let conn = server
+            .connect_transaction(crate::subscription::TopicId(2), id)
             .expect("connect_transaction must succeed");
         conn.commit().expect("connection commit must succeed");
         prepared.commit();
@@ -883,8 +882,8 @@ where
                 .prepare(&source, topic.borrowed())
                 .expect("prepare must succeed");
             let id = prepared.id();
-            let connection = runtime
-                .connect_transaction(&server, topic_id, id)
+            let connection = server
+                .connect_transaction(topic_id, id)
                 .expect("connect_transaction must succeed");
             connection.commit().expect("connection commit must succeed");
             prepared.commit();
@@ -970,8 +969,8 @@ impl RtdChannelPipelineBenchmark {
                     .borrowed(),
             )
             .unwrap();
-        runtime
-            .connect_transaction(&server, crate::subscription::TopicId(1), prepared.id())
+        server
+            .connect_transaction(crate::subscription::TopicId(1), prepared.id())
             .unwrap()
             .commit()
             .unwrap();

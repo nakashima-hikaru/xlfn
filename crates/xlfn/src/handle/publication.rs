@@ -178,18 +178,17 @@ impl<'runtime> PublicationReservation<'runtime> {
 
     pub(super) fn insert_object<T: ExcelHandleObject>(
         self,
-        prepared: PreparedHandleObject<'runtime, T>,
+        prepared: PreparedHandleObject<'_, T>,
     ) -> XllResult<InsertedPublication<'runtime>> {
-        let (token, _binding_id, _object_id, reused) = match prepared {
-            PreparedHandleObject::New(value) => self
-                .runtime
-                .store
-                .insert_pending::<T>(value.into_pending())?,
-            PreparedHandleObject::Existing(object) => self
-                .runtime
-                .store
-                .insert_pending::<T>(object.into_pending())?,
+        // Produce and publish through the reservation's own store. A pending
+        // binding from an unrelated registry cannot be supplied here.
+        let pending = match prepared {
+            PreparedHandleObject::New(value) => self.runtime.store.erase(value)?,
+            PreparedHandleObject::Existing(alias) => {
+                alias.into_pending_object_binding(&self.runtime.store)?
+            }
         };
+        let (token, _binding_id, _object_id, reused) = pending.publish()?;
         let provisional = ProvisionalPublication::new(
             self.runtime,
             self.key,

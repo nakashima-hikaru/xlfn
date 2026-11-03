@@ -712,10 +712,6 @@ impl<'registry, T: Send + Sync + 'static> PendingObjectBinding<'registry, T> {
         self.registry.insert_pending_object(&mut binding)
     }
 
-    pub(super) fn belongs_to(&self, registry: &super::registry::HandleRegistry) -> bool {
-        std::ptr::eq(self.registry, registry)
-    }
-
     #[cfg(test)]
     #[inline]
     pub(crate) fn id(&self) -> ObjectId {

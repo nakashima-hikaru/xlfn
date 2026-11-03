@@ -1,13 +1,16 @@
 //! Pure registration validation and host-independent preparation.
 
-use super::schema::MAX_REGISTER_ARGUMENT_HELP_ENTRIES;
-use super::{ExcelNameKey, RegistrationDescriptor, RegistrationSignature};
+use super::schema::{MAX_REGISTER_ARGUMENT_HELP_ENTRIES, ValidatedSignature};
+use super::{ExcelNameKey, RegistrationDescriptor};
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 
-pub(crate) fn validate_descriptors(descriptors: &[RegistrationDescriptor]) -> XllResult<()> {
+fn validate_descriptors(
+    descriptors: &[RegistrationDescriptor],
+) -> XllResult<SmallVec<[ValidatedSignature; 16]>> {
+    let mut signatures = SmallVec::with_capacity(descriptors.len());
     let mut exports = FxHashSet::with_capacity_and_hasher(descriptors.len(), Default::default());
     let mut excel_names =
         FxHashSet::with_capacity_and_hasher(descriptors.len(), Default::default());
@@ -26,14 +29,18 @@ pub(crate) fn validate_descriptors(descriptors: &[RegistrationDescriptor]) -> Xl
             || !exports.insert(ExcelNameKey::new(descriptor.export_name))
             || !excel_names.insert(ExcelNameKey::new(descriptor.excel_name))
             || descriptor.signature.arguments.len() != descriptor.arguments.len()
-            || descriptor.signature.validate().is_err()
         {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRY,
             });
         }
+        let signature =
+            ValidatedSignature::try_from(descriptor.signature).map_err(|_| XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRY,
+            })?;
+        signatures.push(signature);
     }
-    Ok(())
+    Ok(signatures)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,7 +65,7 @@ pub(crate) struct PreparedRegistration {
     pub descriptor_index: usize,
     pub export_name: &'static str,
     pub excel_name: &'static str,
-    pub signature: RegistrationSignature,
+    pub signature: ValidatedSignature,
     pub visibility: super::schema::FunctionVisibility,
     pub export_name_text: PreparedExcelString,
     pub excel_name_text: PreparedExcelString,
@@ -88,10 +95,10 @@ impl PreparedRegistrationSet {
 pub(crate) fn preflight_registration(
     descriptors: &[RegistrationDescriptor],
 ) -> XllResult<PreparedRegistrationSet> {
-    validate_descriptors(descriptors)?;
+    let signatures = validate_descriptors(descriptors)?;
 
     let mut prepared = Vec::with_capacity(descriptors.len());
-    for (index, descriptor) in descriptors.iter().enumerate() {
+    for (index, (descriptor, signature)) in descriptors.iter().zip(signatures).enumerate() {
         validate_excel_string(descriptor.export_name)?;
         validate_excel_string(descriptor.excel_name)?;
         validate_excel_string(descriptor.category)?;
@@ -125,7 +132,7 @@ pub(crate) fn preflight_registration(
         };
         validate_excel_string(argument_names.as_str())?;
 
-        let encoded_sig = descriptor.signature.encode()?;
+        let encoded_sig = signature.encode();
         validate_excel_string(&encoded_sig)?;
 
         let help_count = descriptor
@@ -146,7 +153,7 @@ pub(crate) fn preflight_registration(
             descriptor_index: index,
             export_name: descriptor.export_name,
             excel_name: descriptor.excel_name,
-            signature: descriptor.signature,
+            signature,
             visibility: descriptor.visibility,
             export_name_text: PreparedExcelString::borrowed(descriptor.export_name),
             excel_name_text: PreparedExcelString::borrowed(descriptor.excel_name),
@@ -172,7 +179,7 @@ fn validate_excel_string(s: &str) -> XllResult<()> {
 mod tests {
     use super::*;
     use crate::diagnostics::id::DiagnosticId;
-    use crate::registration::{ArgumentAbi, ArgumentDescriptor, ReturnAbi};
+    use crate::registration::{ArgumentAbi, ArgumentDescriptor, RegistrationSignature, ReturnAbi};
     use xlfn_common::{ExecutionKind, FunctionVisibility};
 
     fn descriptor() -> RegistrationDescriptor {

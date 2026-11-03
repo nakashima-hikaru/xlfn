@@ -68,6 +68,55 @@ impl<E> Deref for ExecutorRead<'_, E> {
     }
 }
 
+/// Couples the pinned calculation with the only runtime allowed to reserve it.
+/// Both fields are private, and only `AsyncRuntime::snapshot_calculation` creates it.
+pub(crate) struct RuntimeCalculationSnapshot<'a, E: AsyncExecutor> {
+    runtime: &'a AsyncRuntime<E>,
+    calculation: CalculationSnapshot<'a>,
+}
+
+impl<'a, E: AsyncExecutor> RuntimeCalculationSnapshot<'a, E> {
+    pub(crate) fn epoch(&self) -> CalculationEpoch {
+        self.calculation.epoch()
+    }
+
+    pub(crate) fn preflight(&self) -> XllResult<()> {
+        let runtime = self.runtime;
+        if runtime.publication.load(Ordering::Acquire).is_null() {
+            return Err(XllError::Closing);
+        }
+        if runtime.registry().preflight_available()? {
+            return Ok(());
+        }
+        // The executor reader preserves the existing saturation/close ordering.
+        let _executor = runtime.executor().ok_or(XllError::Closing)?;
+        self.calculation.preflight()
+    }
+
+    pub(crate) fn reserve(self) -> XllResult<RuntimeReservation<'a, E>> {
+        let runtime = self.runtime;
+        let executor = runtime.executor().ok_or(XllError::Closing)?;
+        #[cfg(test)]
+        {
+            let hook = runtime.after_executor_snapshot.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let permit = executor.reserve()?;
+        // A snapshot pins storage only; it does not pre-admit the calculation.
+        // Final reservation must re-enter admission and check capacity.
+        let task = self.calculation.reserve()?;
+        Ok(RuntimeReservation {
+            task,
+            permit,
+            executor,
+            #[cfg(test)]
+            runtime,
+        })
+    }
+}
+
 pub(crate) struct RuntimeReservation<'a, E: AsyncExecutor> {
     // Registry reservation drops before executor publication admission.
     task: TaskReservation<'a>,
@@ -164,8 +213,11 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
         self.registry().current_epoch()
     }
 
-    pub(crate) fn snapshot_calculation(&self) -> CalculationSnapshot<'_> {
-        self.registry().snapshot()
+    pub(crate) fn snapshot_calculation(&self) -> RuntimeCalculationSnapshot<'_, E> {
+        RuntimeCalculationSnapshot {
+            runtime: self,
+            calculation: self.registry().snapshot(),
+        }
     }
 
     fn executor(&self) -> Option<ExecutorRead<'_, E>> {
@@ -192,43 +244,6 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
         // between calculation admission and its capacity check.
         let _executor = self.executor().ok_or(XllError::Closing)?;
         self.registry().preflight(epoch)
-    }
-
-    pub(crate) fn preflight_snapshot(&self, snapshot: &CalculationSnapshot<'_>) -> XllResult<()> {
-        let registry = self.registry();
-        if self.publication.load(Ordering::Acquire).is_null() || !snapshot.belongs_to(registry) {
-            return Err(XllError::Closing);
-        }
-        if registry.preflight_available()? {
-            return Ok(());
-        }
-        // Saturation temporarily enters registry activity. Keep an executor
-        // publication reader through that path, as in ordinary preflight.
-        let _executor = self.executor().ok_or(XllError::Closing)?;
-        registry.preflight_snapshot(snapshot)
-    }
-
-    pub(crate) fn reserve_snapshot<'a>(
-        &'a self,
-        snapshot: CalculationSnapshot<'a>,
-    ) -> XllResult<RuntimeReservation<'a, E>> {
-        let executor = self.executor().ok_or(XllError::Closing)?;
-        #[cfg(test)]
-        {
-            let hook = self.after_executor_snapshot.lock().clone();
-            if let Some(hook) = hook {
-                hook();
-            }
-        }
-        let permit = executor.reserve()?;
-        let task = self.registry().reserve_snapshot(snapshot)?;
-        Ok(RuntimeReservation {
-            task,
-            permit,
-            executor,
-            #[cfg(test)]
-            runtime: self,
-        })
     }
 
     #[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]

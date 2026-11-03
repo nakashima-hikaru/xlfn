@@ -106,6 +106,34 @@ impl Default for ValueSlot {
     }
 }
 
+/// The two publication buffers. No other index can enter refresh ownership.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BufferIndex {
+    First,
+    Second,
+}
+
+impl BufferIndex {
+    pub(crate) const ALL: [Self; 2] = [Self::First, Self::Second];
+
+    #[inline]
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::First => 0,
+            Self::Second => 1,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn from_epoch(epoch: u64) -> Self {
+        if epoch & 1 == 0 {
+            Self::First
+        } else {
+            Self::Second
+        }
+    }
+}
+
 pub(crate) struct ActiveSubscription {
     pub(crate) id: SubscriptionId,
     pub(crate) generation: ConnectionGeneration,
@@ -113,7 +141,7 @@ pub(crate) struct ActiveSubscription {
     /// Pending/refresh value slots corresponding to writer buffers 0 and 1.
     pub(crate) values: [ValueSlot; 2],
     /// Index (0 or 1) of the latest value slot for exact publication dedup.
-    pub(crate) latest_slot: Option<u8>,
+    pub(crate) latest_slot: Option<BufferIndex>,
     pub(crate) next_sequence: u64,
     pub(crate) _permit: DetachedQuotaPermit,
 }
@@ -130,8 +158,8 @@ impl ActiveSubscription {
 
     #[inline]
     pub(crate) fn latest_slot_state(&self) -> Option<&ValueSlot> {
-        let slot = self.latest_slot? as usize;
-        self.values.get(slot)
+        let slot = self.latest_slot?.index();
+        Some(&self.values[slot])
     }
 
     #[inline]
@@ -153,7 +181,7 @@ pub(crate) struct RtdUpdate {
     pub(crate) sequence: u64,
     pub(crate) topic_id: i32,
     pub(crate) connection_generation: ConnectionGeneration,
-    pub(crate) buffer: u8,
+    pub(crate) buffer: BufferIndex,
     pub(crate) value: StoredRtdValue,
 }
 
@@ -192,7 +220,7 @@ impl RtdUpdate {
             topic_id,
             connection_generation: ConnectionGeneration::new(1)
                 .expect("test connection generation is non-zero"),
-            buffer: 0,
+            buffer: BufferIndex::First,
             value: value.into_stored().expect("test RTD value is valid"),
         }
     }
@@ -486,5 +514,19 @@ mod typed_sink_tests {
         assert_eq!(runtime.services.active_quota.used(), 0);
         assert_eq!(runtime.services.queued_update_quota.used(), 0);
         runtime.close().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod buffer_index_tests {
+    use super::BufferIndex;
+
+    #[test]
+    fn parity_and_indices_are_total_for_both_buffers() {
+        assert_eq!(BufferIndex::ALL.map(BufferIndex::index), [0, 1]);
+        for epoch in [0, 1, 2, 3, u64::MAX - 1, u64::MAX] {
+            assert_eq!(BufferIndex::from_epoch(epoch).index(), (epoch & 1) as usize);
+        }
+        assert_eq!(std::mem::size_of::<Option<BufferIndex>>(), 1);
     }
 }

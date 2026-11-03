@@ -103,13 +103,35 @@ pub(crate) struct CalculationSnapshot<'a> {
     calculation: CalculationPin,
 }
 
-impl CalculationSnapshot<'_> {
+impl<'a> CalculationSnapshot<'a> {
     pub(crate) fn epoch(&self) -> CalculationEpoch {
         self.calculation.get().epoch
     }
 
-    pub(crate) fn belongs_to(&self, registry: &TaskRegistry) -> bool {
-        std::ptr::eq(registry, self.registry)
+    pub(crate) fn preflight(&self) -> XllResult<()> {
+        if self.registry.preflight_available()? {
+            return Ok(());
+        }
+        let (admission, active, _) = self.registry.admit(self.calculation.get())?;
+        drop(active);
+        drop(admission);
+        Ok(())
+    }
+
+    pub(crate) fn reserve(self) -> XllResult<TaskReservation<'a>> {
+        let registry = self.registry;
+        let calculation = self.calculation;
+        // SAFETY: the pin is moved into the reservation after acquiring admission,
+        // and is dropped after its admission guard.
+        let current = unsafe { calculation.pointer().as_ref() };
+        let (admission, active, id) = registry.admit(current)?;
+        Ok(TaskReservation {
+            registry: RegistryPtr::from_ref(registry),
+            id,
+            admission,
+            calculation,
+            active,
+        })
     }
 }
 
@@ -311,22 +333,6 @@ impl TaskRegistry {
         Ok(())
     }
 
-    pub(crate) fn preflight_snapshot(&self, snapshot: &CalculationSnapshot<'_>) -> XllResult<()> {
-        if !std::ptr::eq(self, snapshot.registry) {
-            return Err(XllError::Closing);
-        }
-        if self.preflight_available()? {
-            return Ok(());
-        }
-        // A saturated call still validates calculation admission before
-        // reporting capacity exhaustion. Borrow the existing pin so neither
-        // a second publication lock nor an additional pin is needed.
-        let (admission, active, _) = self.admit(snapshot.calculation.get())?;
-        drop(active);
-        drop(admission);
-        Ok(())
-    }
-
     #[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
     pub(crate) fn reserve(&self, epoch: CalculationEpoch) -> XllResult<TaskReservation<'_>> {
         if self.closing.load(Ordering::Acquire) {
@@ -336,28 +342,7 @@ impl TaskRegistry {
         if snapshot.epoch() != epoch {
             return Err(cancelled_calculation_error());
         }
-        self.reserve_snapshot(snapshot)
-    }
-
-    pub(crate) fn reserve_snapshot<'a>(
-        &'a self,
-        snapshot: CalculationSnapshot<'a>,
-    ) -> XllResult<TaskReservation<'a>> {
-        if !std::ptr::eq(self, snapshot.registry) {
-            return Err(XllError::Closing);
-        }
-        let calculation = snapshot.calculation;
-        // SAFETY: this pin moves into the returned reservation and retains
-        // the allocation until after its admission guard is destroyed.
-        let current = unsafe { calculation.pointer().as_ref() };
-        let (admission, active, id) = self.admit(current)?;
-        Ok(TaskReservation {
-            registry: RegistryPtr::from_ref(self),
-            id,
-            admission,
-            calculation,
-            active,
-        })
+        snapshot.reserve()
     }
 
     // Saturated preflight needs only the error tag. Keep the admission tuple

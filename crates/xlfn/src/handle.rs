@@ -58,9 +58,10 @@ pub(crate) use runtime::{FormulaHandleService, FormulaHandleServiceSealed, Handl
 pub(crate) use store::HandleStore;
 #[cfg(any(test, feature = "refinement"))]
 pub(crate) use token::HandleToken;
+#[cfg(test)]
+pub(crate) use token::ObjectId;
 #[cfg(feature = "handles")]
 pub(crate) use token::with_utf16_handle_token;
-pub(crate) use token::{HandleId, ObjectId};
 pub(crate) use topic::{
     Initialization, InitializationPtr, PrepareDecision, PublishedTopic, PublishedTopicPtr,
     PublishedTopicState, TopicRemoval, TopicTable,
