@@ -265,11 +265,11 @@
   },
   {
     "path": "crates/xlfn/src/subscription/runtime.rs",
-    "context": "fn connect_transaction",
+    "context": "fn connect_from_handle",
     "code": "let sub_res = catch_unwind(AssertUnwindSafe(|| {",
     "count": 1,
     "category": "resume",
-    "reason": "connect_transaction rolls back the connection reservation and resumes the original subscribe payload to the enclosing caller boundary."
+    "reason": "connect_from_handle rolls back the connection reservation and resumes the original subscribe payload to the enclosing caller boundary."
   },
   {
     "path": "crates/xlfn/src/subscription/runtime.rs",
@@ -277,7 +277,7 @@
     "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
     "count": 1,
     "category": "resume",
-    "reason": "Import for the audited resume-only boundary. connect_transaction rolls back the connection reservation and resumes the original subscribe payload to the enclosing caller boundary."
+    "reason": "Import for the audited resume-only boundary. connect_from_handle rolls back the connection reservation and resumes the original subscribe payload to the enclosing caller boundary."
   },
   {
     "path": "crates/xlfn/src/subscription/tests.rs",
