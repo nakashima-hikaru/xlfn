@@ -13,7 +13,9 @@ use crate::return_abi::ExcelCallbackStatus;
 use crate::value::ExcelInputCells;
 use crate::value::input::sealed::ExcelParameterSealed;
 use crate::value::input::{PreparedArgument, PreparedElement, PreparedParameterSequence};
-use crate::value::{CallContext, ExcelParameter, FromExcel, InputMode, XlValueRef, XlValueType};
+use crate::value::{
+    DecodeCallContext, ExcelParameter, FromExcel, InputMode, XlValueRef, XlValueType,
+};
 use crate::{XllError, XllResult};
 use smallvec::SmallVec;
 use std::convert::Infallible;
@@ -584,7 +586,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ModuleName {
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>> {
         <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
@@ -594,7 +596,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ModuleName {
     type Elements = PreparedParameterSequence<'call, Self, M>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         cells.retain(|value, argument| {
@@ -608,7 +610,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ModuleName {
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        _: &CallContext,
+        _: &mut DecodeCallContext<'_, '_>,
         _: &mut M::Identity,
     ) -> XllResult<Self> {
         Self::from_value(value, argument)

@@ -1,6 +1,6 @@
 // module: value
 fn prepare_after_finish<'call>(
-    mut arguments: crate::value::input::ArgumentContext<'call, crate::value::PlainInputMode>,
+    mut arguments: crate::value::input::ArgumentContext<'_, 'call, crate::value::PlainInputMode>,
     value: crate::value::XlValueRef<'call>,
 ) {
     let _ = arguments.finish();

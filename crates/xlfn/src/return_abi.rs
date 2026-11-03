@@ -2062,9 +2062,9 @@ mod tests {
         crate::call::with_excel_callback_scope_and_call(
             &call,
             &callbacks,
-            |call, scope, callbacks| {
+            |call, storage, token, callbacks| {
                 let frame = crate::__private::v1::CallFrame::<crate::value::PlainInputMode>::new(
-                    call, scope, callbacks, 0,
+                    call, storage, token, callbacks, 0,
                 );
                 let mut context = frame.return_context("scalar").unwrap();
                 let value =

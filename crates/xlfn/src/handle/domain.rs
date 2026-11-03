@@ -1,7 +1,7 @@
 //! Call-scoped handle read domain and deferred reclamation.
 //!
 //! Rather than acquiring a per-record reader permit on every lookup, UDF
-//! calls register once with this domain for the duration of their [`CallScope`].
+//! calls register once with this domain for the duration of their invocation-owned `CallStorage`.
 //! Readers enter striped drain gates partitioned by generation, avoiding
 //! cache-line contention on individual binding records during concurrent
 //! lookups of the same handle.
@@ -149,7 +149,7 @@ impl HandleReadDomain {
             return;
         }
         let debt = self.debt();
-        // CallScope is !Send and all handle permits use the acquiring thread's
+        // CallStorage is !Send and all handle permits use the acquiring thread's
         // default stripe. Looking at both generations therefore excludes an
         // own permit without changing lookup/permit-entry bookkeeping.
         if debt >= HARD_DEBT_LIMIT && !self.retirement.current_thread_may_be_reading() {
@@ -400,9 +400,13 @@ mod tests {
             pending.publish().unwrap().0
         };
         let first = publish();
-        let (remover, finished) =
-            crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
-                let borrowed = registry.lookup_handle::<Payload>(scope, &first).unwrap();
+        let (remover, finished) = crate::call::with_branded_call_scope_and_state(
+            &registry,
+            |registry, storage, brand| {
+                let mut context = crate::value::DecodeCallContext::with_storage(storage, brand);
+                let borrowed = registry
+                    .lookup_handle::<Payload>(&mut context, &first)
+                    .unwrap();
                 registry.remove::<Payload>(&first).unwrap();
                 for _ in 1..HARD_DEBT_LIMIT - 1 {
                     registry.remove::<Payload>(&publish()).unwrap();
@@ -440,7 +444,8 @@ mod tests {
                 assert!(finished.recv_timeout(Duration::from_millis(20)).is_err());
                 std::hint::black_box(&*borrowed);
                 (remover, finished)
-            });
+            },
+        );
         finished.recv_timeout(Duration::from_secs(30)).unwrap();
         remover.join().unwrap();
         registry.bindings.read_domain().flush_for_test();

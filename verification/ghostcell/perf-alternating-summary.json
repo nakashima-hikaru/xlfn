@@ -1,0 +1,123 @@
+{
+  "method": "Prebuilt baseline and new binaries, alternating baseline/new three rounds, taskset core 2, 1s warmup, 30 samples, 10s measurement, no concurrent compilation. Direct timing estimates, not Criterion saved-baseline change output.",
+  "runs": [
+    {
+      "round": 1,
+      "baseline": {
+        "8": {
+          "estimate_ns": 638.93,
+          "interval_ns": [
+            626.8,
+            649.13
+          ]
+        },
+        "32": {
+          "estimate_ns": 3302.0,
+          "interval_ns": [
+            3233.2999999999997,
+            3370.2999999999997
+          ]
+        }
+      },
+      "ghostcell": {
+        "8": {
+          "estimate_ns": 651.06,
+          "interval_ns": [
+            637.36,
+            667.51
+          ]
+        },
+        "32": {
+          "estimate_ns": 2487.2000000000003,
+          "interval_ns": [
+            2442.1,
+            2536.9
+          ]
+        }
+      },
+      "new_vs_baseline_pct": {
+        "8": 1.8984865321709732,
+        "32": -24.675953967292543
+      }
+    },
+    {
+      "round": 2,
+      "baseline": {
+        "8": {
+          "estimate_ns": 648.58,
+          "interval_ns": [
+            634.08,
+            668.95
+          ]
+        },
+        "32": {
+          "estimate_ns": 3167.6000000000004,
+          "interval_ns": [
+            3126.5,
+            3204.2999999999997
+          ]
+        }
+      },
+      "ghostcell": {
+        "8": {
+          "estimate_ns": 648.01,
+          "interval_ns": [
+            632.95,
+            664.87
+          ]
+        },
+        "32": {
+          "estimate_ns": 4019.0,
+          "interval_ns": [
+            3957.3999999999996,
+            4079.9
+          ]
+        }
+      },
+      "new_vs_baseline_pct": {
+        "8": -0.08788430108853662,
+        "32": 26.878393736582893
+      }
+    },
+    {
+      "round": 3,
+      "baseline": {
+        "8": {
+          "estimate_ns": 616.93,
+          "interval_ns": [
+            608.6,
+            626.72
+          ]
+        },
+        "32": {
+          "estimate_ns": 2395.7000000000003,
+          "interval_ns": [
+            2341.5,
+            2447.4
+          ]
+        }
+      },
+      "ghostcell": {
+        "8": {
+          "estimate_ns": 638.06,
+          "interval_ns": [
+            628.9,
+            646.31
+          ]
+        },
+        "32": {
+          "estimate_ns": 2441.3,
+          "interval_ns": [
+            2403.0,
+            2474.9
+          ]
+        }
+      },
+      "new_vs_baseline_pct": {
+        "8": 3.425023908709246,
+        "32": 1.9034102767458316
+      }
+    }
+  ],
+  "conclusion": "32-handle between-process variability exceeds code delta and changes direction; no reproducible 50% regression. Eight-handle observed deltas are -0.09% to +3.42%. No code change justified by these measurements, no speedup claim."
+}

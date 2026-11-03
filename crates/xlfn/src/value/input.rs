@@ -140,7 +140,7 @@ impl sealed::InputModeSealed for PlainInputMode {
         );
         #[cfg(not(feature = "handles"))]
         let context = {
-            let _ = (arguments.call, arguments.inputs);
+            let _ = (arguments.call.scope(), arguments.inputs);
             crate::call_return::ReturnContext::from_state(())
         };
         Ok(context)
@@ -759,7 +759,7 @@ pub trait ExcelParameter<'call, M: InputMode>:
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedParameter<'call, Self, M>> {
         Self::decode(value, argument, context, identity).map(PreparedArgument::Ready)
@@ -771,21 +771,21 @@ pub trait ExcelParameter<'call, M: InputMode>:
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>>;
 
     type Elements;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements>;
     fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>>;
 
     fn prepare_elements_borrowed(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         Self::prepare_elements(cells, context, identity)
@@ -807,7 +807,7 @@ pub trait ExcelParameter<'call, M: InputMode>:
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self>;
 
@@ -828,7 +828,7 @@ impl<'call, T: FromExcel<'call>> ExcelParameter<'call, PlainInputMode> for T {
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut (),
     ) -> XllResult<PreparedElement<'call, Self, PlainInputMode>> {
         <Self as ExcelParameter<'call, PlainInputMode>>::prepare(value, argument, context, identity)
@@ -838,7 +838,7 @@ impl<'call, T: FromExcel<'call>> ExcelParameter<'call, PlainInputMode> for T {
     type Elements = PreparedParameterSequence<'call, Self, PlainInputMode>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut (),
     ) -> XllResult<Self::Elements> {
         cells.retain(|value, argument| Self::prepare_element(value, argument, context, identity))
@@ -853,7 +853,7 @@ impl<'call, T: FromExcel<'call>> ExcelParameter<'call, PlainInputMode> for T {
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        _context: &CallContext<'call>,
+        _context: &mut DecodeCallContext<'_, 'call>,
         _: &mut (),
     ) -> XllResult<Self> {
         T::from_excel(value, argument)
@@ -887,7 +887,7 @@ where
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
-        _: &CallContext<'call>,
+        _: &mut DecodeCallContext<'_, 'call>,
         identity: &mut InputIdentityEncoder,
     ) -> XllResult<PreparedParameter<'call, Self, FormulaInputMode>> {
         Ok(PreparedArgument::prepared(T::prepare(
@@ -901,7 +901,7 @@ where
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut InputIdentityEncoder,
     ) -> XllResult<PreparedElement<'call, Self, FormulaInputMode>> {
         <Self as ExcelParameter<'call, FormulaInputMode>>::prepare(
@@ -913,7 +913,7 @@ where
     type Elements = PreparedExcelSequence<'call, T, T::Prepared>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        _: &CallContext<'call>,
+        _: &mut DecodeCallContext<'_, 'call>,
         identity: &mut InputIdentityEncoder,
     ) -> XllResult<Self::Elements> {
         T::__prepare_elements(cells, identity)
@@ -925,7 +925,7 @@ where
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        _context: &CallContext<'call>,
+        _context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut InputIdentityEncoder,
     ) -> XllResult<Self> {
         T::from_excel_with_identity(value, argument, identity)
@@ -963,97 +963,32 @@ struct RuntimeCallAccess<'call> {
     handles: crate::handle::FormulaHandleServiceResolver<'call>,
 }
 
-/// Runtime services available while converting one Excel-visible argument.
+/// Runtime services retained after input decoding has finished.
 #[doc(hidden)]
-pub struct CallContext<'call> {
+pub(crate) struct CallContext<'call> {
     access: CallAccess<'call>,
 }
-
-/// The call either has plain conversion access or the runtime services for an
-/// admitted generation.
 enum CallAccess<'call> {
     Plain(&'call CallScope<'call>),
     Runtime(RuntimeCallAccess<'call>),
-    #[cfg(all(test, feature = "handles"))]
-    HandleOnly {
-        scope: &'call CallScope<'call>,
-        handles: crate::handle::FormulaHandleServiceResolver<'call>,
-    },
 }
-
 impl<'call> CallContext<'call> {
-    pub(crate) fn plain(scope: &'call CallScope<'call>) -> Self {
-        Self {
-            access: CallAccess::Plain(scope),
-        }
-    }
-
-    pub(crate) fn with_call<A: crate::Addin>(
-        call: &'call crate::runtime::CallGuard<'_, A>,
-        scope: &'call CallScope<'call>,
-    ) -> Self {
-        #[cfg(not(feature = "handles"))]
-        let _ = call;
-        Self {
-            access: CallAccess::Runtime(RuntimeCallAccess {
-                scope,
-                #[cfg(feature = "handles")]
-                handles: call.handle_call_access(),
-            }),
-        }
-    }
-
-    #[cfg(all(test, feature = "handles"))]
-    /// Standalone fixtures keep the service owner alive through CallScope
-    /// destruction, including the domain permit's maintenance tail. Normal
-    /// calls obtain that enclosing owner from the admitted CallGuard.
-    pub(crate) fn from_handle_access(
-        scope: &'call CallScope<'call>,
-        handles: crate::handle::FormulaHandleServiceResolver<'call>,
-    ) -> Self {
-        Self {
-            access: CallAccess::HandleOnly { scope, handles },
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_scope(scope: &'call CallScope<'call>) -> Self {
-        Self {
-            access: CallAccess::Plain(scope),
-        }
-    }
-
-    pub(crate) fn scratch(&self) -> &'call crate::call::CallScratch {
-        self.scope().scratch()
-    }
-
     pub(crate) fn scope(&self) -> &'call CallScope<'call> {
         match &self.access {
             CallAccess::Plain(scope) => scope,
             CallAccess::Runtime(access) => access.scope,
-            #[cfg(all(test, feature = "handles"))]
-            CallAccess::HandleOnly { scope, .. } => scope,
         }
     }
-
     #[cfg(feature = "handles")]
     pub(crate) fn take_handle_access(&mut self) -> Option<HandleCallAccess<'call>> {
-        let scope = match &self.access {
-            CallAccess::Plain(scope) => *scope,
-            CallAccess::Runtime(access) => access.scope,
-            #[cfg(all(test, feature = "handles"))]
-            CallAccess::HandleOnly { scope, .. } => *scope,
-        };
+        let scope = self.scope();
         match std::mem::replace(&mut self.access, CallAccess::Plain(scope)) {
             CallAccess::Runtime(access) => Some(HandleCallAccess {
                 runtime: access.handles,
             }),
-            #[cfg(all(test, feature = "handles"))]
-            CallAccess::HandleOnly { handles, .. } => Some(HandleCallAccess { runtime: handles }),
             CallAccess::Plain(_) => None,
         }
     }
-
     #[cfg(feature = "handles")]
     pub(crate) fn into_plain_return_guard(
         self,
@@ -1061,47 +996,164 @@ impl<'call> CallContext<'call> {
         match self.access {
             CallAccess::Plain(_) => None,
             CallAccess::Runtime(access) => access.handles.into_read_guard(),
-            #[cfg(test)]
-            CallAccess::HandleOnly { handles, .. } => handles.into_read_guard(),
         }
     }
+}
 
+/// Exclusive input-decoding authority. Runtime access owns its fresh token by
+/// value; scratch-only conversion cannot create handle-domain witnesses.
+#[doc(hidden)]
+pub struct DecodeCallContext<'brand, 'call> {
+    access: DecodeCallAccess<'brand, 'call>,
+}
+enum DecodeCallAccess<'brand, 'call> {
+    Plain(&'call CallScope<'call>),
+    #[cfg(any(test, feature = "bench-internals"))]
+    Storage {
+        storage: &'call crate::call::CallStorage<'brand, 'call>,
+        token: ghost_cell::GhostToken<'brand>,
+    },
+    Runtime {
+        storage: &'call crate::call::CallStorage<'brand, 'call>,
+        token: ghost_cell::GhostToken<'brand>,
+        #[cfg(feature = "handles")]
+        handles: crate::handle::FormulaHandleServiceResolver<'call>,
+    },
+}
+impl<'brand, 'call> DecodeCallContext<'brand, 'call> {
+    pub(crate) fn plain(scope: &'call CallScope<'call>) -> Self {
+        Self {
+            access: DecodeCallAccess::Plain(scope),
+        }
+    }
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub fn with_storage(
+        storage: &'call crate::call::CallStorage<'brand, 'call>,
+        token: ghost_cell::GhostToken<'brand>,
+    ) -> Self {
+        Self {
+            access: DecodeCallAccess::Storage { storage, token },
+        }
+    }
+    pub(crate) fn with_call<A: crate::Addin>(
+        call: &'call crate::runtime::CallGuard<'_, A>,
+        storage: &'call crate::call::CallStorage<'brand, 'call>,
+        token: ghost_cell::GhostToken<'brand>,
+    ) -> Self {
+        #[cfg(not(feature = "handles"))]
+        let _ = call;
+        Self {
+            access: DecodeCallAccess::Runtime {
+                storage,
+                token,
+                #[cfg(feature = "handles")]
+                handles: call.handle_call_access(),
+            },
+        }
+    }
+    #[cfg(all(test, feature = "handles"))]
+    pub(crate) fn from_handle_access(
+        storage: &'call crate::call::CallStorage<'brand, 'call>,
+        token: ghost_cell::GhostToken<'brand>,
+        handles: crate::handle::FormulaHandleServiceResolver<'call>,
+    ) -> Self {
+        Self {
+            access: DecodeCallAccess::Runtime {
+                storage,
+                token,
+                handles,
+            },
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn from_scope(scope: &'call CallScope<'call>) -> Self {
+        Self::plain(scope)
+    }
+    pub(crate) fn scratch(&self) -> &'call crate::call::CallScratch {
+        self.scope().scratch()
+    }
+    pub(crate) fn scope(&self) -> &'call CallScope<'call> {
+        match &self.access {
+            DecodeCallAccess::Plain(scope) => scope,
+            #[cfg(any(test, feature = "bench-internals"))]
+            DecodeCallAccess::Storage { storage, .. } => storage.scope(),
+            DecodeCallAccess::Runtime { storage, .. } => storage.scope(),
+        }
+    }
+    #[cfg(feature = "handles")]
+    pub(crate) fn enter_handle_domain(
+        &mut self,
+        domain: &'call crate::handle::HandleReadDomain,
+    ) -> XllResult<crate::handle::HandleDomainWitness<'call>> {
+        match &mut self.access {
+            #[cfg(any(test, feature = "bench-internals"))]
+            DecodeCallAccess::Storage { storage, token } => {
+                storage.enter_handle_domain(token, domain)
+            }
+            DecodeCallAccess::Runtime { storage, token, .. } => {
+                storage.enter_handle_domain(token, domain)
+            }
+            DecodeCallAccess::Plain(_) => Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_NO_CONTEXT,
+            }),
+        }
+    }
+    /// Erases the brand after decoding without releasing the storage's permits.
+    pub(crate) fn finish(self) -> CallContext<'call> {
+        let access = match self.access {
+            DecodeCallAccess::Plain(scope) => CallAccess::Plain(scope),
+            #[cfg(any(test, feature = "bench-internals"))]
+            DecodeCallAccess::Storage { storage, token } => {
+                let _ = token;
+                CallAccess::Plain(storage.scope())
+            }
+            DecodeCallAccess::Runtime {
+                storage,
+                token,
+                #[cfg(feature = "handles")]
+                handles,
+            } => {
+                let _ = token;
+                CallAccess::Runtime(RuntimeCallAccess {
+                    scope: storage.scope(),
+                    #[cfg(feature = "handles")]
+                    handles,
+                })
+            }
+        };
+        CallContext { access }
+    }
     #[cfg(feature = "handles")]
     pub(crate) fn resolve_handle<T: crate::handle::ExcelHandleObject>(
-        &self,
+        &mut self,
         token: &str,
     ) -> XllResult<crate::handle::Handle<'call, T>> {
-        let (handles, scope) = match &self.access {
-            CallAccess::Runtime(access) => (&access.handles, access.scope),
-            #[cfg(all(test, feature = "handles"))]
-            CallAccess::HandleOnly { handles, scope } => (handles, *scope),
-            CallAccess::Plain(_) => {
+        // get() returns a borrow anchored in the enclosing generation owner,
+        // not in this short mutable borrow of decoding authority.
+        let handles = match &self.access {
+            DecodeCallAccess::Runtime { handles, .. } => handles.get()?,
+            _ => {
                 return Err(XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_NO_CONTEXT,
                 });
             }
         };
-        handles.get()?.lookup(scope, token)
+        handles.lookup(self, token)
     }
-
-    /// Resolves and pins a handle during async-UDF argument decoding. The
-    /// pending value is not exposed to user code; the generated boundary
-    /// brands it immediately before committing the task.
     #[cfg(all(feature = "async", feature = "handles"))]
     pub(crate) fn resolve_pending_handle<T: crate::handle::ExcelHandleObject>(
-        &self,
+        &mut self,
         token: &str,
         generation: crate::generation::RuntimeGeneration,
     ) -> XllResult<crate::handle::PendingHandleLease<T>> {
-        let handle = self.resolve_handle::<T>(token)?;
-        handle.into_pending(generation)
+        self.resolve_handle::<T>(token)?.into_pending(generation)
     }
 }
 
 /// Call-scoped argument conversion and formula-revision identity collection.
 #[doc(hidden)]
-pub struct ArgumentContext<'call, M: InputMode> {
-    call: CallContext<'call>,
+pub struct ArgumentContext<'brand, 'call, M: InputMode> {
+    call: DecodeCallContext<'brand, 'call>,
     inputs: M::Fingerprint,
 }
 
@@ -1128,14 +1180,15 @@ impl<'call, M: InputMode> FinishedArguments<'call, M> {
     }
 }
 
-impl<'call, M: InputMode> ArgumentContext<'call, M> {
+impl<'brand, 'call, M: InputMode> ArgumentContext<'brand, 'call, M> {
     pub fn new<A: crate::Addin>(
         call: &'call crate::runtime::CallGuard<'_, A>,
-        scope: &'call CallScope<'call>,
+        storage: &'call crate::call::CallStorage<'brand, 'call>,
+        token: ghost_cell::GhostToken<'brand>,
         argument_count: usize,
     ) -> Self {
         Self {
-            call: CallContext::with_call(call, scope),
+            call: DecodeCallContext::with_call(call, storage, token),
             inputs: M::new_fingerprint(argument_count),
         }
     }
@@ -1143,19 +1196,20 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
     #[cfg(test)]
     pub(crate) fn from_scope(scope: &'call CallScope<'call>, argument_count: usize) -> Self {
         Self {
-            call: CallContext::from_scope(scope),
+            call: DecodeCallContext::from_scope(scope),
             inputs: M::new_fingerprint(argument_count),
         }
     }
 
     #[cfg(all(test, feature = "handles"))]
     pub(crate) fn from_handle_access(
-        scope: &'call CallScope<'call>,
+        storage: &'call crate::call::CallStorage<'brand, 'call>,
+        token: ghost_cell::GhostToken<'brand>,
         handles: crate::handle::FormulaHandleServiceResolver<'call>,
         argument_count: usize,
     ) -> Self {
         Self {
-            call: CallContext::from_handle_access(scope, handles),
+            call: DecodeCallContext::from_handle_access(storage, token, handles),
             inputs: M::new_fingerprint(argument_count),
         }
     }
@@ -1166,7 +1220,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         let finished = M::finish_typed_ref(&inputs)?;
         drop(inputs);
         Ok(FinishedArguments {
-            call,
+            call: call.finish(),
             inputs: finished,
         })
     }
@@ -1190,7 +1244,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
     ) -> XllResult<PreparedParameter<'call, T, M>> {
         let fingerprint = &mut self.inputs;
         M::with_argument(fingerprint, index, argument, |identity| {
-            T::prepare(value, argument, &self.call, identity)
+            T::prepare(value, argument, &mut self.call, identity)
         })
     }
 
@@ -1204,7 +1258,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         T: ExcelParameter<'call, M>,
     {
         let fingerprint = &mut self.inputs;
-        let call = &self.call;
+        let call = &mut self.call;
         M::with_argument(fingerprint, index, argument, |identity| {
             T::decode(value, argument, call, identity)
         })
@@ -1219,7 +1273,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         generation: crate::generation::RuntimeGeneration,
     ) -> XllResult<crate::handle::PendingHandleLease<T>> {
         let fingerprint = &mut self.inputs;
-        let call = &self.call;
+        let call = &mut self.call;
         M::with_argument(fingerprint, index, argument, |identity| {
             let pending = crate::handle::with_utf16_handle_token(
                 value.utf16(argument)?,
@@ -1413,13 +1467,19 @@ where
         XllError::Input { reason, .. } => XllError::Input { argument, reason },
         other => other,
     })?;
-    T::decode(borrowed, argument, &CallContext::plain(scope), &mut ())
+    T::decode(
+        borrowed,
+        argument,
+        &mut DecodeCallContext::plain(scope),
+        &mut (),
+    )
 }
 
 #[doc(hidden)]
 #[cfg(all(test, feature = "handles"))]
-pub(crate) unsafe fn argument_from_raw_with_context<'call, T>(
-    scope: &'call CallScope<'call>,
+pub(crate) unsafe fn argument_from_raw_with_context<'brand, 'call, T>(
+    storage: &'call crate::call::CallStorage<'brand, 'call>,
+    token: ghost_cell::GhostToken<'brand>,
     slot: &'call crate::handle::FormulaHandleServiceSlot,
     argument: &'static str,
     raw: *mut XLOPER12,
@@ -1435,8 +1495,9 @@ where
     T::decode(
         borrowed,
         argument,
-        &CallContext::from_handle_access(
-            scope,
+        &mut DecodeCallContext::from_handle_access(
+            storage,
+            token,
             crate::handle::FormulaHandleServiceResolver::new(slot),
         ),
         &mut (),
@@ -1446,7 +1507,7 @@ where
 /// Converts one raw Excel argument and records its framework identity.
 #[doc(hidden)]
 pub unsafe fn argument_from_raw_with_arguments<'call, M, T>(
-    arguments: &mut ArgumentContext<'call, M>,
+    arguments: &mut ArgumentContext<'_, 'call, M>,
     index: usize,
     argument: &'static str,
     raw: *mut XLOPER12,

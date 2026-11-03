@@ -79,10 +79,10 @@ impl NativeArgumentIngressBenchmark {
             .runtime
             .enter(&ingress)
             .expect("benchmark runtime must be open");
-        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
             macro_rules! run {
                 ($mode:ty) => {{
-                    let mut arguments = ArgumentContext::<$mode>::new(call, scope, self.raw.len());
+                    let mut arguments = ArgumentContext::<$mode>::new(call, scope, token, self.raw.len());
                     for (index, raw) in self.raw.iter_mut().enumerate() {
                         macro_rules! prepare_q {
                             ($ty:ty) => {{

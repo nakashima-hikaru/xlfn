@@ -103,6 +103,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghost-cell"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8449d342b1c67f49169e92e71deb7b9b27f30062301a16dbc27a4cc8d2351b7"
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -465,6 +471,7 @@ dependencies = [
  "constant_time_eq 0.6.1",
  "crossbeam-utils",
  "getrandom",
+ "ghost-cell",
  "indexmap",
  "inventory",
  "papaya",

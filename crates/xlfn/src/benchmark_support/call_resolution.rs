@@ -65,10 +65,10 @@ impl MultiHandleCallBenchmark {
         crate::call::with_excel_callback_scope_and_call(
             &call,
             &callbacks,
-            |call, scope, callbacks| {
+            |call, scope, token, callbacks| {
                 let mut frame = crate::__private::v1::CallFrame::<
                     <f64 as crate::call_return::ExcelReturn>::InputMode,
-                >::new(call, scope, callbacks, 1);
+                >::new(call, scope, token, callbacks, 1);
                 for raw in &mut self.raw_tokens {
                     // SAFETY: raw points to valid benchmark storage.
                     let handle: crate::handle::Handle<'_, BenchHandleObject> = unsafe {

@@ -71,7 +71,7 @@ pub(crate) use input::argument_from_raw;
 pub(crate) use input::argument_from_raw_with_context;
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use input::{ArgumentContext, argument_from_raw_with_arguments};
-pub(crate) use input::{CallContext, ExcelParameter};
+pub(crate) use input::{DecodeCallContext, ExcelParameter};
 pub(crate) use input::{ExcelInputCells, PreparedExcelSequence};
 pub use input::{ExcelInputIdentity, FromExcel, PrepareExcel};
 pub(crate) use input::{InputMode, PlainInputMode};
@@ -627,7 +627,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>> {
         <Self as ExcelParameter<'call, M>>::decode(value, argument, context, identity)
@@ -645,7 +645,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedParameter<'call, Self, M>> {
         M::prepare_borrowed_string(
@@ -661,7 +661,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
 
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         cells.retain(|value, argument| {
@@ -674,7 +674,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
         let text = context
@@ -833,7 +833,7 @@ impl ArrayInputBudget {
 fn convert_grid_elements<'call, T, M>(
     grid: &GridView<'call>,
     argument: &'static str,
-    context: &CallContext<'call>,
+    context: &mut DecodeCallContext<'_, 'call>,
     identity: &mut M::Identity,
 ) -> XllResult<Vec<T>>
 where
@@ -848,7 +848,7 @@ where
 fn convert_grid_elements_borrowed<'call, T, M>(
     grid: &GridView<'call>,
     argument: &'static str,
-    context: &CallContext<'call>,
+    context: &mut DecodeCallContext<'_, 'call>,
     identity: &mut M::Identity,
 ) -> XllResult<&'call [T]>
 where
@@ -866,7 +866,7 @@ where
 
 fn prepare_optional_elements<'call, T, M, const RETAINED_BUDGET: bool>(
     cells: ExcelInputCells<'call>,
-    context: &CallContext<'call>,
+    context: &mut DecodeCallContext<'_, 'call>,
     identity: &mut M::Identity,
 ) -> XllResult<PreparedParameterSequence<'call, T, M>>
 where
@@ -907,7 +907,7 @@ where
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedParameter<'call, Self, M>> {
         if !M::RECORDS_IDENTITY {
@@ -931,7 +931,7 @@ where
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>> {
         if !M::RECORDS_IDENTITY {
@@ -969,14 +969,14 @@ where
     type Elements = PreparedParameterSequence<'call, Self, M>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         prepare_optional_elements::<Self, M, true>(cells, context, identity)
     }
     fn prepare_elements_borrowed(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         prepare_optional_elements::<Self, M, false>(cells, context, identity)
@@ -997,7 +997,7 @@ where
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
         M::tag(
@@ -1048,7 +1048,7 @@ where
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedParameter<'call, Self, M>> {
         if !M::RECORDS_IDENTITY {
@@ -1068,7 +1068,7 @@ where
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>> {
         if !M::RECORDS_IDENTITY {
@@ -1094,14 +1094,14 @@ where
     type Elements = PreparedParameterSequence<'call, Self, M>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         prepare_optional_elements::<Self, M, true>(cells, context, identity)
     }
     fn prepare_elements_borrowed(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         prepare_optional_elements::<Self, M, false>(cells, context, identity)
@@ -1121,7 +1121,7 @@ where
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
         M::bool(
@@ -1160,7 +1160,7 @@ where
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedParameter<'call, Self, M>> {
         if !M::RECORDS_IDENTITY {
@@ -1180,7 +1180,7 @@ where
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>> {
         <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
@@ -1202,7 +1202,7 @@ where
     type Elements = PreparedParameterSequence<'call, Self, M>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         cells.retain(|value, argument| {
@@ -1215,7 +1215,7 @@ where
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
         let grid = convert::grid::<convert::MatrixShape>(value, argument)?;
@@ -1256,7 +1256,7 @@ where
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedParameter<'call, Self, M>> {
         if !M::RECORDS_IDENTITY || !T::BORROWED_ELEMENTS {
@@ -1280,7 +1280,7 @@ where
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>> {
         <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
@@ -1301,7 +1301,7 @@ where
     type Elements = PreparedParameterSequence<'call, Self, M>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         cells.retain(|value, argument| {
@@ -1314,7 +1314,7 @@ where
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
         let grid = convert::grid::<convert::MatrixShape>(value, argument)?;
@@ -1350,7 +1350,7 @@ where
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedParameter<'call, Self, M>> {
         if !M::RECORDS_IDENTITY {
@@ -1369,7 +1369,7 @@ where
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>> {
         <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
@@ -1391,7 +1391,7 @@ where
     type Elements = PreparedParameterSequence<'call, Self, M>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         cells.retain(|value, argument| {
@@ -1404,7 +1404,7 @@ where
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
         let grid = convert::grid::<convert::VectorShape>(value, argument)?;
@@ -1437,7 +1437,7 @@ where
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedParameter<'call, Self, M>> {
         if !M::RECORDS_IDENTITY {
@@ -1456,7 +1456,7 @@ where
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>> {
         <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
@@ -1481,7 +1481,7 @@ where
     type Elements = PreparedParameterSequence<'call, Self, M>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         cells.retain(|value, argument| {
@@ -1494,7 +1494,7 @@ where
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
         let grid = convert::bounded_grid::<MAX>(value, argument)?;
@@ -1531,7 +1531,7 @@ where
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedParameter<'call, Self, M>> {
         if !M::RECORDS_IDENTITY {
@@ -1550,7 +1550,7 @@ where
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>> {
         <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
@@ -1572,7 +1572,7 @@ where
     type Elements = PreparedParameterSequence<'call, Self, M>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         cells.retain(|value, argument| {
@@ -1585,7 +1585,7 @@ where
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
         let grid = convert::grid::<convert::RowShape>(value, argument)?;
@@ -1617,7 +1617,7 @@ where
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedParameter<'call, Self, M>> {
         if !M::RECORDS_IDENTITY {
@@ -1636,7 +1636,7 @@ where
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>> {
         <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
@@ -1658,7 +1658,7 @@ where
     type Elements = PreparedParameterSequence<'call, Self, M>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         cells.retain(|value, argument| {
@@ -1671,7 +1671,7 @@ where
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
         let grid = convert::grid::<convert::ColumnShape>(value, argument)?;
@@ -1756,7 +1756,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>> {
         <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
@@ -1773,7 +1773,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {
     type Elements = PreparedParameterSequence<'call, Self, M>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         cells.retain(|value, argument| {
@@ -1786,7 +1786,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
         let decoded = decode_cell_ref(value, argument, context.scratch())?;
@@ -1922,7 +1922,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelValueRef<'call> {
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedParameter<'call, Self, M>> {
         let value = match value.value_type() {
@@ -1967,7 +1967,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelValueRef<'call> {
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>> {
         <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
@@ -1976,7 +1976,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelValueRef<'call> {
 
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         cells.retain(|value, argument| {
@@ -1991,7 +1991,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelValueRef<'call> {
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
         <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)?
@@ -2116,7 +2116,7 @@ where
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedElement<'call, Self, M>> {
         <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
@@ -2133,7 +2133,7 @@ where
     type Elements = PreparedParameterSequence<'call, Self, M>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
         cells.retain(|value, argument| {
@@ -2146,7 +2146,7 @@ where
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        context: &CallContext<'call>,
+        context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
         let handle =
@@ -2626,7 +2626,7 @@ mod tests {
                     converted = Some(T::decode(
                         value_ref,
                         "arg",
-                        &CallContext::plain(scope),
+                        &mut DecodeCallContext::plain(scope),
                         encoder,
                     )?);
                     Ok(())
@@ -2663,7 +2663,7 @@ mod tests {
                         <ExcelCellRef<'_> as ExcelParameter<FormulaInputMode>>::decode(
                             borrowed,
                             "arg",
-                            &CallContext::plain(scope),
+                            &mut DecodeCallContext::plain(scope),
                             encoder,
                         )
                     })
@@ -4186,10 +4186,12 @@ mod tests {
             .unwrap()
             .into_token();
 
-        let token_b =
-            crate::call::with_excel_call_scope_and_state(&handle_rt, |handle_rt, scope| {
+        let token_b = crate::call::with_branded_call_scope_and_state(
+            &handle_rt,
+            |handle_rt, storage, brand| {
+                let mut context = DecodeCallContext::with_storage(storage, brand);
                 let resolved: crate::handle::Handle<'_, SemanticHandleTestObj> =
-                    handle_rt.lookup(scope, &token_a).unwrap();
+                    handle_rt.lookup(&mut context, &token_a).unwrap();
                 handle_rt
                     .prepare_observed_alias::<SemanticHandleTestObj, _>(
                         topic_b,
@@ -4198,7 +4200,8 @@ mod tests {
                     )
                     .unwrap()
                     .into_token()
-            });
+            },
+        );
 
         assert_ne!(token_a, token_b);
 
@@ -4222,41 +4225,45 @@ mod tests {
             xltype: XLTYPE_STR,
         };
 
-        let (handle_data_a, id_a, object_id_a) = crate::call::with_excel_call_scope(|scope| {
-            let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
-                scope,
-                crate::handle::FormulaHandleServiceResolver::new(slot),
-                1,
-            );
-            // SAFETY: raw_a is live for this conversion.
-            let handle = unsafe {
-                argument_from_raw_with_arguments::<
-                    FormulaInputMode,
-                    crate::handle::Handle<'_, SemanticHandleTestObj>,
-                >(&mut arguments, 0, "arg", &mut raw_a)
-            }
-            .unwrap();
-            let id = arguments.finish().unwrap().unwrap();
-            (handle.data, id, handle.object_id())
-        });
+        let (handle_data_a, id_a, object_id_a) =
+            crate::call::with_branded_call_scope(|storage, brand| {
+                let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
+                    storage,
+                    brand,
+                    crate::handle::FormulaHandleServiceResolver::new(slot),
+                    1,
+                );
+                // SAFETY: raw_a is live for this conversion.
+                let handle = unsafe {
+                    argument_from_raw_with_arguments::<
+                        FormulaInputMode,
+                        crate::handle::Handle<'_, SemanticHandleTestObj>,
+                    >(&mut arguments, 0, "arg", &mut raw_a)
+                }
+                .unwrap();
+                let id = arguments.finish().unwrap().unwrap();
+                (handle.data, id, handle.object_id())
+            });
 
-        let (handle_data_b, id_b, object_id_b) = crate::call::with_excel_call_scope(|scope| {
-            let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
-                scope,
-                crate::handle::FormulaHandleServiceResolver::new(slot),
-                1,
-            );
-            // SAFETY: raw_b is live for this conversion.
-            let handle = unsafe {
-                argument_from_raw_with_arguments::<
-                    FormulaInputMode,
-                    crate::handle::Handle<'_, SemanticHandleTestObj>,
-                >(&mut arguments, 0, "arg", &mut raw_b)
-            }
-            .unwrap();
-            let id = arguments.finish().unwrap().unwrap();
-            (handle.data, id, handle.object_id())
-        });
+        let (handle_data_b, id_b, object_id_b) =
+            crate::call::with_branded_call_scope(|storage, brand| {
+                let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
+                    storage,
+                    brand,
+                    crate::handle::FormulaHandleServiceResolver::new(slot),
+                    1,
+                );
+                // SAFETY: raw_b is live for this conversion.
+                let handle = unsafe {
+                    argument_from_raw_with_arguments::<
+                        FormulaInputMode,
+                        crate::handle::Handle<'_, SemanticHandleTestObj>,
+                    >(&mut arguments, 0, "arg", &mut raw_b)
+                }
+                .unwrap();
+                let id = arguments.finish().unwrap().unwrap();
+                (handle.data, id, handle.object_id())
+            });
 
         assert_eq!(handle_data_a, 99);
         assert_eq!(handle_data_b, 99);

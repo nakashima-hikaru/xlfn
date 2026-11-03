@@ -56,7 +56,10 @@ pub mod v1 {
 
     use crate::addin::{Addin, PhysicallyUnloadableAddin};
     use crate::boundary::host::{host_auto_close, host_auto_remove};
-    pub use crate::call::{CallScope, with_excel_call_scope, with_excel_call_scope_and_state};
+    pub use crate::call::{
+        CallScope, CallStorage, with_branded_call_scope, with_branded_call_scope_and_state,
+        with_excel_call_scope, with_excel_call_scope_and_state,
+    };
     #[cfg(feature = "async")]
     pub use crate::cancellation::CancellationToken;
     use crate::error::{XllError, XllResult};
@@ -71,10 +74,10 @@ pub mod v1 {
     #[cfg(any(feature = "handles", test))]
     pub use crate::value::input::FormulaInputMode;
     pub use crate::value::input::{
-        ArgumentContext, ArgumentMaterializer, ExcelInputIdentity, ExcelParameter,
-        FinishedArguments, InputMode, PlainInputMode, PreparedArgument, PreparedElement,
-        PreparedParameter, PreparedParameterSequence, ReadyArgument, argument_from_raw,
-        argument_from_raw_with_arguments, cell_presence_from_raw,
+        ArgumentContext, ArgumentMaterializer, DecodeCallContext, ExcelInputIdentity,
+        ExcelParameter, FinishedArguments, InputMode, PlainInputMode, PreparedArgument,
+        PreparedElement, PreparedParameter, PreparedParameterSequence, ReadyArgument,
+        argument_from_raw, argument_from_raw_with_arguments, cell_presence_from_raw,
     };
     #[doc(hidden)]
     pub use crate::value::output::ExcelCellSink;
@@ -214,7 +217,7 @@ pub mod v1 {
         C: crate::RtdSourceCatalog<E>,
         X: ExecutionMode,
     >(
-        _: &CallFrame<'call, R::InputMode, E, C, X>,
+        _: &CallFrame<'_, 'call, R::InputMode, E, C, X>,
     ) where
         R: ExcelReturn,
         T: ExcelParameter<'call, R::InputMode>,
@@ -615,6 +618,7 @@ pub mod v1 {
     /// Input preparation owns its recording authority until consumed by finish.
     #[doc(hidden)]
     pub struct CallFrame<
+        'brand,
         'call,
         M: InputMode,
         E: crate::RtdSubscription = (),
@@ -622,7 +626,7 @@ pub mod v1 {
         X: ExecutionMode = MainThreadMode,
     > {
         environment: CallEnvironment<'call, E, C, X>,
-        arguments: ArgumentContext<'call, M>,
+        arguments: ArgumentContext<'brand, 'call, M>,
     }
 
     /// The reusable call environment paired with its finalized return authority.
@@ -633,17 +637,19 @@ pub mod v1 {
     );
 
     impl<
+        'brand,
         'call,
         M: InputMode,
         E: crate::RtdSubscription,
         C: crate::RtdSourceCatalog<E>,
         X: ExecutionMode,
-    > CallFrame<'call, M, E, C, X>
+    > CallFrame<'brand, 'call, M, E, C, X>
     {
         #[doc(hidden)]
         pub(crate) fn new<A: Addin + crate::addin::AddinRtdTypes<Subscription = E, Sources = C>>(
             call: &'call crate::runtime::CallGuard<'_, A>,
-            scope: &'call CallScope<'call>,
+            storage: &'call CallStorage<'brand, 'call>,
+            token: ghost_cell::GhostToken<'brand>,
             callbacks: &'call crate::host_callback::HostCallbackSession,
             argument_count: usize,
         ) -> Self {
@@ -655,7 +661,7 @@ pub mod v1 {
                     callbacks,
                     diagnostics: call.diagnostics(),
                 },
-                arguments: ArgumentContext::new(call, scope, argument_count),
+                arguments: ArgumentContext::new(call, storage, token, argument_count),
             }
         }
 
@@ -968,7 +974,7 @@ pub mod v1 {
         C: crate::RtdSourceCatalog<E>,
         X: ExecutionMode,
     >(
-        frame: &mut CallFrame<'call, R::InputMode, E, C, X>,
+        frame: &mut CallFrame<'_, 'call, R::InputMode, E, C, X>,
         index: usize,
         name: &'static str,
         raw: *mut xlfn_sys::XLOPER12,
@@ -1006,7 +1012,7 @@ pub mod v1 {
         C: crate::RtdSourceCatalog<E>,
         X: ExecutionMode,
     >(
-        frame: &mut CallFrame<'call, M, E, C, X>,
+        frame: &mut CallFrame<'_, 'call, M, E, C, X>,
         name: &'static str,
         raw: *mut xlfn_sys::XLOPER12,
     ) -> XllResult<T>
@@ -1026,7 +1032,7 @@ pub mod v1 {
         X: ExecutionMode,
         M: InputMode,
     >(
-        frame: &CallFrame<'_, M, E, C, X>,
+        frame: &CallFrame<'_, '_, M, E, C, X>,
         name: &'static str,
         raw: *mut xlfn_sys::XLOPER12,
     ) -> XllResult<CellPresence> {
@@ -1050,9 +1056,10 @@ pub mod v1 {
         execute: F,
     ) -> *mut xlfn_sys::XLOPER12
     where
-        F: for<'call> FnOnce(
+        F: for<'brand, 'call> FnOnce(
             &'call A::SharedState,
             CallFrame<
+                'brand,
                 'call,
                 R::InputMode,
                 crate::addin::AddinSubscription<A>,
@@ -1089,9 +1096,10 @@ pub mod v1 {
         execute: F,
     ) -> *mut xlfn_sys::XLOPER12
     where
-        F: for<'call> FnOnce(
+        F: for<'brand, 'call> FnOnce(
             &'call A::SharedState,
             CallFrame<
+                'brand,
                 'call,
                 R::InputMode,
                 crate::addin::AddinSubscription<A>,
@@ -1105,13 +1113,15 @@ pub mod v1 {
             crate::call::with_excel_callback_scope_and_call(
                 call,
                 &callbacks,
-                |call, scope, callbacks| {
+                |call, storage, token, callbacks| {
                     let frame = CallFrame::<
                         R::InputMode,
                         crate::addin::AddinSubscription<A>,
                         crate::addin::AddinSources<A>,
                         X,
-                    >::new(call, scope, callbacks, argument_count);
+                    >::new(
+                        call, storage, token, callbacks, argument_count
+                    );
                     execute(call.state(), frame)
                 },
             )
@@ -1132,9 +1142,10 @@ pub mod v1 {
         execute: F,
     ) -> *mut xlfn_sys::FP12
     where
-        F: for<'call> FnOnce(
+        F: for<'brand, 'call> FnOnce(
             &'call A::SharedState,
             CallFrame<
+                'brand,
                 'call,
                 R::InputMode,
                 crate::addin::AddinSubscription<A>,
@@ -1152,14 +1163,14 @@ pub mod v1 {
                 crate::call::with_excel_callback_scope_and_call(
                     call,
                     &callbacks,
-                    |call, scope, callbacks| {
+                    |call, storage, token, callbacks| {
                         let frame = CallFrame::<
                             R::InputMode,
                             crate::addin::AddinSubscription<A>,
                             crate::addin::AddinSources<A>,
                             X,
                         >::new(
-                            call, scope, callbacks, argument_count
+                            call, storage, token, callbacks, argument_count
                         );
                         execute(call.state(), frame)
                     },
@@ -1188,11 +1199,12 @@ pub mod v1 {
     ) where
         A: Addin,
         R: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
-        F: for<'call> FnOnce(
+        F: for<'brand, 'call> FnOnce(
             &'call crate::runtime::CallGuard<'call, A>,
             crate::generation::ExecutionLease<A>,
             CancellationToken,
             CallFrame<
+                'brand,
                 'call,
                 R::InputMode,
                 crate::addin::AddinSubscription<A>,
@@ -1214,14 +1226,14 @@ pub mod v1 {
                     crate::call::with_excel_callback_scope_and_call(
                         call,
                         &callbacks,
-                        |call, scope, callbacks| {
+                        |call, storage, token, callbacks| {
                             let frame = CallFrame::<
                                 R::InputMode,
                                 crate::addin::AddinSubscription<A>,
                                 crate::addin::AddinSources<A>,
                                 AsyncLaunchMode,
                             >::new(
-                                call, scope, callbacks, argument_count
+                                call, storage, token, callbacks, argument_count
                             );
                             let future = execute(call, lease, cancellation, frame)?;
                             Ok(future)
@@ -1253,11 +1265,12 @@ pub mod v1 {
     ) where
         A: Addin,
         R: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
-        F: for<'call> FnOnce(
+        F: for<'brand, 'call> FnOnce(
             &'call crate::runtime::CallGuard<'call, A>,
             crate::generation::ExecutionLease<A>,
             CancellationToken,
             CallFrame<
+                'brand,
                 'call,
                 R::InputMode,
                 crate::addin::AddinSubscription<A>,
@@ -1279,14 +1292,14 @@ pub mod v1 {
                     crate::call::with_excel_callback_scope_and_call(
                         call,
                         &callbacks,
-                        |call, scope, callbacks| {
+                        |call, storage, token, callbacks| {
                             let frame = CallFrame::<
                                 R::InputMode,
                                 crate::addin::AddinSubscription<A>,
                                 crate::addin::AddinSources<A>,
                                 AsyncLaunchMode,
                             >::new(
-                                call, scope, callbacks, argument_count
+                                call, storage, token, callbacks, argument_count
                             );
                             let build = execute(call, lease, cancellation, frame)?;
                             Ok(build)
@@ -1340,7 +1353,6 @@ pub mod v1 {
     #[cfg(all(feature = "handles", feature = "bench-internals"))]
     #[doc(hidden)]
     pub mod handle_test {
-        use crate::call::CallScope;
         use crate::error::XllResult;
         use crate::handle::{ExcelHandleObject, Handle};
 
@@ -1364,10 +1376,10 @@ pub mod v1 {
 
             pub fn lookup_handle<'call, T: ExcelHandleObject>(
                 &'call self,
-                scope: &'call CallScope<'call>,
+                context: &mut crate::value::DecodeCallContext<'_, 'call>,
                 token: &str,
             ) -> XllResult<Handle<'call, T>> {
-                self.0.lookup_handle::<T>(scope, token)
+                self.0.lookup_handle::<T>(context, token)
             }
         }
     }
@@ -1381,7 +1393,14 @@ pub mod v1 {
             macro_rules! frame_bytes {
                 ($mode:ty) => {
                     std::mem::size_of::<
-                        CallFrame<'static, PlainInputMode, (), crate::DynamicRtdSources<()>, $mode>,
+                        CallFrame<
+                            'static,
+                            'static,
+                            PlainInputMode,
+                            (),
+                            crate::DynamicRtdSources<()>,
+                            $mode,
+                        >,
                     >()
                 };
             }

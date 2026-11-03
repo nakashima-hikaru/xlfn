@@ -1,5 +1,10 @@
-error[E0425]: cannot find function `new_call_scope` in module `xlfn::__private::handle_test`
- --> tests/ui/fail/unscoped_call_scope.rs:7:47
+error[E0624]: associated function `new` is private
+ --> tests/ui/fail/unscoped_call_scope.rs:3:54
   |
-7 |     let scope = xlfn::__private::handle_test::new_call_scope();
-  |                                               ^^^^^^^^^^^^^^ not found in `xlfn::__private::handle_test`
+3 |     let _storage = xlfn::__private::v1::CallStorage::new();
+  |                                                      ^^^ private associated function
+  |
+ ::: src/call.rs
+  |
+  |     fn new() -> Self {
+  |     ---------------- private associated function defined here

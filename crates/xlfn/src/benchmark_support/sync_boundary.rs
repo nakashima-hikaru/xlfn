@@ -163,13 +163,16 @@ impl SyncBoundaryWorkerPool {
                                         crate::call::with_excel_callback_scope_and_call(
                                             call,
                                             &callbacks,
-                                            |call, scope, callbacks| {
-                                                let mut frame =
-                                                    crate::__private::v1::CallFrame::<
-                                                        crate::value::input::PlainInputMode,
-                                                    >::new(
-                                                        call, scope, callbacks, argument_count
-                                                    );
+                                            |call, scope, token, callbacks| {
+                                                let mut frame = crate::__private::v1::CallFrame::<
+                                                    crate::value::input::PlainInputMode,
+                                                >::new(
+                                                    call,
+                                                    scope,
+                                                    token,
+                                                    callbacks,
+                                                    argument_count,
+                                                );
                                                 let mut sum = 0.0;
                                                 for (index, raw) in arguments
                                                     .iter()
