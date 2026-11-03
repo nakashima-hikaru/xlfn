@@ -494,6 +494,8 @@ mod tests {
     use xlfn_sys::{XLRET_ABORT, XLRET_FAILED, XLRET_SUCCESS, XLRET_UNCALCED};
 
     assert_not_impl_any!(ExcelCallbackValue<'static>: Send, Sync);
+    assert_not_impl_any!(CleanupOnlyValue<'static>: Send, Sync);
+    assert_not_impl_any!(CallbackOwner<'static>: Send, Sync);
 
     static FREE_CALLS: AtomicUsize = AtomicUsize::new(0);
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
