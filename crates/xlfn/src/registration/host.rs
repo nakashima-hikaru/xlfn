@@ -323,9 +323,8 @@ fn invoke_operation<O: RegistrationOperation>(
     arguments: &[NonNull<XLOPER12>],
 ) -> RegistrationInvocation<O> {
     RegistrationInvocation {
-        evidence: host.invoke_protocol(O::FUNCTION_ID, arguments, |result| {
-            operation.decode(result)
-        }),
+        evidence: host
+            .invoke_protocol(O::FUNCTION_ID, arguments, |result| operation.decode(result)),
         operation: std::marker::PhantomData,
     }
 }

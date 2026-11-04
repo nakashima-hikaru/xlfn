@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "xlfn-common"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "xlfn-excel-comparison"
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "xlfn-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
