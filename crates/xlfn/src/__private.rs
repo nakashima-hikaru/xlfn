@@ -457,9 +457,6 @@ pub mod v1 {
         target: &'static str,
         module_anchor: *const (),
     ) -> i32 {
-        #[cfg(feature = "lifecycle-diagnostics")]
-        let diagnostic =
-            crate::lifecycle_diagnostics::Boundary::enter("xlAutoOpen", runtime.runtime().phase());
         let residency =
             match crate::runtime::OpenResidency::acquire(runtime.runtime(), module_anchor) {
                 Ok(residency) => residency,
@@ -483,10 +480,7 @@ pub mod v1 {
             }
         }
         descriptors.sort_unstable_by_key(|descriptor| descriptor.excel_name);
-        let result = residency.open(&parsed_id, version, target, &descriptors);
-        #[cfg(feature = "lifecycle-diagnostics")]
-        diagnostic.finish(result, runtime.runtime());
-        result
+        residency.open(&parsed_id, version, target, &descriptors)
     }
 
     /// Cleans up a deactivated add-in and follows its physical-unload contract.
@@ -503,13 +497,7 @@ pub mod v1 {
     pub unsafe fn auto_close_generated_addin<A: Addin>(
         runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
     ) -> i32 {
-        #[cfg(feature = "lifecycle-diagnostics")]
-        let diagnostic =
-            crate::lifecycle_diagnostics::Boundary::enter("xlAutoClose", runtime.runtime().phase());
-        let result = host_auto_close::<A>(runtime.runtime());
-        #[cfg(feature = "lifecycle-diagnostics")]
-        diagnostic.finish(result, runtime.runtime());
-        result
+        host_auto_close::<A>(runtime.runtime())
     }
 
     /// Performs explicit terminal removal and unregisters all functions.
@@ -526,15 +514,7 @@ pub mod v1 {
     pub unsafe fn auto_remove_generated_addin<A: Addin>(
         runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
     ) -> i32 {
-        #[cfg(feature = "lifecycle-diagnostics")]
-        let diagnostic = crate::lifecycle_diagnostics::Boundary::enter(
-            "xlAutoRemove",
-            runtime.runtime().phase(),
-        );
-        let result = host_auto_remove::<A>(runtime.runtime());
-        #[cfg(feature = "lifecycle-diagnostics")]
-        diagnostic.finish(result, runtime.runtime());
-        result
+        host_auto_remove::<A>(runtime.runtime())
     }
 
     /// Releases a return value pointer returned to Excel.

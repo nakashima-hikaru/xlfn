@@ -10,7 +10,6 @@ if ([string]::IsNullOrWhiteSpace($Destination)) {
     $Destination = Join-Path $here 'artifacts'
 }
 $repoRoot = (Resolve-Path (Join-Path $here '..\..')).Path
-$toolsProject = Join-Path $repoRoot 'tools'
 # PowerShell's current location can differ from the process working directory
 # used by System.IO.Path.GetFullPath. Resolve against the caller's PS location,
 # before Push-Location, and allow the destination not to exist yet.
@@ -31,7 +30,7 @@ try {
     }
     gh run download $RunId --repo $Repository --name excel-comparison-x86_64 --dir $staging
     if ($LASTEXITCODE -ne 0) { throw "Could not download CI run $RunId" }
-    uv run --project $toolsProject --locked python (Join-Path $here 'artifact_manifest.py') verify --root $staging --run-id $RunId
+    uv run --project $here --locked excel-comparison manifest-verify --root $staging --run-id $RunId
     if ($LASTEXITCODE -ne 0) { throw "CI artifact verification failed for run $RunId" }
     $destinationParent = Split-Path -Parent $destinationPath
     New-Item -ItemType Directory -Force -Path $destinationParent | Out-Null

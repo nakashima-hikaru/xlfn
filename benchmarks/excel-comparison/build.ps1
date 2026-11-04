@@ -2,7 +2,6 @@ param([switch]$Smoke)
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$toolsProject = Join-Path $here '..\..\tools'
 $artifactRoot = Join-Path $here 'artifacts'
 $counts = if ($Smoke) { @(10) } else { @(10, 100, 1000, 5000) }
 
@@ -25,7 +24,7 @@ function Build-Pair([int]$extras, [string]$outputName) {
             Copy-Item -LiteralPath $rustPdb -Destination $rustSymbols
         }
 
-        uv run --project $toolsProject --locked python (Join-Path $here 'generate_registration.py') $extras
+        uv run --project $here --locked excel-comparison generate-registration $extras
         if ($LASTEXITCODE -ne 0) { throw "registration source generation failed ($extras)" }
         $publishDir = Join-Path $here "excel_dna\bin\benchmark-publish\$extras"
         dotnet publish (Join-Path $here 'excel_dna\ExcelComparison.csproj') -c Release -r win-x64 -o $publishDir -p:ContinuousIntegrationBuild=true
@@ -55,6 +54,6 @@ function Build-Pair([int]$extras, [string]$outputName) {
 
 Build-Pair 0 'benchmark.xll'
 foreach ($count in $counts) { Build-Pair $count "registration-$count.xll" }
-uv run --project $toolsProject --locked python (Join-Path $here 'generate_registration.py') 0
+uv run --project $here --locked excel-comparison generate-registration 0
 if ($LASTEXITCODE -ne 0) { throw 'Could not restore baseline generated source' }
 Write-Host "Paired add-ins built in $artifactRoot"

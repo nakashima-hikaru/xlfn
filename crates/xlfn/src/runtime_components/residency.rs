@@ -247,7 +247,7 @@ impl ModuleResidency {
     }
 
     /// Includes uncertain and in-flight registrations, which also require a lease.
-    #[cfg(any(test, feature = "refinement", feature = "lifecycle-diagnostics"))]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn resident_event_count(&self) -> usize {
         self.state.lock().resident_event_count()
     }

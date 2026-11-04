@@ -9,25 +9,17 @@ public sealed class BenchAddIn : IExcelAddIn
 {
     public void AutoOpen()
     {
-        using var trace = new LifecycleTrace.Scope("IExcelAddIn.AutoOpen");
-        trace.Complete();
     }
     public void AutoClose()
     {
-        using var trace = new LifecycleTrace.Scope("IExcelAddIn.AutoClose");
         try
         {
-            LifecycleTrace.Write("RtdEngine.Close.enter");
             RtdEngine.Close();
-            LifecycleTrace.Write("RtdEngine.Close.return");
         }
         finally
         {
-            LifecycleTrace.Write("AsyncGateControl.Close.enter");
             AsyncGateControl.Close();
-            LifecycleTrace.Write("AsyncGateControl.Close.return");
         }
-        trace.Complete();
     }
 }
 

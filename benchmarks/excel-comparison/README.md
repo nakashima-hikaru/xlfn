@@ -7,8 +7,8 @@ Running it requires **64-bit Excel for Windows with dynamic arrays**, Python
 run Excel. The `smoke` profile checks the harness, while `full` supplies the
 comparison workloads.
 
-Results depend on the Excel build and machine. Keep generated measurements,
-traces, and dumps outside version control. Compare both implementations on the
+Results depend on the Excel build and machine. Keep generated measurements
+outside version control. Compare both implementations on the
 same computer, Excel build, power mode, calculation settings, and trust settings.
 Repeat independent sessions and reverse implementation order when evaluating a
 performance change.
@@ -26,16 +26,16 @@ From this directory on the Windows Excel machine:
 ```powershell
 gh auth login
 ./fetch-ci.ps1 -RunId 123456789
-uv run --project ../../tools --locked --with pywin32 --with psutil python ./run.py --profile smoke --out ./results-smoke.jsonl
-uv run --project ../../tools --locked --with pywin32 --with psutil python ./run.py --profile full --out ./results-full.jsonl
-uv run --project ../../tools --locked python ./summarize.py ./results-full.jsonl
+uv run --locked excel-comparison run --profile smoke --out ./results-smoke.jsonl
+uv run --locked excel-comparison run --profile full --out ./results-full.jsonl
+uv run --locked excel-comparison summarize ./results-full.jsonl
 ```
 
 Use a completed workflow run ID and check out its source commit before running.
 For a PR artifact, use the CI merge commit. `fetch-ci.ps1` refuses an existing
 destination to avoid mixing artifacts. Its optional `-Repository OWNER/REPO`
 and `-Destination PATH` select another repository or destination; pass the same
-destination to `run.py --artifacts`.
+destination to `excel-comparison run --artifacts`.
 
 The runner verifies all ten XLL digests, PE architecture, artifact provenance,
 and checkout commit before opening Excel. `--allow-commit-mismatch` permits a
@@ -51,7 +51,7 @@ file. Filter with `--id S01 --id S02`, `--variant 1000`, or
 `--implementation xlfn`. Preview workloads on any platform:
 
 ```sh
-uv run --project ../../tools --locked python run.py --profile smoke --plan
+uv run --locked excel-comparison run --profile smoke --plan
 ```
 
 For local fixture development, install the Rust x86_64 MSVC target, .NET 10 SDK,
@@ -104,8 +104,8 @@ blocks, validate outputs, retain timing vectors, and report signed changes.
 They are within-xlfn controls and have no Excel-DNA performance ratio. For example:
 
 ```powershell
-uv run --project ../../tools --locked --with pywin32 --with psutil python ./run.py --id M06 --implementation xlfn --repeat 10 --out ./results-returns.jsonl
-uv run --project ../../tools --locked --with pywin32 --with psutil python ./run.py --id N01 --id N04 --implementation xlfn --repeat 10 --out ./results-inputs.jsonl
+uv run --locked excel-comparison run --id M06 --implementation xlfn --repeat 10 --out ./results-returns.jsonl
+uv run --locked excel-comparison run --id N01 --id N04 --implementation xlfn --repeat 10 --out ./results-inputs.jsonl
 ```
 
 The paired summarizer requires successful results with matching settings,
@@ -116,20 +116,16 @@ instead. RSS growth alone does not establish a leak. FP12 process-heap buffers
 also bypass the Rust allocator counters.
 
 M05 enables allocation tracking after warmup and disables it in `finally`.
-Other ordinary workloads run with Rust allocation tracking disabled. The
-optional `--repeat-diagnostics` enables it for L02; those instrumented timings
-are excluded from comparison ratios. `--shutdown-diagnostics` captures lifecycle
-and exit observations, while `--dump-on-failure` captures a surviving process
-only after failure. `--full-memory-dumps` adds heap memory to either dump mode.
-These troubleshooting modes write local artifacts and may affect timing;
-full lifecycle diagnostics are excluded from performance ratios.
+Other ordinary workloads run with Rust allocation tracking disabled.
 
 ## Local checks
 
 From the repository root:
 
 ```sh
-uv run --project tools --locked python -B -m unittest discover -s benchmarks/excel-comparison -p 'test_*.py'
+uv run --project benchmarks/excel-comparison --locked ruff check benchmarks/excel-comparison
+uv run --project benchmarks/excel-comparison --locked ty check --project benchmarks/excel-comparison --error-on-warning
+uv run --project benchmarks/excel-comparison --locked python -B -m unittest discover -s benchmarks/excel-comparison/tests -p 'test_*.py'
 cargo test --manifest-path benchmarks/excel-comparison/xlfn/Cargo.toml --locked --lib
 dotnet run --project benchmarks/excel-comparison/control-tests/ControlTests.csproj -- normal
 dotnet run --project benchmarks/excel-comparison/control-tests/ControlTests.csproj --no-build -- emergency

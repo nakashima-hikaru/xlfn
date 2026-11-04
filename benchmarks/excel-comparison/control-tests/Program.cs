@@ -25,7 +25,6 @@ static JsonElement WaitJson(string directory, string name, Func<JsonElement, boo
     throw new TimeoutException($"Missing expected {name}");
 }
 
-LifecycleTraceChecks.Run();
 string directory = Path.Combine(Path.GetTempPath(), "xlfn-dna-control-" + Guid.NewGuid());
 Directory.CreateDirectory(directory);
 try

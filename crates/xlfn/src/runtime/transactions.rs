@@ -52,13 +52,7 @@ where
     >() {
         return Err(transaction.failure(error));
     }
-    let prepare = || crate::registration::preflight_registration(descriptors);
-    #[cfg(feature = "lifecycle-diagnostics")]
-    let prepared_result =
-        crate::lifecycle_diagnostics::registration_preflight(descriptors.len(), prepare);
-    #[cfg(not(feature = "lifecycle-diagnostics"))]
-    let prepared_result = prepare();
-    let prepared_set = match prepared_result {
+    let prepared_set = match crate::registration::preflight_registration(descriptors) {
         Ok(prepared_set) => prepared_set,
         Err(error) => return Err(transaction.failure(error)),
     };

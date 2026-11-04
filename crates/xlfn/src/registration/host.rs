@@ -210,22 +210,7 @@ impl<'call> RegistrationHost<'call> {
     ) -> RegistrationMutation<()> {
         let mut id = XLOPER12::number(registration.id);
         let arguments = [NonNull::from_mut(&mut id)];
-        #[cfg(feature = "lifecycle-diagnostics")]
-        let mut raw_result = None;
-        let invocation = invoke_observed_operation(self.excel, Unregister, &arguments, |_result| {
-            #[cfg(feature = "lifecycle-diagnostics")]
-            {
-                raw_result = crate::lifecycle_diagnostics::registration_result(_result);
-            }
-        });
-        #[cfg(feature = "lifecycle-diagnostics")]
-        crate::lifecycle_diagnostics::registration_removal(
-            "xlfUnregister",
-            registration.id,
-            &invocation.evidence,
-            raw_result,
-        );
-        mutation_from_invocation(invocation)
+        mutation_from_invocation(invoke_operation(self.excel, Unregister, &arguments))
     }
 
     /// Deletes registration metadata only while its current binding is still
@@ -337,18 +322,8 @@ fn invoke_operation<O: RegistrationOperation>(
     operation: O,
     arguments: &[NonNull<XLOPER12>],
 ) -> RegistrationInvocation<O> {
-    invoke_observed_operation(host, operation, arguments, |_| {})
-}
-
-fn invoke_observed_operation<O: RegistrationOperation>(
-    host: ExcelHost<'_>,
-    operation: O,
-    arguments: &[NonNull<XLOPER12>],
-    observe: impl FnOnce(&mut ExcelCallbackValue<'_>),
-) -> RegistrationInvocation<O> {
     RegistrationInvocation {
         evidence: host.invoke_protocol(O::FUNCTION_ID, arguments, |result| {
-            observe(result);
             operation.decode(result)
         }),
         operation: std::marker::PhantomData,

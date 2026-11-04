@@ -22,8 +22,6 @@ rtd = []
 handles = ["dep:blake3", "dep:constant_time_eq", "dep:getrandom", "dep:papaya"]
 cache = ["dep:papaya", "dep:quick_cache"]
 refinement = ["serde/derive"]
-# Opt-in native lifecycle diagnostics; inactive without a process-bound control file.
-lifecycle-diagnostics = []
 # Internal instrumentation for production-path benchmarks.
 bench-internals = ["handles", "xlfn-sys/abi-probe"]
 

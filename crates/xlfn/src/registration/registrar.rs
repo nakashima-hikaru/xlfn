@@ -11,8 +11,6 @@ use super::{
     UnregisterResult,
 };
 use crate::XllError;
-#[cfg(feature = "lifecycle-diagnostics")]
-use crate::lifecycle_diagnostics::{RegistrationTiming, RegistrationTimingPhase};
 use std::path::PathBuf;
 
 pub(crate) struct HostRegistrar {
@@ -51,30 +49,12 @@ impl HostRegistrar {
         host: &RegistrationHost<'_>,
         prepared: &PreparedRegistrationSet,
     ) -> Result<super::SuccessfulRegistrations, RegistrationTransactionError> {
-        #[cfg(feature = "lifecycle-diagnostics")]
-        let mut timing = RegistrationTiming::begin(prepared.as_slice().len());
         let result = register_all_transaction(
             host,
             prepared.as_slice(),
-            |host, registration| {
-                let result = self.register_one(
-                    host,
-                    registration,
-                    #[cfg(feature = "lifecycle-diagnostics")]
-                    &mut timing,
-                );
-                #[cfg(feature = "lifecycle-diagnostics")]
-                if let Some(timing) = &mut timing {
-                    timing.function_completed(result.is_ok());
-                }
-                result
-            },
+            |host, registration| self.register_one(host, registration),
             Self::unregister_pending,
         );
-        #[cfg(feature = "lifecycle-diagnostics")]
-        if let Some(timing) = timing {
-            timing.finish(&result, host.terminal_status());
-        }
         result.map(super::SuccessfulRegistrations::from_applied)
     }
 
@@ -82,18 +62,11 @@ impl HostRegistrar {
         &self,
         host: &RegistrationHost<'_>,
         descriptor: &PreparedRegistration,
-        #[cfg(feature = "lifecycle-diagnostics")] timing: &mut Option<RegistrationTiming>,
     ) -> Result<RegistrationId, RegistrationTransactionError> {
-        let check_conflict = || host.is_registered_name(descriptor.excel_name);
-        #[cfg(feature = "lifecycle-diagnostics")]
-        let conflict = RegistrationTiming::measure(
-            timing,
-            RegistrationTimingPhase::ConflictCheck,
-            check_conflict,
-        );
-        #[cfg(not(feature = "lifecycle-diagnostics"))]
-        let conflict = check_conflict();
-        if conflict.map_err(RegistrationTransactionError::new)? {
+        if host
+            .is_registered_name(descriptor.excel_name)
+            .map_err(RegistrationTransactionError::new)?
+        {
             return Err(RegistrationTransactionError::new(
                 XllError::RegistrationConflict {
                     name: descriptor.excel_name,
@@ -101,12 +74,7 @@ impl HostRegistrar {
             ));
         }
 
-        let register = || host.register(&self.module_units, descriptor);
-        #[cfg(feature = "lifecycle-diagnostics")]
-        let mutation =
-            RegistrationTiming::measure(timing, RegistrationTimingPhase::Register, register);
-        #[cfg(not(feature = "lifecycle-diagnostics"))]
-        let mutation = register();
+        let mutation = host.register(&self.module_units, descriptor);
         match mutation {
             RegistrationMutation::Applied { value, cleanup } => match cleanup {
                 Ok(()) => Ok(value),

@@ -151,11 +151,11 @@ impl HostMutationJournal {
     pub(super) fn retain_metadata(&mut self, debts: Vec<MetadataDebt>) {
         self.metadata_debt.extend(debts);
     }
-    #[cfg(any(test, feature = "lifecycle-diagnostics"))]
+    #[cfg(test)]
     pub(crate) fn pending_registrations(&self) -> &[PendingRegistration] {
         &self.pending_registrations
     }
-    #[cfg(any(test, feature = "lifecycle-diagnostics"))]
+    #[cfg(test)]
     pub(crate) fn metadata_debt(&self) -> &[MetadataDebt] {
         &self.metadata_debt
     }

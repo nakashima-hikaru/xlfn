@@ -259,7 +259,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
             .ensure_calculation_events(host, has_async_functions)
     }
 
-    #[cfg(any(test, feature = "lifecycle-diagnostics"))]
+    #[cfg(test)]
     pub(crate) fn resident_event_count(&self) -> usize {
         self.residency.resident_event_count()
     }
@@ -276,12 +276,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         P::quiesce(shared, lifecycle).map_err(crate::error::IntoXllError::into_xll_error)
     }
 
-    #[cfg(any(
-        test,
-        feature = "rtd",
-        feature = "handles",
-        feature = "lifecycle-diagnostics"
-    ))]
+    #[cfg(any(test, feature = "rtd", feature = "handles"))]
     pub(crate) fn module_residency_held(&self) -> bool {
         self.residency.is_held()
     }
