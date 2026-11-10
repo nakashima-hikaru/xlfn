@@ -2677,21 +2677,23 @@ fn topic_key_from_safearray_preserves_bstr_ownership_and_text_errors() {
                 // SAFETY: the test retains array ownership throughout each
                 // parse; parsing must release only its copied element.
                 let key = unsafe { topic_key_from_safearray(&mut array_pointer) };
-                match case {
-                    0 => assert_eq!(key.unwrap(), "topic_日本語💡"),
-                    1 => assert!(matches!(
-                        key,
-                        Err(XllError::Input {
-                            argument: "RTD topic",
-                            reason: crate::error::InputError::InvalidUtf16,
-                        })
-                    )),
-                    2 => assert!(matches!(key, Err(XllError::Input {
-                        argument: "RTD topic",
-                        reason: crate::error::InputError::TooLarge { limit, actual },
-                    }) if limit == crate::utf16::EXCEL_STRING_LIMIT && actual == units.len())),
+                let reason = match case {
+                    0 => {
+                        assert_eq!(key.unwrap(), "topic_日本語💡");
+                        continue;
+                    }
+                    1 => crate::error::InputError::InvalidUtf16,
+                    2 => crate::error::InputError::TooLarge {
+                        limit: crate::utf16::EXCEL_STRING_LIMIT,
+                        actual: units.len(),
+                    },
                     _ => unreachable!(),
-                }
+                };
+                let error = key.unwrap_err();
+                assert_eq!(error.to_excel_error(), crate::ExcelError::Value);
+                assert_eq!(error.to_string(), "invalid RTD topic");
+                let cause = std::error::Error::source(&error).unwrap();
+                assert_eq!(cause.to_string(), reason.to_string());
             }
         }
     }

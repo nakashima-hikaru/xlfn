@@ -46,10 +46,7 @@ jobs:
             - name: Install pinned extraction toolchain and targets
               run: rustup toolchain install nightly-2026-09-28 --profile minimal --target aarch64-apple-darwin,x86_64-pc-windows-msvc
             - name: Install API extractor
-              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
-              with:
-                  tool: cargo-public-api@0.52.0
-                  fallback: none
+              run: cargo install --locked cargo-public-api --version 0.52.0
             - name: Verify reviewed API surfaces
               run: PYTHONPATH=tools/src python3 -m xlfn_tools.check_public_api
 
