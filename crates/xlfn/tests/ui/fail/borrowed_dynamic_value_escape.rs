@@ -1,5 +1,6 @@
 use xlfn::__private::v1::{XLOPER12, argument_from_raw, with_excel_call_scope};
 use xlfn::value::{ExcelArrayRef, ExcelCellRef, ExcelValueRef};
+
 use xlfn::XllResult;
 
 fn escape_array<'call>(array: ExcelArrayRef<'call>) -> ExcelArrayRef<'static> {

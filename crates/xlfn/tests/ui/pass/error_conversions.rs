@@ -13,7 +13,7 @@ impl Addin for ErrorConversions {
     type Error = XllError;
     type Layers = ();
 
-    fn open(context: &OpenContext<Self>) -> xlfn::OpenResult<Self> {
+    fn open(context: &OpenContext<Self>) -> xlfn::addin::OpenResult<Self> {
         context.diagnostics().install_sink(Discard)?;
         Ok(Opened::new(()))
     }

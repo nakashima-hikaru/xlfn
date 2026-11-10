@@ -4,20 +4,17 @@ xlfn separates what Excel sees from what operators need to diagnose. A worksheet
 
 ## Return a worksheet error
 
-Use `XllResult<T>` when a calculation can fail. Add this function to the
+Use `UdfResult<T>` when application calculations can fail. Add this function to the
 [tutorial project](quick-start.md):
 
 ```rust
 {{#include ../fixtures/addin.md}}
-use xlfn::error::DomainErrorCode;
 use xlfn::prelude::*;
 
 #[excel_function(name = "HELLO.SQRT", thread_safe)]
-fn square_root(value: f64) -> XllResult<f64> {
+fn square_root(value: f64) -> UdfResult<f64> {
     if value < 0.0 {
-        return Err(XllError::Domain {
-            code: DomainErrorCode::InvalidInput,
-        });
+        return Err(UdfError::new(ExcelError::Number, "square root requires a nonnegative value"));
     }
     Ok(value.sqrt())
 }
@@ -47,12 +44,27 @@ fn available(value: f64) -> Result<f64, ExcelError> {
 ```
 
 When the same cell error needs application diagnostic detail, use
-`XllError::custom(ExcelError::NotAvailable, "market data connection is unavailable")`.
+`UdfError::new(ExcelError::NotAvailable, "market data connection is unavailable")`.
 On the Q path the cell receives `#N/A`; the message is retained in diagnostics.
 
 ## Error types
 
-Most add-ins use `XllResult<T>`, an alias for `Result<T, XllError>`.
+Application code can use `UdfResult<T>` (`Result<T, UdfError>`).
+`UdfError::with_source` preserves the original concrete error and `source()` chain
+while the application owns it; `std::io::Error` converts directly through `?`.
+At the Excel boundary the framework copies up to eight causes, at most 1024
+UTF-8 bytes per cause, and a 4096-byte main message. The snapshot preserves
+cause text and order, not concrete error types. Diagnostic queues never retain
+arbitrary application-owned objects. Cyclic causes are bounded by the same limit.
+
+`XllResult<T>` remains the result of framework operations. Its `XllError` is
+structured diagnostic data, distinct from the opaque application error.
+`InvalidLimit` is used for rejected configuration capacities and is independent
+of worksheet errors.
+
+RTD `RtdSendError` and `RtdBatchSendError` support `?` into `XllError`. This
+intentionally discards retained updates and stops propagation; recover the pending
+payload instead when a full queue should be retried.
 
 Important `XllError` families include:
 
@@ -80,7 +92,7 @@ The Q (`XLOPER12*`) path maps errors conservatively:
 
 Non-finite numeric outputs (`NaN` and either infinity) are
 `DomainErrorCode::InvalidInput` and produce `#NUM!`. This applies equally to
-scalar returns, `Matrix`/`Row`/`Column` cells, incremental `XlArrayBuilder`
+scalar returns, `Matrix`/`Row`/`Column` cells, incremental `ExcelArrayBuilder`
 output, and custom `IntoExcel` conversions. These output errors carry no
 worksheet argument name. A non-finite numeric input remains
 `InputError::NonFinite`, with the supplied argument name, and maps to `#VALUE!`.

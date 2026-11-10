@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn warm_endpoint_resolution_does_not_take_the_registry_lock() {
-        let registry = CacheRegistry::new(64);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         let endpoint = CacheEndpoint::<u64, u64>::new("warm-lock-free-resolution");
         std::thread::scope(|scope| {
             let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn uncached_endpoint_resolution_does_not_take_the_publication_lock() {
-        let registry = CacheRegistry::new(64);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         let endpoint = CacheEndpoint::<u64, u64>::new("shared-index-lock-free-resolution");
         let expected = registry.resolve_cache(&endpoint).unwrap().as_ptr().addr();
         std::thread::scope(|scope| {
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn miri_registry_endpoint_resolution_keeps_owner_identity() {
         let endpoint = CacheEndpoint::<u64, String>::new("registry-lifetime");
-        let first = CacheRegistry::new(64);
+        let first = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         drop(
             first
                 .get_or_try_insert_weighted(&endpoint, 1, String::len, || Ok("old".into()))
@@ -309,7 +309,7 @@ mod tests {
 
         // Replace in the same stack slot: stale TLS pointers cannot authorize
         // access to the destroyed registry even if allocator addresses repeat.
-        registry = CacheRegistry::new(64);
+        registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         assert_ne!(registry.identity, identity);
         assert!(registry.get(&endpoint, &1).unwrap().is_none());
         drop(
@@ -326,8 +326,8 @@ mod tests {
     #[test]
     fn miri_endpoint_cache_preserves_registry_and_type_separation() {
         enum Marker {}
-        let first = CacheRegistry::new(64);
-        let second = CacheRegistry::new(64);
+        let first = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
+        let second = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         let numbers = CacheEndpoint::<u64, u64>::new("same-name");
         let marked = CacheEndpoint::<u64, u64, Marker>::new("same-name");
         let strings = CacheEndpoint::<u64, String>::new("same-name");
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn more_endpoints_than_tls_capacity_fall_back_without_losing_values() {
-        let registry = CacheRegistry::new(64);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         const IDS: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_.";
         assert!(IDS.len() > super::SET_COUNT * super::WAYS);
         let ids: Vec<_> = (0..IDS.len()).map(|index| &IDS[index..index + 1]).collect();
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn miri_equal_endpoint_names_share_storage_across_resolution_sets() {
         static NAMES: [u8; 128] = [b'x'; 128];
-        let registry = CacheRegistry::new(64);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         let first_name = std::str::from_utf8(&NAMES[..8]).unwrap();
         let type_id = TypeId::of::<((), u64, u64)>();
         let first_set = super::set_index(registry.identity, (type_id, first_name));

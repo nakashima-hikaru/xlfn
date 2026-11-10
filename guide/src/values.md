@@ -3,69 +3,50 @@
 Start with an owned `Matrix<T>` when a function accepts or returns a rectangular
 range. Use borrowed views or incremental output when conversion cost matters.
 
-xlfn selects the input ABI from each Rust parameter type. Native scalar
-parameters let Excel convert the input before Rust is called. Use
-`#[excel_arg(strict)]` when the original worksheet type must be checked by
-xlfn instead.
+Ordinary parameters use XLOPER12 (`Q`) and strict conversion traits. Renaming
+an import or introducing a scalar type alias does not change that behavior.
 
 ## Choose a scalar type
 
-| Rust input | Default input ABI | Notes |
+| Rust input | Default ABI | Explicit native option |
 | --- | --- | --- |
-| `f64` | `B`: double by value | Excel numeric conversion, then finite validation |
-| `bool` | `A`: 16-bit Boolean by value | Excel Boolean conversion; only 0 and 1 are accepted at the ABI boundary |
-| `i32` | `J`: 32-bit integer by value | Excel integer conversion, including its fractional-input rules |
-| `String` | `D%`: counted UTF-16 pointer | validated UTF-16 converted to owned UTF-8 |
-| `&str` | `D%`: counted UTF-16 pointer | decoded call-local UTF-8 for synchronous functions |
-| `NumericMatrixRef<'_>` | `K%`: FP12 pointer | borrowed numeric array after Excel conversion |
-| `i64` | `Q`: XLOPER12 value | integral input within the exact binary64 integer range |
-| `Matrix<T>`, `MatrixRef<'_, T>` | `Q` | strict element conversion |
-| `ExcelValue`, `ExcelValueRef<'_>` | `Q` | dynamic scalar, missing value, or array; the borrowed view is call-local |
-| `Option<T>`, `OptionalExcelValue<T>` | `Q` | original missing/blank states are retained |
-| `ExcelError`, `ExcelSerialDate` | `Q` | error value or finite serial with unresolved workbook date system |
-| custom `FromExcel` types and unrecognized type aliases | `Q` | declared conversion contract |
+| `f64` | `Q`, finite numbers | `#[excel_arg(native)]`: `B` |
+| `bool` | `Q`, Boolean cells | `#[excel_arg(native)]`: `A` |
+| `i32` | `Q`, integral numbers in range | `#[excel_arg(native)]`: `J` |
+| `String`, `&str` | `Q`, text cells | `#[excel_arg(native)]`: `D%` |
+| Scalar aliases | `Q`, underlying conversion | `#[excel_arg(native = f64)]` etc. |
+| `NumericMatrixRef<'_>` | `K%`, Excel numeric coercion | Specialized numeric view |
+| `Matrix<T>`, `MatrixRef<'_, T>` | `Q` | Strict element conversion |
+| `ExcelValue`, `ExcelValueRef<'_>` | `Q` | Preserve dynamic input distinctions |
+| `Option<T>`, `OptionalExcelValue<T>` | `Q` | Preserve presence states |
+| Custom `FromExcel` types | `Q` | Declared conversion contract |
 
-Cell reference parameters continue to use `U` in macro-sheet mode. Native
-scalars are supported in both synchronous and async functions. Async `String`
-inputs are owned before the task is submitted; `&str` and `NumericMatrixRef`
-remain synchronous only. Return values keep the ordinary `Q` value ABI and
-async completion keeps its existing handle and return protocol.
-
-For example, `(spot: f64, enabled: bool, periods: i32, label: &str)` in a
-thread-safe function registers as `QBAJD%$`. The registration text, FFI
-parameter types, and admission path come from one analyzed ABI plan. The
-Boolean FFI parameter is `i16`, never Rust `bool`.
-The registration codes and C widths follow Microsoft's
-[xlfRegister specification](https://learn.microsoft.com/en-us/office/client-developer/excel/xlfregister-form-1).
-
-### Require the original worksheet type
+Native ABI selection is explicit. For a scalar alias, spell its ABI as
+`native = f64`, `i32`, `bool`, `string`, or `str`; the compiler verifies that
+it matches the resolved type. Native policies cannot combine with defaults,
+blank/missing policies, `strict`, or specialized input views.
+`input_semantics = strict` rejects native opt-ins throughout a function.
 
 ```rust
 {{#include ../fixtures/addin.md}}
 # use xlfn::prelude::*;
+type Price = f64;
 #[excel_function(name = "CALC.STRICT", thread_safe)]
-fn calculate(
-    #[excel_arg(strict)] spot: f64,
-    enabled: bool,
-    #[excel_arg(strict)] periods: i32,
-) -> f64 {
+fn calculate(spot: Price, enabled: bool, periods: i32) -> f64 {
     if enabled { spot * f64::from(periods) } else { 0.0 }
 }
+#[excel_function(name = "CALC.NATIVE", thread_safe)]
+fn native_price(#[excel_arg(native = f64)] spot: Price) -> f64 { spot }
 ```
 
-This registers as `QQAQ$`. `strict` selects `Q` and the existing `FromExcel`
-rules: `f64` accepts only finite numbers or integers, `bool` only Booleans,
-`i32` only in-range integral numbers or integers, and strings only text.
-An Excel error passed to a strict parameter expecting another type propagates
-the original error. `strict` cannot be applied to a reference, FP12 numeric
-view, or async handle lease. Native registration codes cannot be selected
-directly, and there is no `excel_arg(coerce)` option.
+The first function registers as `QQQQ$`; the second as `QB$`. Native Boolean
+FFI parameters use `i16`, never Rust `bool`. References use `U` and require
+macro-sheet mode. Borrowed strings and numeric views require synchronous calls.
 
-Presence/default policies automatically select `Q`, including an explicit
-`blank = convert` or `missing = convert`. They need the original Excel value;
-`strict` is unnecessary for them. Metadata such as the argument name and
-description does not affect the ABI. Unrecognized type aliases use `Q`
-because a procedural macro cannot resolve their underlying Rust type.
+For strict inputs, `f64` accepts finite numbers, `bool` accepts Boolean cells,
+`i32` requires integral values in range, and strings require text. An incoming
+Excel error propagates unchanged. Presence/default policies also use `Q` so
+conversion can observe the original blank or omitted argument.
 
 Excel can reject a native input before invoking the UDF. Such a worksheet
 error does not produce a Rust argument-conversion diagnostic. Exact Excel
@@ -138,7 +119,7 @@ eagerly. Cell headers are validated on admission; payload conversion is lazy.
 ```rust
 {{#include ../fixtures/addin.md}}
 use xlfn::prelude::*;
-use xlfn::value::XlArrayRef;
+use xlfn::value::raw::XlArrayRef;
 
 #[excel_function(name = "ARRAY.SUM.BORROWED", thread_safe)]
 fn sum_borrowed(values: XlArrayRef<'_>) -> XllResult<f64> {
@@ -348,7 +329,7 @@ contracts. Native Windows/Excel validation remains required for deployment.
 
 ### Build a large result incrementally
 
-When an output is large or produced one cell at a time, `XlArrayBuilder`
+When an output is large or produced one cell at a time, `ExcelArrayBuilder`
 writes the result without an intermediate owned matrix.
 Use it when the function can calculate each output cell directly. Returning an
 existing `Matrix<T>` remains convenient when the application already needs that
@@ -357,13 +338,13 @@ owned matrix; converting it to Excel still encodes each cell into return storage
 ```rust
 {{#include ../fixtures/addin.md}}
 use xlfn::prelude::*;
-use xlfn::output::{XlArrayBuilder, XlArrayOutput};
-use xlfn::value::XlArrayRef;
+use xlfn::output::{ExcelArrayBuilder, ExcelArrayOutput};
+use xlfn::value::raw::XlArrayRef;
 
 #[excel_function(name = "ARRAY.DOUBLED", thread_safe)]
-fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
+fn doubled(values: XlArrayRef<'_>) -> XllResult<ExcelArrayOutput> {
     let shape = values.shape();
-    let mut output = XlArrayBuilder::new(shape.rows, shape.columns)?;
+    let mut output = ExcelArrayBuilder::new(shape.rows, shape.columns)?;
     for cell in values.cells() {
         output.push_f64(cell.as_f64()? * 2.0)?;
     }
@@ -375,17 +356,17 @@ The builder rejects non-finite output as `#NUM!` and checks dimensions and
 return-storage limits.
 
 For an existing row-major numeric slice,
-`XlArrayBuilder::from_f64(rows, columns, values)?.finish()` validates and
+`ExcelArrayOutput::from_f64(rows, columns, values)` validates and
 encodes it directly without an intermediate owned `Matrix`.
 
 ```rust
 {{#include ../fixtures/addin.md}}
 use xlfn::prelude::*;
-use xlfn::output::{XlArrayBuilder, XlArrayOutput};
+use xlfn::output::ExcelArrayOutput;
 
 #[excel_function(name = "ARRAY.COPY.NUMERIC", thread_safe)]
-fn copy_numeric(values: NumericMatrixRef<'_>) -> XllResult<XlArrayOutput> {
-    XlArrayBuilder::from_f64(values.rows(), values.columns(), values.as_slice())?.finish()
+fn copy_numeric(values: NumericMatrixRef<'_>) -> XllResult<ExcelArrayOutput> {
+    ExcelArrayOutput::from_f64(values.rows(), values.columns(), values.as_slice())
 }
 ```
 
@@ -460,7 +441,7 @@ fn date_year(
     let serial = context.coerce_matrix::<ExcelSerialDate>(&settlement)?;
     let date = serial.get(0, 0).ok_or_else(||
         XllError::input("settlement", xlfn::error::InputError::OutOfRange))?;
-    Ok(date.with_date_system(system).to_ymd_with_argument("settlement")?.0)
+    Ok(date.with_date_system(system).to_ymd().map_err(|error| error.with_argument("settlement"))?.year)
 }
 ```
 
@@ -476,8 +457,7 @@ Use `ExcelSerialDate::from_ymd(year, month, day, system)` to construct a
 midnight serial, and `date.to_ymd()` to read its Gregorian calendar day.
 Their component types are `year: i16`, `month: i8`, and `day: i8`, matching
 Jiff's civil-date constructor and accessors.
-`to_ymd_with_argument("settlement")` and, with Jiff enabled,
-`to_jiff_with_argument("settlement")` attach a worksheet argument name to
+`to_ymd().map_err(|error| error.with_argument("settlement"))` attaches a worksheet argument name to
 calendar-conversion errors; ordinary conversions retain the label `date`.
 `with_date_system` reinterprets the same serial rather than shifting it to
 preserve the calendar date across epochs.
@@ -491,9 +471,10 @@ rounding can produce `1.0` for a very small negative serial.
 ```rust
 use xlfn::value::{ExcelDateSystem, ExcelSerialDate};
 
+
 let date = ExcelSerialDate::from_ymd(2026, 10, 5, ExcelDateSystem::Windows1900)?;
 assert_eq!(date.serial(), 46300.0);
-assert_eq!(date.to_ymd()?, (2026, 10, 5));
+assert_eq!(date.to_ymd()?.year, 2026);
 # Ok::<(), xlfn::XllError>(())
 ```
 

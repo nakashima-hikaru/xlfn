@@ -452,7 +452,9 @@ pub(crate) fn classify_error(error: &XllError) -> (UdfErrorKind, Option<i32>) {
         XllError::Input { .. } => (UdfErrorKind::Input, None),
         XllError::Domain { .. } => (UdfErrorKind::Domain, None),
         XllError::Native { code, .. } => (UdfErrorKind::Vendor, Some(*code)),
-        XllError::ExcelValue(_) | XllError::Custom { .. } => (UdfErrorKind::ExcelValue, None),
+        XllError::ExcelValue(_) | XllError::Custom { .. } | XllError::Application { .. } => {
+            (UdfErrorKind::ExcelValue, None)
+        }
         XllError::Panic => (UdfErrorKind::Panic, None),
         XllError::Closing => (UdfErrorKind::Closing, None),
         _ => (UdfErrorKind::Internal, None),

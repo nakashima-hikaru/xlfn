@@ -2,7 +2,8 @@ use xlfn::cache::CalculationCache;
 
 #[test]
 fn clear_invalidates_resident_values() {
-    let cache = CalculationCache::<String, String>::new(1024);
+    let cache =
+        CalculationCache::<String, String>::new(xlfn::cache::CacheBudget::weight_units(1024));
     cache
         .get_or_try_insert_with("k1".to_string(), || Ok("v1".to_string()))
         .unwrap();
@@ -15,7 +16,8 @@ fn clear_invalidates_resident_values() {
 
 #[test]
 fn lease_survives_clear() {
-    let cache = CalculationCache::<String, String>::new(1024);
+    let cache =
+        CalculationCache::<String, String>::new(xlfn::cache::CacheBudget::weight_units(1024));
     let lease = cache
         .get_or_try_insert_with("k1".to_string(), || Ok("v1".to_string()))
         .unwrap();

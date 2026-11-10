@@ -1,7 +1,7 @@
 #[cfg(any(test, feature = "bench-internals"))]
 use crate::XllError;
 use crate::XllResult;
-use crate::addin::PhysicallyUnloadableAddin;
+use crate::addin_impl::PhysicallyUnloadableAddin;
 #[cfg(feature = "async")]
 use crate::generation::ExecutionLease;
 #[cfg(test)]
@@ -340,7 +340,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         let transaction = match transaction.stage_opening_generation(OpeningGeneration {
             shared_state: state,
             layers,
-            init_config: crate::addin::RuntimeConfig::new(),
+            init_config: crate::addin_impl::RuntimeConfig::new(),
         }) {
             Ok(transaction) => transaction,
             Err((_error, transaction, _opening)) => {
@@ -368,8 +368,8 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         state: A::SharedState,
         layers: A::Layers,
         sources: crate::subscription::SourceArena<
-            crate::addin::AddinSubscription<A>,
-            crate::addin::AddinSources<A>,
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
         >,
     ) -> OpeningTxn<'runtime, A, LifecycleInstalled<A>>
     where
@@ -388,7 +388,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         let transaction = match transaction.stage_opening_generation(OpeningGeneration {
             shared_state: state,
             layers,
-            init_config: crate::addin::RuntimeConfig::new(),
+            init_config: crate::addin_impl::RuntimeConfig::new(),
         }) {
             Ok(transaction) => transaction,
             Err((_error, transaction, _opening)) => {
@@ -413,8 +413,8 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         lifecycle_state: A::LifecycleState,
         layers: A::Layers,
         sources: crate::subscription::SourceArena<
-            crate::addin::AddinSubscription<A>,
-            crate::addin::AddinSources<A>,
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
         >,
     ) -> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
         let access = self
@@ -430,7 +430,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         let transaction = match transaction.stage_opening_generation(OpeningGeneration {
             shared_state: state,
             layers,
-            init_config: crate::addin::RuntimeConfig::new(),
+            init_config: crate::addin_impl::RuntimeConfig::new(),
         }) {
             Ok(transaction) => transaction,
             Err((_error, transaction, _opening)) => {
@@ -664,7 +664,10 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     pub(crate) fn with_generation_services<R>(
         &self,
         operation: impl FnOnce(
-            &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+            &GenerationServices<
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
+            >,
         ) -> R,
     ) -> XllResult<R> {
         self.lifecycle
@@ -708,8 +711,8 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         &self,
         operation: impl FnOnce(
             &crate::subscription::SubscriptionRuntime<
-                crate::addin::AddinSubscription<A>,
-                crate::addin::AddinSources<A>,
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
             >,
         ) -> R,
     ) -> XllResult<R> {
@@ -925,8 +928,8 @@ impl<A: crate::Addin> CallGuard<'_, A> {
         &self,
     ) -> crate::rtd::RtdGenerationAccess<
         '_,
-        crate::addin::AddinSubscription<A>,
-        crate::addin::AddinSources<A>,
+        crate::addin_impl::AddinSubscription<A>,
+        crate::addin_impl::AddinSources<A>,
     > {
         self.admission.services().rtd_call_access()
     }
@@ -965,12 +968,12 @@ pub(crate) mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _context: &crate::addin::OpenContext<Self>,
+            _context: &crate::addin_impl::OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
-            Ok(crate::addin::Opened::new(0))
+            Ok(crate::addin_impl::Opened::new(0))
         }
     }
 
@@ -1074,9 +1077,9 @@ pub(crate) mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _: &crate::addin::OpenContext<Self>,
+            _: &crate::addin_impl::OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
             unreachable!("drain tests publish their observed state directly")

@@ -376,7 +376,7 @@ mod release_owner_tests {
         for _ in 0..16 {
             let owner = PublishedOwner::new(TaskRegistry::new());
             owner
-                .start(crate::addin::AsyncTaskLimit::new(1).unwrap())
+                .start(crate::addin_impl::AsyncTaskLimit::new(1).unwrap())
                 .unwrap();
             let reservation = owner.reserve(owner.current_epoch()).unwrap();
             let (cancellation, _token) =

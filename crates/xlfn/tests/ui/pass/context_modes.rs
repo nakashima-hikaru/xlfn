@@ -1,5 +1,8 @@
 use xlfn::prelude::*;
-use xlfn::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
+
+use xlfn::addin::{MacroSheetContext};
+use xlfn::addin::{MainThreadContext};
+use xlfn::addin::{ThreadSafeContext};
 
 pub struct TestAddin;
 
@@ -47,17 +50,17 @@ fn workbook_date_system(
 }
 
 #[excel_function(name = "TEST.QUALIFIED.MAIN")]
-fn qualified_main(context: xlfn::MainThreadContext<'_, TestAddin>, value: f64) -> f64 {
+fn qualified_main(context: xlfn::addin::MainThreadContext<'_, TestAddin>, value: f64) -> f64 {
     value + f64::from(*context.state())
 }
 
 #[excel_function(name = "TEST.QUALIFIED.THREAD")]
-fn qualified_thread(context: xlfn::ThreadSafeContext<'_, TestAddin>) -> i32 {
+fn qualified_thread(context: xlfn::addin::ThreadSafeContext<'_, TestAddin>) -> i32 {
     *context.state()
 }
 
 #[excel_function(name = "TEST.QUALIFIED.MACRO")]
-fn qualified_macro(context: xlfn::MacroSheetContext<'_, TestAddin>) -> i32 {
+fn qualified_macro(context: xlfn::addin::MacroSheetContext<'_, TestAddin>) -> i32 {
     *context.state()
 }
 
@@ -94,7 +97,7 @@ fn elided_macro(context: MacroSheetContext<TestAddin>) -> i32 {
 fn main() {
     type ValueExport = unsafe extern "system" fn() -> *mut xlfn::__private::v1::XLOPER12;
     type OneArgumentExport = unsafe extern "system" fn(
-        f64,
+        *mut xlfn::__private::v1::XLOPER12,
     ) -> *mut xlfn::__private::v1::XLOPER12;
 
     // Injected capabilities do not add worksheet-visible ABI arguments.

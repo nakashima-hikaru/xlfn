@@ -1,0 +1,5 @@
+error: `return_abi` requires a policy identifier or string literal
+ --> tests/ui/return_abi_non_policy_value.rs:3:31
+  |
+3 | #[excel_function(return_abi = 123)]
+  |                               ^^^

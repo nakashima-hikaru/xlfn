@@ -1,5 +1,7 @@
 error: add-in `id` must be a non-reserved ASCII slug beginning with a letter and containing only letters, digits, `-`, or `_`
- --> tests/ui/addin_unsafe_id.rs:4:1
+ --> tests/ui/addin_unsafe_id.rs:3:1
   |
-4 | struct Addin;
-  | ^^^^^^^^^^^^^
+3 | #[excel_addin(id = "../NUL")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `excel_addin` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -1,6 +1,6 @@
 use xlfn_macros::excel_addin;
 
 #[excel_addin(name = "First", name = "Second")]
-struct Addin;
+impl Addin for App {}
 
 fn main() {}

@@ -1340,7 +1340,7 @@ unsafe fn connect_data_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     // SAFETY: `strings` was validated as non-null and Excel supplies the live
     // RTD topic SAFEARRAY for the duration of this call.
     let Ok(key) = (unsafe { topic_key_from_safearray(strings) }) else {
-        let error = XllError::input("RTD topic", InputError::Malformed("invalid topic array"));
+        let error = XllError::validation("RTD topic", InputError::Malformed("invalid topic array"));
         crate::diagnostics::report_no_unwind("IRtdServer::ConnectData", &error);
         return E_INVALIDARG;
     };

@@ -345,3 +345,10 @@ miri-cache-residency:
 # Standalone lifetime model, including compile-fail escape and brand checks.
 ghostcell-model:
     cargo test --manifest-path probes/ghostcell-call-model/Cargo.toml --locked
+
+# Review additions and removals on portable and Windows surfaces, with fixed tooling.
+public-api:
+    uv run --project tools --locked python -B -m xlfn_tools.check_public_api
+
+public-api-update:
+    uv run --project tools --locked python -B -m xlfn_tools.check_public_api --update

@@ -1,4 +1,4 @@
-use xlfn::AsyncContext;
+use xlfn::task::AsyncContext;
 use xlfn::diagnostics::DiagnosticHistory;
 
 fn escape(context: AsyncContext<'_, ()>) -> &'static DiagnosticHistory {

@@ -4,7 +4,8 @@ use xlfn::cache::CalculationCache;
 
 #[test]
 fn pre_clear_computation_cannot_republish_stale_value() {
-    let cache = CalculationCache::<String, String>::new(1024);
+    let cache =
+        CalculationCache::<String, String>::new(xlfn::cache::CacheBudget::weight_units(1024));
     let start_compute = Barrier::new(2);
     let finish_compute = Barrier::new(2);
 
@@ -54,7 +55,8 @@ fn follower_retrying_after_leader_panic_across_clear_does_not_pollute_new_epoch(
     use super::single_flight::{FlightWitness, WitnessKey};
     use std::sync::{Arc, atomic::AtomicUsize, mpsc};
     use std::time::Duration;
-    let cache = CalculationCache::<WitnessKey, String>::new(1024);
+    let cache =
+        CalculationCache::<WitnessKey, String>::new(xlfn::cache::CacheBudget::weight_units(1024));
     let (matched_tx, matched_rx) = mpsc::sync_channel(2);
     let witness = Arc::new(FlightWitness {
         seen: AtomicUsize::new(1),

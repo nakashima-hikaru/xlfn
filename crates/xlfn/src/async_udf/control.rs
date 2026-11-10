@@ -137,7 +137,7 @@ pub(in crate::async_udf) struct RegistryPreparedStart<'registry> {
     activity: xlfn_kernel::drain_gate::GateControl<'registry, xlfn_kernel::drain_gate::GateDrained>,
     registry: &'registry TaskRegistry,
     candidate: PublishedOwner<CalculationState>,
-    limit: crate::addin::AsyncTaskLimit,
+    limit: crate::addin_impl::AsyncTaskLimit,
 }
 
 impl RegistryPreparedStart<'_> {
@@ -171,7 +171,7 @@ impl RegistryPreparedStart<'_> {
 impl TaskRegistry {
     pub(in crate::async_udf) fn prepare_start(
         &self,
-        limit: crate::addin::AsyncTaskLimit,
+        limit: crate::addin_impl::AsyncTaskLimit,
     ) -> XllResult<RegistryPreparedStart<'_>> {
         let transition = self.transition.lock();
         let control = self.control.lock();
@@ -198,7 +198,7 @@ impl TaskRegistry {
     }
 
     #[cfg(test)]
-    pub(crate) fn start(&self, limit: crate::addin::AsyncTaskLimit) -> XllResult<()> {
+    pub(crate) fn start(&self, limit: crate::addin_impl::AsyncTaskLimit) -> XllResult<()> {
         self.prepare_start(limit)?.publish();
         Ok(())
     }

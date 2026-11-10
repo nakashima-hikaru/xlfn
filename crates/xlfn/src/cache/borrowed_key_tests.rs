@@ -90,7 +90,7 @@ impl Eq for OwnedKey {}
 
 #[test]
 fn string_cache_and_registry_accept_str_and_string_queries() {
-    let cache = CalculationCache::<String, u8>::new(8);
+    let cache = CalculationCache::<String, u8>::new(crate::cache::CacheBudget::weight_units(8));
     assert!(cache.get("key").is_none());
     let old = cache
         .get_or_try_insert_with("key".to_owned(), || Ok(7))
@@ -114,7 +114,7 @@ fn string_cache_and_registry_accept_str_and_string_queries() {
     assert!(cache.get("key").is_none());
     assert_eq!(*old, 7, "clear must preserve existing leases");
 
-    let registry = CacheRegistry::new(8);
+    let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(8));
     let endpoint = CacheEndpoint::<String, u8>::new("borrowed");
     assert!(registry.get(&endpoint, "key").unwrap().is_none());
     assert_eq!(
@@ -140,7 +140,7 @@ fn string_cache_and_registry_accept_str_and_string_queries() {
 fn resident_hits_do_not_own_borrowed_keys() {
     let control = StdArc::new(QueryControl::default());
     let query = Query::new("key", StdArc::clone(&control));
-    let cache = CalculationCache::<OwnedKey, u8>::new(8);
+    let cache = CalculationCache::<OwnedKey, u8>::new(crate::cache::CacheBudget::weight_units(8));
     assert_eq!(
         *cache.get_or_try_insert_borrowed(&query, || Ok(1)).unwrap(),
         1
@@ -160,7 +160,7 @@ fn resident_hits_do_not_own_borrowed_keys() {
     assert_eq!(control.owned.load(Ordering::Relaxed), 1);
     control.fault.store(0, Ordering::Relaxed);
 
-    let registry = CacheRegistry::new(8);
+    let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(8));
     let endpoint = CacheEndpoint::<OwnedKey, u8>::new("counted");
     drop(
         registry
@@ -199,7 +199,7 @@ fn owned_and_borrowed_versioned_hashes_match() {
 fn borrowed_key_panics_leave_no_flights_or_broken_residents() {
     let control = StdArc::new(QueryControl::default());
     let query = Query::new("key", StdArc::clone(&control));
-    let cache = CalculationCache::<OwnedKey, u8>::new(8);
+    let cache = CalculationCache::<OwnedKey, u8>::new(crate::cache::CacheBudget::weight_units(8));
     drop(
         cache
             .get_or_try_insert_with(query.owned(), || Ok(1))
@@ -226,7 +226,7 @@ fn borrowed_key_panics_leave_no_flights_or_broken_residents() {
 
 #[test]
 fn borrowed_misses_reject_reentry_but_resident_hits_remain_available() {
-    let cache = CalculationCache::<String, u8>::new(8);
+    let cache = CalculationCache::<String, u8>::new(crate::cache::CacheBudget::weight_units(8));
     drop(cache.get_or_try_insert_borrowed("warm", || Ok(1)).unwrap());
     let outer = cache
         .get_or_try_insert_borrowed("outer", || {
@@ -266,7 +266,8 @@ fn borrowed_ownership_race_rechecks_residency_and_keeps_original_generation() {
             ..QueryControl::default()
         });
         let query = Query::new("key", control);
-        let cache = CalculationCache::<OwnedKey, u8>::new(8);
+        let cache =
+            CalculationCache::<OwnedKey, u8>::new(crate::cache::CacheBudget::weight_units(8));
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| {
                 *cache
@@ -300,7 +301,8 @@ fn borrowed_ownership_race_rechecks_residency_and_keeps_original_generation() {
 #[cfg(not(miri))]
 fn borrowed_and_owned_misses_share_singleflight_even_without_residency() {
     for budget in [0, 8] {
-        let cache = CalculationCache::<String, u8>::new(budget);
+        let cache =
+            CalculationCache::<String, u8>::new(crate::cache::CacheBudget::weight_units(budget));
         let key = VersionedKey {
             epoch: 0,
             key: "key".to_owned(),

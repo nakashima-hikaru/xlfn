@@ -79,7 +79,7 @@ impl Addin for TestU32Addin {
     fn open(
         _: &OpenContext<Self>,
     ) -> Result<
-        crate::addin::Opened<
+        crate::addin_impl::Opened<
             Self::SharedState,
             Self::LifecycleState,
             Self::Layers,
@@ -569,7 +569,7 @@ fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
         fn open(
             _: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<
+            crate::addin_impl::Opened<
                 Self::SharedState,
                 Self::LifecycleState,
                 Self::Layers,
@@ -1546,7 +1546,7 @@ fn async_boundary_reports_handler_failures_to_layers() {
         fn open(
             _: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<
+            crate::addin_impl::Opened<
                 Self::SharedState,
                 Self::LifecycleState,
                 Self::Layers,
@@ -1658,7 +1658,7 @@ fn async_boundary_records_delivery_rejection_as_failure() {
         fn open(
             _: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<
+            crate::addin_impl::Opened<
                 Self::SharedState,
                 Self::LifecycleState,
                 Self::Layers,
@@ -2681,7 +2681,7 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
         fn open(
             _: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<
+            crate::addin_impl::Opened<
                 Self::SharedState,
                 Self::LifecycleState,
                 Self::Layers,

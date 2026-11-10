@@ -132,8 +132,13 @@ Select an executor with `Addin::AsyncExecutor` and transfer it to `Opened` durin
 to the executor:
 
 ```rust
-# use xlfn::{prelude::*, AsyncConfig, AsyncPollerCount, AsyncTaskLimit,
-#     BuiltinAsyncExecutor, BuiltinExecutorConfig, RuntimeConfig};
+# use xlfn::prelude::*;
+
+use xlfn::task::{AsyncConfig};
+use xlfn::task::{AsyncPollerCount};
+use xlfn::task::{AsyncTaskLimit};
+use xlfn::task::{BuiltinExecutorConfig};
+use xlfn::addin::{RuntimeConfig};
 # fn example() -> XllResult<Opened<(), (), (), BuiltinAsyncExecutor>> {
 # let state = ();
 let runtime = RuntimeConfig::new().with_async(
@@ -185,7 +190,10 @@ separate crate; xlfn does not require Tokio.
 `submit` is generic over the concrete task future:
 
 ```rust
-# use xlfn::{AsyncExecutor, AsyncTask, XllResult};
+# use xlfn::{XllResult};
+
+use xlfn::task::{AsyncExecutor};
+use xlfn::task::{AsyncTask};
 # struct RuntimeHandle;
 # impl RuntimeHandle {
 #     fn spawn<F>(&self, task: F)

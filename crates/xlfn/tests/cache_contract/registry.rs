@@ -7,7 +7,7 @@ struct MarkerB;
 
 #[test]
 fn different_endpoint_markers_remain_distinct() {
-    let registry = CacheRegistry::new(1024);
+    let registry = CacheRegistry::new(xlfn::cache::CacheBudget::weight_units(1024));
     let ep_a = CacheEndpoint::<String, String, MarkerA>::new("endpoint");
     let ep_b = CacheEndpoint::<String, String, MarkerB>::new("endpoint");
 
@@ -24,7 +24,7 @@ fn different_endpoint_markers_remain_distinct() {
 
 #[test]
 fn versioned_endpoint_ids_are_distinct() {
-    let registry = CacheRegistry::new(1024);
+    let registry = CacheRegistry::new(xlfn::cache::CacheBudget::weight_units(1024));
     let ep1 = CacheEndpoint::<String, String, MarkerA>::new("v1");
     let ep2 = CacheEndpoint::<String, String, MarkerA>::new("v2");
 
@@ -41,7 +41,7 @@ fn versioned_endpoint_ids_are_distinct() {
 
 #[test]
 fn registry_clear_clears_all_endpoints() {
-    let registry = CacheRegistry::new(1024);
+    let registry = CacheRegistry::new(xlfn::cache::CacheBudget::weight_units(1024));
     let ep_a = CacheEndpoint::<String, String, MarkerA>::new("ep_a");
     let ep_b = CacheEndpoint::<String, String, MarkerB>::new("ep_b");
 
@@ -65,7 +65,7 @@ fn registry_clear_clears_all_endpoints() {
 fn endpoint_fixes_resource_units_for_all_callers_and_rejects_conflicts() {
     static BYTES: CacheEndpoint<u32, String> =
         CacheEndpoint::new("accounting-v1").with_weigher(String::len);
-    let registry = CacheRegistry::new(4);
+    let registry = CacheRegistry::new(xlfn::cache::CacheBudget::weight_units(4));
     drop(
         registry
             .get_or_try_insert(&BYTES, 1, || Ok("four".into()))

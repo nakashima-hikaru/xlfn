@@ -34,46 +34,64 @@ use options::parse_addin_options;
 use support::{extract_gating_attributes, resolve_crate_path};
 use validation::validate_addin_metadata;
 
-/// Attributes a function as an Excel UDF.
+/// Registers a Rust function as an Excel UDF.
 ///
-/// Excel-visible arguments and return values are selected by their conversion
-/// trait implementations. Recognized `f64`, `bool`, `i32`, `String`, and
-/// synchronous `&str` arguments use Excel's native scalar ABIs and accept Excel's
-/// coercion rules. `#[excel_arg(strict)]` selects XLOPER12 with the type's strict
-/// conversion instead. `input_semantics = strict` selects this conversion for
-/// every ordinary argument, including scalar aliases. Explicit numeric views
-/// and reference parameters retain their specialized ABI. Explicit blank, missing, or default policies also select
-/// XLOPER12 so the original input's presence is available. Other types and
-/// unrecognized aliases use their ordinary conversion.
-/// Ordinary `Matrix<f64>`, `Row<f64>`, and `Column<f64>` results use
-/// XLOPER12 (`Q`), preserving Excel errors in `Result` and `XllResult`.
-/// `NumericArrayOutput` explicitly opts into FP12 (`K%`), including when
-/// wrapped in a result. Unrecognized return aliases use XLOPER12 (`Q`). `return_abi = "fp12"` explicitly selects FP12 for a numeric
-/// array alias; incompatible resolved types fail to compile.
-/// `return_abi = "xloper12"` preserves individual Excel error values such as
-/// `#N/A`. FP12 failures return `#NUM!`, with details in the runtime's diagnostic
-/// history. Async results always use Excel's asynchronous completion API.
-/// An `async fn` selects asynchronous mode directly;
-/// there is no `#[excel_function(async)]` mode flag. A standard context type
-/// (`MainThreadContext`, `ThreadSafeContext`, `MacroSheetContext`, or
-/// `AsyncContext`) is injected when passed by value as the first parameter.
-/// Its final path identifier selects the context; ordinary imports and
-/// qualified paths work, while type aliases and renamed imports do not select
-/// injection. `AsyncContext` is permitted only on an `async fn`.
-/// `thread_safe` and `macro_sheet` select execution only for functions without
-/// an injected context. Either flag combined with a context or an `async fn`
-/// is rejected.
-/// `#[excel_arg(default = expression)]` defaults omitted arguments; blank cells
-/// keep the parameter type's ordinary conversion unless `blank = default` is
-/// selected. Explicit `missing` policies override this inferred default.
-/// Handle producers reuse the formula and converted inputs by default;
-/// `handle_reuse = inputs` makes this explicit, and `handle_reuse = never`
-/// invokes the producer with a fresh revision on each call. Excel disconnects
-/// older bindings through the existing RTD protocol; active leases remain live.
-/// Handle policies require a synchronous handle return and do not permit volatility.
-/// Both identifier policies (`blank = error`) and string policies are accepted.
-/// Use `missing = convert` to keep the declared type's ordinary conversion,
-/// including `None` for an omitted `Option<T>` input.
+/// # Arguments
+///
+/// Ordinary arguments use XLOPER12 and their strict conversion traits, including
+/// type aliases. `#[excel_arg(native)]` explicitly selects Excel coercion for
+/// a standard scalar spelling. For aliases, specify `native = f64`, `i32`,
+/// `bool`, `string`, or `str`; the compiler checks the resolved Rust type.
+/// `NumericMatrixRef` and `#[excel_arg(reference)]` retain specialized ABIs.
+///
+/// | Argument option | Meaning |
+/// | --- | --- |
+/// | `name = "..."`, `description = "..."` | Registration metadata |
+/// | `strict` | Explicit ordinary conversion (the default) |
+/// | `native` / `native = f64` | Opt into native scalar coercion |
+/// | `default = expression` | Default an omitted argument |
+/// | `blank = error/convert/default` | Blank-cell policy |
+/// | `missing = error/convert/default` | Omitted-argument policy |
+/// | `reference` | Worksheet-reference input in macro-sheet mode |
+///
+/// Explicit presence policies require XLOPER12 and cannot combine with native
+/// coercion. Blank cells keep ordinary conversion unless `blank = default`.
+/// Explicit `missing` overrides the policy inferred from `default`.
+///
+/// # Execution mode and contexts
+///
+/// An `async fn` selects async execution. `thread_safe` and `macro_sheet`
+/// select synchronous execution for functions without injected contexts.
+/// Standard context names as the first by-value parameter select injection.
+/// Renamed imports and generic aliases can opt in with
+/// `#[excel_context(main_thread)]`, `thread_safe`, `macro_sheet`, or `async`.
+/// A context spelling must carry its add-in type, optionally after a lifetime.
+/// Execution flags cannot combine with injected contexts or async functions.
+///
+/// # Return values
+///
+/// Ordinary matrices use XLOPER12 and preserve individual Excel errors.
+/// `NumericArrayOutput` opts into FP12; `return_abi = fp12` also supports
+/// aliases. FP12 failures yield `#NUM!`; details remain in diagnostics.
+/// `return_abi = xloper12` explicitly selects ordinary returns.
+/// Async results always use Excel's asynchronous completion API.
+///
+/// # Function policies
+///
+/// | Option | Meaning |
+/// | --- | --- |
+/// | `name`, `id`, `category`, `description`, `help_topic` | String metadata |
+/// | `return_abi = fp12/xloper12` | Explicit synchronous return ABI |
+/// | `input_semantics = strict` | Require strict ordinary inputs |
+/// | `handle_reuse = inputs/never` | Reuse converted inputs or create a revision |
+/// | `thread_safe`, `macro_sheet` | Execution without an injected context |
+/// | `volatile`, `hidden` | Registration flags |
+/// | `crate = path` | Facade path override |
+///
+/// Policy values accept identifiers or equivalent string literals. Handle
+/// producers default to `inputs`; `never` creates a fresh revision per call.
+/// Handle policies require synchronous handle returns and forbid volatility.
+/// Excel disconnects old bindings through RTD while active leases remain live.
 #[proc_macro_attribute]
 pub fn excel_function(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as UdfFunction);
@@ -93,18 +111,21 @@ pub fn excel_function(attributes: TokenStream, item: TokenStream) -> TokenStream
 /// `RtdSources`. Feature selection happens in xlfn, so configured RTD and async
 /// associated types must not carry consumer-side `cfg` attributes.
 ///
-/// The struct form is also accepted and only emits exports; its separate
-/// `Addin` implementation supplies every feature-required associated type.
-/// Apply the attribute once, on either the implementation or the struct.
+/// This impl attribute is the supported implementation contract. Bare hand-written
+/// implementations and attributes on structs are not supported: the macro must
+/// supply associated types using the facade's unified Cargo features.
 #[proc_macro_attribute]
 pub fn excel_addin(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as syn::Item);
     let result = match item {
-        syn::Item::Struct(item) => expand_excel_addin(attributes.into(), item),
+        syn::Item::Struct(item) => Err(syn::Error::new_spanned(
+            item,
+            "apply #[excel_addin] to impl Addin, not the struct; the macro supplies feature-dependent associated types",
+        )),
         syn::Item::Impl(item) => expand_excel_addin_impl(attributes.into(), item),
         item => Err(syn::Error::new_spanned(
             item,
-            "expected an `impl Addin for MyAddin` block or an add-in struct",
+            "expected an `impl Addin for MyAddin` block",
         )),
     };
     match result {
@@ -113,6 +134,10 @@ pub fn excel_addin(attributes: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Implements the handle marker and return conversion together.
+///
+/// Always derive this contract; implementing the marker alone does not provide
+/// the generated `ExcelReturn` conversion needed by handle-producing UDFs.
 #[proc_macro_derive(ExcelHandleObject, attributes(excel_handle))]
 pub fn derive_excel_handle_object(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
@@ -274,7 +299,7 @@ fn expand_excel_addin_impl(
         (Some(subscription), None) => syn::parse_quote! {
             #krate::__private::v1::__xlfn_addin_rtd_types!(
                 @configured subscription: #subscription,
-                sources: #krate::DynamicRtdSources<Self::RtdSubscription>
+                sources: #krate::rtd::DynamicRtdSources<Self::RtdSubscription>
             );
         },
         (Some(subscription), Some(sources)) => syn::parse_quote! {
@@ -626,7 +651,7 @@ mod tests {
         .to_string();
         assert!(expanded.contains("FunctionRegistration :: new"));
         assert!(expanded.contains("sync_udf"));
-        assert!(expanded.contains("prepare_native_f64"));
+        assert!(expanded.contains("prepare_argument"));
         assert!(expanded.contains("assert_thread_safe_return"));
         assert!(expanded.contains("assert_volatile_return"));
     }
@@ -664,7 +689,7 @@ mod tests {
             (quote!(Matrix<i32>), ReturnAbi::Value12),
             (quote!(Matrix<FloatAlias>), ReturnAbi::Value12),
             (quote!(Matrix<custom::f64>), ReturnAbi::Value12),
-            (quote!(XlArrayOutput), ReturnAbi::Value12),
+            (quote!(ExcelArrayOutput), ReturnAbi::Value12),
             (quote!(NumericAlias), ReturnAbi::Value12),
             (quote!(custom::Matrix<f64>), ReturnAbi::Value12),
             (quote!(<Owner as Trait>::Matrix<f64>), ReturnAbi::Value12),
@@ -808,9 +833,19 @@ mod tests {
             (quote!(ExcelError), ArgumentAbi::Value12),
             (quote!(ExcelSerialDate), ArgumentAbi::Value12),
         ] {
+            let ordinary = model::analyze(
+                model::parse_udf(
+                    quote!(),
+                    function(quote!(fn typed(value: #ty) -> f64 { 0.0 })),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(ordinary.arguments[0].abi(), ArgumentAbi::Value12);
+            let opt_in = (abi != ArgumentAbi::Value12).then(|| quote!(#[excel_arg(native)]));
             let parsed = model::parse_udf(
                 quote!(),
-                function(quote!(fn typed(value: #ty) -> f64 { 0.0 })),
+                function(quote!(fn typed(#opt_in value: #ty) -> f64 { 0.0 })),
             )
             .unwrap();
             let analyzed = model::analyze(parsed).unwrap();
@@ -853,7 +888,9 @@ mod tests {
         let parsed = model::parse_udf(
             quote!(),
             function(quote!(
-                fn typed(#[excel_arg(name = "input", description = "value")] value: f64) -> f64 {
+                fn typed(
+                    #[excel_arg(native, name = "input", description = "value")] value: f64,
+                ) -> f64 {
                     value
                 }
             )),
@@ -874,10 +911,10 @@ mod tests {
                 quote!(),
                 function(quote!(
                     #qualifier fn typed(
-                        number: f64,
-                        enabled: bool,
-                        count: i32,
-                        text: String,
+                        #[excel_arg(native)] number: f64,
+                        #[excel_arg(native)] enabled: bool,
+                        #[excel_arg(native)] count: i32,
+                        #[excel_arg(native)] text: String,
                         #[excel_arg(strict)] strict_number: f64,
                     ) -> f64 { number }
                 )),
@@ -977,7 +1014,7 @@ mod tests {
         assert!(expanded.contains("ArgumentAbi :: NumericArray12"));
         assert!(expanded.contains("* const :: xlfn :: __private :: v1 :: FP12"));
         assert!(expanded.contains("prepare_numeric_matrix"));
-        assert!(expanded.contains("prepare_native_f64"));
+        assert!(expanded.contains("prepare_argument"));
     }
 
     #[test]
@@ -1440,7 +1477,7 @@ mod tests {
             (true, quote!(AsyncContext<'_, State>), ExecutionKind::Async),
             (
                 false,
-                quote!(xlfn::MainThreadContext<'_, State>),
+                quote!(xlfn::addin::MainThreadContext<'_, State>),
                 ExecutionKind::MainThread,
             ),
             (
@@ -1455,7 +1492,7 @@ mod tests {
             ),
             (
                 true,
-                quote!(::xlfn::AsyncContext<'_, State>),
+                quote!(::xlfn::task::AsyncContext<'_, State>),
                 ExecutionKind::Async,
             ),
             (
@@ -1723,20 +1760,37 @@ mod tests {
     }
 
     #[test]
-    fn excel_context_attributes_are_rejected_without_role_parsing() {
+    fn explicit_context_supports_renamed_types_and_checks_modes() {
+        for mode in [
+            quote!(main_thread),
+            quote!(thread_safe),
+            quote!(macro_sheet),
+        ] {
+            let parsed = model::parse_udf(
+                quote!(),
+                function(quote!(
+                    fn value(#[excel_context(#mode)] context: RenamedContext<'_, State>) -> f64 {
+                        1.0
+                    }
+                )),
+            )
+            .unwrap();
+            let analyzed = model::analyze(parsed).unwrap();
+            assert!(analyzed.arguments.is_empty());
+        }
         for attribute in [
-            quote!(#[excel_context(main_thread)]),
             quote!(#[excel_context(asynchronous)]),
             quote!(#[excel_context]),
             quote!(#[excel_context(unknown, extra)]),
         ] {
-            let error = expand_excel_function(
-                quote!(),
-                function(quote!(fn value(#attribute context: MainThreadContext<'_, State>) -> f64 { 1.0 })),
-            ).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "#[excel_context(...)] is not supported; use a standard context type as the first parameter"
+            assert!(
+                model::parse_udf(
+                    quote!(),
+                    function(quote!(
+                        fn value(#attribute context: MainThreadContext<'_, State>) -> f64 { 1.0 }
+                    ))
+                )
+                .is_err()
             );
         }
     }
@@ -1747,7 +1801,7 @@ mod tests {
             quote!(),
             function(quote!(
                 async fn value(
-                    context: xlfn::AsyncContext<'_, State>,
+                    context: xlfn::task::AsyncContext<'_, State>,
                     object: HandleLease<'_, Dataset>,
                 ) -> f64 {
                     1.0
@@ -1758,7 +1812,7 @@ mod tests {
         .to_string();
         assert!(expanded.contains("ExecutionLease < State >"));
         assert!(expanded.contains("async_context :: < State >"));
-        assert!(expanded.contains("let __context : xlfn :: AsyncContext"));
+        assert!(expanded.contains("let __context : xlfn :: task :: AsyncContext"));
         assert!(!expanded.contains("AsyncContextFactory"));
         assert!(!expanded.contains("async_context_for"));
     }

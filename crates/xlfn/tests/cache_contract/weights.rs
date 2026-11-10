@@ -2,7 +2,10 @@ use xlfn::cache::CalculationCache;
 
 #[test]
 fn zero_weight_is_normalized_to_minimum() {
-    let cache = CalculationCache::<String, String>::with_weigher(1024, |_| 0);
+    let cache = CalculationCache::<String, String>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(1024),
+        |_| 0,
+    );
     assert_eq!(cache.used_weight(), 0);
 
     cache
@@ -15,7 +18,10 @@ fn zero_weight_is_normalized_to_minimum() {
 
 #[test]
 fn weights_accumulate_monotonically() {
-    let cache = CalculationCache::<String, usize>::with_weigher(1024, |value| *value);
+    let cache = CalculationCache::<String, usize>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(1024),
+        |value| *value,
+    );
     assert_eq!(cache.used_weight(), 0);
 
     cache
@@ -38,10 +44,13 @@ fn weights_accumulate_monotonically() {
 fn construction_policy_runs_once_per_created_value_and_unit_default_is_explicit() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static WEIGHED: AtomicUsize = AtomicUsize::new(0);
-    let cache = CalculationCache::<u8, String>::with_weigher(64, |value| {
-        WEIGHED.fetch_add(1, Ordering::SeqCst);
-        value.len()
-    });
+    let cache = CalculationCache::<u8, String>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(64),
+        |value| {
+            WEIGHED.fetch_add(1, Ordering::SeqCst);
+            value.len()
+        },
+    );
     let first = cache
         .get_or_try_insert_with(1, || Ok("bytes".into()))
         .unwrap();
@@ -51,7 +60,7 @@ fn construction_policy_runs_once_per_created_value_and_unit_default_is_explicit(
     assert_eq!(&*first, &*hit);
     assert_eq!(cache.used_weight(), 5);
     assert_eq!(WEIGHED.load(Ordering::SeqCst), 1);
-    let units = CalculationCache::<u8, String>::new(64);
+    let units = CalculationCache::<u8, String>::new(xlfn::cache::CacheBudget::weight_units(64));
     drop(
         units
             .get_or_try_insert_with(1, || Ok("many bytes".into()))

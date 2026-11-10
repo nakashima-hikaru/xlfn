@@ -1,4 +1,4 @@
-use xlfn::RuntimeConfig;
+use xlfn::addin::RuntimeConfig;
 
 #[test]
 fn default_runtime_config_is_const_constructible() {
@@ -9,7 +9,8 @@ fn default_runtime_config_is_const_constructible() {
 #[cfg(feature = "async")]
 #[test]
 fn async_config_accepts_nonzero_task_limits() {
-    use xlfn::{AsyncConfig, AsyncTaskLimit};
+    use xlfn::task::AsyncConfig;
+    use xlfn::task::AsyncTaskLimit;
 
     const CONFIG: RuntimeConfig = RuntimeConfig::new()
         .with_async(AsyncConfig::new().with_task_limit(AsyncTaskLimit::new(1).unwrap()));
@@ -25,7 +26,9 @@ fn async_config_accepts_nonzero_task_limits() {
 #[cfg(feature = "async-builtin")]
 #[test]
 fn builtin_executor_config_bounds_poller_count_separately_from_task_limit() {
-    use xlfn::{AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig};
+    use xlfn::task::AsyncPollerCount;
+    use xlfn::task::BuiltinAsyncExecutor;
+    use xlfn::task::BuiltinExecutorConfig;
 
     assert!(AsyncPollerCount::new(0).is_none());
     assert!(AsyncPollerCount::new(33).is_none());
@@ -38,7 +41,8 @@ fn builtin_executor_config_bounds_poller_count_separately_from_task_limit() {
 #[cfg(feature = "handles")]
 #[test]
 fn handle_config_accepts_only_supported_binding_limits() {
-    use xlfn::{HandleBindingLimit, HandleConfig};
+    use xlfn::handle::HandleBindingLimit;
+    use xlfn::handle::HandleConfig;
 
     const CONFIG: RuntimeConfig = RuntimeConfig::new()
         .with_handles(HandleConfig::new().with_binding_limit(HandleBindingLimit::new(1).unwrap()));
@@ -56,7 +60,7 @@ fn handle_config_accepts_only_supported_binding_limits() {
 #[cfg(feature = "rtd")]
 #[test]
 fn rtd_config_distinguishes_disabled_and_bounded_admission() {
-    use xlfn::RtdConfig;
+    use xlfn::rtd::RtdConfig;
     use xlfn::rtd::{RtdCapacity, RtdLimits};
 
     const LIMITS: RtdLimits = RtdLimits::standard()
@@ -74,7 +78,12 @@ fn rtd_config_distinguishes_disabled_and_bounded_admission() {
 #[test]
 fn configuring_one_feature_preserves_the_other_feature_settings() {
     use xlfn::rtd::{RtdCapacity, RtdLimits};
-    use xlfn::{AsyncConfig, AsyncTaskLimit, HandleBindingLimit, HandleConfig, RtdConfig};
+
+    use xlfn::handle::HandleBindingLimit;
+    use xlfn::handle::HandleConfig;
+    use xlfn::rtd::RtdConfig;
+    use xlfn::task::AsyncConfig;
+    use xlfn::task::AsyncTaskLimit;
 
     const ASYNC: AsyncConfig = AsyncConfig::new().with_task_limit(AsyncTaskLimit::new(1).unwrap());
     const HANDLES: HandleConfig =

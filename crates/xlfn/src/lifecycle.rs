@@ -40,7 +40,7 @@ pub(crate) fn lifecycle_invariant_violation(_message: &'static str) -> ! {
 )]
 mod tests {
     use super::*;
-    use crate::addin::{Addin, BuildInfo, OpenContext};
+    use crate::addin_impl::{Addin, BuildInfo, OpenContext};
     use crate::boundary::host::{host_auto_close, host_auto_open, host_auto_remove};
     use crate::diagnostics::AddinId;
     use crate::generation::RuntimeGeneration;
@@ -159,10 +159,10 @@ mod tests {
         fn open(
             _: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
-            Ok(crate::addin::Opened::new(()))
+            Ok(crate::addin_impl::Opened::new(()))
         }
 
         fn quiesce(
@@ -280,7 +280,7 @@ mod tests {
         fn open(
             _: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
             Err(XllError::Internal {
@@ -332,7 +332,7 @@ mod tests {
         fn open(
             _context: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
             unreachable!("the close retry test publishes state directly")
@@ -402,7 +402,7 @@ mod tests {
         fn open(
             _: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
             unreachable!()
@@ -469,7 +469,7 @@ mod tests {
         fn open(
             _: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
             unreachable!("the wrong-thread test publishes state directly")
@@ -546,7 +546,7 @@ mod tests {
         fn open(
             _: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
             unreachable!()
@@ -683,7 +683,7 @@ mod tests {
         fn open(
             _context: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
             unreachable!()
@@ -691,7 +691,7 @@ mod tests {
     }
 
     // SAFETY: this test Addin has no application-owned executable sources.
-    unsafe impl crate::addin::PhysicallyUnloadableAddin for CleanClose {}
+    unsafe impl crate::addin_impl::PhysicallyUnloadableAddin for CleanClose {}
 
     struct InitializationFailure<const PANIC: bool>;
 
@@ -707,7 +707,7 @@ mod tests {
         #[cfg(feature = "async")]
         type AsyncExecutor = crate::NoAsyncExecutor;
 
-        fn open(_: &OpenContext<Self>) -> Result<crate::addin::Opened<(), ()>, XllError> {
+        fn open(_: &OpenContext<Self>) -> Result<crate::addin_impl::Opened<(), ()>, XllError> {
             if PANIC {
                 panic!("injected application initialization panic");
             }
@@ -1549,7 +1549,7 @@ mod tests {
         fn open(
             _context: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
             unreachable!()
@@ -1917,7 +1917,7 @@ mod tests {
             fn open(
                 _context: &OpenContext<Self>,
             ) -> Result<
-                crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+                crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
                 Self::Error,
             > {
                 unreachable!()
@@ -2029,7 +2029,7 @@ mod tests {
         fn open(
             _context: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
             unreachable!()
@@ -2141,7 +2141,7 @@ mod tests {
         fn open(
             _context: &OpenContext<Self>,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
             unreachable!()

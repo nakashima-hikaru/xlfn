@@ -420,14 +420,30 @@ pub(super) fn parse_udf(
 
         let mut retained = Vec::new();
         let mut has_excel_arg = false;
+        let mut explicit_context = None;
         let mut excel_arg_attribute = None;
         let mut argument_options = ParsedArgumentOptions::default();
         for attribute in std::mem::take(&mut argument.attrs) {
             if attribute.path().is_ident("excel_context") {
-                return Err(syn::Error::new_spanned(
-                    attribute,
-                    "#[excel_context(...)] is not supported; use a standard context type as the first parameter",
-                ));
+                if explicit_context.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        attribute,
+                        "duplicate excel_context",
+                    ));
+                }
+                let mode: syn::Ident = attribute.parse_args_with(syn::Ident::parse_any)?;
+                explicit_context = Some(match mode.to_string().as_str() {
+                    "main_thread" => ContextKind::MainThread,
+                    "thread_safe" => ContextKind::ThreadSafe,
+                    "macro_sheet" => ContextKind::MacroSheet,
+                    "async" => ContextKind::Async,
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            mode,
+                            "expected main_thread, thread_safe, macro_sheet, or async",
+                        ));
+                    }
+                });
             } else if attribute.path().is_ident("excel_arg") {
                 has_excel_arg = true;
                 parse_argument_options(&attribute, &mut argument_options)?;
@@ -438,7 +454,7 @@ pub(super) fn parse_udf(
         }
         argument.attrs = retained;
 
-        if let Some(kind) = recognize_context_type(&argument.ty) {
+        if let Some(kind) = explicit_context.or_else(|| recognize_context_type(&argument.ty)) {
             if !is_context_value_path(&argument.ty) {
                 return Err(syn::Error::new_spanned(
                     &argument.ty,
@@ -920,16 +936,41 @@ fn analyze_arguments(
             ArgumentConversion::Value(Box::new(ValueConversion { blank, missing }))
         };
 
-        let conversion = if matches!(conversion, ArgumentConversion::Value(_))
-            && !strict_inputs
-            && !argument.options.strict
-            && argument.options.default.is_none()
-            && argument.options.blank.is_none()
-            && argument.options.missing.is_none()
-        {
-            native_argument_abi(&argument.ty)
-                .map(ArgumentConversion::Native)
-                .unwrap_or(conversion)
+        let conversion = if let Some(native) = &argument.options.native {
+            if !matches!(conversion, ArgumentConversion::Value(_))
+                || strict_inputs
+                || argument.options.strict
+                || argument.options.default.is_some()
+                || argument.options.blank.is_some()
+                || argument.options.missing.is_some()
+            {
+                return Err(syn::Error::new_spanned(
+                    &argument.ty,
+                    "native arguments cannot combine strict, reference, specialized views, or presence policies",
+                ));
+            }
+            let abi = match native.as_str() {
+                "infer" => native_argument_abi(&argument.ty),
+                "f64" => native_argument_abi(&syn::parse_quote!(f64)),
+                "i32" => native_argument_abi(&syn::parse_quote!(i32)),
+                "bool" => native_argument_abi(&syn::parse_quote!(bool)),
+                "String" | "string" => native_argument_abi(&syn::parse_quote!(String)),
+                "str" => native_argument_abi(&syn::parse_quote!(&str)),
+                _ => None,
+            }
+            .ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &argument.ty,
+                    "specify native = f64, i32, bool, string, or str for an alias",
+                )
+            })?;
+            if execution.is_async() && native == "str" {
+                return Err(syn::Error::new_spanned(
+                    &argument.ty,
+                    "native str requires a synchronous function",
+                ));
+            }
+            ArgumentConversion::Native(abi)
         } else {
             conversion
         };

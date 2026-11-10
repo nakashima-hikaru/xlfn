@@ -4,7 +4,7 @@
 //! Excel callbacks into the runtime protocol. They live beside the lifecycle
 //! domain but own host-facing policy rather than canonical state transitions.
 
-use crate::addin::Addin;
+use crate::addin_impl::Addin;
 use crate::boundary::report_boundary_error;
 use crate::diagnostics::AddinId;
 use crate::host_callback::HostCallbackSession;
@@ -332,7 +332,7 @@ mod terminal_tests;
 mod tests {
     use super::*;
     use crate::XllError;
-    use crate::addin::{OpenContext, Opened};
+    use crate::addin_impl::{OpenContext, Opened};
     use std::sync::{Arc, Mutex};
 
     struct ReentrantClose;
@@ -528,7 +528,7 @@ mod tests {
     )]
     mod reload_callback_tests {
         use super::*;
-        use crate::addin::PhysicallyUnloadableAddin;
+        use crate::addin_impl::PhysicallyUnloadableAddin;
         use crate::registration::RegistrationSignature;
         use std::cell::RefCell;
         use xlfn_common::{ExecutionKind, FunctionVisibility};
@@ -553,7 +553,7 @@ mod tests {
             #[cfg(all(feature = "async", not(feature = "async-builtin")))]
             type AsyncExecutor = crate::NoAsyncExecutor;
 
-            fn open(_: &OpenContext<Self>) -> crate::addin::OpenResult<Self> {
+            fn open(_: &OpenContext<Self>) -> crate::addin_impl::OpenResult<Self> {
                 SCRIPT.with_borrow_mut(|script| script.opens += 1);
                 let opened = Opened::new(());
                 #[cfg(feature = "async-builtin")]

@@ -69,13 +69,17 @@ impl<T: NumericReturn, E: IntoXllError> NumericReturn for Result<T, E> {
 impl super::ExcelReturnSealed for NumericArrayOutput {}
 impl ExcelReturn for NumericArrayOutput {
     type InputMode = PlainInputMode;
-    type Payload = crate::return_abi::XlArrayOutput;
+    type Payload = crate::return_abi::ExcelArrayOutput;
     fn into_excel<S: crate::RtdSubscription, C: crate::RtdSourceCatalog<S>>(
         self,
         _: &mut ReturnContext<'_, '_, Self::InputMode, S, C>,
     ) -> XllResult<Self::Payload> {
-        crate::return_abi::XlArrayBuilder::from_f64(self.rows(), self.columns(), self.as_slice())?
-            .finish()
+        crate::return_abi::ExcelArrayBuilder::from_f64(
+            self.rows(),
+            self.columns(),
+            self.as_slice(),
+        )?
+        .finish()
     }
 }
 impl super::MainThreadReturn for NumericArrayOutput {}

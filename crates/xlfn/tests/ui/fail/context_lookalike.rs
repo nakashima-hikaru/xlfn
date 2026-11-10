@@ -6,7 +6,8 @@ static __XLFN_RUNTIME: xlfn::__private::v1::MacroRuntime<()> =
 mod custom {
     use std::marker::PhantomData;
     use xlfn::XllResult;
-    use xlfn::value::{FromExcel, XlValueRef};
+    use xlfn::value::{FromExcel};
+use xlfn::value::raw::{XlValueRef};
 
     pub struct MainThreadContext<'call, A>(PhantomData<&'call A>);
     pub struct ThreadSafeContext<'call, A>(PhantomData<&'call A>);

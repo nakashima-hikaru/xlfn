@@ -18,7 +18,7 @@ impl Addin for TestAddin {
     }
 }
 
-use xlfn::AsyncContext;
+use xlfn::task::AsyncContext;
 
 #[excel_function]
 async fn context(context: AsyncContext<'_, TestAddin>, value: f64) -> f64 {
@@ -30,7 +30,7 @@ async fn context(context: AsyncContext<'_, TestAddin>, value: f64) -> f64 {
 }
 
 #[excel_function]
-async fn qualified_context(context: xlfn::AsyncContext<'_, TestAddin>, value: f64) -> f64 {
+async fn qualified_context(context: xlfn::task::AsyncContext<'_, TestAddin>, value: f64) -> f64 {
     let _ = context.state();
     std::future::ready(()).await;
     value
@@ -51,7 +51,7 @@ async fn elided_context(context: AsyncContext<TestAddin>, value: f64) -> f64 {
 
 fn main() {
     type AsyncExport = unsafe extern "system" fn(
-        f64,
+        *mut xlfn::__private::v1::XLOPER12,
         *mut xlfn::__private::v1::XLOPER12,
     );
 

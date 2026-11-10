@@ -1,8 +1,8 @@
 error[E0624]: associated function `new` is private
- --> tests/ui/fail/context_callback_constructor.rs:4:55
+ --> tests/ui/fail/context_callback_constructor.rs:4:62
   |
-4 |           let _context = xlfn::MacroSheetContext::<()>::new(state, scope);
-  |                                                         ^^^ private associated function
+4 |           let _context = xlfn::addin::MacroSheetContext::<()>::new(state, scope);
+  |                                                                ^^^ private associated function
   |
  ::: src/addin.rs
   |
@@ -16,11 +16,11 @@ error[E0624]: associated function `new` is private
 error[E0061]: this function takes 3 arguments but 2 arguments were supplied
  --> tests/ui/fail/context_callback_constructor.rs:4:24
   |
-4 |         let _context = xlfn::MacroSheetContext::<()>::new(state, scope);
-  |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------------
-  |                                                          |       |
-  |                                                          |       expected `&DiagnosticHistory`, found `&CallScope<'_>`
-  |                                                          argument #3 of type `xlfn::host_api::ExcelHost<'_>` is missing
+4 |         let _context = xlfn::addin::MacroSheetContext::<()>::new(state, scope);
+  |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------------
+  |                                                                 |       |
+  |                                                                 |       expected `&DiagnosticHistory`, found `&CallScope<'_>`
+  |                                                                 argument #3 of type `xlfn::host_api::ExcelHost<'_>` is missing
   |
   = note: expected reference `&DiagnosticHistory`
              found reference `&xlfn::__private::v1::CallScope<'_>`
@@ -31,6 +31,6 @@ note: associated function defined here
   |                   ^^^
 help: provide the argument
   |
-4 -         let _context = xlfn::MacroSheetContext::<()>::new(state, scope);
-4 +         let _context = xlfn::MacroSheetContext::<()>::new(state, /* &DiagnosticHistory */, /* ExcelHost<'_> */);
+4 -         let _context = xlfn::addin::MacroSheetContext::<()>::new(state, scope);
+4 +         let _context = xlfn::addin::MacroSheetContext::<()>::new(state, /* &DiagnosticHistory */, /* ExcelHost<'_> */);
   |

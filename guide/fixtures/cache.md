@@ -2,5 +2,5 @@
 # use xlfn::cache::{CacheEndpoint, CacheRegistry};
 # static UPPERCASE: CacheEndpoint<String, String> = CacheEndpoint::new("uppercase-v1");
 # struct State { caches: CacheRegistry }
-# let state = State { caches: CacheRegistry::new(1024) };
+# let state = State { caches: CacheRegistry::new(xlfn::cache::CacheBudget::weight_units(1024)) };
 # let text = String::from("example");

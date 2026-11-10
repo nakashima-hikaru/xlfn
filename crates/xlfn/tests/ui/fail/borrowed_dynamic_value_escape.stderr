@@ -1,26 +1,26 @@
 error: lifetime may not live long enough
- --> tests/ui/fail/borrowed_dynamic_value_escape.rs:6:5
+ --> tests/ui/fail/borrowed_dynamic_value_escape.rs:7:5
   |
-5 | fn escape_array<'call>(array: ExcelArrayRef<'call>) -> ExcelArrayRef<'static> {
+6 | fn escape_array<'call>(array: ExcelArrayRef<'call>) -> ExcelArrayRef<'static> {
   |                 ----- lifetime `'call` defined here
-6 |     array
+7 |     array
   |     ^^^^^ returning this value requires that `'call` must outlive `'static`
 
 error: lifetime may not live long enough
-  --> tests/ui/fail/borrowed_dynamic_value_escape.rs:10:5
+  --> tests/ui/fail/borrowed_dynamic_value_escape.rs:11:5
    |
- 9 | fn escape_cell<'call>(array: &ExcelArrayRef<'call>) -> XllResult<Option<ExcelCellRef<'static>>> {
+10 | fn escape_cell<'call>(array: &ExcelArrayRef<'call>) -> XllResult<Option<ExcelCellRef<'static>>> {
    |                ----- lifetime `'call` defined here
-10 |     array.get(0, 0)
+11 |     array.get(0, 0)
    |     ^^^^^^^^^^^^^^^ returning this value requires that `'call` must outlive `'static`
 
 error: lifetime may not live long enough
-  --> tests/ui/fail/borrowed_dynamic_value_escape.rs:17:9
+  --> tests/ui/fail/borrowed_dynamic_value_escape.rs:18:9
    |
-15 |     let _escaped: ExcelValueRef<'static> = with_excel_call_scope(|scope| {
+16 |     let _escaped: ExcelValueRef<'static> = with_excel_call_scope(|scope| {
    |                                                                   ------ return type of closure is ExcelValueRef<'2>
    |                                                                   |
    |                                                                   has type `&'1 xlfn::__private::v1::CallScope<'1>`
-16 |         // SAFETY: the raw value remains live throughout the conversion.
-17 |         unsafe { argument_from_raw(scope, "value", &mut raw) }.unwrap()
+17 |         // SAFETY: the raw value remains live throughout the conversion.
+18 |         unsafe { argument_from_raw(scope, "value", &mut raw) }.unwrap()
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`

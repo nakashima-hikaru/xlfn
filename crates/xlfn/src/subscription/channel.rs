@@ -64,17 +64,6 @@ pub struct RtdChannelSource<T, F, D: RtdDeliveryPolicy = RtdFifo> {
     error_policy: RtdProducerErrorPolicy,
 }
 
-impl<T: IntoRtdValue + Send + 'static, F> RtdChannelSource<T, F> {
-    /// Creates a source with a typed FIFO policy.
-    pub fn new<P>(capacity: NonZeroUsize, factory: F) -> Self
-    where
-        F: Fn(RtdTopic) -> XllResult<P> + Send + Sync + 'static,
-        P: FnOnce(RtdSender<T>) -> XllResult<()> + Send + 'static,
-    {
-        Self::with_policy(RtdFifo::new(capacity), factory)
-    }
-}
-
 impl<T: IntoRtdValue + Send + 'static, F, D: RtdDeliveryPolicy> RtdChannelSource<T, F, D> {
     /// Creates a source with a statically selected buffering policy.
     ///
@@ -86,7 +75,7 @@ impl<T: IntoRtdValue + Send + 'static, F, D: RtdDeliveryPolicy> RtdChannelSource
     /// return closes sender admission and drains
     /// accepted values. The shared publisher remains available to other topics.
     /// Job resources are dropped before the producer worker is joined.
-    pub fn with_policy<P>(delivery: D, factory: F) -> Self
+    pub fn new<P>(delivery: D, factory: F) -> Self
     where
         F: Fn(RtdTopic) -> XllResult<P> + Send + Sync + 'static,
         P: FnOnce(RtdSender<T, D>) -> XllResult<()> + Send + 'static,
@@ -427,7 +416,7 @@ impl<T: IntoRtdValue, D: RtdDeliveryPolicy> RtdSender<T, D> {
         };
         for value in values {
             if batch.values.len() == 32 {
-                return Err(RtdBatchSendError::Invalid(XllError::input(
+                return Err(RtdBatchSendError::Invalid(XllError::validation(
                     "RTD batch",
                     crate::error::InputError::TooLarge {
                         limit: 32,
@@ -1356,6 +1345,19 @@ fn spawn_error(error: std::io::Error) -> XllError {
 #[cfg(test)]
 mod batch_tests;
 
+/// Propagation discards the retained update; use `into_pending` to retry it.
+impl<T> From<RtdSendError<T>> for XllError {
+    fn from(error: RtdSendError<T>) -> Self {
+        error.into_error()
+    }
+}
+/// Propagation discards retained updates; use the batch recovery API to retry.
+impl<T> From<RtdBatchSendError<T>> for XllError {
+    fn from(error: RtdBatchSendError<T>) -> Self {
+        error.into_error()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::budget::RtdLatest;
@@ -1520,11 +1522,13 @@ mod tests {
             super::super::topic::RtdLimits::standard()
                 .with_max_workers(super::super::topic::RtdCapacity::disabled_if_zero(1)),
         );
-        let first = RtdChannelSource::new(capacity(), |_| Ok(|_: RtdSender<i32>| Ok(())));
+        let first = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), |_| {
+            Ok(|_: RtdSender<i32>| Ok(()))
+        });
         assert_eq!(first.max_producers().get(), 64);
         let second_calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
         let calls = StdArc::clone(&second_calls);
-        let second = RtdChannelSource::new(capacity(), move |_| {
+        let second = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), move |_| {
             calls.fetch_add(1, Ordering::Relaxed);
             Ok(|_: RtdSender<i32>| Ok(()))
         });
@@ -1550,7 +1554,7 @@ mod tests {
         );
         let calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
         let source_calls = StdArc::clone(&calls);
-        let source = RtdChannelSource::new(capacity(), move |_| {
+        let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), move |_| {
             if source_calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 return Err(XllError::Overloaded);
             }
@@ -1639,16 +1643,17 @@ mod tests {
                 ] {
                     let (_runtime, server, sink) = sink();
                     let (sender_tx, sender_rx) = mpsc::channel();
-                    let source = RtdChannelSource::new(capacity(), move |_| {
-                        let sender_tx = sender_tx.clone();
-                        Ok(move |sender: RtdSender<i32>| {
-                            sender.try_send(42).unwrap();
-                            sender_tx.send(sender).unwrap();
-                            assert!(!panic, "injected producer failure");
-                            Err(XllError::Overloaded)
+                    let source =
+                        RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), move |_| {
+                            let sender_tx = sender_tx.clone();
+                            Ok(move |sender: RtdSender<i32>| {
+                                sender.try_send(42).unwrap();
+                                sender_tx.send(sender).unwrap();
+                                assert!(!panic, "injected producer failure");
+                                Err(XllError::Overloaded)
+                            })
                         })
-                    })
-                    .with_error_policy(policy);
+                        .with_error_policy(policy);
                     let subscription = source
                         .subscribe(
                             &RtdTopic::single("diagnostic-channel-policy").unwrap(),
@@ -1730,7 +1735,7 @@ mod tests {
         with_producer_diagnostics(|events| {
             let (_runtime, server, sink) = sink();
             let (sender_tx, sender_rx) = mpsc::channel();
-            let source = RtdChannelSource::new(capacity(), move |_| {
+            let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), move |_| {
                 let sender_tx = sender_tx.clone();
                 Ok(move |sender: RtdSender<i32>| {
                     sender_tx.send(sender.clone()).unwrap();
@@ -1753,7 +1758,7 @@ mod tests {
             assert!(cancelled.updates().is_empty());
             cancelled.complete(RefreshOutcome::Delivered).unwrap();
 
-            let source = RtdChannelSource::new(capacity(), |_| {
+            let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), |_| {
                 Ok(|_: RtdSender<i32>| Err(XllError::Closing))
             })
             .with_error_policy(RtdProducerErrorPolicy::PublishError(
@@ -1792,7 +1797,7 @@ mod tests {
         let calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
         let called = StdArc::clone(&calls);
         let (sender_tx, sender_rx) = mpsc::channel();
-        let source = RtdChannelSource::new(capacity(), move |_| {
+        let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), move |_| {
             called.fetch_add(1, Ordering::Relaxed);
             let sender_tx = sender_tx.clone();
             Ok(move |sender: RtdSender<i32>| {
@@ -2274,7 +2279,7 @@ mod tests {
     #[test]
     fn miri_typed_latest_source_coalesces_before_shared_publication() {
         let (_runtime, server, sink) = sink();
-        let source = RtdChannelSource::with_policy(RtdLatest, |_| {
+        let source = RtdChannelSource::new(RtdLatest, |_| {
             Ok(|sender: RtdSender<i32, RtdLatest>| {
                 sender
                     .try_send_batch([1, 2, 3])
@@ -2297,7 +2302,7 @@ mod tests {
     #[test]
     fn completed_producer_drains_values_then_stops_publisher() {
         let (_runtime, server, sink) = sink();
-        let source = RtdChannelSource::new(capacity(), |_| {
+        let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), |_| {
             Ok(|sender: RtdSender<i32>| {
                 sender.try_send(17).map_err(RtdSendError::into_error)?;
                 sender.try_send(42).map_err(RtdSendError::into_error)
@@ -2348,7 +2353,7 @@ mod tests {
             dropped: dropped_tx,
         };
         let (sender_tx, sender_rx) = mpsc::channel();
-        let source = RtdChannelSource::new(capacity(), move |_| {
+        let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), move |_| {
             // Cell is Send but not Sync. This uncloneable resource belongs
             // only to its FnOnce job, never to a shared producer callback.
             let job_owner = std::cell::Cell::new(Some(factory_owner.new_job()));
@@ -2389,7 +2394,7 @@ mod tests {
             let (_runtime, _server, sink) = sink();
             let factory_calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
             let source = RtdChannelSource::new(
-                capacity(),
+                crate::rtd::RtdFifo::new(capacity()),
                 move |topic| -> XllResult<fn(RtdSender<i32>) -> XllResult<()>> {
                     assert!(topic.parts().eq(["invalid"]));
                     if factory_calls.fetch_add(1, Ordering::Relaxed) > 0 {
@@ -2426,7 +2431,7 @@ mod tests {
         let release_rx = Mutex::new(Some(release_rx));
         let finished = Arc::new(AtomicBool::new(false));
         let producer_finished = Arc::clone(&finished);
-        let source = RtdChannelSource::new(capacity(), move |_| {
+        let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), move |_| {
             let sender_tx = sender_tx.clone();
             let closed_tx = closed_tx.clone();
             let release_rx = release_rx.lock().take().unwrap();
@@ -2493,7 +2498,7 @@ mod tests {
             .attach_update_notifier(crate::excel_rtd::RtdNotifier::for_test(notifier))
             .unwrap();
         let (sender_tx, sender_rx) = mpsc::channel();
-        let source = RtdChannelSource::new(capacity(), move |_| {
+        let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), move |_| {
             let sender_tx = sender_tx.clone();
             Ok(move |sender: RtdSender<i32>| {
                 sender_tx.send(sender.clone()).unwrap();
@@ -2530,7 +2535,7 @@ mod tests {
     fn panic_in_producer_closes_sender_without_repeating_failure_on_disconnect() {
         let (_runtime, _server, sink) = sink();
         let (sender_tx, sender_rx) = mpsc::channel();
-        let source = RtdChannelSource::new(capacity(), move |_| {
+        let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), move |_| {
             let sender_tx = sender_tx.clone();
             Ok(move |sender| {
                 sender_tx.send(sender).unwrap();
@@ -2550,7 +2555,7 @@ mod tests {
     fn producer_error_closes_sender_without_repeating_failure_on_disconnect() {
         let (_runtime, _server, sink) = sink();
         let (sender_tx, sender_rx) = mpsc::channel();
-        let source = RtdChannelSource::new(capacity(), move |_| {
+        let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), move |_| {
             let sender_tx = sender_tx.clone();
             Ok(move |sender| {
                 sender_tx.send(sender).unwrap();
@@ -2571,7 +2576,7 @@ mod tests {
             let (_runtime, _server, sink) = sink();
             let payload_drops = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
             let producer_drops = StdArc::clone(&payload_drops);
-            let source = RtdChannelSource::new(capacity(), move |_| {
+            let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), move |_| {
                 let producer_drops = StdArc::clone(&producer_drops);
                 Ok(move |_| {
                     std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(
@@ -2597,7 +2602,7 @@ mod tests {
         let (sender_tx, sender_rx) = mpsc::channel();
         let finished = Arc::new(AtomicBool::new(false));
         let producer_finished = Arc::clone(&finished);
-        let source = RtdChannelSource::new(capacity(), move |_| {
+        let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), move |_| {
             let sender_tx = sender_tx.clone();
             let producer_finished = Arc::clone(&producer_finished);
             Ok(move |sender: RtdSender<i32>| {

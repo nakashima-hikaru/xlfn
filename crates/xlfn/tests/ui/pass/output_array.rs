@@ -1,6 +1,6 @@
-use xlfn::output::{XlArrayBuilder, XlArrayOutput};
+use xlfn::output::{ExcelArrayBuilder, ExcelArrayOutput};
 use xlfn::prelude::*;
-use xlfn::value::XlArrayRef;
+use xlfn::value::raw::XlArrayRef;
 
 #[excel_function(name = "TEST.COW.TEXT", thread_safe)]
 fn cow_text(value: &str) -> std::borrow::Cow<'_, str> {
@@ -13,8 +13,8 @@ fn cow_owned() -> std::borrow::Cow<'static, str> {
 }
 
 #[allow(dead_code)]
-fn array() -> xlfn::XllResult<XlArrayOutput> {
-    let mut out = XlArrayBuilder::new(1, 2)?;
+fn array() -> xlfn::XllResult<ExcelArrayOutput> {
+    let mut out = ExcelArrayBuilder::new(1, 2)?;
     out.push_f64(1.0)?;
     out.push("two")?;
     out.finish()
@@ -46,15 +46,15 @@ fn sum(values: XlArrayRef<'_>) -> XllResult<f64> {
 }
 
 #[excel_function(name = "TEST.DIRECT.ARRAY", thread_safe)]
-fn normalize(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
+fn normalize(values: XlArrayRef<'_>) -> XllResult<ExcelArrayOutput> {
     let mean = values
         .cells()
         .try_fold(0.0, |sum, cell| -> XllResult<f64> {
             Ok(sum + cell.as_f64()?)
         })?
         / values.len() as f64;
-    let xlfn::error::Shape { rows, columns } = values.shape();
-    let mut output = XlArrayBuilder::new(rows, columns)?;
+    let xlfn::value::Shape { rows, columns } = values.shape();
+    let mut output = ExcelArrayBuilder::new(rows, columns)?;
     for cell in values.cells() {
         output.push_f64(cell.as_f64()? - mean)?;
     }

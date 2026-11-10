@@ -18,8 +18,8 @@ keep the core computation in pure Rust functions:
 #     type LifecycleState = ();
 #     type Error = xlfn::XllError;
 #     type Layers = ();
-#     fn open(_: &xlfn::OpenContext<Self>) -> xlfn::XllResult<xlfn::Opened<()>> {
-#         Ok(xlfn::Opened::new(()))
+#     fn open(_: &xlfn::addin::OpenContext<Self>) -> xlfn::XllResult<xlfn::addin::Opened<()>> {
+#         Ok(xlfn::addin::Opened::new(()))
 #     }
 # }
 # fn main() { assert_eq!(compute_hypot(3.0, 4.0), 5.0); }

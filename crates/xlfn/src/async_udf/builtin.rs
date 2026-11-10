@@ -5,7 +5,6 @@ mod worker;
 
 use super::{AsyncExecutor, AsyncTask};
 use crate::diagnostics::id::DiagnosticId;
-use crate::error::DomainErrorCode;
 use crate::sync::{Condvar, Mutex, MutexGuard};
 use crate::{XllError, XllResult};
 use async_task::Runnable;
@@ -78,12 +77,10 @@ impl Default for AsyncPollerCount {
 }
 
 impl TryFrom<usize> for AsyncPollerCount {
-    type Error = XllError;
+    type Error = crate::error::InvalidLimit;
 
-    fn try_from(poller_count: usize) -> XllResult<Self> {
-        Self::new(poller_count).ok_or(XllError::Domain {
-            code: DomainErrorCode::InvalidInput,
-        })
+    fn try_from(poller_count: usize) -> Result<Self, Self::Error> {
+        Self::new(poller_count).ok_or(crate::error::InvalidLimit)
     }
 }
 

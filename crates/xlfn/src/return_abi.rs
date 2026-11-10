@@ -38,7 +38,7 @@ pub(crate) use ownership::ReturnFreeBoundaryGuard;
 use ownership::ReturnPublicationTxn;
 pub(crate) use ownership::{ReturnFreeGuard, ReturnObligation, ReturnProducerGuard, ReturnTracker};
 
-pub use array::{XlArrayBuilder, XlArrayOutput};
+pub use array::{ExcelArrayBuilder, ExcelArrayOutput};
 pub use numeric::{
     MAX_MODULE_NUMERIC_RETURN_BYTES, MAX_NUMERIC_RETURN_BYTES, MAX_PROCESS_NUMERIC_RETURN_BYTES,
     MAX_THREAD_NUMERIC_RETURN_BYTES, NumericArrayBuilder, NumericArrayOutput,
@@ -104,7 +104,7 @@ impl PreparedReturn {
         }
     }
 
-    pub(crate) fn from_array_output(encoded: XlArrayOutput) -> XllResult<Self> {
+    pub(crate) fn from_array_output(encoded: ExcelArrayOutput) -> XllResult<Self> {
         let total_bytes = encoded
             .payload_bytes
             .checked_add(std::mem::size_of::<ReturnBlock>())
@@ -146,7 +146,7 @@ impl PreparedReturn {
 
     fn error(error: &XllError) -> Self {
         Self {
-            oper: XLOPER12::error(error.excel_error().code()),
+            oper: XLOPER12::error(error.to_excel_error().code()),
             storage: None,
             array: None,
         }
@@ -300,7 +300,7 @@ pub(crate) fn closing_error_pointer() -> *mut XLOPER12 {
     // Use a process-wide static singleton to prevent memory leaks on repeated late calls.
     CLOSING_ERROR
         .get_or_init(|| {
-            detached_scalar::permanent(XLOPER12::error(XllError::Closing.excel_error().code()))
+            detached_scalar::permanent(XLOPER12::error(XllError::Closing.to_excel_error().code()))
         })
         .pointer()
 }
@@ -881,7 +881,7 @@ mod tests {
                 ),
                 "output errors must not acquire input-argument metadata: {error}"
             );
-            assert_eq!(error.excel_error(), ExcelError::Number);
+            assert_eq!(error.to_excel_error(), ExcelError::Number);
         }
 
         fn assert_rejected_output<T: ExcelReturn<InputMode = crate::value::PlainInputMode>>(
@@ -900,7 +900,7 @@ mod tests {
             assert_rejected_output(Matrix::new(1, 1, vec![make()]).unwrap());
             assert_rejected_output(Row::new(vec![make()]).unwrap());
             assert_rejected_output(Column::new(vec![make()]).unwrap());
-            let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+            let mut builder = ExcelArrayBuilder::new(1, 1).unwrap();
             assert_numeric_error(builder.push(make()).unwrap_err());
             // A rejected cell leaves the builder usable and does not consume a slot.
             builder.push(1.0).unwrap();
@@ -921,7 +921,7 @@ mod tests {
                 assert_all_output_shapes(|| number);
                 assert_all_output_shapes(|| ExcelCellOutput::Number(number));
                 assert_all_output_shapes(|| UnvalidatedNumber(number));
-                let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+                let mut builder = ExcelArrayBuilder::new(1, 1).unwrap();
                 assert_numeric_error(builder.push_f64(number).unwrap_err());
                 builder.push_f64(1.0).unwrap();
                 assert!(builder.finish().is_ok());
@@ -1088,7 +1088,7 @@ mod tests {
 
             fn open(
                 _: &OpenContext<Self>,
-            ) -> XllResult<crate::addin::Opened<(), (), Self::Layers>> {
+            ) -> XllResult<crate::addin_impl::Opened<(), (), Self::Layers>> {
                 unreachable!()
             }
         }
@@ -1650,7 +1650,7 @@ mod tests {
         let _test = test_lock();
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
-        let mut builder = crate::return_abi::XlArrayBuilder::new(1, 2).unwrap();
+        let mut builder = crate::return_abi::ExcelArrayBuilder::new(1, 2).unwrap();
         builder.push_f64(10.0).unwrap();
         builder.push_f64(20.0).unwrap();
         let encoded = builder.finish().unwrap();
@@ -1983,7 +1983,7 @@ mod tests {
             fn open(
                 _: &OpenContext<Self>,
             ) -> Result<
-                crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+                crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
                 Self::Error,
             > {
                 unreachable!()
@@ -2108,7 +2108,7 @@ mod tests {
     #[cfg(feature = "async")]
     #[test]
     fn miri_async_return_buffers_remain_live_after_moving_the_inline_root() {
-        let mut builder = XlArrayBuilder::new(1, 2).unwrap();
+        let mut builder = ExcelArrayBuilder::new(1, 2).unwrap();
         builder.push("日本語 💡").unwrap();
         builder.push(42.0).unwrap();
         let array =
@@ -2134,7 +2134,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             array_ref.shape(),
-            crate::error::Shape {
+            crate::value::Shape {
                 rows: 1,
                 columns: 2
             }
@@ -2376,7 +2376,7 @@ mod tests {
         let matrix = Matrix::new(1, 2, vec!["hello".to_string(), "world".to_string()]).unwrap();
         let value =
             <Matrix<_> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new()).unwrap();
-        let _: XlArrayOutput = value;
+        let _: ExcelArrayOutput = value;
 
         let prepared = PreparedReturn::encode(value).unwrap();
         let cells = prepared.array.as_ref().unwrap();

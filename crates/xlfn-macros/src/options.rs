@@ -46,6 +46,7 @@ pub(super) struct ParsedArgumentOptions {
     pub(super) missing: Option<String>,
     pub(super) reference: bool,
     pub(super) strict: bool,
+    pub(super) native: Option<String>,
 }
 
 #[derive(Default)]
@@ -108,6 +109,17 @@ pub(super) fn parse_argument_options(
                 }
                 options.missing = Some(policy_value(&value.value, "missing")?);
             }
+            Meta::Path(path) if path.is_ident("native") => {
+                if options.native.replace("infer".into()).is_some() {
+                    return Err(syn::Error::new_spanned(path, "duplicate `native`"));
+                }
+            }
+            Meta::NameValue(value) if value.path.is_ident("native") => {
+                if options.native.is_some() {
+                    return Err(syn::Error::new_spanned(value, "duplicate `native`"));
+                }
+                options.native = Some(policy_value(&value.value, "native")?);
+            }
             Meta::Path(path) if path.is_ident("strict") => {
                 if options.strict {
                     return Err(syn::Error::new_spanned(path, "duplicate `strict`"));
@@ -123,7 +135,7 @@ pub(super) fn parse_argument_options(
             other => {
                 return Err(syn::Error::new_spanned(
                     other,
-                    "expected `name`, `description`, `default`, `blank`, `missing`, `strict`, or `reference`",
+                    "expected `name`, `description`, `default`, `blank`, `missing`, `native`, `strict`, or `reference`",
                 ));
             }
         }
@@ -212,7 +224,7 @@ pub(super) fn parse_function_options(tokens: TokenStream) -> syn::Result<ParsedF
                 if options.return_abi.is_some() {
                     return Err(syn::Error::new_spanned(value, "duplicate `return_abi`"));
                 }
-                options.return_abi = Some(string_value(&value.value, "return_abi")?);
+                options.return_abi = Some(policy_value(&value.value, "return_abi")?);
             }
             Meta::NameValue(value) if value.path.is_ident("input_semantics") => {
                 if options.input_semantics.is_some() {

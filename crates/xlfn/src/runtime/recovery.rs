@@ -6,7 +6,7 @@
 //! an incomplete shutdown.
 
 use crate::XllError;
-use crate::addin::Addin;
+use crate::addin_impl::Addin;
 use crate::boundary::{fail_stop_invariant, report_boundary_error};
 use crate::generation::RuntimeGeneration;
 use crate::panic_boundary::catch_no_unwind;

@@ -109,7 +109,9 @@ impl Drop for DropProbe {
 
 #[test]
 fn double_checked_hit_reclaims_after_singleflight_unlock() {
-    let cache = StdArc::new(CalculationCache::new(8));
+    let cache = StdArc::new(CalculationCache::new(
+        crate::cache::CacheBudget::weight_units(8),
+    ));
     let reentry = Reentry::new(&cache, 3, false);
     let previous = cache
         .get_or_try_insert_weighted(
@@ -205,7 +207,9 @@ fn double_checked_hit_reclaims_after_singleflight_unlock() {
 
 #[test]
 fn failed_follower_reclaims_after_flight_state_unlock() {
-    let cache = StdArc::new(CalculationCache::new(8));
+    let cache = StdArc::new(CalculationCache::new(
+        crate::cache::CacheBudget::weight_units(8),
+    ));
     let reentry = Reentry::new(&cache, 1, true);
     let previous = cache
         .get_or_try_insert_weighted(
@@ -253,7 +257,9 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
 
 #[test]
 fn eviction_drops_values_outside_the_cache_lock() {
-    let cache = StdArc::new(CalculationCache::new(1));
+    let cache = StdArc::new(CalculationCache::new(
+        crate::cache::CacheBudget::weight_units(1),
+    ));
     let reentry = Reentry::new(&cache, 100, false);
     drop(
         cache

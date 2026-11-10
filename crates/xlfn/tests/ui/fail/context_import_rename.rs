@@ -3,7 +3,7 @@ use xlfn::prelude::*;
 static __XLFN_RUNTIME: xlfn::__private::v1::MacroRuntime<()> =
     xlfn::__private::v1::MacroRuntime::new();
 
-use xlfn::ThreadSafeContext as WorkerContext;
+use xlfn::addin::ThreadSafeContext as WorkerContext;
 
 #[excel_function]
 fn bad(context: WorkerContext<'_, ()>) -> f64 {

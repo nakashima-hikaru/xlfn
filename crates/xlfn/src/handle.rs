@@ -1,3 +1,5 @@
+pub use crate::addin_impl::{HandleBindingLimit, HandleConfig};
+
 mod binding;
 mod connection;
 mod domain;

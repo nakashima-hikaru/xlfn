@@ -22,6 +22,14 @@
 //!
 //! The `serde` feature enables serialization of owned values and collections.
 //! The `jiff` feature provides civil-date conversions for serial dates.
+//!
+//! # Stability boundaries
+//!
+//! `bench-internals` and `refinement` are unstable developer instrumentation,
+//! excluded from the supported API and semantic-versioning guarantees. They may
+//! be enabled by Cargo consumers, but must not be used by application code.
+//! Hidden `__private` exports and dispatch hooks are likewise implementation
+//! details; only documented conversion methods are customization contracts.
 
 #![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -38,7 +46,8 @@ pub(crate) mod win32;
 #[doc(hidden)]
 pub mod __private;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-mod addin;
+#[path = "addin.rs"]
+mod addin_impl;
 #[cfg(feature = "async")]
 mod async_udf;
 #[cfg(feature = "bench-internals")]
@@ -122,43 +131,104 @@ mod source_catalog;
 mod subscription;
 mod subscription_owner;
 #[cfg(feature = "rtd")]
-pub use source_catalog::{DynamicRtdSources, RtdSourceCatalog};
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
+pub(crate) use source_catalog::{DynamicRtdSources, RtdSourceCatalog};
 #[cfg(not(feature = "rtd"))]
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
 pub(crate) use source_catalog::{DynamicRtdSources, RtdSourceCatalog};
 mod utf16;
 /// Safe worksheet input views, owned values, and explicit output shapes.
 pub mod value;
 
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
 pub(crate) use xlfn_kernel::sync;
 
-pub use addin::{
-    Addin, BuildInfo, DiagnosticsSetup, MacroSheetContext, MainThreadContext, NoAsyncExecutor,
+#[cfg(feature = "async")]
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
+pub(crate) use addin_impl::{AsyncConfig, AsyncContext, AsyncTaskLimit};
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
+pub(crate) use addin_impl::{
+    BuildInfo, DiagnosticsSetup, MacroSheetContext, MainThreadContext, NoAsyncExecutor,
     OpenContext, OpenResult, Opened, PhysicallyUnloadableAddin, RuntimeConfig, ThreadSafeContext,
 };
-#[cfg(feature = "async")]
-pub use addin::{AsyncConfig, AsyncContext, AsyncTaskLimit};
 #[cfg(feature = "handles")]
-pub use addin::{HandleBindingLimit, HandleConfig};
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
+pub(crate) use addin_impl::{HandleBindingLimit, HandleConfig};
 #[cfg(feature = "rtd")]
-pub use addin::{RtdConfig, RtdOpenContext};
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
+pub(crate) use addin_impl::{RtdConfig, RtdOpenContext};
 #[cfg(feature = "async")]
-pub use async_udf::{AsyncExecutor, AsyncTask};
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
+pub(crate) use async_udf::{AsyncExecutor, AsyncTask};
 #[cfg(feature = "async-builtin")]
-pub use async_udf::{AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig};
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
+pub(crate) use async_udf::{AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig};
 #[cfg(feature = "async")]
-pub use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
+pub(crate) use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
 pub use error::{
-    ExcelApiFailure, ExcelApiFunction, ExcelCallbackStatus, ExcelError, XllError, XllResult,
+    ExcelApiFailure, ExcelApiFunction, ExcelCallbackStatus, ExcelError, UdfError, UdfResult,
+    XllError, XllResult,
 };
 #[cfg(feature = "rtd")]
-pub use rtd::RtdCallContext;
-pub use shutdown::{CleanupIssueKind, CleanupReporter};
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
+pub(crate) use rtd::RtdCallContext;
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
+pub(crate) use shutdown::{CleanupIssueKind, CleanupReporter};
 #[cfg(all(not(feature = "rtd"), any(test, feature = "handles")))]
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
 pub(crate) use subscription_owner::IntoRtdSubscription;
 #[cfg(not(feature = "rtd"))]
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
 pub(crate) use subscription_owner::RtdSubscription;
 #[cfg(feature = "rtd")]
-pub use subscription_owner::{BoxedRtdSubscription, IntoRtdSubscription, RtdSubscription};
+#[allow(
+    unused_imports,
+    reason = "Internal aliases also serve feature-specific tests"
+)]
+pub(crate) use subscription_owner::{BoxedRtdSubscription, IntoRtdSubscription, RtdSubscription};
 
 mod ingress;
 
@@ -282,13 +352,38 @@ macro_rules! __xlfn_private_excel_rtd_exports {
     ($runtime:expr) => {};
 }
 
+/// Add-in state, lifecycle and execution contexts.
+pub mod addin {
+    pub use crate::addin_impl::{
+        Addin, BuildInfo, DiagnosticsSetup, MacroSheetContext, MainThreadContext, OpenContext,
+        OpenResult, Opened, PhysicallyUnloadableAddin, RuntimeConfig, ThreadSafeContext,
+    };
+    pub use crate::shutdown::{CleanupIssueKind, CleanupReporter};
+}
+pub use addin::Addin;
+
+/// Executor resources, task admission and cooperative cancellation.
+pub mod task {
+    pub use crate::addin_impl::NoAsyncExecutor;
+    #[cfg(feature = "async")]
+    pub use crate::addin_impl::{AsyncConfig, AsyncContext, AsyncTaskLimit};
+    #[cfg(feature = "async")]
+    pub use crate::async_udf::{AsyncExecutor, AsyncTask};
+    #[cfg(feature = "async-builtin")]
+    pub use crate::async_udf::{
+        AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig, BuiltinReservation,
+    };
+    #[cfg(feature = "async")]
+    pub use crate::cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
+}
+
 /// Efficient construction of Excel array return values.
 pub mod output {
     pub use crate::return_abi::{
-        MAX_MODULE_NUMERIC_RETURN_BYTES, MAX_NUMERIC_RETURN_BYTES,
-        MAX_PROCESS_NUMERIC_RETURN_BYTES, MAX_THREAD_NUMERIC_RETURN_BYTES, NumericArrayBuilder,
-        NumericArrayOutput, NumericReturnMemoryMetrics, XlArrayBuilder, XlArrayOutput,
-        numeric_return_memory_metrics,
+        ExcelArrayBuilder, ExcelArrayOutput, MAX_MODULE_NUMERIC_RETURN_BYTES,
+        MAX_NUMERIC_RETURN_BYTES, MAX_PROCESS_NUMERIC_RETURN_BYTES,
+        MAX_THREAD_NUMERIC_RETURN_BYTES, NumericArrayBuilder, NumericArrayOutput,
+        NumericReturnMemoryMetrics, numeric_return_memory_metrics,
     };
 }
 
@@ -301,21 +396,22 @@ pub mod prelude {
     #[cfg(feature = "handles")]
     pub use crate::ExcelHandleObject;
     pub use crate::addin::{
-        Addin, MacroSheetContext, MainThreadContext, NoAsyncExecutor, OpenContext, OpenResult,
-        Opened, ThreadSafeContext,
+        Addin, MacroSheetContext, MainThreadContext, OpenContext, OpenResult, Opened,
+        ThreadSafeContext,
     };
-    #[cfg(feature = "async")]
-    pub use crate::addin::{AsyncConfig, AsyncContext, AsyncTaskLimit};
-    pub use crate::error::{ExcelError, XllError, XllResult};
+    pub use crate::error::{ExcelError, UdfError, UdfResult, XllError, XllResult};
     #[cfg(feature = "handles")]
     pub use crate::handle::{Handle, HandleAlias, HandleLease};
+    pub use crate::task::NoAsyncExecutor;
+    #[cfg(feature = "async")]
+    pub use crate::task::{AsyncConfig, AsyncContext, AsyncTaskLimit};
+    #[cfg(feature = "async")]
+    pub use crate::task::{AsyncExecutor, AsyncTask};
+    #[cfg(feature = "async-builtin")]
+    pub use crate::task::{AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig};
     pub use crate::value::{
         Column, ExcelArrayRef, ExcelCellRef, ExcelSerialDate, ExcelValueRef, Matrix, MatrixRef,
         NumericMatrixRef, OptionalExcelValue, Row,
     };
-    #[cfg(feature = "async")]
-    pub use crate::{AsyncExecutor, AsyncTask};
-    #[cfg(feature = "async-builtin")]
-    pub use crate::{AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig};
     pub use crate::{ExcelEnum, ExcelInputIdentity, ExcelPrepare, excel_addin, excel_function};
 }

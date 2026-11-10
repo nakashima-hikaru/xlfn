@@ -20,7 +20,7 @@ use xlfn::cache::{
 ```rust
 # use xlfn::cache::CalculationCache;
 # fn example() -> xlfn::XllResult<()> {
-let cache = CalculationCache::<String, String>::with_weigher(1024, String::len);
+let cache = CalculationCache::<String, String>::with_weigher(xlfn::cache::CacheBudget::weight_units(1024), String::len);
 let value = cache.get_or_try_insert_with(
     "abc".to_owned(),
     || Ok("ABC".to_owned()),
@@ -42,7 +42,7 @@ and `get_or_try_insert_borrowed` creates an owned key only after a resident miss
 ```rust
 # use xlfn::cache::CalculationCache;
 # fn example() -> xlfn::XllResult<()> {
-let cache = CalculationCache::<String, usize>::new(1024);
+let cache = CalculationCache::<String, usize>::new(xlfn::cache::CacheBudget::weight_units(1024));
 let text: &str = "a borrowed key";
 let value = cache.get_or_try_insert_borrowed(text, || Ok(text.len()))?;
 assert_eq!(*cache.get(text).unwrap(), *value);
@@ -83,7 +83,7 @@ struct State {
 
 fn build_state() -> State {
     State {
-        caches: CacheRegistry::new(1024),
+        caches: CacheRegistry::new(xlfn::cache::CacheBudget::weight_units(1024)),
     }
 }
 

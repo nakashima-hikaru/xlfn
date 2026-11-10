@@ -39,7 +39,7 @@ struct Shared {
 pub(super) struct ActiveGuard<'a> {
     shared: &'a Shared,
     completed: bool,
-    cancelled: &'a xlfn::CancellationToken,
+    cancelled: &'a xlfn::task::CancellationToken,
 }
 
 impl ActiveGuard<'_> {
@@ -67,7 +67,7 @@ impl Drop for ActiveGuard<'_> {
 }
 
 impl AsyncControl {
-    pub(super) fn enter<'a>(&'a self, cancelled: &'a xlfn::CancellationToken) -> ActiveGuard<'a> {
+    pub(super) fn enter<'a>(&'a self, cancelled: &'a xlfn::task::CancellationToken) -> ActiveGuard<'a> {
         let armed = self.shared.armed.load(Ordering::Acquire);
         if armed {
             self.shared.started.fetch_add(1, Ordering::Relaxed);

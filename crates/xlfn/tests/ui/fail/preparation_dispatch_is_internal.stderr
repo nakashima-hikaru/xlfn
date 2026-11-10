@@ -1,0 +1,13 @@
+error[E0603]: module `input` is private
+ --> tests/ui/fail/preparation_dispatch_is_internal.rs:1:18
+  |
+1 | use xlfn::value::input::PreparationDispatch;
+  |                  ^^^^^  ------------------- struct `PreparationDispatch` is not publicly re-exported
+  |                  |
+  |                  private module
+  |
+note: the module `input` is defined here
+ --> src/value.rs
+  |
+  | pub(crate) mod input;
+  | ^^^^^^^^^^^^^^^^^^^^

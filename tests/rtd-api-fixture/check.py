@@ -65,9 +65,13 @@ def main() -> int:
                     if name == "configured":
                         passed &= len(errors) == 1 and "RTD configuration requires the xlfn `rtd` feature" in errors[0]["message"]
                     elif name == "rtd_exports":
-                        codes = [error.get("code", {}).get("code") for error in errors]
-                        expected_codes = ["E0603"] * 4 if "objects" in features else ["E0432", "E0603", "E0603", "E0603"]
-                        passed &= sorted(codes) == sorted(expected_codes)
+                        # The entire supported RTD module is absent without RTD,
+                        # including when the independent handles feature is on.
+                        passed &= (
+                            len(errors) == 1
+                            and (errors[0].get("code") or {}).get("code") == "E0432"
+                            and "framework::rtd" in errors[0]["message"]
+                        )
                     elif name == "rtd_access":
                         passed &= len(errors) == 1 and errors[0].get("code", {}).get("code") == "E0599" and "rtd" in errors[0]["message"]
                     elif name == "erased":

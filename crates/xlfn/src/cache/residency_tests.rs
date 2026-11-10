@@ -24,7 +24,7 @@ fn counters(count: usize) -> Arc<Vec<AtomicUsize>> {
 fn clear_and_final_lease_release_defer_reclamation_while_reading() {
     for release_while_reading in [false, true] {
         let drops = counters(1);
-        let cache = CalculationCache::new(1);
+        let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(1));
         let lease = cache
             .get_or_try_insert_weighted(
                 0,
@@ -62,7 +62,7 @@ fn clear_and_final_lease_release_defer_reclamation_while_reading() {
 fn eviction_preserves_live_leases_and_drops_every_value_once() {
     let count = if cfg!(miri) { 8 } else { 128 };
     let drops = counters(count);
-    let cache = CalculationCache::new(2);
+    let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(2));
     let lease = cache
         .get_or_try_insert_weighted(
             0,
@@ -104,7 +104,7 @@ fn eviction_preserves_live_leases_and_drops_every_value_once() {
 
 #[test]
 fn clear_races_concurrent_lookup_and_initialization() {
-    let cache = CalculationCache::new(32);
+    let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(32));
     let rounds = if cfg!(miri) { 3 } else { 128 };
     let barrier = Barrier::new(3);
     std::thread::scope(|scope| {
@@ -137,7 +137,7 @@ fn clear_races_concurrent_lookup_and_initialization() {
 
 #[test]
 fn generation_rollover_cannot_publish_an_old_initializer_as_current() {
-    let cache = CalculationCache::new(16);
+    let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(16));
     let (started_tx, started_rx) = mpsc::sync_channel(0);
     let (resume_tx, resume_rx) = mpsc::sync_channel(0);
     std::thread::scope(|scope| {
@@ -173,7 +173,7 @@ fn generation_rollover_cannot_publish_an_old_initializer_as_current() {
 
 #[test]
 fn duplicate_initializers_share_a_single_computation() {
-    let cache = CalculationCache::new(16);
+    let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(16));
     let computes = AtomicUsize::new(0);
     let followers = if cfg!(miri) { 2 } else { 15 };
     std::thread::scope(|scope| {
@@ -228,7 +228,7 @@ fn duplicate_initializers_share_a_single_computation() {
 
 #[test]
 fn reentrant_miss_is_rejected_but_hits_and_clear_remain_safe() {
-    let cache = CalculationCache::new(16);
+    let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(16));
     drop(
         cache
             .get_or_try_insert_weighted(1, |_| 1, || Ok(10))
@@ -262,7 +262,7 @@ fn weighted_capacity_zero_oversized_and_drop_cleanup() {
     for capacity in [0, 1, 17] {
         let count = if cfg!(miri) { 6 } else { 256 };
         let drops = counters(count);
-        let cache = CalculationCache::new(capacity);
+        let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(capacity));
         for id in 0..count {
             let weight = id % 23 + 1;
             let lease = cache
@@ -293,7 +293,7 @@ fn weighted_capacity_zero_oversized_and_drop_cleanup() {
 fn heavy_concurrent_read_write_drains_retirement_debt() {
     let workers = if cfg!(miri) { 2 } else { 16 };
     let rounds = if cfg!(miri) { 4 } else { 512 };
-    let cache = CalculationCache::new(64);
+    let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(64));
     let barrier = Barrier::new(workers);
     std::thread::scope(|scope| {
         for worker in 0..workers {
@@ -325,7 +325,7 @@ fn heavy_concurrent_read_write_drains_retirement_debt() {
 
 #[test]
 fn failed_and_panicking_initializers_do_not_leave_pending_flights() {
-    let cache = CalculationCache::<u32, u32>::new(16);
+    let cache = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(16));
     assert!(
         cache
             .get_or_try_insert_weighted(1, |_| 1, || Err(XllError::Closing))
@@ -357,7 +357,7 @@ fn panicking_initializers_drain_retired_values_after_unwinding() {
 
     for capacity in [0, 8] {
         let drops = Arc::new(AtomicUsize::new(0));
-        let cache = CalculationCache::new(capacity);
+        let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(capacity));
         let previous = cache
             .get_or_try_insert_weighted(1, |_| 1, || Ok(DeferredDrop(Arc::clone(&drops))))
             .unwrap();
@@ -385,7 +385,7 @@ fn panicking_initializers_drain_retired_values_after_unwinding() {
 fn panicking_initializers_do_not_wait_for_active_readers() {
     for capacity in [0, 8] {
         let drops = counters(1);
-        let cache = CalculationCache::new(capacity);
+        let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(capacity));
         let previous = cache
             .get_or_try_insert_weighted(
                 0,

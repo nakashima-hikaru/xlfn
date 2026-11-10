@@ -205,7 +205,11 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
             .get_or_init(|| PublishedOwner::new(TaskRegistry::new()))
     }
 
-    pub(crate) fn start(&self, executor: E, limit: crate::addin::AsyncTaskLimit) -> XllResult<()> {
+    pub(crate) fn start(
+        &self,
+        executor: E,
+        limit: crate::addin_impl::AsyncTaskLimit,
+    ) -> XllResult<()> {
         startup::StartupClaim::acquire(self, executor)?.publish(limit)
     }
 

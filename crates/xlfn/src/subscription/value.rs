@@ -82,7 +82,7 @@ impl TryFrom<crate::value::ExcelValue> for RtdValue {
             crate::value::ExcelValue::Missing
             | crate::value::ExcelValue::Scalar(crate::value::ExcelCellValue::Blank) => Self::Empty,
             crate::value::ExcelValue::Array(_) => {
-                return Err(XllError::input(
+                return Err(XllError::validation(
                     "RTD value",
                     crate::error::InputError::Malformed("RTD values must be scalar"),
                 ));

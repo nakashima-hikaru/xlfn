@@ -16,10 +16,12 @@ use std::{
 
 mod async_control;
 use async_control::AsyncControl;
+use xlfn::task::{AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig};
+use xlfn::rtd::RtdConfig;
+use xlfn::addin::RuntimeConfig;
 use xlfn::{
-    AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig, RtdConfig, RuntimeConfig,
     error::InputError,
-    output::{NumericArrayBuilder, NumericArrayOutput, XlArrayBuilder, XlArrayOutput},
+    output::{NumericArrayBuilder, NumericArrayOutput, ExcelArrayOutput},
     prelude::*,
     rtd::{RtdCapacity, RtdLimits, RtdSourceHandle, RtdValue},
 };
@@ -78,23 +80,23 @@ impl Addin for BenchAddin {
 }
 
 #[excel_function(name = "BENCH.ID", thread_safe)]
-pub fn identity(value: f64) -> f64 {
+pub fn identity(#[excel_arg(native)] value: f64) -> f64 {
     value
 }
 
 #[excel_function(name = "BENCH.SUM2", thread_safe)]
-pub fn sum2(a: f64, b: f64) -> f64 {
+pub fn sum2(#[excel_arg(native)] a: f64, #[excel_arg(native)] b: f64) -> f64 {
     a + b
 }
 
 #[excel_function(name = "BENCH.SUM4", thread_safe)]
-pub fn sum4(a: f64, b: f64, c: f64, d: f64) -> f64 {
+pub fn sum4(#[excel_arg(native)] a: f64, #[excel_arg(native)] b: f64, #[excel_arg(native)] c: f64, #[excel_arg(native)] d: f64) -> f64 {
     a + b + c + d
 }
 
 #[excel_function(name = "BENCH.SUM8", thread_safe)]
 #[allow(clippy::too_many_arguments, reason = "Measures eight Excel arguments")]
-pub fn sum8(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64) -> f64 {
+pub fn sum8(#[excel_arg(native)] a: f64, #[excel_arg(native)] b: f64, #[excel_arg(native)] c: f64, #[excel_arg(native)] d: f64, #[excel_arg(native)] e: f64, #[excel_arg(native)] f: f64, #[excel_arg(native)] g: f64, #[excel_arg(native)] h: f64) -> f64 {
     a + b + c + d + e + f + g + h
 }
 
@@ -109,13 +111,13 @@ fn busy(micros: i32) {
 }
 
 #[excel_function(name = "BENCH.CPU", thread_safe)]
-pub fn cpu(value: f64, micros: i32) -> f64 {
+pub fn cpu(#[excel_arg(native)] value: f64, #[excel_arg(native)] micros: i32) -> f64 {
     busy(micros);
     value
 }
 
 #[excel_function(name = "BENCH.ERRNUM", thread_safe)]
-pub fn error(value: f64, period: i32) -> Result<f64, ExcelError> {
+pub fn error(#[excel_arg(native)] value: f64, #[excel_arg(native)] period: i32) -> Result<f64, ExcelError> {
     if period > 0 && (value as i64) % period as i64 == 0 {
         Err(ExcelError::Number)
     } else {
@@ -129,7 +131,7 @@ pub fn matrix_sum(values: NumericMatrixRef<'_>) -> f64 {
 }
 
 #[excel_function(name = "BENCH.MAT.MAKE", thread_safe, return_abi = "fp12")]
-pub fn matrix_make(rows: i32, columns: i32, seed: f64) -> XllResult<NumericArrayOutput> {
+pub fn matrix_make(#[excel_arg(native)] rows: i32, #[excel_arg(native)] columns: i32, #[excel_arg(native)] seed: f64) -> XllResult<NumericArrayOutput> {
     let rows =
         usize::try_from(rows).map_err(|_| XllError::input("rows", InputError::OutOfRange))?;
     let columns =
@@ -146,13 +148,13 @@ pub fn matrix_make(rows: i32, columns: i32, seed: f64) -> XllResult<NumericArray
 
 // The same numeric producer under the explicit Q ABI isolates return encoding.
 #[excel_function(name = "BENCH.MAT.MAKE.Q", thread_safe, return_abi = "xloper12")]
-pub fn matrix_make_q(rows: i32, columns: i32, seed: f64) -> XllResult<NumericArrayOutput> {
+pub fn matrix_make_q(#[excel_arg(native)] rows: i32, #[excel_arg(native)] columns: i32, #[excel_arg(native)] seed: f64) -> XllResult<NumericArrayOutput> {
     matrix_make(rows, columns, seed)
 }
 
 #[excel_function(name = "BENCH.MAT.COPY", thread_safe, return_abi = "xloper12")]
-pub fn matrix_copy(values: NumericMatrixRef<'_>) -> XllResult<XlArrayOutput> {
-    XlArrayBuilder::from_f64(values.rows(), values.columns(), values.as_slice())?.finish()
+pub fn matrix_copy(values: NumericMatrixRef<'_>) -> XllResult<ExcelArrayOutput> {
+    ExcelArrayOutput::from_f64(values.rows(), values.columns(), values.as_slice())
 }
 
 #[cfg(test)]
@@ -165,7 +167,7 @@ mod numeric_abi_tests {
         type Xloper12 = xlfn::__private::v1::XLOPER12;
 
         // M02/M06 have numeric FP12 and explicit Q producer controls. M03
-        // copies through XlArrayBuilder and must retain its measured Q output
+        // copies through ExcelArrayBuilder and must retain its measured Q output
         // path rather than silently switching its storage and error policy.
         let _: unsafe extern "system" fn(i32, i32, f64) -> *mut Fp12 = xll_matrix_make;
         let _: unsafe extern "system" fn(i32, i32, f64) -> *mut Xloper12 = xll_matrix_make_q;
@@ -188,28 +190,28 @@ pub fn matrix_mixed(values: MatrixRef<'_, ExcelCellRef<'_>>) -> f64 {
 }
 
 #[excel_function(name = "BENCH.STR.IN", thread_safe)]
-pub fn string_input(value: String) -> f64 {
+pub fn string_input(#[excel_arg(native)] value: String) -> f64 {
     value.chars().count() as f64
 }
 
 #[excel_function(name = "BENCH.STR.OUT", thread_safe)]
-pub fn string_output(length: i32, japanese: bool) -> String {
+pub fn string_output(#[excel_arg(native)] length: i32, #[excel_arg(native)] japanese: bool) -> String {
     let unit = if japanese { "日" } else { "a" };
     unit.repeat(length.max(0) as usize)
 }
 
 #[excel_function(name = "BENCH.STR.COPY", thread_safe)]
-pub fn string_copy(value: String) -> String {
+pub fn string_copy(#[excel_arg(native)] value: String) -> String {
     value
 }
 
 #[excel_function(name = "BENCH.SHARED")]
-pub fn shared_read(context: ThreadSafeContext<'_, BenchAddin>, value: f64) -> f64 {
+pub fn shared_read(context: ThreadSafeContext<'_, BenchAddin>, #[excel_arg(native)] value: f64) -> f64 {
     value + context.state().shared_read.load(Ordering::Relaxed) as f64
 }
 
 #[excel_function(name = "BENCH.CONTENDED")]
-pub fn contended(context: ThreadSafeContext<'_, BenchAddin>, value: f64) -> f64 {
+pub fn contended(context: ThreadSafeContext<'_, BenchAddin>, #[excel_arg(native)] value: f64) -> f64 {
     value + context.state().contended.fetch_add(1, Ordering::AcqRel) as f64
 }
 
@@ -226,7 +228,7 @@ pub fn alloc_freed() -> f64 {
 
 /// Enables allocation counting without resetting the cumulative counter.
 #[excel_function(name = "BENCH.ALLOC.TRACK")]
-pub fn alloc_track(enabled: bool) -> f64 {
+pub fn alloc_track(#[excel_arg(native)] enabled: bool) -> f64 {
     ALLOCATOR.track(enabled);
     if enabled { 1.0 } else { 0.0 }
 }
@@ -234,8 +236,8 @@ pub fn alloc_track(enabled: bool) -> f64 {
 #[excel_function(name = "BENCH.ASYNC")]
 pub async fn async_value(
     context: AsyncContext<'_, BenchAddin>,
-    value: f64,
-    delay_us: i32,
+    #[excel_arg(native)] value: f64,
+    #[excel_arg(native)] delay_us: i32,
 ) -> XllResult<f64> {
     let mut guard = context.state().async_control.enter(context.cancellation());
     context.check_cancelled()?;
@@ -256,8 +258,8 @@ pub async fn async_value(
 #[excel_function(name = "BENCH.ASYNC.ARM")]
 pub fn async_arm(
     context: MainThreadContext<'_, BenchAddin>,
-    directory: String,
-    expected: i32,
+    #[excel_arg(native)] directory: String,
+    #[excel_arg(native)] expected: i32,
 ) -> XllResult<f64> {
     context
         .state()
@@ -271,7 +273,7 @@ pub fn async_arm(
 }
 
 #[excel_function(name = "BENCH.ASYNC.RELEASE")]
-pub fn async_release(context: MainThreadContext<'_, BenchAddin>, sequence: f64) -> f64 {
+pub fn async_release(context: MainThreadContext<'_, BenchAddin>, #[excel_arg(native)] sequence: f64) -> f64 {
     context.state().async_control.release();
     sequence
 }
@@ -289,8 +291,8 @@ pub fn async_finished(context: ThreadSafeContext<'_, BenchAddin>) -> f64 {
 #[excel_function(name = "BENCH.RTD")]
 pub fn rtd_value(
     context: MainThreadContext<'_, BenchAddin>,
-    topic: String,
-    period_ms: f64,
+    #[excel_arg(native)] topic: String,
+    #[excel_arg(native)] period_ms: f64,
 ) -> XllResult<RtdValue> {
     let period = period_ms.to_string();
     context
@@ -304,7 +306,7 @@ pub fn rtd_emitted(context: ThreadSafeContext<'_, BenchAddin>) -> f64 {
 }
 
 #[excel_function(name = "BENCH.RTD.PULSE")]
-pub fn rtd_pulse(context: MainThreadContext<'_, BenchAddin>, sequence: f64) -> f64 {
+pub fn rtd_pulse(context: MainThreadContext<'_, BenchAddin>, #[excel_arg(native)] sequence: f64) -> f64 {
     context.state().rtd_shared.set_pulse(sequence as u64);
     sequence
 }

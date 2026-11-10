@@ -1,7 +1,7 @@
 //! Transaction ownership for one logical open attempt.
 
 use crate::XllError;
-use crate::addin::{Addin, BuildInfo};
+use crate::addin_impl::{Addin, BuildInfo};
 use crate::boundary::{report_boundary_error, write_startup_log};
 use crate::diagnostics::AddinId;
 use crate::generation::OpeningGeneration;

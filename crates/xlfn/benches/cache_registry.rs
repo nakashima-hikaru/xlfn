@@ -59,7 +59,7 @@ fn cache_registry_benchmarks(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     for length in [16, 1024] {
         let key = "k".repeat(length);
-        let cache = CalculationCache::<String, u64>::new(8);
+        let cache = CalculationCache::<String, u64>::new(xlfn::cache::CacheBudget::weight_units(8));
         drop(
             cache
                 .get_or_try_insert_borrowed(key.as_str(), || Ok(7))
@@ -91,7 +91,7 @@ fn cache_registry_benchmarks(c: &mut Criterion) {
                 });
             },
         );
-        let registry = CacheRegistry::new(8);
+        let registry = CacheRegistry::new(xlfn::cache::CacheBudget::weight_units(8));
         let endpoint = CacheEndpoint::<String, u64>::new("borrowed_keys");
         drop(
             registry

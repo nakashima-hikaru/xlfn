@@ -1,5 +1,6 @@
 use xlfn::prelude::*;
-use xlfn::value::{FromExcel, XlValueRef};
+use xlfn::value::{FromExcel};
+use xlfn::value::raw::{XlValueRef};
 
 struct CustomRate(f64);
 

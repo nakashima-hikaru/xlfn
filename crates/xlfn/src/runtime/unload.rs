@@ -1,9 +1,9 @@
 //! Static selection of the add-in's quiescence and physical residency policy.
 
-use crate::addin::{Addin, PhysicallyUnloadableAddin};
+use crate::addin_impl::{Addin, PhysicallyUnloadableAddin};
 
 mod sealed {
-    pub trait Sealed<A: crate::addin::Addin> {}
+    pub trait Sealed<A: crate::addin_impl::Addin> {}
 }
 
 /// The quiescence contract selected by the generated add-in runtime.
@@ -58,7 +58,7 @@ impl<A: PhysicallyUnloadableAddin> UnloadPolicy<A> for PhysicalUnload {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addin::{OpenContext, OpenResult, Opened};
+    use crate::addin_impl::{OpenContext, OpenResult, Opened};
     use crate::runtime::Runtime;
 
     struct DistinctQuiesceAddin;

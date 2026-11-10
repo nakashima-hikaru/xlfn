@@ -79,7 +79,7 @@ forwarded_numeric_return!(XllResult<Matrix<f64>>);
 type Fp12 = xlfn::__private::v1::FP12;
 type Xloper12 = xlfn::__private::v1::XLOPER12;
 
-const _: unsafe extern "system" fn(f64, *const Fp12) -> *mut Xloper12 = xll_numeric_matrix;
+const _: unsafe extern "system" fn(*mut Xloper12, *const Fp12) -> *mut Xloper12 = xll_numeric_matrix;
 const _: unsafe extern "system" fn() -> *mut Xloper12 = xll_numeric_row;
 const _: unsafe extern "system" fn() -> *mut Xloper12 = xll_numeric_column;
 const _: unsafe extern "system" fn() -> *mut Fp12 = xll_numeric_output;

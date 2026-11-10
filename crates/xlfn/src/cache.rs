@@ -348,6 +348,24 @@ struct CacheEntry {
 
 type CacheMap = papaya::HashMap<(TypeId, &'static str), CacheEntry, FxBuildHasher>;
 
+/// Resident cache budget in units returned by the configured weigher.
+///
+/// With the default unit weigher this counts entries. Zero disables retention;
+/// it does not mean unlimited storage. This is not necessarily a byte count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CacheBudget(usize);
+
+impl CacheBudget {
+    /// Selects the maximum resident weight for each cache.
+    pub const fn weight_units(units: usize) -> Self {
+        Self(units)
+    }
+    /// Returns the configured weight units.
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
 /// Owns lazily created endpoint caches for its lifetime.
 ///
 /// Each endpoint follows [`CalculationCache`]'s key and callback contracts.
@@ -364,10 +382,10 @@ pub struct CacheRegistry {
 impl CacheRegistry {
     #[must_use]
     /// Creates a registry with an independent resident weight budget per endpoint.
-    pub fn new(weight_budget_per_endpoint: usize) -> Self {
+    pub fn new(weight_budget_per_endpoint: CacheBudget) -> Self {
         Self {
             identity: endpoint_cache::RegistryIdentity::fresh(),
-            weight_budget_per_endpoint,
+            weight_budget_per_endpoint: weight_budget_per_endpoint.get(),
             caches: CacheMap::with_hasher(FxBuildHasher),
             insertions: Mutex::new(()),
         }
@@ -445,7 +463,7 @@ impl CacheRegistry {
         // leave read-only endpoint traffic walking a chain of older tables.
         let cache = Box::new(StoredCache::<Marker, K, V> {
             cache: CalculationCache::with_weigher(
-                self.weight_budget_per_endpoint,
+                crate::cache::CacheBudget::weight_units(self.weight_budget_per_endpoint),
                 endpoint.weigher.unwrap_or(unit_weight::<V>),
             ),
             weigher: endpoint.weigher,
@@ -1258,7 +1276,7 @@ where
     /// Cache misses cannot start another cache initialization from inside an
     /// initializer. Existing cached values may still be read normally.
     #[must_use]
-    pub fn new(weight_budget: usize) -> Self {
+    pub fn new(weight_budget: CacheBudget) -> Self {
         Self::with_weigher(weight_budget, unit_weight::<V>)
     }
 
@@ -1268,7 +1286,8 @@ where
     /// A returned zero is normalized to one. The callback may panic, subject
     /// to the same cleanup and reentry rules as initialization.
     #[must_use]
-    pub fn with_weigher(weight_budget: usize, weigher: fn(&V) -> usize) -> Self {
+    pub fn with_weigher(weight_budget: CacheBudget, weigher: fn(&V) -> usize) -> Self {
+        let weight_budget = weight_budget.get();
         let capacity = u64::try_from(weight_budget).unwrap_or(u64::MAX);
         Self {
             weight_budget,
@@ -1288,7 +1307,7 @@ where
         weight_budget: usize,
         hook: impl Fn() + Send + Sync + 'static,
     ) -> Self {
-        let mut cache = Self::new(weight_budget);
+        let mut cache = Self::new(CacheBudget::weight_units(weight_budget));
         cache.follower_hook = Some(Box::new(hook));
         cache
     }
@@ -1832,7 +1851,7 @@ mod tests {
         enum Marker {}
         static NUMBERS: CacheEndpoint<u32, u32, Marker> = CacheEndpoint::new("shared-id");
         static TEXT: CacheEndpoint<String, String, Marker> = CacheEndpoint::new("shared-id");
-        let registry = CacheRegistry::new(64);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
 
         assert_eq!(
             *registry
@@ -1854,7 +1873,7 @@ mod tests {
 
     #[test]
     fn zero_weight_entries_still_consume_budget() {
-        let cache = CalculationCache::new(1);
+        let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(1));
         cache
             .get_or_try_insert_weighted("first", |_| 0, || Ok::<_, XllError>(1_u32))
             .unwrap();
@@ -1865,7 +1884,9 @@ mod tests {
     #[test]
     fn cache_hit_does_not_clone_key() {
         let clones = Arc::new(AtomicUsize::new(0));
-        let cache = CalculationCache::<CloneCountedKey, u32>::new(8);
+        let cache = CalculationCache::<CloneCountedKey, u32>::new(
+            crate::cache::CacheBudget::weight_units(8),
+        );
         let key = CloneCountedKey {
             value: 1,
             clones: Arc::clone(&clones),
@@ -1891,7 +1912,9 @@ mod tests {
     #[test]
     fn cache_miss_clones_only_the_resident_key() {
         let clones = Arc::new(AtomicUsize::new(0));
-        let cache = CalculationCache::<CloneCountedKey, u32>::new(8);
+        let cache = CalculationCache::<CloneCountedKey, u32>::new(
+            crate::cache::CacheBudget::weight_units(8),
+        );
         let key = CloneCountedKey {
             value: 1,
             clones: Arc::clone(&clones),
@@ -1911,7 +1934,9 @@ mod tests {
     #[test]
     fn resident_hit_with_get_or_try_insert_does_not_clone_key() {
         let clones = Arc::new(AtomicUsize::new(0));
-        let cache = CalculationCache::<CloneCountedKey, u32>::new(8);
+        let cache = CalculationCache::<CloneCountedKey, u32>::new(
+            crate::cache::CacheBudget::weight_units(8),
+        );
         let key1 = CloneCountedKey {
             value: 1,
             clones: Arc::clone(&clones),
@@ -1937,7 +1962,9 @@ mod tests {
     #[test]
     fn follower_does_not_clone_key() {
         let clones = Arc::new(AtomicUsize::new(0));
-        let cache = CalculationCache::<CloneCountedKey, u32>::new(8);
+        let cache = CalculationCache::<CloneCountedKey, u32>::new(
+            crate::cache::CacheBudget::weight_units(8),
+        );
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         let cache_ref = &cache;
@@ -1999,7 +2026,9 @@ mod tests {
     #[test]
     fn zero_budget_miss_does_not_clone_key() {
         let clones = Arc::new(AtomicUsize::new(0));
-        let cache = CalculationCache::<CloneCountedKey, u32>::new(0);
+        let cache = CalculationCache::<CloneCountedKey, u32>::new(
+            crate::cache::CacheBudget::weight_units(0),
+        );
         let key = CloneCountedKey {
             value: 1,
             clones: Arc::clone(&clones),
@@ -2014,7 +2043,9 @@ mod tests {
     #[test]
     fn overweight_miss_does_not_clone_key() {
         let clones = Arc::new(AtomicUsize::new(0));
-        let cache = CalculationCache::<CloneCountedKey, u32>::new(10);
+        let cache = CalculationCache::<CloneCountedKey, u32>::new(
+            crate::cache::CacheBudget::weight_units(10),
+        );
         let key = CloneCountedKey {
             value: 1,
             clones: Arc::clone(&clones),
@@ -2110,7 +2141,7 @@ mod tests {
 
     #[test]
     fn eviction_is_bounded_by_approximate_bytes() {
-        let cache = CalculationCache::new(8);
+        let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(8));
         cache
             .get_or_try_insert_weighted(1, |_| 8, || Ok(10_u32))
             .unwrap();
@@ -2124,7 +2155,7 @@ mod tests {
 
     #[test]
     fn panicking_computation_does_not_leave_a_stuck_singleflight() {
-        let cache = CalculationCache::<u32, u32>::new(8);
+        let cache = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(8));
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = cache.get_or_try_insert_weighted(
                 1,
@@ -2143,7 +2174,7 @@ mod tests {
 
     #[test]
     fn panicking_weight_does_not_leave_a_stuck_singleflight() {
-        let cache = CalculationCache::<u32, u32>::new(8);
+        let cache = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(8));
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = cache.get_or_try_insert_weighted(1, |_| panic!("weight panic"), || Ok(7));
         }));
@@ -2158,7 +2189,7 @@ mod tests {
 
     #[test]
     fn oversized_values_are_returned_without_being_cached() {
-        let cache = CalculationCache::<u32, u32>::new(4);
+        let cache = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(4));
         assert_eq!(
             *cache
                 .get_or_try_insert_weighted(1, |_| 8, || Ok(7))
@@ -2170,7 +2201,7 @@ mod tests {
 
     #[test]
     fn clear_allows_an_inflight_initializer_to_complete() {
-        let cache = CalculationCache::<u32, u32>::new(8);
+        let cache = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(8));
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         let cache_ref = &cache;
@@ -2199,7 +2230,7 @@ mod tests {
 
     #[test]
     fn operation_that_enters_cache_after_clear_cannot_retain_its_old_epoch() {
-        let cache = CalculationCache::<u32, u32>::new(8);
+        let cache = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(8));
         let old_epoch = cache.generation.snapshot();
         cache.clear();
 
@@ -2214,7 +2245,7 @@ mod tests {
 
     #[test]
     fn delayed_old_epoch_invalidation_preserves_fresh_entries() {
-        let cache = CalculationCache::<u32, u32>::new(8);
+        let cache = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(8));
         let current_epoch = cache.generation.advance();
         assert_eq!(
             *cache
@@ -2230,7 +2261,7 @@ mod tests {
 
     #[test]
     fn recursive_same_key_is_rejected_instead_of_deadlocking() {
-        let cache = CalculationCache::<u32, u32>::new(8);
+        let cache = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(8));
         let result = cache.get_or_try_insert_weighted(
             1,
             |_| 4,
@@ -2246,7 +2277,7 @@ mod tests {
 
     #[test]
     fn reentrant_initialization_on_another_key_is_rejected() {
-        let cache = CalculationCache::<u32, u32>::new(8);
+        let cache = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(8));
         let result = cache.get_or_try_insert_weighted(
             1,
             |_| 4,
@@ -2263,8 +2294,8 @@ mod tests {
 
     #[test]
     fn initialization_of_a_different_cache_is_rejected_instead_of_deadlocking() {
-        let first = CalculationCache::<u32, u32>::new(8);
-        let second = CalculationCache::<u32, u32>::new(8);
+        let first = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(8));
+        let second = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(8));
         let result = first.get_or_try_insert_weighted(
             1,
             |_| 4,
@@ -2281,7 +2312,7 @@ mod tests {
 
     #[test]
     fn initializer_may_read_an_already_cached_value() {
-        let cache = CalculationCache::<u32, u32>::new(8);
+        let cache = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(8));
         cache
             .get_or_try_insert_weighted(2, |_| 4, || Ok(20))
             .unwrap();
@@ -2300,7 +2331,7 @@ mod tests {
         static SECOND: CacheEndpoint<u32, String, Second> =
             CacheEndpoint::<u32, String, Second>::new("SECOND");
 
-        let registry = CacheRegistry::new(8);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(8));
 
         assert_eq!(
             *registry
@@ -2337,7 +2368,7 @@ mod tests {
             }
         }
 
-        let registry = CacheRegistry::new(64);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         let numbers = CacheEndpoint::<u64, u64, Numbers>::new("shared-name");
         let text = CacheEndpoint::<String, String, Text>::new("shared-name");
         let tracked = CacheEndpoint::<u32, TrackedValue, Numbers>::new("shared-name");
@@ -2410,7 +2441,7 @@ mod tests {
         static ENDPOINT: CacheEndpoint<u32, u32, FirstUse> =
             CacheEndpoint::<u32, u32, FirstUse>::new("FIRST_USE");
 
-        let registry = CacheRegistry::new(8);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(8));
         let reg = &registry;
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
@@ -2448,7 +2479,9 @@ mod tests {
 
     #[test]
     fn clear_generation_isolation() {
-        let cache = CalculationCache::<u32, &'static str>::new(1024);
+        let cache = CalculationCache::<u32, &'static str>::new(
+            crate::cache::CacheBudget::weight_units(1024),
+        );
         let (started_tx, started_rx) = std::sync::mpsc::channel();
 
         let cache_ref = &cache;
@@ -2818,7 +2851,7 @@ mod tests {
     fn same_endpoint_resolved_twice_shares_single_allocation() {
         enum Marker {}
         static ENDPOINT: CacheEndpoint<u32, u32, Marker> = CacheEndpoint::new("SAME_ENDPOINT");
-        let registry = CacheRegistry::new(64);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         let a = registry.resolve_cache(&ENDPOINT).unwrap();
         let b = registry.resolve_cache(&ENDPOINT).unwrap();
         assert_eq!(a, b);
@@ -2830,7 +2863,7 @@ mod tests {
         enum MarkerB {}
         static ENDPOINT_A: CacheEndpoint<u32, u32, MarkerA> = CacheEndpoint::new("SHARED_ID");
         static ENDPOINT_B: CacheEndpoint<u32, u32, MarkerB> = CacheEndpoint::new("SHARED_ID");
-        let registry = CacheRegistry::new(64);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         registry
             .get_or_try_insert_weighted(&ENDPOINT_A, 1, |_| 1, || Ok(10))
             .unwrap();
@@ -2846,7 +2879,7 @@ mod tests {
     fn endpoint_remains_usable_across_registry_clear() {
         enum Marker {}
         static ENDPOINT: CacheEndpoint<u32, u32, Marker> = CacheEndpoint::new("SURVIVE_CLEAR");
-        let registry = CacheRegistry::new(64);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
 
         assert_eq!(
             *registry
@@ -2884,7 +2917,8 @@ mod tests {
         }
 
         DROPPED.store(false, Ordering::SeqCst);
-        let cache = CalculationCache::<u32, TrackDrop>::new(1024);
+        let cache =
+            CalculationCache::<u32, TrackDrop>::new(crate::cache::CacheBudget::weight_units(1024));
         let lease = cache
             .get_or_try_insert_weighted(1, |_| 1, || Ok(TrackDrop))
             .unwrap();
@@ -2932,7 +2966,8 @@ mod tests {
 
         DROPPED_A.store(false, Ordering::SeqCst);
         DROPPED_B.store(false, Ordering::SeqCst);
-        let cache = CalculationCache::<u32, TrackDrop>::new(1024);
+        let cache =
+            CalculationCache::<u32, TrackDrop>::new(crate::cache::CacheBudget::weight_units(1024));
         let lease_a = cache
             .get_or_try_insert_weighted(1, |_| 1, || Ok(TrackDrop(&DROPPED_A)))
             .unwrap();
@@ -2955,7 +2990,8 @@ mod tests {
 
     #[test]
     fn hit_path_and_clear_race_safety() {
-        let cache = CalculationCache::<u32, String>::new(1024);
+        let cache =
+            CalculationCache::<u32, String>::new(crate::cache::CacheBudget::weight_units(1024));
         assert_eq!(
             *cache
                 .get_or_try_insert_weighted(1, |_| 10, || Ok("initial".to_string()))
@@ -3015,7 +3051,9 @@ mod tests {
         }
 
         let cleared = Arc::new(AtomicBool::new(false));
-        let cache = Arc::new(CalculationCache::<u32, ReentrantClear>::new(10));
+        let cache = Arc::new(CalculationCache::<u32, ReentrantClear>::new(
+            crate::cache::CacheBudget::weight_units(10),
+        ));
         let cache_clone = Arc::clone(&cache);
         let cleared_clone = Arc::clone(&cleared);
 
@@ -3050,7 +3088,9 @@ mod tests {
             }
         }
 
-        let cache = CalculationCache::<u32, PanickingDrop>::new(10);
+        let cache = CalculationCache::<u32, PanickingDrop>::new(
+            crate::cache::CacheBudget::weight_units(10),
+        );
         let lease = cache
             .get_or_try_insert_weighted(1, |_| 1, || Ok(PanickingDrop { _unused: 42 }))
             .unwrap();
@@ -3085,7 +3125,7 @@ mod tests {
         for capacity in [0, 16_384] {
             let drops = Arc::new(AtomicUsize::new(0));
             let expected_address = Arc::new(AtomicUsize::new(0));
-            let cache = CalculationCache::new(capacity);
+            let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(capacity));
             let lease = cache
                 .get_or_try_insert_weighted(
                     1_u32,
@@ -3311,7 +3351,7 @@ mod tests {
             }
         }
         let drops = Arc::new(AtomicUsize::new(0));
-        let cache = CalculationCache::new(4);
+        let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(4));
         for key in 0..4096 {
             drop(
                 cache
@@ -3337,7 +3377,7 @@ mod tests {
             }
         }
         let drops = Arc::new(AtomicUsize::new(0));
-        let cache = CalculationCache::new(4);
+        let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(4));
         drop(
             cache
                 .get_or_try_insert_weighted(1, |_| 3, || Ok(DropProbe(Arc::clone(&drops))))
@@ -3364,7 +3404,7 @@ mod tests {
             }
         }
         let drops = Arc::new(AtomicUsize::new(0));
-        let cache = CalculationCache::new(0);
+        let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(0));
         for key in 0..128 {
             let lease = cache
                 .get_or_try_insert_weighted(key, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
@@ -3390,7 +3430,7 @@ mod tests {
 
         for succeeds in [false, true] {
             let drops = Arc::new(AtomicUsize::new(0));
-            let cache = CalculationCache::new(0);
+            let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(0));
             let previous = cache
                 .get_or_try_insert_weighted(1, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
                 .unwrap();
@@ -3436,7 +3476,7 @@ mod tests {
         for capacity in [0, 8] {
             let drops = Arc::new(AtomicUsize::new(0));
             let payload_drops = Arc::new(AtomicUsize::new(0));
-            let cache = CalculationCache::new(capacity);
+            let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(capacity));
             let previous = cache
                 .get_or_try_insert_weighted(
                     1,
@@ -3505,7 +3545,9 @@ mod tests {
             }
         }
 
-        let cache = Arc::new(CalculationCache::new(8));
+        let cache = Arc::new(CalculationCache::new(
+            crate::cache::CacheBudget::weight_units(8),
+        ));
         let completed = Arc::new(AtomicBool::new(false));
         let workers = Arc::new(Mutex::new(Vec::new()));
         let previous = cache
@@ -3568,7 +3610,7 @@ mod tests {
             panic_on_hash: false,
         };
         let drops = Arc::new(AtomicUsize::new(0));
-        let cache = CalculationCache::new(8);
+        let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(8));
         let previous = cache
             .get_or_try_insert_weighted(key(1), |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
             .unwrap();
@@ -3618,7 +3660,9 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn oversized_weight_is_checked_before_weight_saturation() {
-        let cache = CalculationCache::<u32, u32>::new(u32::MAX as usize);
+        let cache = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(
+            u32::MAX as usize,
+        ));
         let value = cache
             .get_or_try_insert_weighted(1, |_| u32::MAX as usize + 1, || Ok(7))
             .unwrap();
@@ -3643,7 +3687,7 @@ mod tests {
         }
         let values_dropped = Arc::new(AtomicUsize::new(0));
         let payloads_dropped = Arc::new(AtomicUsize::new(0));
-        let cache = CalculationCache::new(8);
+        let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(8));
         for key in 0..3 {
             drop(
                 cache
@@ -3676,7 +3720,7 @@ mod tests {
             }
         }
         let drops = Arc::new(AtomicUsize::new(0));
-        let cache = CalculationCache::new(8);
+        let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(8));
         let final_lease = cache
             .get_or_try_insert_weighted(1, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
             .unwrap();
@@ -3707,7 +3751,7 @@ mod tests {
     #[test]
     fn registry_concurrent_first_use_has_one_owner_and_one_computation() {
         static ENDPOINT: CacheEndpoint<u64, u64> = CacheEndpoint::new("registry-first-use-race");
-        let registry = CacheRegistry::new(64);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         let start = std::sync::Barrier::new(8);
         let computes = AtomicUsize::new(0);
         std::thread::scope(|scope| {
@@ -3743,7 +3787,7 @@ mod tests {
         }
         const NAMES: &str = "registry-growth-abcdefghijklmnopqrstuvwxyz";
         let drops = Arc::new(AtomicUsize::new(0));
-        let registry = CacheRegistry::new(64);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         let primary = CacheEndpoint::<u64, DropProbe>::new("registry-growth-primary");
         let lease = registry
             .get_or_try_insert_weighted(&primary, 1, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
@@ -3779,7 +3823,7 @@ mod tests {
             }
         }
         const NAMES: &str = "registry-concurrent-growth-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        let registry = CacheRegistry::new(64);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         let drops = Arc::new(AtomicUsize::new(0));
         let start = std::sync::Barrier::new(4);
         std::thread::scope(|scope| {
@@ -3827,7 +3871,7 @@ mod tests {
 
     #[test]
     fn registry_callback_can_bind_another_endpoint_without_nested_initialization() {
-        let registry = CacheRegistry::new(64);
+        let registry = CacheRegistry::new(crate::cache::CacheBudget::weight_units(64));
         let first = CacheEndpoint::<u64, u64>::new("registry-reentrant-first");
         let second = CacheEndpoint::<u64, u64>::new("registry-reentrant-second");
         let lease = registry.get_or_try_insert_weighted(&first, 1,
@@ -3878,7 +3922,9 @@ mod tests {
                 self.completed.store(true, Ordering::Release);
             }
         }
-        let registry = Arc::new(CacheRegistry::new(16));
+        let registry = Arc::new(CacheRegistry::new(crate::cache::CacheBudget::weight_units(
+            16,
+        )));
         let completed = Arc::new(AtomicBool::new(false));
         drop(
             registry

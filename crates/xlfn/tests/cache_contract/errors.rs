@@ -4,7 +4,10 @@ use xlfn::error::DomainErrorCode;
 
 #[test]
 fn compute_err_is_not_cached() {
-    let cache = CalculationCache::<String, String>::with_weigher(1024, String::len);
+    let cache = CalculationCache::<String, String>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(1024),
+        String::len,
+    );
 
     let res = cache.get_or_try_insert_with("err_key".to_string(), || {
         Err(XllError::Domain {
@@ -24,7 +27,10 @@ fn compute_err_is_not_cached() {
 
 #[test]
 fn reentrant_initialization_is_rejected() {
-    let cache = CalculationCache::<String, String>::with_weigher(1024, String::len);
+    let cache = CalculationCache::<String, String>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(1024),
+        String::len,
+    );
 
     let res = cache.get_or_try_insert_with("outer".to_string(), || {
         let nested = cache.get_or_try_insert_with("inner".to_string(), || Ok("nested".to_string()));

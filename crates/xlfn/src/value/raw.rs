@@ -224,7 +224,7 @@ impl<'call> XlValueRef<'call> {
 
     /// Borrows a string and uses `argument` in subsequent decode errors.
     #[inline]
-    pub fn as_str_with_argument(self, argument: &'static str) -> XllResult<XlStrRef<'call>> {
+    pub(crate) fn as_str_with_argument(self, argument: &'static str) -> XllResult<XlStrRef<'call>> {
         Ok(XlStrRef {
             utf16: self.utf16(argument)?,
             argument,
@@ -326,6 +326,13 @@ impl PartialEq for XlStrRef<'_> {
 impl Eq for XlStrRef<'_> {}
 
 impl<'call> XlStrRef<'call> {
+    /// Attaches diagnostic context for later UTF-16 decoding.
+    /// Equality and the borrowed code units are unchanged.
+    pub const fn with_argument(mut self, argument: &'static str) -> Self {
+        self.argument = argument;
+        self
+    }
+
     /// Returns the borrowed UTF-16 code units without the Excel length prefix.
     #[must_use]
     #[inline]
@@ -676,9 +683,21 @@ mod tests {
         let [left, same, different] = raw
             .each_ref()
             .map(|value| XlValueRef::from_array_cell(value).unwrap());
-        let left = left.as_str_with_argument("left").unwrap();
-        let same = same.as_str_with_argument("right").unwrap();
-        let different = different.as_str_with_argument("left").unwrap();
+        let left = left
+            .as_str()
+            .map(|text| text.with_argument("left"))
+            .map_err(|error| error.with_argument("left"))
+            .unwrap();
+        let same = same
+            .as_str()
+            .map(|text| text.with_argument("right"))
+            .map_err(|error| error.with_argument("right"))
+            .unwrap();
+        let different = different
+            .as_str()
+            .map(|text| text.with_argument("left"))
+            .map_err(|error| error.with_argument("left"))
+            .unwrap();
 
         assert_eq!(left, same);
         assert_ne!(left, different);
@@ -694,8 +713,16 @@ mod tests {
             xltype: XLTYPE_STR,
         };
         let value = XlValueRef::from_array_cell(&raw).unwrap();
-        let left = value.as_str_with_argument("left").unwrap();
-        let right = value.as_str_with_argument("right").unwrap();
+        let left = value
+            .as_str()
+            .map(|text| text.with_argument("left"))
+            .map_err(|error| error.with_argument("left"))
+            .unwrap();
+        let right = value
+            .as_str()
+            .map(|text| text.with_argument("right"))
+            .map_err(|error| error.with_argument("right"))
+            .unwrap();
 
         assert_eq!(left, right);
         for (value, expected) in [(left, "left"), (right, "right")] {

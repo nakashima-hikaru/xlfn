@@ -6,8 +6,8 @@ use xlfn_sys::{XLOPER12, XLOPER12Value, XLTYPE_STR};
 
 /// A completed Excel array return value.
 ///
-/// Values of this type are normally created by [`XlArrayBuilder::finish`].
-pub struct XlArrayOutput {
+/// Values of this type are normally created by [`ExcelArrayBuilder::finish`].
+pub struct ExcelArrayOutput {
     pub(crate) rows: usize,
     pub(crate) columns: usize,
     pub(crate) cells: Box<[XLOPER12]>,
@@ -15,10 +15,25 @@ pub struct XlArrayOutput {
     pub(crate) payload_bytes: usize,
 }
 
-impl std::fmt::Debug for XlArrayOutput {
+impl ExcelArrayOutput {
+    /// Encodes a complete row-major numeric slice as an XLOPER12 array.
+    pub fn from_f64(rows: usize, columns: usize, values: &[f64]) -> XllResult<Self> {
+        ExcelArrayBuilder::from_f64(rows, columns, values)?.finish()
+    }
+
+    /// Returns the validated dimensions.
+    pub const fn shape(&self) -> crate::value::Shape {
+        crate::value::Shape {
+            rows: self.rows,
+            columns: self.columns,
+        }
+    }
+}
+
+impl std::fmt::Debug for ExcelArrayOutput {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("XlArrayOutput")
+            .debug_struct("ExcelArrayOutput")
             .field("rows", &self.rows)
             .field("columns", &self.columns)
             .field("cells", &self.cells.len())
@@ -31,7 +46,7 @@ impl std::fmt::Debug for XlArrayOutput {
 /// This provides a low-allocation path for constructing large array results.
 /// It encodes cells directly into its return representation instead of first
 /// materializing a [`Matrix<T>`](crate::value::Matrix).
-pub struct XlArrayBuilder {
+pub struct ExcelArrayBuilder {
     rows: usize,
     columns: usize,
     cells: Box<[std::mem::MaybeUninit<XLOPER12>]>,
@@ -40,7 +55,7 @@ pub struct XlArrayBuilder {
     payload_bytes: usize,
 }
 
-impl XlArrayBuilder {
+impl ExcelArrayBuilder {
     /// Allocates an array builder after validating positive dimensions and payload limits.
     pub fn new(rows: usize, columns: usize) -> XllResult<Self> {
         let len = rows.checked_mul(columns).ok_or(XllError::Domain {
@@ -80,7 +95,7 @@ impl XlArrayBuilder {
     /// Dimensions, the element count, and every number are validated. Cells
     /// are written directly into the return buffer without an intermediate
     /// [`Matrix<f64>`](crate::value::Matrix) or a capacity check per element.
-    pub fn from_f64(rows: usize, columns: usize, values: &[f64]) -> XllResult<Self> {
+    pub(crate) fn from_f64(rows: usize, columns: usize, values: &[f64]) -> XllResult<Self> {
         validate_matrix_dimensions(rows, columns, values.len())?;
         let mut builder = Self::new(rows, columns)?;
         for (cell, &value) in builder.cells.iter_mut().zip(values) {
@@ -199,7 +214,7 @@ impl XlArrayBuilder {
     }
 
     /// Completes the array, rejecting an incomplete cell count.
-    pub fn finish(self) -> XllResult<XlArrayOutput> {
+    pub fn finish(self) -> XllResult<ExcelArrayOutput> {
         let expected = self.rows * self.columns;
 
         if self.initialized != expected {
@@ -214,7 +229,7 @@ impl XlArrayBuilder {
         // SAFETY: initialized == cells.len() so every element is written.
         let cells = unsafe { self.cells.assume_init() };
 
-        Ok(XlArrayOutput {
+        Ok(ExcelArrayOutput {
             rows: self.rows,
             columns: self.columns,
             cells,
@@ -224,7 +239,7 @@ impl XlArrayBuilder {
     }
 }
 
-impl crate::value::output::ExcelCellSink for XlArrayBuilder {
+impl crate::value::output::ExcelCellSink for ExcelArrayBuilder {
     fn push_cell(&mut self, value: ExcelCellOutput) -> XllResult<()> {
         Self::push_cell(self, value)
     }
@@ -257,7 +272,7 @@ mod tests {
     #[test]
     fn numeric_slice_encoding_preserves_shape_and_values_without_string_storage() {
         let values = [-0.0, 0.0, 1.5, -2.5, f64::MAX, f64::MIN];
-        let output = XlArrayBuilder::from_f64(2, 3, &values)
+        let output = ExcelArrayBuilder::from_f64(2, 3, &values)
             .unwrap()
             .finish()
             .unwrap();
@@ -272,7 +287,7 @@ mod tests {
 
     #[test]
     fn miri_numeric_push_preserves_error_order_and_partial_builder() {
-        let mut builder = XlArrayBuilder::new(1, 2).unwrap();
+        let mut builder = ExcelArrayBuilder::new(1, 2).unwrap();
         builder.push_f64(-0.0).unwrap();
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(matches!(
@@ -309,26 +324,26 @@ mod tests {
     #[test]
     fn numeric_slice_encoding_rejects_shape_and_non_finite_values() {
         assert!(matches!(
-            XlArrayBuilder::from_f64(1, 2, &[1.0]),
+            ExcelArrayBuilder::from_f64(1, 2, &[1.0]),
             Err(XllError::ElementCountMismatch { .. })
         ));
-        assert!(XlArrayBuilder::from_f64(0, 1, &[]).is_err());
+        assert!(ExcelArrayBuilder::from_f64(0, 1, &[]).is_err());
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(matches!(
-                XlArrayBuilder::from_f64(1, 2, &[1.0, value]),
+                ExcelArrayBuilder::from_f64(1, 2, &[1.0, value]),
                 Err(XllError::Domain {
                     code: DomainErrorCode::InvalidInput
                 })
             ));
         }
-        let valid = XlArrayBuilder::from_f64(1, 2, &[1.0, 2.0]).unwrap();
+        let valid = ExcelArrayBuilder::from_f64(1, 2, &[1.0, 2.0]).unwrap();
         assert!(valid.finish().is_ok());
     }
 
     #[test]
     fn miri_mixed_array_text_survives_arena_growth_and_owner_moves() {
         let texts = [String::new(), "日本語💡".to_owned(), "a".repeat(1_200)];
-        let mut builder = XlArrayBuilder::new(1, 15).unwrap();
+        let mut builder = ExcelArrayBuilder::new(1, 15).unwrap();
         for index in 0..15 {
             if index % 4 == 0 {
                 builder.push_f64(index as f64).unwrap();
@@ -352,7 +367,7 @@ mod tests {
 
     #[test]
     fn rejected_string_push_does_not_create_storage() {
-        let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+        let mut builder = ExcelArrayBuilder::new(1, 1).unwrap();
         builder.push(7.0).unwrap();
         let payload_bytes = builder.payload_bytes;
         assert!(builder.push_str("extra cell").is_err());
@@ -364,7 +379,7 @@ mod tests {
 
     #[test]
     fn repeated_rejected_strings_leave_arena_and_payload_unchanged() {
-        let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+        let mut builder = ExcelArrayBuilder::new(1, 1).unwrap();
         builder.push("first cell").unwrap();
         let arena_bytes = builder.storage.as_ref().unwrap().arena.allocated_bytes();
         let payload_bytes = builder.payload_bytes;
@@ -392,7 +407,7 @@ mod tests {
         }
 
         let converted = std::cell::Cell::new(0);
-        let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+        let mut builder = ExcelArrayBuilder::new(1, 1).unwrap();
         builder.push(Conversion(&converted)).unwrap();
         assert_eq!(converted.get(), 1);
         assert!(builder.push(Conversion(&converted)).is_err());

@@ -8,7 +8,7 @@
 
 use super::certificate::TerminalCertificateKind;
 use super::owner::{RemovalClaimGuard, RemovalOwner, ReturnedRemovalClaimGuard};
-use crate::addin::Addin;
+use crate::addin_impl::Addin;
 use crate::error::IntoXllError;
 use crate::panic_boundary::catch_no_unwind;
 use crate::runtime::capabilities::{
@@ -1526,7 +1526,7 @@ impl<'runtime, A: Addin> RemovalOwner<'runtime, A, super::certificate::OpenRollb
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addin::{Addin, OpenContext, OpenResult};
+    use crate::addin_impl::{Addin, OpenContext, OpenResult};
     use crate::runtime::{Runtime, transactions::RemovalSuccess};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

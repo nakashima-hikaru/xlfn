@@ -195,7 +195,7 @@ mod tests {
         let services = PublishedOwner::from_box(
             GenerationServices::arm_generation(
                 generation,
-                crate::addin::RuntimeConfig::default(),
+                crate::addin_impl::RuntimeConfig::default(),
                 #[cfg(feature = "rtd")]
                 crate::excel_rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
                 crate::runtime_components::GenerationServiceInputs::empty_for_generation(
@@ -248,7 +248,7 @@ mod tests {
                     payload: ClosePayload::Staged(OpeningGeneration {
                         shared_state: payload,
                         layers: (),
-                        init_config: crate::addin::RuntimeConfig::default(),
+                        init_config: crate::addin_impl::RuntimeConfig::default(),
                     }),
                 });
             // This fixture does not initialize generation services or publish

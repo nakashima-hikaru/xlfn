@@ -299,6 +299,14 @@ impl NumericArrayOutput {
         NumericArrayBuilder::from_f64(rows, columns, values)?.finish()
     }
 
+    /// Returns the validated dimensions.
+    pub const fn shape(&self) -> crate::value::Shape {
+        crate::value::Shape {
+            rows: self.rows,
+            columns: self.columns,
+        }
+    }
+
     /// Returns the number of rows.
     #[must_use]
     pub const fn rows(&self) -> usize {
@@ -382,7 +390,7 @@ impl NumericArrayBuilder {
     }
 
     /// Copies a complete row-major slice, rejecting non-finite values.
-    pub fn from_f64(rows: usize, columns: usize, values: &[f64]) -> XllResult<Self> {
+    pub(crate) fn from_f64(rows: usize, columns: usize, values: &[f64]) -> XllResult<Self> {
         let expected = numeric_element_count(rows, columns)?;
         if expected != values.len() {
             return Err(XllError::ElementCountMismatch {

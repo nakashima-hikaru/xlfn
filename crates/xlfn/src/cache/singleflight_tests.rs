@@ -41,7 +41,7 @@ impl Drop for DropProbe {
 #[test]
 #[cfg(not(miri))]
 fn abandoned_leader_detaches_before_follower_retries() {
-    let cache = CalculationCache::<u64, u64>::new(0);
+    let cache = CalculationCache::<u64, u64>::new(crate::cache::CacheBudget::weight_units(0));
     let key = VersionedKey {
         epoch: cache.generation.snapshot(),
         key: 7,
@@ -97,7 +97,7 @@ fn success_and_error_completion_do_not_reenter_key_callbacks() {
                 id: 7,
                 fault: StdArc::clone(&fault),
             };
-            let cache = CalculationCache::new(0);
+            let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(0));
             let dropped = StdArc::new(AtomicUsize::new(0));
             let first = catch_no_unwind(AssertUnwindSafe(|| {
                 cache.get_or_try_insert_weighted(
@@ -218,7 +218,7 @@ fn coordination_uses_both_hash_halves_without_changing_key_identity() {
 #[test]
 #[cfg(not(miri))]
 fn unrelated_coordination_shard_does_not_block_a_cold_miss() {
-    let cache = CalculationCache::<u64, u64>::new(1024);
+    let cache = CalculationCache::<u64, u64>::new(crate::cache::CacheBudget::weight_units(1024));
     let epoch = cache.generation.snapshot();
     let blocked_hash = flight_hash(&VersionedKey { epoch, key: 0_u64 });
     let free_key = (1_u64..)
@@ -249,7 +249,7 @@ fn unrelated_coordination_shard_does_not_block_a_cold_miss() {
 #[test]
 #[cfg(not(miri))]
 fn clear_keeps_old_followers_and_new_epoch_flights_independent() {
-    let cache = CalculationCache::<u64, u64>::new(1024);
+    let cache = CalculationCache::<u64, u64>::new(crate::cache::CacheBudget::weight_units(1024));
     let old_epoch = cache.generation.snapshot();
     let old_key = VersionedKey {
         epoch: old_epoch,
@@ -336,7 +336,8 @@ fn unwind_cleanup_does_not_call_faulting_keys_again() {
             id: 7,
             fault: StdArc::clone(&fault),
         };
-        let cache = CalculationCache::<FaultKey, u8>::new(8);
+        let cache =
+            CalculationCache::<FaultKey, u8>::new(crate::cache::CacheBudget::weight_units(8));
         // Inspect the fixed string payload to distinguish the original panic
         // from any new panic raised while cleaning up the registered flight.
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {

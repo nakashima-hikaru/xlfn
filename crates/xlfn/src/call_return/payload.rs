@@ -1,7 +1,7 @@
 //! Owned cell encoding handed from call dispatch to ABI publication.
 
 use crate::XllResult;
-use crate::return_abi::{XlArrayOutput, XlScalarOutput};
+use crate::return_abi::{ExcelArrayOutput, XlScalarOutput};
 #[cfg(test)]
 use crate::value::IntoExcel;
 
@@ -10,7 +10,7 @@ use crate::value::IntoExcel;
 #[doc(hidden)]
 pub enum ReturnPayload {
     Scalar(XlScalarOutput),
-    Array(XlArrayOutput),
+    Array(ExcelArrayOutput),
 }
 
 #[cfg(test)]
@@ -31,7 +31,7 @@ impl EncodedReturn for XlScalarOutput {
         Ok(crate::return_abi::PreparedReturn::from_scalar_output(self))
     }
 }
-impl EncodedReturn for XlArrayOutput {
+impl EncodedReturn for ExcelArrayOutput {
     fn prepare(self) -> XllResult<crate::return_abi::PreparedReturn> {
         crate::return_abi::PreparedReturn::from_array_output(self)
     }

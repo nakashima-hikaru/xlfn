@@ -54,7 +54,7 @@ fn borrowed_dynamic_array_decodes_only_accessed_cells_and_retains_prior_borrows(
         };
         assert_eq!(
             array.shape(),
-            crate::error::Shape {
+            crate::value::Shape {
                 rows: 2,
                 columns: 2
             }

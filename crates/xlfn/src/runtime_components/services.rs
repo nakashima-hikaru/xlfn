@@ -136,7 +136,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> ArmedServices<E, C> {
 impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C> {
     pub(crate) fn arm_generation(
         generation: RuntimeGeneration,
-        _config: crate::addin::RuntimeConfig,
+        _config: crate::addin_impl::RuntimeConfig,
         #[cfg(feature = "rtd")] subscription_host: crate::excel_rtd::RtdSubscriptionHost,
         inputs: GenerationServiceInputs<E, C>,
     ) -> crate::XllResult<ArmedServices<E, C>> {
@@ -287,7 +287,7 @@ mod tests {
         let generation = RuntimeGeneration::new(1).unwrap();
         GenerationServices::arm_generation(
             generation,
-            crate::addin::RuntimeConfig::default(),
+            crate::addin_impl::RuntimeConfig::default(),
             #[cfg(feature = "rtd")]
             crate::excel_rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
             GenerationServiceInputs::empty_for_generation(generation),

@@ -116,7 +116,7 @@ source. A one-source catalog uses `(Source,)`, including the trailing comma.
 
 For a source set assembled incrementally, or source types containing captured
 closures that cannot be named in an associated type, select
-`type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;`.
+`type RtdSources = xlfn::rtd::DynamicRtdSources<Self::RtdSubscription>;`.
 This mode also retains `register_source(source)` for typed handles and common
 subscription owners. It owns a boxed adapter per source. A typed handle can
 be stored without its concrete source type by calling `.erase()`; the erased
@@ -253,8 +253,8 @@ publication already in flight. Both modes also enforce source and runtime
 buffer budgets. A rejected replacement preserves the old pending value and
 returns the new value in `RtdSendError::Full`. Terminal errors remain separate
 from data and cannot be replaced by later samples. Select the blocking adapter's policy with
-`RtdChannelSource::with_policy(RtdLatest, factory)` or keep the FIFO
-`RtdChannelSource::new(capacity, factory)` constructor. Multiplexed sources take
+`RtdChannelSource::new(RtdLatest, factory)` or keep the FIFO
+`RtdChannelSource::new(xlfn::rtd::RtdFifo::new(capacity), factory)` constructor. Multiplexed sources take
 the policy as their first constructor argument. Senders and multiplex contexts
 carry the policy type (`RtdSender<T, RtdLatest>` and
 `RtdSourceContext<T, RtdLatest>`); default type parameters select FIFO.
@@ -373,7 +373,7 @@ xlfn::rtd_subscriptions! {
 }
 // In `impl Addin`: type RtdSubscription = Subscriptions;
 // Also select RtdSources: a tuple of named source types, or
-// xlfn::DynamicRtdSources<Self::RtdSubscription> for incremental registration.
+// xlfn::rtd::DynamicRtdSources<Self::RtdSubscription> for incremental registration.
 ```
 
 The macro generates direct enum construction and delegates each barrier to

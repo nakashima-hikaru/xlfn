@@ -1,6 +1,7 @@
 use xlfn::prelude::*;
 use xlfn::value::{ExcelArrayRef, ExcelValueRef};
 
+
 struct App;
 
 #[excel_addin(name = "Borrowed Dynamic Value", id = "borrowed-dynamic-value", category = "Test")]

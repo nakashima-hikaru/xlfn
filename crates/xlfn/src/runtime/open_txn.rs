@@ -20,8 +20,8 @@ pub(crate) trait OpeningState<A: crate::Addin>: Sized {
 }
 
 type ServiceInputs<A> = crate::runtime_components::GenerationServiceInputs<
-    crate::addin::AddinSubscription<A>,
-    crate::addin::AddinSources<A>,
+    crate::addin_impl::AddinSubscription<A>,
+    crate::addin_impl::AddinSources<A>,
 >;
 type InitializedOpenCore<A> = OpenCore<A, ServiceInputs<A>>;
 type RollbackOpenCore<A> = OpenCore<A, Option<ServiceInputs<A>>>;
@@ -771,8 +771,8 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initializing<A>> {
         self,
         lifecycle: A::LifecycleState,
         service_inputs: crate::runtime_components::GenerationServiceInputs<
-            crate::addin::AddinSubscription<A>,
-            crate::addin::AddinSources<A>,
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
         >,
     ) -> OpeningTxn<'runtime, A, Initialized<A>> {
         let mut transaction = self;
@@ -1007,8 +1007,8 @@ fn publish_generation<A: crate::Addin>(
     control: &mut LifecycleAccess<'_, A>,
     module_opening: &mut Option<crate::module_runtime::ModuleOpening>,
     service_inputs: crate::runtime_components::GenerationServiceInputs<
-        crate::addin::AddinSubscription<A>,
-        crate::addin::AddinSources<A>,
+        crate::addin_impl::AddinSubscription<A>,
+        crate::addin_impl::AddinSources<A>,
     >,
 ) -> XllResult<()> {
     let generation = attempt_id.into_runtime_generation();

@@ -939,7 +939,7 @@ impl RtdChannelPipelineBenchmark {
         let (sender_tx, sender_rx) = std::sync::mpsc::sync_channel(1);
         let source = registration
             .register(crate::subscription::RtdChannelSource::new(
-                std::num::NonZeroUsize::new(capacity).unwrap(),
+                crate::rtd::RtdFifo::new(std::num::NonZeroUsize::new(capacity).unwrap()),
                 move |_| {
                     let sender_tx = sender_tx.clone();
                     Ok(move |sender: crate::subscription::RtdSender<f64>| {

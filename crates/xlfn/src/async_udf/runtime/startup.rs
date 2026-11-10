@@ -50,14 +50,14 @@ impl<'a, E: AsyncExecutor> StartupClaim<'a, E> {
         Ok(ExecutorStarted { owner: self.owner })
     }
 
-    pub(super) fn publish(self, limit: crate::addin::AsyncTaskLimit) -> XllResult<()> {
+    pub(super) fn publish(self, limit: crate::addin_impl::AsyncTaskLimit) -> XllResult<()> {
         self.start()?.arm(limit)?.publish();
         Ok(())
     }
 }
 
 impl<'a, E: AsyncExecutor> ExecutorStarted<'a, E> {
-    fn arm(mut self, limit: crate::addin::AsyncTaskLimit) -> XllResult<RegistryArmed<'a, E>> {
+    fn arm(mut self, limit: crate::addin_impl::AsyncTaskLimit) -> XllResult<RegistryArmed<'a, E>> {
         self.owner.registry = Some(self.owner.runtime.registry().prepare_start(limit)?);
         Ok(RegistryArmed { owner: self.owner })
     }

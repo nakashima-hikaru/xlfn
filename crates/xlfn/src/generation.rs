@@ -39,12 +39,14 @@ impl<A: crate::Addin> ExecutionGeneration<A> {
 pub(crate) struct OpeningGeneration<A: crate::Addin> {
     pub(crate) shared_state: A::SharedState,
     pub(crate) layers: A::Layers,
-    pub(crate) init_config: crate::addin::RuntimeConfig,
+    pub(crate) init_config: crate::addin_impl::RuntimeConfig,
 }
 
 impl<A: crate::Addin> OpeningGeneration<A> {
     #[must_use]
-    pub(crate) fn into_parts(self) -> (A::SharedState, A::Layers, crate::addin::RuntimeConfig) {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (A::SharedState, A::Layers, crate::addin_impl::RuntimeConfig) {
         (self.shared_state, self.layers, self.init_config)
     }
 }

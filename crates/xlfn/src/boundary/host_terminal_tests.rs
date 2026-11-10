@@ -5,7 +5,7 @@
 
 use super::{host_auto_close, host_auto_open};
 use crate::XllError;
-use crate::addin::{Addin, OpenContext, Opened, PhysicallyUnloadableAddin};
+use crate::addin_impl::{Addin, OpenContext, Opened, PhysicallyUnloadableAddin};
 use crate::diagnostics::AddinId;
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use crate::registration::host::test_support::{CallbackScript, Reply};

@@ -2,7 +2,10 @@ use xlfn::cache::CalculationCache;
 
 #[test]
 fn overweight_result_returned_but_not_resident() {
-    let cache = CalculationCache::<String, String>::with_weigher(10, |_| 50);
+    let cache = CalculationCache::<String, String>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(10),
+        |_| 50,
+    );
 
     let lease = cache
         .get_or_try_insert_with("huge".to_string(), || Ok("huge_payload".to_string()))

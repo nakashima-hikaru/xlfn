@@ -72,7 +72,7 @@ impl CloseReport {
 /// established logical quiescence for the generation.
 ///
 /// Physical DLL unloading additionally requires the explicit
-/// [`crate::PhysicallyUnloadableAddin`] contract.
+/// [`crate::addin::PhysicallyUnloadableAddin`] contract.
 pub struct CleanupReporter<'a> {
     report: &'a mut CloseReport,
 }

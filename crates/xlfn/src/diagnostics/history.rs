@@ -426,7 +426,7 @@ impl DiagnosticHistory {
             sequence: 0,
             metadata,
             error_kind: crate::execution::classify_error(error).0,
-            excel_error: error.excel_error(),
+            excel_error: error.to_excel_error(),
             argument: match error {
                 XllError::Input { argument, .. } => Some(argument),
                 _ => None,
@@ -599,7 +599,7 @@ mod tests {
         assert_eq!(page.errors.len(), errors.len());
         for (record, error) in page.errors.iter().zip(&errors) {
             assert_eq!(record.message, error.to_string());
-            assert_eq!(record.excel_error, error.excel_error());
+            assert_eq!(record.excel_error, error.to_excel_error());
             assert_eq!(record.error_kind, crate::execution::classify_error(error).0);
         }
     }

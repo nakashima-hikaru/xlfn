@@ -9,16 +9,16 @@ use xlfn::{
 use super::Client;
 
 pub(crate) fn metric_source() -> impl RtdSource<Value = RtdValue> {
-    RtdChannelSource::new(NonZeroUsize::new(64).unwrap(), |topic| {
+    RtdChannelSource::new(xlfn::rtd::RtdFifo::new(NonZeroUsize::new(64).unwrap()), |topic| {
         let mut parts = topic.parts();
         let (Some(kind), Some(symbol), None) = (parts.next(), parts.next(), parts.next()) else {
-            return Err(XllError::input(
+            return Err(XllError::validation(
                 "RTD topic",
                 InputError::Malformed("expected [kind, symbol]"),
             ));
         };
         if kind != "last" {
-            return Err(XllError::input(
+            return Err(XllError::validation(
                 "RTD topic",
                 InputError::Malformed("unsupported metric topic"),
             ));

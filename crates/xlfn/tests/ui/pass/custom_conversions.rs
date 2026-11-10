@@ -1,7 +1,6 @@
 use xlfn::prelude::*;
-use xlfn::value::{
-    ExcelCellOutput, ExcelInputIdentity, FromExcel, InputIdentityEncoder, IntoExcel, XlValueRef,
-};
+use xlfn::value::{ExcelCellOutput, ExcelInputIdentity, FromExcel, InputIdentityEncoder, IntoExcel};
+use xlfn::value::raw::{XlValueRef};
 
 struct State;
 
@@ -42,7 +41,7 @@ impl IntoExcel for Positive {
 
 impl<'call> xlfn::value::PrepareExcel<'call> for Positive {
     type Prepared = Box<Self>;
-    fn prepare(value: xlfn::value::XlValueRef<'call>, argument: &'static str, identity: &mut xlfn::value::InputIdentityEncoder) -> xlfn::XllResult<Self::Prepared> {
+    fn prepare(value: xlfn::value::raw::XlValueRef<'call>, argument: &'static str, identity: &mut xlfn::value::InputIdentityEncoder) -> xlfn::XllResult<Self::Prepared> {
         <Self as xlfn::value::FromExcel>::from_excel_with_identity(value, argument, identity).map(Box::new)
     }
     fn materialize(value: Self::Prepared) -> xlfn::XllResult<Self> { Ok(*value) }

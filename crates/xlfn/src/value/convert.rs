@@ -85,7 +85,8 @@ pub(super) fn grid<'call, S: GridShapePolicy>(
 /// Converts a scalar or rectangular array into an owned matrix.
 ///
 /// ```
-/// use xlfn::value::{convert, FromExcel, Matrix, XlValueRef};
+/// use xlfn::value::{convert, FromExcel, Matrix};
+/// use xlfn::value::raw::XlValueRef;
 /// use xlfn::XllResult;
 ///
 /// struct NumericMatrix(Matrix<f64>);

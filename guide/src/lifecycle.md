@@ -68,7 +68,7 @@ default runtime settings. Add the pieces that your application needs:
 ```rust
 # use xlfn::prelude::*;
 # let (shared_state, lifecycle_state, layers) = ((), (), ());
-# let runtime_config = xlfn::RuntimeConfig::new();
+# let runtime_config = xlfn::addin::RuntimeConfig::new();
 let opened = Opened::new(shared_state)
     .with_lifecycle(lifecycle_state)
     .with_layers(layers)
@@ -169,3 +169,10 @@ by outstanding work and any held DLL residency lease. A close or remove
 callback return does not permit unloading a quarantined add-in; restart Excel
 to recover. Failure to prepare the Windows COM wait for outstanding calls also
 enters quarantine, without retrying that wait from cleanup or destructors.
+
+## Feature-unified implementation contract
+
+Apply `#[excel_addin]` to the `impl Addin` block. Attributes on a struct and
+bare manual implementations are not supported authoring interfaces. The macro
+fills feature-dependent associated types using xlfn's unified feature set;
+do not put consumer-side `cfg` attributes on those associated types.

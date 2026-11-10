@@ -656,7 +656,7 @@ impl FormulaHandleServiceSealed {
 #[cfg(feature = "handles")]
 pub(crate) struct FormulaHandleServiceSlot {
     service: xlfn_kernel::service_slot::GenerationServiceSlot<
-        crate::addin::HandleConfig,
+        crate::addin_impl::HandleConfig,
         FormulaHandleService,
         crate::XllError,
     >,
@@ -680,7 +680,7 @@ impl FormulaHandleServiceSlot {
         }
     }
 
-    pub(crate) fn arm(&self, config: crate::addin::HandleConfig) -> XllResult<()> {
+    pub(crate) fn arm(&self, config: crate::addin_impl::HandleConfig) -> XllResult<()> {
         self.service
             .arm(config)
             .map_err(crate::error::map_service_slot_error)

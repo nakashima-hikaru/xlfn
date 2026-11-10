@@ -1,6 +1,7 @@
 use xlfn::prelude::*;
 use xlfn::reference::{ExcelReference, FromExcelReference};
-use xlfn::value::{ExcelInputIdentity, InputIdentityEncoder, XlValueRef};
+use xlfn::value::{ExcelInputIdentity, InputIdentityEncoder};
+use xlfn::value::raw::{XlValueRef};
 
 #[derive(ExcelHandleObject)]
 struct Dataset;

@@ -60,7 +60,7 @@ pub(crate) mod output;
 mod prepared_tests;
 /// Raw, borrowed views over Excel's XLOPER12 input representation.
 #[allow(unsafe_code, reason = "Raw XLOPER12 views are the value ABI leaf")]
-mod raw;
+pub mod raw;
 
 pub use crate::input_identity::InputIdentityEncoder;
 #[cfg(any(test, feature = "handles", feature = "bench-internals"))]
@@ -79,12 +79,21 @@ use input::{PreparedArgument, PreparedElement, PreparedParameter, PreparedParame
 pub use output::IntoExcel;
 use std::convert::Infallible;
 
-pub use date::{ExcelDateSystem, ExcelSerialDate};
+pub use date::{CalendarDate, ExcelDateSystem, ExcelSerialDate};
 pub(crate) use matrix::validate_matrix_dimensions;
 pub use matrix::{BoundedVarArgs, Column, Matrix, MatrixRef, Row};
 pub use numeric::NumericMatrixRef;
 pub(crate) use raw::GridView;
-pub use raw::{XlArrayRef, XlStrRef, XlValueRef, XlValueType};
+pub(crate) use raw::{XlArrayRef, XlStrRef, XlValueRef, XlValueType};
+
+/// The number of rows and columns in an Excel array or Rust matrix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct Shape {
+    /// The number of rows.
+    pub rows: usize,
+    /// The number of columns.
+    pub columns: usize,
+}
 
 const EXCEL_MAX_ROWS: usize = 1_048_576;
 const EXCEL_MAX_COLUMNS: usize = 16_384;
@@ -210,7 +219,7 @@ impl<'call> ExcelArrayRef<'call> {
 
     /// Returns the rectangular shape.
     #[must_use]
-    pub const fn shape(&self) -> crate::error::Shape {
+    pub const fn shape(&self) -> crate::value::Shape {
         self.raw.shape()
     }
 
@@ -431,7 +440,9 @@ impl<'call> PrepareExcel<'call> for XlArrayRef<'call> {
 }
 impl<'call> PrepareExcel<'call> for f64 {
     type Prepared = Self;
-    const __BORROWED_ELEMENTS: bool = true;
+    fn __borrowed_elements(_: input::PreparationDispatch) -> bool {
+        true
+    }
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -451,7 +462,9 @@ impl<'call> PrepareExcel<'call> for f64 {
 }
 impl<'call> PrepareExcel<'call> for bool {
     type Prepared = Self;
-    const __BORROWED_ELEMENTS: bool = true;
+    fn __borrowed_elements(_: input::PreparationDispatch) -> bool {
+        true
+    }
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -471,7 +484,9 @@ impl<'call> PrepareExcel<'call> for bool {
 }
 impl<'call> PrepareExcel<'call> for i32 {
     type Prepared = Self;
-    const __BORROWED_ELEMENTS: bool = true;
+    fn __borrowed_elements(_: input::PreparationDispatch) -> bool {
+        true
+    }
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -491,7 +506,9 @@ impl<'call> PrepareExcel<'call> for i32 {
 }
 impl<'call> PrepareExcel<'call> for i64 {
     type Prepared = Self;
-    const __BORROWED_ELEMENTS: bool = true;
+    fn __borrowed_elements(_: input::PreparationDispatch) -> bool {
+        true
+    }
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -511,7 +528,9 @@ impl<'call> PrepareExcel<'call> for i64 {
 }
 impl<'call> PrepareExcel<'call> for ExcelError {
     type Prepared = Self;
-    const __BORROWED_ELEMENTS: bool = true;
+    fn __borrowed_elements(_: input::PreparationDispatch) -> bool {
+        true
+    }
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -531,7 +550,9 @@ impl<'call> PrepareExcel<'call> for ExcelError {
 }
 impl<'call> PrepareExcel<'call> for ExcelSerialDate {
     type Prepared = Self;
-    const __BORROWED_ELEMENTS: bool = true;
+    fn __borrowed_elements(_: input::PreparationDispatch) -> bool {
+        true
+    }
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -873,7 +894,7 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
-    if T::BORROWED_ELEMENTS {
+    if T::borrowed_elements() {
         // Resource-free built-ins need validation and identity here, but no
         // transient tree of PreparedArgument wrappers for every cell.
         cells.borrowed_wrapped::<_, _, _, RETAINED_BUDGET>(|value, argument| {
@@ -896,7 +917,9 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
-    const BORROWED_ELEMENTS: bool = T::BORROWED_ELEMENTS;
+    fn borrowed_elements() -> bool {
+        T::borrowed_elements()
+    }
     fn decode_borrowed_element(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -1037,7 +1060,9 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
-    const BORROWED_ELEMENTS: bool = T::BORROWED_ELEMENTS;
+    fn borrowed_elements() -> bool {
+        T::borrowed_elements()
+    }
     fn decode_borrowed_element(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -1259,7 +1284,7 @@ where
         context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedParameter<'call, Self, M>> {
-        if !M::RECORDS_IDENTITY || !T::BORROWED_ELEMENTS {
+        if !M::RECORDS_IDENTITY || !T::borrowed_elements() {
             return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
         }
         let grid = convert::grid::<convert::MatrixShape>(value, argument)?;
@@ -2357,7 +2382,7 @@ mod tests {
         AsyncReturn, ExcelReturn, MacroSheetReturn, MainThreadReturn, ReturnContext,
         ThreadSafeReturn, VolatileReturn,
     };
-    use crate::return_abi::XlArrayBuilder;
+    use crate::return_abi::ExcelArrayBuilder;
     use proptest::prelude::*;
     use static_assertions::assert_impl_all;
     use xlfn_sys::{XLBIT_XL_FREE, XLOPER12Value, XLTYPE_MULTI, XLTYPE_STR};
@@ -2368,7 +2393,7 @@ mod tests {
     assert_impl_all!(u32: MainThreadReturn, ThreadSafeReturn, AsyncReturn);
     assert_impl_all!(usize: MainThreadReturn, ThreadSafeReturn, AsyncReturn);
     assert_impl_all!(
-        XlArrayBuilder: std::panic::UnwindSafe, std::panic::RefUnwindSafe
+        ExcelArrayBuilder: std::panic::UnwindSafe, std::panic::RefUnwindSafe
     );
 
     #[test]
@@ -2400,7 +2425,7 @@ mod tests {
                 IntoExcel::into_excel(value).unwrap(),
                 ExcelCellOutput::Number(value as f64)
             );
-            let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+            let mut builder = ExcelArrayBuilder::new(1, 1).unwrap();
             value.write_into(&mut builder).unwrap();
             builder.finish().unwrap();
         }
@@ -2411,7 +2436,7 @@ mod tests {
                     code: DomainErrorCode::Overflow
                 })
             ));
-            let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+            let mut builder = ExcelArrayBuilder::new(1, 1).unwrap();
             assert!(matches!(
                 value.write_into(&mut builder),
                 Err(XllError::Domain {
@@ -2454,7 +2479,7 @@ mod tests {
                     code: DomainErrorCode::InvalidInput
                 })
             ));
-            let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+            let mut builder = ExcelArrayBuilder::new(1, 1).unwrap();
             assert!(matches!(
                 value.write_into(&mut builder),
                 Err(XllError::Domain {
@@ -2539,7 +2564,7 @@ mod tests {
         for text in ["", "価格 💡", &at_limit, &too_long] {
             for cow in [Cow::Borrowed(text), Cow::Owned(text.to_owned())] {
                 let scalar = XlScalarOutput::encode(cow.clone());
-                let mut array = XlArrayBuilder::new(1, 1).unwrap();
+                let mut array = ExcelArrayBuilder::new(1, 1).unwrap();
                 let write = cow.write_into(&mut array);
                 if text == too_long {
                     for error in [scalar.err().unwrap(), write.unwrap_err()] {
@@ -2591,7 +2616,7 @@ mod tests {
             Unicode,
         }
 
-        let mut builder = XlArrayBuilder::new(1, 2).unwrap();
+        let mut builder = ExcelArrayBuilder::new(1, 2).unwrap();
         builder.push(Label::Ready).unwrap();
         builder.push(Label::Unicode).unwrap();
         assert!(Label::Ready.write_into(&mut builder).is_err());
@@ -3144,7 +3169,11 @@ mod tests {
         with_excel_call_scope(|_| {
             // SAFETY: raw and its UTF-16 payload remain live for this scope.
             let value = unsafe { XlValueRef::from_raw(&mut raw) }.unwrap();
-            let string = value.as_str_with_argument("currency").unwrap();
+            let string = value
+                .as_str()
+                .map(|text| text.with_argument("currency"))
+                .map_err(|error| error.with_argument("currency"))
+                .unwrap();
             assert!(matches!(
                 string.try_to_string(),
                 Err(XllError::Input {
@@ -3445,7 +3474,7 @@ mod tests {
     fn typed_arguments_propagate_excel_error_values() {
         let mut raw = XLOPER12::error(xlfn_sys::XLERR_NA);
         let error = convert::<f64>(&mut raw).unwrap_err();
-        assert_eq!(error.excel_error(), ExcelError::NotAvailable);
+        assert_eq!(error.to_excel_error(), ExcelError::NotAvailable);
     }
 
     #[test]
@@ -3504,7 +3533,7 @@ mod tests {
                 unsafe { argument_from_raw(scope, "values", &mut raw) }.unwrap();
             assert_eq!(
                 view.shape(),
-                crate::error::Shape {
+                crate::value::Shape {
                     rows: 2,
                     columns: 2
                 }
@@ -3670,7 +3699,7 @@ mod tests {
 
     #[test]
     fn array_builder_encodes_directly_into_its_finished_cell_buffer() {
-        let mut builder = XlArrayBuilder::new(2, 2).unwrap();
+        let mut builder = ExcelArrayBuilder::new(2, 2).unwrap();
         for value in [1.0, 2.0, 3.0, 4.0] {
             builder.push_f64(value).unwrap();
         }

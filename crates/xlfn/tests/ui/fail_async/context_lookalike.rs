@@ -21,7 +21,8 @@ impl Addin for TestAddin {
 mod custom {
     use std::marker::PhantomData;
     use xlfn::XllResult;
-    use xlfn::value::{FromExcel, XlValueRef};
+    use xlfn::value::{FromExcel};
+use xlfn::value::raw::{XlValueRef};
 
     pub struct AsyncContext<'call, A>(PhantomData<&'call A>);
 

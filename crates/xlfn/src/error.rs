@@ -2,7 +2,7 @@
 //!
 //! [`XllError`] keeps diagnostic detail separate from the [`ExcelError`] returned
 //! to a worksheet. Applications can return `Result<T, ExcelError>` directly, use
-//! [`XllError::custom`] for a chosen cell error with diagnostic text, or implement
+//! [`UdfError`] for application messages and original causes, or implement
 //! [`IntoXllError`](crate::error::IntoXllError) for an application-specific error type.
 
 use std::borrow::Cow;
@@ -208,14 +208,7 @@ pub enum InputError {
     },
 }
 
-/// The number of rows and columns in an Excel array or Rust matrix.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct Shape {
-    /// The number of rows.
-    pub rows: usize,
-    /// The number of columns.
-    pub columns: usize,
-}
+pub(crate) use crate::value::Shape;
 
 /// Stable, coarse categories for calculation failures.
 ///
@@ -354,14 +347,197 @@ impl fmt::Display for ExcelApiFailure {
     }
 }
 
+/// Application-facing error with a selected worksheet value and original cause.
+///
+/// UDFs may return [`UdfResult`]. The original source remains inspectable until
+/// conversion at the Excel boundary. Conversion snapshots at most eight causes
+/// and 1024 UTF-8 bytes per cause; diagnostics never retain arbitrary application
+/// objects. The main message is limited to 4096 bytes at that boundary.
+#[derive(Debug)]
+pub struct UdfError {
+    excel: ExcelError,
+    message: Cow<'static, str>,
+    source: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+/// A calculation result with an application-facing error.
+pub type UdfResult<T> = Result<T, UdfError>;
+
+impl UdfError {
+    /// Creates an application failure; diagnostic text is never a worksheet string.
+    pub fn new(excel: ExcelError, message: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            excel,
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Preserves an original error for inspection before the Excel boundary.
+    pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        self.source = Some(Box::new(source));
+        self
+    }
+
+    /// Returns the selected worksheet error.
+    pub const fn to_excel_error(&self) -> ExcelError {
+        self.excel
+    }
+
+    /// Returns application diagnostic text.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for UdfError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UdfError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &dyn std::error::Error)
+    }
+}
+
+impl From<io::Error> for UdfError {
+    fn from(source: io::Error) -> Self {
+        Self::new(ExcelError::Value, "I/O operation failed").with_source(source)
+    }
+}
+
+impl From<ExcelError> for UdfError {
+    fn from(error: ExcelError) -> Self {
+        Self::new(error, "worksheet error")
+    }
+}
+
+impl From<XllError> for UdfError {
+    fn from(error: XllError) -> Self {
+        Self::new(error.to_excel_error(), "framework operation failed").with_source(error)
+    }
+}
+
+/// Bounded diagnostic copy of one application cause.
+///
+/// This preserves cause text and order, not the original concrete error type.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct ErrorCause {
+    message: String,
+    #[source]
+    source: Option<Box<ErrorCause>>,
+}
+
+impl ErrorCause {
+    fn snapshot(source: &(dyn std::error::Error + 'static), remaining: usize) -> Self {
+        Self {
+            message: bounded_error_text(format_args!("{source}"), 1024),
+            source: if remaining > 1 {
+                source
+                    .source()
+                    .map(|next| Box::new(Self::snapshot(next, remaining - 1)))
+            } else {
+                None
+            },
+        }
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.message.len()
+            + self
+                .source
+                .as_ref()
+                .map_or(0, |source| source.retained_bytes())
+    }
+}
+
+fn bounded_error_text(arguments: std::fmt::Arguments<'_>, limit: usize) -> String {
+    struct Text {
+        text: String,
+        limit: usize,
+    }
+    impl std::fmt::Write for Text {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            let end = text.floor_char_boundary(text.len().min(self.limit - self.text.len()));
+            self.text.push_str(&text[..end]);
+            if end == text.len() {
+                Ok(())
+            } else {
+                Err(std::fmt::Error)
+            }
+        }
+    }
+    let mut text = Text {
+        text: String::new(),
+        limit,
+    };
+    let _ = std::fmt::write(&mut text, arguments);
+    text.text
+}
+
+impl From<UdfError> for XllError {
+    fn from(error: UdfError) -> Self {
+        Self::Application {
+            excel: error.excel,
+            message: bounded_error_text(format_args!("{}", error.message), 4096),
+            source: error
+                .source
+                .as_deref()
+                .map(|source| Box::new(ErrorCause::snapshot(source, 8))),
+        }
+    }
+}
+
+impl IntoXllError for UdfError {
+    fn into_xll_error(self) -> XllError {
+        self.into()
+    }
+}
+
+/// A rejected configuration limit, independent of Excel worksheet conversion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("configuration limit is outside its supported range")]
+pub struct InvalidLimit;
+
+impl From<InvalidLimit> for XllError {
+    fn from(_: InvalidLimit) -> Self {
+        Self::domain(DomainErrorCode::InvalidInput)
+    }
+}
+
+impl From<InvalidLimit> for UdfError {
+    fn from(error: InvalidLimit) -> Self {
+        Self::new(ExcelError::Value, "invalid configuration limit").with_source(error)
+    }
+}
+
 /// A calculation or framework failure with a safe worksheet representation.
 ///
-/// [`Self::excel_error`] selects the value returned to Excel. The full error is
+/// [`Self::to_excel_error`] selects the value returned to Excel. The full error is
 /// available to diagnostics. Framework-owned variants are non-exhaustive so
 /// applications can inspect their context without constructing internal failures.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum XllError {
+    /// Bounded application failure copied at the worksheet boundary.
+    #[non_exhaustive]
+    #[error("{message}")]
+    Application {
+        /// Worksheet representation selected by the application.
+        excel: ExcelError,
+        /// Bounded primary diagnostic text.
+        message: String,
+        /// Bounded cause chain; original error objects are not retained.
+        #[source]
+        source: Option<Box<ErrorCause>>,
+    },
+
     /// A named worksheet argument failed validation or conversion.
     #[error("invalid argument {argument}: {reason}")]
     Input {
@@ -552,6 +728,28 @@ impl XllError {
         Self::Input { argument, reason }
     }
 
+    /// Reports validation of a named resource rather than a worksheet parameter.
+    /// The reason is retained as a bounded diagnostic cause.
+    pub fn validation(context: &'static str, reason: InputError) -> Self {
+        let excel = if matches!(reason, InputError::NumericOverflow) {
+            ExcelError::Number
+        } else {
+            ExcelError::Value
+        };
+        UdfError::new(excel, format!("invalid {context}"))
+            .with_source(reason)
+            .into()
+    }
+
+    /// Attaches the caller's parameter name to an input validation failure.
+    /// Other error categories retain their existing context.
+    pub fn with_argument(self, argument: &'static str) -> Self {
+        match self {
+            Self::Input { reason, .. } => Self::input(argument, reason),
+            error => error,
+        }
+    }
+
     /// Creates an application error with a chosen worksheet value and diagnostic text.
     ///
     /// Borrowed static text is retained without allocation. Owned messages are
@@ -567,9 +765,9 @@ impl XllError {
 
     /// Returns the safe worksheet error for this failure.
     #[must_use]
-    pub const fn excel_error(&self) -> ExcelError {
+    pub const fn to_excel_error(&self) -> ExcelError {
         match self {
-            Self::RtdProducerFailure { source, .. } => source.excel_error(),
+            Self::RtdProducerFailure { source, .. } => source.to_excel_error(),
             Self::Domain { .. } => ExcelError::Number,
             Self::Input {
                 reason: InputError::NumericOverflow,
@@ -580,7 +778,9 @@ impl XllError {
             | Self::Closing
             | Self::Overloaded
             | Self::ReentrantCall => ExcelError::NotAvailable,
-            Self::ExcelValue(error) | Self::Custom { excel: error, .. } => *error,
+            Self::ExcelValue(error)
+            | Self::Custom { excel: error, .. }
+            | Self::Application { excel: error, .. } => *error,
             Self::Input { .. }
             | Self::Shape { .. }
             | Self::ElementCountMismatch { .. }
@@ -606,7 +806,7 @@ mod tests {
     #[test]
     fn errors_map_to_the_documented_excel_values() {
         assert_eq!(
-            XllError::input("x", InputError::NonFinite).excel_error(),
+            XllError::input("x", InputError::NonFinite).to_excel_error(),
             ExcelError::Value
         );
         assert_eq!(
@@ -620,22 +820,22 @@ mod tests {
                     columns: 1,
                 },
             }
-            .excel_error(),
+            .to_excel_error(),
             ExcelError::Value
         );
         assert_eq!(
             XllError::Domain {
                 code: DomainErrorCode::Overflow,
             }
-            .excel_error(),
+            .to_excel_error(),
             ExcelError::Number
         );
         assert_eq!(
-            XllError::input("x", InputError::NumericOverflow).excel_error(),
+            XllError::input("x", InputError::NumericOverflow).to_excel_error(),
             ExcelError::Number
         );
         assert_eq!(
-            XllError::StaleHandle.excel_error(),
+            XllError::StaleHandle.to_excel_error(),
             ExcelError::NotAvailable
         );
     }
@@ -653,8 +853,8 @@ mod tests {
             (ExcelError::GettingData, "#GETTING_DATA"),
         ] {
             assert_eq!(ExcelError::from_code(error.code()), Some(error));
-            assert_eq!(XllError::from(error).excel_error(), error);
-            assert_eq!(error.into_xll_error().excel_error(), error);
+            assert_eq!(XllError::from(error).to_excel_error(), error);
+            assert_eq!(error.into_xll_error().to_excel_error(), error);
             assert_eq!(error.to_string(), text);
         }
         assert_eq!(ExcelError::from_code(i32::MAX), None);
@@ -675,14 +875,14 @@ mod tests {
             error,
             XllError::Native { code: 0, ref message } if message == "application I/O failure"
         ));
-        assert_eq!(error.excel_error(), ExcelError::Value);
+        assert_eq!(error.to_excel_error(), ExcelError::Value);
     }
 
     #[test]
     fn diagnostic_initialization_conversion_retains_lifecycle_and_worker_context() {
         use crate::diagnostics::DiagnosticInitError;
         assert_eq!(
-            XllError::from(DiagnosticInitError::AlreadyInstalled).excel_error(),
+            XllError::from(DiagnosticInitError::AlreadyInstalled).to_excel_error(),
             ExcelError::Value
         );
         assert!(matches!(
@@ -696,7 +896,7 @@ mod tests {
         let error = XllError::from(DiagnosticInitError::WorkerSpawn(io::Error::other(
             "worker resource limit",
         )));
-        assert_eq!(error.excel_error(), ExcelError::Value);
+        assert_eq!(error.to_excel_error(), ExcelError::Value);
         assert_eq!(
             error.to_string(),
             "failed to start diagnostic logger worker: worker resource limit"
@@ -706,7 +906,7 @@ mod tests {
     #[test]
     fn application_error_selects_the_cell_error_without_losing_diagnostic_text() {
         let error = XllError::custom(ExcelError::NotAvailable, "market data unavailable");
-        assert_eq!(error.excel_error(), ExcelError::NotAvailable);
+        assert_eq!(error.to_excel_error(), ExcelError::NotAvailable);
         assert_eq!(error.to_string(), "market data unavailable");
         assert!(matches!(
             error,
@@ -722,7 +922,7 @@ mod tests {
                 "upstream reference",
             )),
         };
-        assert_eq!(error.excel_error(), ExcelError::Reference);
+        assert_eq!(error.to_excel_error(), ExcelError::Reference);
     }
 
     #[test]

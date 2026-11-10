@@ -46,7 +46,9 @@ mod transport;
 pub(crate) use boundary::async_udf_boundary_named_handle;
 pub(crate) use boundary::{async_udf_boundary_named, cancel_async_calculation};
 #[cfg(feature = "async-builtin")]
-pub use builtin::{AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig};
+pub use builtin::{
+    AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig, BuiltinReservation,
+};
 #[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
 pub(crate) use calculation::CalculationEpoch;
 pub use executor::AsyncExecutor;

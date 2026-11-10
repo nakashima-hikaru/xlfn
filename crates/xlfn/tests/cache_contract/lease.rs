@@ -2,7 +2,10 @@ use xlfn::cache::CalculationCache;
 
 #[test]
 fn lease_survives_eviction() {
-    let cache = CalculationCache::<u32, String>::with_weigher(8, |_| 8);
+    let cache = CalculationCache::<u32, String>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(8),
+        |_| 8,
+    );
 
     let lease1 = cache
         .get_or_try_insert_with(1, || Ok("val1".to_string()))

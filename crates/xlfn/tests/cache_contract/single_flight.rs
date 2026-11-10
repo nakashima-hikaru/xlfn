@@ -60,7 +60,10 @@ impl Eq for WitnessKey {}
 
 fn concurrent_initialization(budget: usize, weight: usize) {
     const THREADS: usize = 16;
-    let cache = CalculationCache::<WitnessKey, usize>::with_weigher(budget, |value| *value);
+    let cache = CalculationCache::<WitnessKey, usize>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(budget),
+        |value| *value,
+    );
     let calls = AtomicUsize::new(0);
     let (matched_tx, matched_rx) = mpsc::sync_channel(THREADS);
     let witness = Arc::new(FlightWitness {

@@ -159,9 +159,10 @@ impl Pool {
     fn new(workers: usize, keys: Keys, compute: Compute, operation: Operation) -> Self {
         assert!(workers != 0);
         assert!(REQUESTS_PER_WORKER * workers * VALUE_BYTES < BUDGET_BYTES);
-        let cache = Arc::new(CalculationCache::with_weigher(BUDGET_BYTES, |_| {
-            VALUE_BYTES
-        }));
+        let cache = Arc::new(CalculationCache::with_weigher(
+            xlfn::cache::CacheBudget::weight_units(BUDGET_BYTES),
+            |_| VALUE_BYTES,
+        ));
         // This is a representative numerical reduction, not an Excel call or
         // input-conversion measurement. The fixed source is allocated once.
         let input: Arc<[f64]> = (0..NUMERIC_ELEMENTS)

@@ -20,6 +20,9 @@ fn trait_driven_function_signatures_compile() {
     tests.pass("tests/ui/pass/physical_unload.rs");
     tests.pass("tests/ui/pass/raw_identifiers.rs");
     tests.pass("tests/ui/pass/udf_layers_tuple.rs");
+    tests.compile_fail("tests/ui/fail/addin_struct_is_unsupported.rs");
+    tests.compile_fail("tests/ui/fail/native_alias_mismatch.rs");
+    tests.compile_fail("tests/ui/fail/preparation_dispatch_is_internal.rs");
     tests.compile_fail("tests/ui/fail/argument_trait_missing.rs");
     tests.compile_fail("tests/ui/fail/enum_legacy_variant.rs");
     tests.compile_fail("tests/ui/fail/eager_identity_missing.rs");

@@ -1,4 +1,4 @@
-use xlfn::value::XlValueRef;
+use xlfn::value::raw::XlValueRef;
 
 fn inspect(value: XlValueRef<'_>) {
     let _ = value.raw();

@@ -8,6 +8,8 @@
 /// explicitly so an ABI-breaking façade change is visible at the expansion
 /// site instead of silently binding to a different set of symbols.
 pub mod v1 {
+    #[cfg(any(test, feature = "rtd"))]
+    pub use crate::subscription_owner::IntoRtdSubscription;
 
     /// Final generated ABI boundary, including admission and guard teardown.
     /// The fallback is a detached error value that needs no runtime ownership.
@@ -54,7 +56,7 @@ pub mod v1 {
     #[cfg(feature = "async")]
     use std::future::Future;
 
-    use crate::addin::{Addin, PhysicallyUnloadableAddin};
+    use crate::addin_impl::{Addin, PhysicallyUnloadableAddin};
     use crate::boundary::host::{host_auto_close, host_auto_remove};
     pub use crate::call::{
         CallScope, CallStorage, with_branded_call_scope, with_branded_call_scope_and_state,
@@ -118,7 +120,7 @@ pub mod v1 {
     #[cfg(feature = "handles")]
     #[doc(hidden)]
     pub use crate::source_catalog::RtdSourceCatalog;
-    #[cfg(feature = "handles")]
+    #[cfg(any(test, feature = "rtd", feature = "handles"))]
     #[doc(hidden)]
     pub use crate::subscription_owner::RtdSubscription;
     /// Forwards the generated COM export to the private Excel RTD transport.
@@ -224,7 +226,7 @@ pub mod v1 {
     {
     }
 
-    /// Instantiates a [`ThreadSafeContext`](crate::addin::ThreadSafeContext) for generated UDFs.
+    /// Instantiates a [`ThreadSafeContext`](crate::addin_impl::ThreadSafeContext) for generated UDFs.
     #[doc(hidden)]
     pub fn thread_safe_context<
         'call,
@@ -234,23 +236,23 @@ pub mod v1 {
     >(
         frame: &CallEnvironment<'call, E, C, ThreadSafeMode>,
         state: &'call A::SharedState,
-    ) -> crate::addin::ThreadSafeContext<'call, A> {
-        crate::addin::ThreadSafeContext::new(state, frame.diagnostics)
+    ) -> crate::addin_impl::ThreadSafeContext<'call, A> {
+        crate::addin_impl::ThreadSafeContext::new(state, frame.diagnostics)
     }
 
-    /// Instantiates a [`MainThreadContext`](crate::addin::MainThreadContext) for generated UDFs.
+    /// Instantiates a [`MainThreadContext`](crate::addin_impl::MainThreadContext) for generated UDFs.
     #[doc(hidden)]
     pub fn main_thread_context<'call, A: Addin>(
         frame: &CallEnvironment<
             'call,
-            crate::addin::AddinSubscription<A>,
-            crate::addin::AddinSources<A>,
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
         >,
         state: &'call A::SharedState,
-    ) -> crate::addin::MainThreadContext<'call, A> {
+    ) -> crate::addin_impl::MainThreadContext<'call, A> {
         #[cfg(feature = "rtd")]
         {
-            crate::addin::MainThreadContext::new(
+            crate::addin_impl::MainThreadContext::new(
                 state,
                 frame.diagnostics,
                 crate::rtd::RtdCallContext::new(
@@ -260,10 +262,10 @@ pub mod v1 {
             )
         }
         #[cfg(not(feature = "rtd"))]
-        crate::addin::MainThreadContext::new(state, frame.diagnostics)
+        crate::addin_impl::MainThreadContext::new(state, frame.diagnostics)
     }
 
-    /// Instantiates a [`MacroSheetContext`](crate::addin::MacroSheetContext) for generated UDFs.
+    /// Instantiates a [`MacroSheetContext`](crate::addin_impl::MacroSheetContext) for generated UDFs.
     #[doc(hidden)]
     pub fn macro_sheet_context<
         'call,
@@ -273,8 +275,8 @@ pub mod v1 {
     >(
         frame: &CallEnvironment<'call, E, C, MacroSheetMode>,
         state: &'call A::SharedState,
-    ) -> crate::addin::MacroSheetContext<'call, A> {
-        crate::addin::MacroSheetContext::new(
+    ) -> crate::addin_impl::MacroSheetContext<'call, A> {
+        crate::addin_impl::MacroSheetContext::new(
             state,
             frame.diagnostics,
             crate::host_api::ExcelHost::new(frame.callbacks),
@@ -301,15 +303,15 @@ pub mod v1 {
         );
     }
 
-    /// Instantiates an [`AsyncContext`](crate::addin::AsyncContext) for generated UDFs.
+    /// Instantiates an [`AsyncContext`](crate::addin_impl::AsyncContext) for generated UDFs.
     #[cfg(feature = "async")]
     #[doc(hidden)]
     pub fn async_context<'call, A: Addin>(
         lease: &'call crate::generation::ExecutionLease<A>,
         cancellation: &'call CancellationToken,
         runtime: &'call MacroRuntime<A, impl UnloadPolicy<A>>,
-    ) -> crate::addin::AsyncContext<'call, A> {
-        crate::addin::AsyncContext::new(
+    ) -> crate::addin_impl::AsyncContext<'call, A> {
+        crate::addin_impl::AsyncContext::new(
             lease.state(),
             cancellation,
             runtime.runtime().diagnostics(),
@@ -626,7 +628,9 @@ pub mod v1 {
     > CallFrame<'brand, 'call, M, E, C, X>
     {
         #[doc(hidden)]
-        pub(crate) fn new<A: Addin + crate::addin::AddinRtdTypes<Subscription = E, Sources = C>>(
+        pub(crate) fn new<
+            A: Addin + crate::addin_impl::AddinRtdTypes<Subscription = E, Sources = C>,
+        >(
             call: &'call crate::runtime::CallGuard<'_, A>,
             storage: &'call CallStorage<'brand, 'call>,
             token: ghost_cell::GhostToken<'brand>,
@@ -1042,8 +1046,8 @@ pub mod v1 {
                 'brand,
                 'call,
                 R::InputMode,
-                crate::addin::AddinSubscription<A>,
-                crate::addin::AddinSources<A>,
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
             >,
         ) -> XllResult<R::Payload>,
     {
@@ -1082,8 +1086,8 @@ pub mod v1 {
                 'brand,
                 'call,
                 R::InputMode,
-                crate::addin::AddinSubscription<A>,
-                crate::addin::AddinSources<A>,
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
                 X,
             >,
         ) -> XllResult<R::Payload>,
@@ -1096,8 +1100,8 @@ pub mod v1 {
                 |call, storage, token, callbacks| {
                     let frame = CallFrame::<
                         R::InputMode,
-                        crate::addin::AddinSubscription<A>,
-                        crate::addin::AddinSources<A>,
+                        crate::addin_impl::AddinSubscription<A>,
+                        crate::addin_impl::AddinSources<A>,
                         X,
                     >::new(
                         call, storage, token, callbacks, argument_count
@@ -1128,8 +1132,8 @@ pub mod v1 {
                 'brand,
                 'call,
                 R::InputMode,
-                crate::addin::AddinSubscription<A>,
-                crate::addin::AddinSources<A>,
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
                 X,
             >,
         ) -> XllResult<crate::output::NumericArrayOutput>,
@@ -1146,8 +1150,8 @@ pub mod v1 {
                     |call, storage, token, callbacks| {
                         let frame = CallFrame::<
                             R::InputMode,
-                            crate::addin::AddinSubscription<A>,
-                            crate::addin::AddinSources<A>,
+                            crate::addin_impl::AddinSubscription<A>,
+                            crate::addin_impl::AddinSources<A>,
                             X,
                         >::new(
                             call, storage, token, callbacks, argument_count
@@ -1187,8 +1191,8 @@ pub mod v1 {
                 'brand,
                 'call,
                 R::InputMode,
-                crate::addin::AddinSubscription<A>,
-                crate::addin::AddinSources<A>,
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
                 AsyncLaunchMode,
             >,
         ) -> XllResult<Fut>,
@@ -1209,8 +1213,8 @@ pub mod v1 {
                         |call, storage, token, callbacks| {
                             let frame = CallFrame::<
                                 R::InputMode,
-                                crate::addin::AddinSubscription<A>,
-                                crate::addin::AddinSources<A>,
+                                crate::addin_impl::AddinSubscription<A>,
+                                crate::addin_impl::AddinSources<A>,
                                 AsyncLaunchMode,
                             >::new(
                                 call, storage, token, callbacks, argument_count
@@ -1253,8 +1257,8 @@ pub mod v1 {
                 'brand,
                 'call,
                 R::InputMode,
-                crate::addin::AddinSubscription<A>,
-                crate::addin::AddinSources<A>,
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
                 AsyncLaunchMode,
             >,
         ) -> XllResult<Build>,
@@ -1275,8 +1279,8 @@ pub mod v1 {
                         |call, storage, token, callbacks| {
                             let frame = CallFrame::<
                                 R::InputMode,
-                                crate::addin::AddinSubscription<A>,
-                                crate::addin::AddinSources<A>,
+                                crate::addin_impl::AddinSubscription<A>,
+                                crate::addin_impl::AddinSources<A>,
                                 AsyncLaunchMode,
                             >::new(
                                 call, storage, token, callbacks, argument_count
@@ -1542,7 +1546,7 @@ pub mod v1 {
     mod open_failure_tests {
         use super::MacroRuntime;
         use crate::XllError;
-        use crate::addin::{Addin, BuildInfo, OpenContext, Opened, PhysicallyUnloadableAddin};
+        use crate::addin_impl::{Addin, BuildInfo, OpenContext, Opened, PhysicallyUnloadableAddin};
         use crate::boundary::host::{host_auto_close, host_auto_open, host_auto_remove};
         use crate::diagnostics::AddinId;
         use crate::lifecycle::LifecyclePhase;
@@ -1799,7 +1803,7 @@ mod tests {
                 if actual == "unknown日本語" && *expected == "[\"Fast mode\", \"Slow\"]"
         ));
         assert!(error.to_string().contains("unknown日本語"));
-        assert_eq!(error.excel_error(), crate::ExcelError::Value);
+        assert_eq!(error.to_excel_error(), crate::ExcelError::Value);
     }
 
     #[test]

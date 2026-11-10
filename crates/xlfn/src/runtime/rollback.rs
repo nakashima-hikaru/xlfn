@@ -4,7 +4,7 @@
 //! loaded into the runtime recovery domain; the lifecycle root retains only
 //! canonical state and ownership types.
 
-use crate::addin::Addin;
+use crate::addin_impl::Addin;
 use crate::boundary::{report_boundary_error, report_cleanup_issue};
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;

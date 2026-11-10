@@ -46,7 +46,9 @@ fn post_compute_hash_panic_must_not_leak_the_creator_pin() {
         id: 7,
         panic_on_next_hash: Arc::clone(&armed),
     };
-    let cache = CalculationCache::<OneShotPanickingKey, DropProbe>::new(1);
+    let cache = CalculationCache::<OneShotPanickingKey, DropProbe>::new(
+        xlfn::cache::CacheBudget::weight_units(1),
+    );
 
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         let result = cache.get_or_try_insert_with(
@@ -75,7 +77,10 @@ fn post_compute_hash_panic_must_not_leak_the_creator_pin() {
 #[test]
 fn a_usize_budget_must_not_silently_shrink_to_u32_max() {
     let budget = (u32::MAX as usize) + 1;
-    let cache = CalculationCache::<u8, ()>::with_weigher(budget, |_| u32::MAX as usize + 1);
+    let cache = CalculationCache::<u8, ()>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(budget),
+        |_| u32::MAX as usize + 1,
+    );
     let lease = cache
         .get_or_try_insert_with(7, || Ok(()))
         .expect("computation succeeds");

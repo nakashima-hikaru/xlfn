@@ -833,7 +833,7 @@ pub(super) fn checked_topic_part_count(lower: i32, upper: i32) -> XllResult<usiz
         .checked_sub(i64::from(lower))
         .and_then(|value| value.checked_add(1))
         .ok_or_else(|| {
-            XllError::input(
+            XllError::validation(
                 "RTD topic",
                 InputError::TooLarge {
                     limit: MAX_RTD_TOPIC_PARTS,
@@ -842,7 +842,7 @@ pub(super) fn checked_topic_part_count(lower: i32, upper: i32) -> XllResult<usiz
             )
         })?;
     let count = usize::try_from(count).map_err(|_| {
-        XllError::input(
+        XllError::validation(
             "RTD topic",
             InputError::TooLarge {
                 limit: MAX_RTD_TOPIC_PARTS,
@@ -851,7 +851,7 @@ pub(super) fn checked_topic_part_count(lower: i32, upper: i32) -> XllResult<usiz
         )
     })?;
     if count == 0 || count > MAX_RTD_TOPIC_PARTS {
-        return Err(XllError::input(
+        return Err(XllError::validation(
             "RTD topic",
             InputError::TooLarge {
                 limit: MAX_RTD_TOPIC_PARTS,
@@ -864,7 +864,7 @@ pub(super) fn checked_topic_part_count(lower: i32, upper: i32) -> XllResult<usiz
 
 pub(super) fn checked_topic_part_length(length: usize) -> XllResult<()> {
     if length > crate::utf16::EXCEL_STRING_LIMIT {
-        Err(XllError::input(
+        Err(XllError::validation(
             "RTD topic",
             InputError::TooLarge {
                 limit: crate::utf16::EXCEL_STRING_LIMIT,
@@ -957,7 +957,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
             let units = unsafe { std::slice::from_raw_parts(bstr.as_ptr(), length) };
 
             String::from_utf16(units)
-                .map_err(|_| XllError::input("RTD topic", InputError::InvalidUtf16))
+                .map_err(|_| XllError::validation("RTD topic", InputError::InvalidUtf16))
         }
         VT_VARIANT | VT_EMPTY => {
             let mut value = VARIANT::default();
@@ -995,7 +995,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
             let units = unsafe { std::slice::from_raw_parts(bstr.as_ptr(), length) };
 
             String::from_utf16(units)
-                .map_err(|_| XllError::input("RTD topic", InputError::InvalidUtf16))
+                .map_err(|_| XllError::validation("RTD topic", InputError::InvalidUtf16))
         }
         _ => Err(XllError::InvalidHandle),
     }

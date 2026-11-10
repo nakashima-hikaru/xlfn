@@ -19,8 +19,7 @@ impl Addin for ErasedAddin {
 
     fn open(context: &OpenContext<Self>) -> OpenResult<Self> {
         let initial = 42;
-        let blocking = context.rtd().register(RtdChannelSource::new(
-            NonZeroUsize::new(4).unwrap(),
+        let blocking = context.rtd().register(RtdChannelSource::new(framework::rtd::RtdFifo::new(NonZeroUsize::new(4).unwrap()),
             move |_topic| Ok(move |_sender: RtdSender<i32>| {
                 let _captured = initial;
                 Ok(())

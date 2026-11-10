@@ -1,8 +1,7 @@
 use xlfn::prelude::*;
-use xlfn::value::{
-    Column, ExcelInputIdentity, FromExcel, InputIdentityEncoder, PrepareExcel, Row, XlStrRef,
-    XlValueRef, convert,
-};
+use xlfn::value::{Column, ExcelInputIdentity, FromExcel, InputIdentityEncoder, PrepareExcel, Row, convert};
+use xlfn::value::raw::{XlStrRef};
+use xlfn::value::raw::{XlValueRef};
 
 struct CollectionConversionAddin;
 
@@ -94,7 +93,7 @@ struct TextRow<'call>(Row<XlStrRef<'call>>);
 
 impl<'call> FromExcel<'call> for TextRow<'call> {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        convert::row(value, argument, XlValueRef::as_str_with_argument).map(Self)
+        convert::row(value, argument, |value, argument| value.as_str().map(|text| text.with_argument(argument)).map_err(|error| error.with_argument(argument))).map(Self)
     }
 }
 

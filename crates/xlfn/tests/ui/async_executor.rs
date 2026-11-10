@@ -1,6 +1,6 @@
 // Compile-fixture executor; dropping admitted tasks completes their ownership.
 pub struct Executor;
-impl xlfn::AsyncExecutor for Executor {
+impl xlfn::task::AsyncExecutor for Executor {
     type Reservation = ();
     fn start(&self) -> xlfn::XllResult<()> {
         Ok(())
@@ -8,7 +8,7 @@ impl xlfn::AsyncExecutor for Executor {
     fn reserve(&self) -> xlfn::XllResult<()> {
         Ok(())
     }
-    fn submit<F>(&self, (): (), task: xlfn::AsyncTask<F>)
+    fn submit<F>(&self, (): (), task: xlfn::task::AsyncTask<F>)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {

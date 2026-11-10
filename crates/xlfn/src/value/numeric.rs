@@ -36,9 +36,12 @@ impl<'call> NumericMatrixRef<'call> {
         self.columns
     }
 
-    /// The matrix dimensions as `(rows, columns)`.
-    pub const fn shape(self) -> (usize, usize) {
-        (self.rows, self.columns)
+    /// The matrix dimensions.
+    pub const fn shape(self) -> crate::value::Shape {
+        crate::value::Shape {
+            rows: self.rows,
+            columns: self.columns,
+        }
     }
 
     /// All elements in row-major order, borrowing the current Excel call.
@@ -195,7 +198,13 @@ mod tests {
         // SAFETY: NumericInput has FP12's header and six initialized doubles.
         let matrix =
             unsafe { NumericMatrixRef::from_raw((&raw const raw).cast(), "matrix") }.unwrap();
-        assert_eq!(matrix.shape(), (2, 3));
+        assert_eq!(
+            matrix.shape(),
+            crate::value::Shape {
+                rows: 2,
+                columns: 3
+            }
+        );
         assert_eq!(matrix.as_slice().as_ptr(), raw.values.as_ptr());
         assert_eq!(matrix.row(1), Some([3.0, 4.0, 5.0].as_slice()));
         assert_eq!(matrix[(1, 2)], 5.0);

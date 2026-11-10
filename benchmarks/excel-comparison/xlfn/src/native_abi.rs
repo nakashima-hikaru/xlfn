@@ -7,7 +7,7 @@ pub fn f64_1_q(#[excel_arg(strict)] a: f64) -> f64 {
 }
 
 #[excel_function(name = "BENCH.ABI.F641.NATIVE", thread_safe)]
-pub fn f64_1_native(a: f64) -> f64 {
+pub fn f64_1_native(#[excel_arg(native)] a: f64) -> f64 {
     a
 }
 
@@ -17,7 +17,7 @@ pub fn f64_2_q(#[excel_arg(strict)] a: f64, #[excel_arg(strict)] b: f64) -> f64 
 }
 
 #[excel_function(name = "BENCH.ABI.F642.NATIVE", thread_safe)]
-pub fn f64_2_native(a: f64, b: f64) -> f64 {
+pub fn f64_2_native(#[excel_arg(native)] a: f64, #[excel_arg(native)] b: f64) -> f64 {
     a + b
 }
 
@@ -32,7 +32,7 @@ pub fn f64_4_q(
 }
 
 #[excel_function(name = "BENCH.ABI.F644.NATIVE", thread_safe)]
-pub fn f64_4_native(a: f64, b: f64, c: f64, d: f64) -> f64 {
+pub fn f64_4_native(#[excel_arg(native)] a: f64, #[excel_arg(native)] b: f64, #[excel_arg(native)] c: f64, #[excel_arg(native)] d: f64) -> f64 {
     a + b + c + d
 }
 
@@ -53,7 +53,7 @@ pub fn f64_8_q(
 
 #[excel_function(name = "BENCH.ABI.F648.NATIVE", thread_safe)]
 #[allow(clippy::too_many_arguments, reason = "Measures eight Excel arguments")]
-pub fn f64_8_native(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64) -> f64 {
+pub fn f64_8_native(#[excel_arg(native)] a: f64, #[excel_arg(native)] b: f64, #[excel_arg(native)] c: f64, #[excel_arg(native)] d: f64, #[excel_arg(native)] e: f64, #[excel_arg(native)] f: f64, #[excel_arg(native)] g: f64, #[excel_arg(native)] h: f64) -> f64 {
     a + b + c + d + e + f + g + h
 }
 
@@ -63,7 +63,7 @@ pub fn bool_q(#[excel_arg(strict)] value: bool) -> f64 {
 }
 
 #[excel_function(name = "BENCH.ABI.BOOL.NATIVE", thread_safe)]
-pub fn bool_native(value: bool) -> f64 {
+pub fn bool_native(#[excel_arg(native)] value: bool) -> f64 {
     if value { 1.0 } else { 0.0 }
 }
 
@@ -73,7 +73,7 @@ pub fn i32_q(#[excel_arg(strict)] value: i32) -> f64 {
 }
 
 #[excel_function(name = "BENCH.ABI.I32.NATIVE", thread_safe)]
-pub fn i32_native(value: i32) -> f64 {
+pub fn i32_native(#[excel_arg(native)] value: i32) -> f64 {
     f64::from(value)
 }
 
@@ -83,7 +83,7 @@ pub fn str_q(#[excel_arg(strict)] value: String) -> f64 {
 }
 
 #[excel_function(name = "BENCH.ABI.STR.NATIVE", thread_safe)]
-pub fn str_native(value: String) -> f64 {
+pub fn str_native(#[excel_arg(native)] value: String) -> f64 {
     value.chars().count() as f64
 }
 

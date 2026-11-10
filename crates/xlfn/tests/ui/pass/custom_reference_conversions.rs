@@ -1,6 +1,6 @@
 use xlfn::prelude::*;
 use xlfn::reference::{ExcelReference, FromExcelReference, ReferenceArea, SheetId};
-use xlfn::value::XlValueRef;
+use xlfn::value::raw::XlValueRef;
 
 struct App;
 

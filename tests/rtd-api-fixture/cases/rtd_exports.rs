@@ -1,4 +1,4 @@
-use framework::{DynamicRtdSources, IntoRtdSubscription, RtdSourceCatalog, RtdSubscription};
+use framework::rtd::{DynamicRtdSources, IntoRtdSubscription, RtdSourceCatalog, RtdSubscription};
 
 fn subscription<T: RtdSubscription + IntoRtdSubscription<T>>() {}
 fn catalog<T: RtdSourceCatalog<()>>() {}

@@ -3728,7 +3728,7 @@ fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cl
         let (sender_tx, sender_rx) = mpsc::sync_channel(1);
         let source = registration
             .register(crate::subscription::RtdChannelSource::new(
-                std::num::NonZeroUsize::new(64).unwrap(),
+                crate::rtd::RtdFifo::new(std::num::NonZeroUsize::new(64).unwrap()),
                 move |_| {
                     let sender_tx = sender_tx.clone();
                     Ok(move |sender: crate::subscription::RtdSender<i32>| {
@@ -3903,7 +3903,7 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
         let (sender_tx, sender_rx) = mpsc::sync_channel(1);
         let source = registration
             .register(crate::subscription::RtdChannelSource::new(
-                std::num::NonZeroUsize::new(64).unwrap(),
+                crate::rtd::RtdFifo::new(std::num::NonZeroUsize::new(64).unwrap()),
                 move |_| {
                     let sender_tx = sender_tx.clone();
                     Ok(move |sender: crate::subscription::RtdSender<i32>| {

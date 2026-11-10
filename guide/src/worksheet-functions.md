@@ -37,8 +37,9 @@ to every ordinary parameter. Both `type Spot = f64` and a directly spelled
 Excel coercion caused by type aliases. `#[excel_arg(strict)]` remains useful
 for one parameter. Presence and default policies continue to apply.
 
-Without this option, recognized native scalar and string spellings retain
-Excel's native coercion. `NumericMatrixRef` still uses its explicit FP12 input
+Strict conversion is also the default without this option. Use
+`#[excel_arg(native)]` for explicit Excel coercion, or `native = f64` (etc.)
+for aliases. Function-wide strictness rejects these native opt-ins. `NumericMatrixRef` still uses its explicit FP12 input
 ABI, and `#[excel_arg(reference)]` still uses the reference ABI; function-wide
 strictness does not change these specialized contracts.
 

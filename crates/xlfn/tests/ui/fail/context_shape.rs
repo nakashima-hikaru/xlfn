@@ -8,7 +8,7 @@ trait ContextTypes {
 }
 
 impl ContextTypes for () {
-    type MainThreadContext = xlfn::MainThreadContext<'static, ()>;
+    type MainThreadContext = xlfn::addin::MainThreadContext<'static, ()>;
 }
 
 #[excel_function]

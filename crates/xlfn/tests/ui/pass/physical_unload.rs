@@ -25,6 +25,6 @@ impl Addin for PhysicalUnloadAddin {
 
 // SAFETY: this compile fixture represents an add-in that synchronously stops
 // every application-owned executable source before physical unload.
-unsafe impl xlfn::PhysicallyUnloadableAddin for PhysicalUnloadAddin {}
+unsafe impl xlfn::addin::PhysicallyUnloadableAddin for PhysicalUnloadAddin {}
 
 fn main() {}

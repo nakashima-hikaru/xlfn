@@ -15,25 +15,19 @@ pub(crate) const DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES: usize = 64 * 1024 * 1024;
 
 /// Capacity for one RTD resource class.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum RtdCapacity {
-    /// Do not admit the corresponding RTD resource.
-    Disabled,
-    /// Admit at most this many live resources.
-    Bounded(NonZeroUsize),
-}
+pub struct RtdCapacity(Option<NonZeroUsize>);
 
 impl RtdCapacity {
     #[must_use]
     /// Disables admission for this resource.
     pub const fn disabled() -> Self {
-        Self::Disabled
+        Self(None)
     }
 
     #[must_use]
     /// Admits at most the given positive number of resources.
     pub const fn bounded(value: NonZeroUsize) -> Self {
-        Self::Bounded(value)
+        Self(Some(value))
     }
 
     #[must_use]
@@ -42,8 +36,8 @@ impl RtdCapacity {
     /// Zero never means unlimited capacity.
     pub const fn disabled_if_zero(value: usize) -> Self {
         match NonZeroUsize::new(value) {
-            Some(value) => Self::Bounded(value),
-            None => Self::Disabled,
+            Some(value) => Self(Some(value)),
+            None => Self(None),
         }
     }
 
@@ -51,15 +45,15 @@ impl RtdCapacity {
     /// Returns the finite bound, or zero for disabled admission.
     pub const fn get(self) -> usize {
         match self {
-            Self::Disabled => 0,
-            Self::Bounded(value) => value.get(),
+            Self(None) => 0,
+            Self(Some(value)) => value.get(),
         }
     }
 
     #[must_use]
     /// Returns whether admission is disabled.
     pub const fn is_disabled(self) -> bool {
-        matches!(self, Self::Disabled)
+        self.0.is_none()
     }
 }
 
@@ -177,31 +171,31 @@ impl RtdLimits {
 
     #[must_use]
     /// Returns the pending-subscription capacity.
-    pub const fn max_pending(&self) -> RtdCapacity {
+    pub const fn max_pending(self) -> RtdCapacity {
         self.max_pending
     }
 
     #[must_use]
     /// Capacity for live subscriptions and source owners awaiting cleanup.
-    pub const fn max_active(&self) -> RtdCapacity {
+    pub const fn max_active(self) -> RtdCapacity {
         self.max_active
     }
 
     #[must_use]
     /// Returns the queued-update capacity.
-    pub const fn max_queued_updates(&self) -> RtdCapacity {
+    pub const fn max_queued_updates(self) -> RtdCapacity {
         self.max_queued_updates
     }
 
     #[must_use]
     /// Returns the source-identity capacity.
-    pub const fn max_source_ids(&self) -> RtdCapacity {
+    pub const fn max_source_ids(self) -> RtdCapacity {
         self.max_source_ids
     }
 
     #[must_use]
     /// Returns the aggregate retained topic-byte budget.
-    pub const fn max_total_topic_bytes(&self) -> RtdCapacity {
+    pub const fn max_total_topic_bytes(self) -> RtdCapacity {
         self.max_total_topic_bytes
     }
 }
@@ -335,7 +329,7 @@ impl RtdTopic {
         let mut normalized = Vec::with_capacity(parts.size_hint().0.min(MAX_RTD_TOPIC_PARTS));
         for part in parts {
             if normalized.len() >= MAX_RTD_TOPIC_PARTS {
-                return Err(XllError::input(
+                return Err(XllError::validation(
                     "RTD topic",
                     crate::error::InputError::TooLarge {
                         limit: MAX_RTD_TOPIC_PARTS,
@@ -345,7 +339,7 @@ impl RtdTopic {
             }
             let part = SmolStr::new(part.as_ref());
             if part.is_empty() {
-                return Err(XllError::input(
+                return Err(XllError::validation(
                     "RTD topic",
                     crate::error::InputError::Malformed("RTD topics require non-empty parts"),
                 ));
@@ -353,7 +347,7 @@ impl RtdTopic {
             normalized.push(part);
         }
         if normalized.is_empty() {
-            return Err(XllError::input(
+            return Err(XllError::validation(
                 "RTD topic",
                 crate::error::InputError::Malformed("RTD topics require non-empty parts"),
             ));
@@ -566,7 +560,7 @@ fn validate_topic_parts<'a>(
     parts: impl Clone + ExactSizeIterator<Item = &'a str>,
 ) -> XllResult<TopicMetadata> {
     if parts.len() == 0 {
-        return Err(XllError::input(
+        return Err(XllError::validation(
             "RTD topic",
             crate::error::InputError::Malformed("RTD topics require non-empty parts"),
         ));
@@ -575,7 +569,7 @@ fn validate_topic_parts<'a>(
     // the first 253 wins, but the 254th is rejected before inspecting it.
     for (index, part) in parts.clone().enumerate() {
         if index >= MAX_RTD_TOPIC_PARTS {
-            return Err(XllError::input(
+            return Err(XllError::validation(
                 "RTD topic",
                 crate::error::InputError::TooLarge {
                     limit: MAX_RTD_TOPIC_PARTS,
@@ -584,7 +578,7 @@ fn validate_topic_parts<'a>(
             ));
         }
         if part.is_empty() {
-            return Err(XllError::input(
+            return Err(XllError::validation(
                 "RTD topic",
                 crate::error::InputError::Malformed("RTD topics require non-empty parts"),
             ));
@@ -595,7 +589,7 @@ fn validate_topic_parts<'a>(
     parts.len().hash(&mut hasher);
     for part in parts.clone() {
         total_bytes = total_bytes.checked_add(part.len()).ok_or_else(|| {
-            XllError::input(
+            XllError::validation(
                 "RTD topic",
                 crate::error::InputError::TooLarge {
                     limit: MAX_RTD_TOPIC_BYTES,
@@ -606,7 +600,7 @@ fn validate_topic_parts<'a>(
         part.hash(&mut hasher);
     }
     if total_bytes > MAX_RTD_TOPIC_BYTES {
-        return Err(XllError::input(
+        return Err(XllError::validation(
             "RTD topic",
             crate::error::InputError::TooLarge {
                 limit: MAX_RTD_TOPIC_BYTES,
@@ -622,7 +616,7 @@ fn validate_topic_parts<'a>(
         }
         let length = part.encode_utf16().count();
         if length > crate::utf16::EXCEL_STRING_LIMIT {
-            return Err(XllError::input(
+            return Err(XllError::validation(
                 "RTD topic",
                 crate::error::InputError::TooLarge {
                     limit: crate::utf16::EXCEL_STRING_LIMIT,

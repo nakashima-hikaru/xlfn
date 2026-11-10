@@ -2,7 +2,7 @@
 mod executor;
 
 use xlfn::prelude::*;
-use xlfn::value::XlArrayRef;
+use xlfn::value::raw::XlArrayRef;
 
 struct State;
 

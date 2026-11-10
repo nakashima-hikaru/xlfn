@@ -1,5 +1,5 @@
 use crate::XllError;
-use crate::addin::{Addin, BuildInfo, OpenContext, RuntimeConfig};
+use crate::addin_impl::{Addin, BuildInfo, OpenContext, RuntimeConfig};
 use crate::error::IntoXllError;
 use crate::host_callback::HostCallbackSession;
 use crate::panic_boundary::catch_no_unwind;
@@ -47,8 +47,8 @@ where
     }
     #[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
     if let Err(error) = crate::excel_rtd::register_server_type::<
-        crate::addin::AddinSubscription<A>,
-        crate::addin::AddinSources<A>,
+        crate::addin_impl::AddinSubscription<A>,
+        crate::addin_impl::AddinSources<A>,
     >() {
         return Err(transaction.failure(error));
     }

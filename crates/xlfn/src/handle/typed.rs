@@ -11,7 +11,10 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::panic::AssertUnwindSafe;
 
-/// Marker implemented by `#[derive(ExcelHandleObject)]`.
+/// Marker implemented together with return conversion by `#[derive(ExcelHandleObject)]`.
+///
+/// Derive this contract. A manual marker implementation alone cannot return a
+/// new object from a UDF; the derive also supplies its owned return protocol.
 pub trait ExcelHandleObject: Send + Sync + 'static {}
 
 /// Compile-time brand used to keep a generated async handle lease inside the

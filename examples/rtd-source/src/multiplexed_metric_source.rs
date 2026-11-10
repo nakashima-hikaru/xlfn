@@ -91,7 +91,7 @@ fn produce_metrics(context: RtdSourceContext<RtdValue, RtdLatest>) -> XllResult<
 
 fn validate_topic(topic: &RtdTopic) -> XllResult<()> {
     if topic.len() != 2 || topic.part(0) != Some("last") {
-        return Err(XllError::input(
+        return Err(XllError::validation(
             "RTD topic",
             InputError::Malformed("expected [last, symbol]"),
         ));

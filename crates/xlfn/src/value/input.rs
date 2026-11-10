@@ -410,6 +410,11 @@ pub trait ExcelInputIdentity {
     fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder);
 }
 
+/// Framework-only authority for dispatch selection.
+#[derive(Clone, Copy)]
+#[doc(hidden)]
+pub struct PreparationDispatch;
+
 /// Preparation contract for semantic inputs of handle-producing functions.
 /// Preparation validates and records the complete identity before lookup.
 /// The returned state owns or borrows everything materialization needs; it is
@@ -420,6 +425,10 @@ pub trait ExcelInputIdentity {
 /// on a hit or a later argument error. Materialization consumes it at most once.
 /// The supported extension points are `Prepared`, `prepare`, and `materialize`;
 /// hidden dispatch hooks are framework implementation details.
+#[allow(
+    private_interfaces,
+    reason = "Unnameable token prevents downstream overrides of dispatch hooks"
+)]
 pub trait PrepareExcel<'call>: FromExcel<'call> + ExcelInputIdentity {
     /// Validated owned or borrowed state retained until a cache miss.
     type Prepared;
@@ -427,7 +436,9 @@ pub trait PrepareExcel<'call>: FromExcel<'call> + ExcelInputIdentity {
     // without retaining a per-cell prepared allocation. Custom preparation
     // keeps its existing eager MatrixRef policy.
     #[doc(hidden)]
-    const __BORROWED_ELEMENTS: bool = false;
+    fn __borrowed_elements(_: PreparationDispatch) -> bool {
+        false
+    }
     /// Validates the entire input and records its identity before lookup.
     fn prepare(
         value: XlValueRef<'call>,
@@ -750,7 +761,9 @@ pub trait ExcelParameter<'call, M: InputMode>:
 {
     // Only context-free built-ins may be decoded again after lookup. Custom
     // prepared ownership and call-scoped resources must stay retained.
-    const BORROWED_ELEMENTS: bool = false;
+    fn borrowed_elements() -> bool {
+        false
+    }
     fn decode_borrowed_element(_: XlValueRef<'call>, _: &'static str) -> XllResult<Self> {
         unreachable!("only context-free element strategies can decode borrowed cells")
     }
@@ -873,7 +886,9 @@ impl<'call, T> ExcelParameter<'call, FormulaInputMode> for T
 where
     T: PrepareExcel<'call>,
 {
-    const BORROWED_ELEMENTS: bool = T::__BORROWED_ELEMENTS;
+    fn borrowed_elements() -> bool {
+        T::__borrowed_elements(PreparationDispatch)
+    }
     fn decode_borrowed_element(
         value: XlValueRef<'call>,
         argument: &'static str,

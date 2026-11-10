@@ -3,7 +3,10 @@ use xlfn::cache::CalculationCache;
 
 #[test]
 fn miss_computes_and_returns_lease() {
-    let cache = CalculationCache::<String, String>::with_weigher(1024, String::len);
+    let cache = CalculationCache::<String, String>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(1024),
+        String::len,
+    );
     assert_eq!(cache.len(), 0);
     assert!(cache.get(&"k1".to_string()).is_none());
 
@@ -17,7 +20,10 @@ fn miss_computes_and_returns_lease() {
 
 #[test]
 fn hit_does_not_recompute() {
-    let cache = CalculationCache::<String, String>::with_weigher(1024, String::len);
+    let cache = CalculationCache::<String, String>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(1024),
+        String::len,
+    );
     let computes = AtomicUsize::new(0);
 
     let lease1 = cache

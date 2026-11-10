@@ -1,0 +1,5 @@
+error: expected main_thread, thread_safe, macro_sheet, or async
+ --> tests/ui/context_unknown_mode.rs:4:24
+  |
+4 | fn bad(#[excel_context(unknown)] context: MainThreadContext<'_, State>) -> f64 {
+  |                        ^^^^^^^

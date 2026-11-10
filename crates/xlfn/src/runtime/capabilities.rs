@@ -5,7 +5,7 @@
 //! `Runtime` itself into a service locator available to every transaction.
 
 use super::{AddinLifecycleAccess, Runtime};
-use crate::addin::Addin;
+use crate::addin_impl::Addin;
 use crate::lifecycle::{LifecycleAccess, LifecycleControl, LifecycleCoordinator};
 use crate::runtime::observer::RuntimeObserver;
 use crate::runtime_components::{

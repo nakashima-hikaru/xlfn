@@ -139,10 +139,10 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
             for #ident #type_generics #from_excel_where_clause
         {
             fn from_excel(
-                __value: #krate::value::XlValueRef<'__xlfn_call>,
+                __value: #krate::value::raw::XlValueRef<'__xlfn_call>,
                 __argument: &'static str,
             ) -> #krate::error::XllResult<Self> {
-                let __text = __value.as_str_with_argument(__argument)?;
+                let __text = __value.as_str().map_err(|error| error.with_argument(__argument))?.with_argument(__argument);
                 #(#comparisons)*
                 ::core::result::Result::Err(#krate::__private::v1::unknown_enum_error(
                     __text,
@@ -156,7 +156,7 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
             for #ident #type_generics #from_excel_where_clause
         {
             type Prepared = Self;
-            fn prepare(value: #krate::value::XlValueRef<'__xlfn_call>, argument: &'static str,
+            fn prepare(value: #krate::value::raw::XlValueRef<'__xlfn_call>, argument: &'static str,
                 identity: &mut #krate::value::InputIdentityEncoder) -> #krate::XllResult<Self> {
                 <Self as #krate::value::FromExcel>::from_excel_with_identity(value, argument, identity)
             }

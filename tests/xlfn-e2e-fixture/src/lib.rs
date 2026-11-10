@@ -28,7 +28,7 @@ impl Addin for FixtureAddin {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
-    type AsyncExecutor = xlfn::BuiltinAsyncExecutor;
+    type AsyncExecutor = xlfn::task::BuiltinAsyncExecutor;
 
     fn open(context: &OpenContext<Self>) -> OpenResult<Self> {
         let core = Box::new(FixtureCore {
@@ -40,8 +40,8 @@ impl Addin for FixtureAddin {
             .rtd()
             .register_sources((RtdFixtureSource { core: core_ptr },))?;
         Ok(
-            Opened::new(State { rtd, core }).with_async_executor(xlfn::BuiltinAsyncExecutor::new(
-                xlfn::BuiltinExecutorConfig::new(),
+            Opened::new(State { rtd, core }).with_async_executor(xlfn::task::BuiltinAsyncExecutor::new(
+                xlfn::task::BuiltinExecutorConfig::new(),
             )),
         )
     }
@@ -252,8 +252,8 @@ pub fn workbook_date_ymd(
     #[excel_arg(reference)] reference: ExcelReference<'_>,
 ) -> XllResult<String> {
     let system = context.workbook_date_system(&reference)?;
-    let (year, month, day) = serial
+    let xlfn::value::CalendarDate { year, month, day } = serial
         .with_date_system(system)
-        .to_ymd_with_argument("serial")?;
+        .to_ymd().map_err(|error| error.with_argument("serial"))?;
     Ok(format!("{year:04}-{month:02}-{day:02}"))
 }

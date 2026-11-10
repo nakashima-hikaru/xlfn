@@ -1,8 +1,8 @@
-error[E0277]: the trait bound `xlfn::MainThreadContext<'_, ()>: xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>` is not satisfied
+error[E0277]: the trait bound `xlfn::addin::MainThreadContext<'_, ()>: xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>` is not satisfied
  --> tests/ui/fail/context_alias.rs:9:17
   |
 9 | fn bad(context: MainContext<'_>) -> f64 {
-  |                 ^^^^^^^^^^^^^^^ the trait `FromExcel<'_>` is not implemented for `xlfn::MainThreadContext<'_, ()>`
+  |                 ^^^^^^^^^^^^^^^ the trait `FromExcel<'_>` is not implemented for `xlfn::addin::MainThreadContext<'_, ()>`
   |
   = help: the following other types implement trait `FromExcel<'call>`:
             ExcelCellValue
@@ -14,7 +14,7 @@ error[E0277]: the trait bound `xlfn::MainThreadContext<'_, ()>: xlfn::__private:
             i32
             i64
           and $N others
-  = note: required for `xlfn::MainThreadContext<'_, ()>` to implement `xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>`
+  = note: required for `xlfn::addin::MainThreadContext<'_, ()>` to implement `xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>`
 note: required by a bound in `xlfn::__private::v1::assert_excel_parameter`
  --> src/__private.rs
   |
@@ -24,13 +24,13 @@ note: required by a bound in `xlfn::__private::v1::assert_excel_parameter`
   |         T: ExcelParameter<'call, R::InputMode>,
   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_excel_parameter`
 
-error[E0277]: `xlfn::MainThreadContext<'_, ()>` cannot be converted from an Excel argument
+error[E0277]: `xlfn::addin::MainThreadContext<'_, ()>` cannot be converted from an Excel argument
  --> tests/ui/fail/context_alias.rs:8:1
   |
 8 | #[excel_function]
-  | ^^^^^^^^^^^^^^^^^ `xlfn::MainThreadContext<'_, ()>` does not implement `FromExcel`
+  | ^^^^^^^^^^^^^^^^^ `xlfn::addin::MainThreadContext<'_, ()>` does not implement `FromExcel`
   |
-  = help: the trait `FromExcel<'_>` is not implemented for `xlfn::MainThreadContext<'_, ()>`
+  = help: the trait `FromExcel<'_>` is not implemented for `xlfn::addin::MainThreadContext<'_, ()>`
   = note: implement `FromExcel` for this argument type or use a supported argument type
   = help: the following other types implement trait `FromExcel<'call>`:
             ExcelCellValue
@@ -42,10 +42,10 @@ error[E0277]: `xlfn::MainThreadContext<'_, ()>` cannot be converted from an Exce
             i32
             i64
           and $N others
-  = note: required for `xlfn::MainThreadContext<'_, ()>` to implement `xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>`
+  = note: required for `xlfn::addin::MainThreadContext<'_, ()>` to implement `xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0599]: the method `materialize` exists for enum `xlfn::__private::v1::PreparedArgument<xlfn::MainThreadContext<'_, ()>, Infallible, value::input::ParameterMaterializer<'_, xlfn::MainThreadContext<'_, ()>, xlfn::__private::v1::PlainInputMode>>`, but its trait bounds were not satisfied
+error[E0599]: the method `materialize` exists for enum `xlfn::__private::v1::PreparedArgument<xlfn::addin::MainThreadContext<'_, ()>, Infallible, value::input::ParameterMaterializer<'_, xlfn::addin::MainThreadContext<'_, ()>, xlfn::__private::v1::PlainInputMode>>`, but its trait bounds were not satisfied
  --> tests/ui/fail/context_alias.rs:8:1
   |
 8 | #[excel_function]
@@ -54,7 +54,7 @@ error[E0599]: the method `materialize` exists for enum `xlfn::__private::v1::Pre
  ::: src/addin.rs
   |
   | pub struct MainThreadContext<'call, A: Addin> {
-  | --------------------------------------------- doesn't satisfy `xlfn::MainThreadContext<'_, ()>: FromExcel<'_>`
+  | --------------------------------------------- doesn't satisfy `_: FromExcel<'_>`
   |
  ::: src/value/input.rs
   |
@@ -62,6 +62,6 @@ error[E0599]: the method `materialize` exists for enum `xlfn::__private::v1::Pre
   | --------------------------------------------- doesn't satisfy `_: ArgumentMaterializer<MainThreadContext<'_, ()>, Infallible>`
   |
   = note: the following trait bounds were not satisfied:
-          `xlfn::MainThreadContext<'_, ()>: FromExcel<'_>`
-          which is required by `value::input::ParameterMaterializer<'_, xlfn::MainThreadContext<'_, ()>, xlfn::__private::v1::PlainInputMode>: xlfn::__private::v1::ArgumentMaterializer<xlfn::MainThreadContext<'_, ()>, Infallible>`
+          `xlfn::addin::MainThreadContext<'_, ()>: FromExcel<'_>`
+          which is required by `value::input::ParameterMaterializer<'_, xlfn::addin::MainThreadContext<'_, ()>, xlfn::__private::v1::PlainInputMode>: xlfn::__private::v1::ArgumentMaterializer<xlfn::addin::MainThreadContext<'_, ()>, Infallible>`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

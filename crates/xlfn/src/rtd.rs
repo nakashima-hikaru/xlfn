@@ -7,10 +7,10 @@
     )
 )]
 
-#[cfg(feature = "rtd")]
-pub use crate::BoxedRtdSubscription;
 use crate::XllResult;
+pub use crate::addin_impl::{RtdConfig, RtdOpenContext};
 use crate::host_api::ExcelHost;
+pub use crate::source_catalog::{DynamicRtdSources, RtdSourceCatalog};
 #[cfg(feature = "rtd")]
 pub use crate::subscription::{
     IntoRtdSubscription, IntoRtdValue, NoTopicValidator, RtdBatchSendError, RtdCapacity,
@@ -20,6 +20,8 @@ pub use crate::subscription::{
     RtdSourceEvent, RtdSourceHandle, RtdSourceLimits, RtdSubscription, RtdSubscriptionId, RtdTopic,
     RtdTopicInput, RtdTopicParts, RtdTopicValidator, RtdValue,
 };
+#[cfg(feature = "rtd")]
+pub use crate::subscription_owner::BoxedRtdSubscription;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -28,7 +30,7 @@ pub(crate) mod test_support;
 /// publication.
 ///
 /// The capability owns the RTD-side preparation/observation/commit protocol;
-/// [`crate::addin::MainThreadContext`] only exposes this narrow entry point and
+/// [`crate::addin_impl::MainThreadContext`] only exposes this narrow entry point and
 /// does not know how generation services are composed.
 #[cfg(feature = "rtd")]
 pub struct RtdCallContext<

@@ -18,6 +18,12 @@ neither state nor those operations.
 | Asynchronous | `async fn` | native async ABI | no | no |
 
 
+Renamed imports and generic type aliases can select injection explicitly:
+`#[excel_context(main_thread)] context: MyContext<'_, MyAddin>`.
+The supported modes are `main_thread`, `thread_safe`, `macro_sheet`, and `async`.
+The compiler checks that the actual context type matches the selected mode.
+Use this explicit attribute when a refactor changes a standard context spelling.
+
 ## Add a context when needed
 
 A context must be the first parameter and be passed by value. The macro
@@ -35,7 +41,7 @@ mode flags, whether or not a context is present.
 
 Use the standard type name directly, such as
 `ThreadSafeContext<'_, AppTools>` after an ordinary import, or a qualified
-path such as `xlfn::ThreadSafeContext<'_, AppTools>`. The macro recognizes the
+path such as `xlfn::addin::ThreadSafeContext<'_, AppTools>`. The macro recognizes the
 path's final identifier. Type aliases, renamed imports, and custom context
 types are not supported for injection.
 

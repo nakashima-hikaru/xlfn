@@ -175,16 +175,16 @@ macro_rules! rtd_subscriptions {
 
         // SAFETY: every operation delegates to the exact uniquely owned variant.
         #[allow(unsafe_code, reason = "generated subscription enum delegates each barrier to its concrete owner")]
-        unsafe impl $crate::RtdSubscription for $name {
+        unsafe impl $crate::__private::v1::RtdSubscription for $name {
             fn request_cancel(&self) {
                 match self {
-                    $(Self::$variant(value) => <$subscription as $crate::RtdSubscription>::request_cancel(value),)+
+                    $(Self::$variant(value) => <$subscription as $crate::__private::v1::RtdSubscription>::request_cancel(value),)+
                 }
             }
 
             fn disconnect_and_wait(self) -> $crate::XllResult<()> {
                 match self {
-                    $(Self::$variant(value) => <$subscription as $crate::RtdSubscription>::disconnect_and_wait(value),)+
+                    $(Self::$variant(value) => <$subscription as $crate::__private::v1::RtdSubscription>::disconnect_and_wait(value),)+
                 }
             }
         }
@@ -193,7 +193,7 @@ macro_rules! rtd_subscriptions {
             // SAFETY: constructing the variant only moves its owner; it cannot
             // panic, retain an independent obligation, or invoke application code.
             #[allow(unsafe_code, reason = "generated conversion only moves a subscription into its enum variant")]
-            unsafe impl $crate::IntoRtdSubscription<$name> for $subscription {
+            unsafe impl $crate::__private::v1::IntoRtdSubscription<$name> for $subscription {
                 fn into_rtd_subscription(self) -> $name {
                     $name::$variant(self)
                 }

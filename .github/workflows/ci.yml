@@ -37,6 +37,22 @@ jobs:
             - name: Reject unreviewed direct panic boundaries
               run: just panic-boundaries
 
+    public-api:
+        name: Supported API snapshots
+        runs-on: macos-latest
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+            - name: Install pinned extraction toolchain and targets
+              run: rustup toolchain install nightly-2026-09-28 --profile minimal --target aarch64-apple-darwin,x86_64-pc-windows-msvc
+            - name: Install API extractor
+              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
+              with:
+                  tool: cargo-public-api@0.52.0
+                  fallback: none
+            - name: Verify reviewed API surfaces
+              run: PYTHONPATH=tools/src python3 -m xlfn_tools.check_public_api
+
     portable-quality:
         name: Portable quality and tooling
         runs-on: ubuntu-latest

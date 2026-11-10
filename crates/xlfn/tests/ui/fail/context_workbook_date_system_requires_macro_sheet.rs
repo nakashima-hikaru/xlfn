@@ -1,4 +1,6 @@
-use xlfn::{MainThreadContext, ThreadSafeContext};
+
+use xlfn::addin::{MainThreadContext};
+use xlfn::addin::{ThreadSafeContext};
 use xlfn::reference::ExcelReference;
 
 fn main_thread(context: MainThreadContext<'_, ()>, reference: ExcelReference<'_>) {

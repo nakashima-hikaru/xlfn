@@ -251,7 +251,7 @@ where
         F: Fn(u64) -> K + Copy + Send + 'static,
     {
         let cache = Arc::new(CalculationCache::with_weigher(
-            RESIDENT_ENTRIES * payload_bytes,
+            xlfn::cache::CacheBudget::weight_units(RESIDENT_ENTRIES * payload_bytes),
             |value: &Payload| value.0.len(),
         ));
         let barrier = Arc::new(Barrier::new(worker_count + 1));
@@ -438,7 +438,10 @@ where
 fn reclamation_benchmarks(c: &mut Criterion) {
     // Isolate entry storage from policy allocation and payload backing
     // buffers. Warm TLS first and keep final-drop maintenance outside the probe.
-    let zero_capacity = CalculationCache::<u64, u64>::with_weigher(0, |_| 8);
+    let zero_capacity = CalculationCache::<u64, u64>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(0),
+        |_| 8,
+    );
     drop(zero_capacity.get_or_try_insert_with(0, || Ok(42)).unwrap());
     let allocation_probe = AllocationProbe::start();
     let value = zero_capacity.get_or_try_insert_with(1, || Ok(42)).unwrap();
@@ -526,8 +529,10 @@ where
     // Owner construction includes resident policy and the retirement queue for
     // Drop-bearing keys. Final cache destruction stays outside the probe.
     let probe = AllocationProbe::start();
-    let cache =
-        CalculationCache::<K, Payload>::with_weigher(RESIDENT_ENTRIES * 64, |value| value.0.len());
+    let cache = CalculationCache::<K, Payload>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(RESIDENT_ENTRIES * 64),
+        |value| value.0.len(),
+    );
     let counts = probe.finish();
     println!(
         "cache_owner_allocation_probe {}",
@@ -574,7 +579,10 @@ fn deferred_queue_churn<K>(
 ) where
     K: Clone + Eq + Hash + Send + Sync + 'static,
 {
-    let cache = CalculationCache::<K, u64>::with_weigher(RESIDENT_ENTRIES * 8, |_| 8);
+    let cache = CalculationCache::<K, u64>::with_weigher(
+        xlfn::cache::CacheBudget::weight_units(RESIDENT_ENTRIES * 8),
+        |_| 8,
+    );
     // Keep decimal key width fixed throughout practical timing runs, so a
     // faster variant does not pay for longer strings merely by doing more work.
     let mut next_key = 1_u64 << 60;

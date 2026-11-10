@@ -164,13 +164,13 @@ pub(crate) fn connected_sink<T: IntoRtdValue + Clone + Send + Sync + 'static>(
 
 #[test]
 fn rtd_capacity_distinguishes_disabled_and_bounded_limits() {
-    assert_eq!(RtdCapacity::disabled_if_zero(0), RtdCapacity::Disabled);
+    assert_eq!(RtdCapacity::disabled_if_zero(0), RtdCapacity::disabled());
     assert!(RtdCapacity::disabled().is_disabled());
 
     let bounded = RtdCapacity::disabled_if_zero(4);
     assert_eq!(
         bounded,
-        RtdCapacity::Bounded(NonZeroUsize::new(4).expect("test limit is non-zero"))
+        RtdCapacity::bounded(NonZeroUsize::new(4).expect("test limit is non-zero"))
     );
     assert_eq!(bounded.get(), 4);
     assert!(!bounded.is_disabled());

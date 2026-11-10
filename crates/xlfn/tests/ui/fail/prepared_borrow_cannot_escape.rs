@@ -1,4 +1,5 @@
-use xlfn::value::{InputIdentityEncoder, PrepareExcel, XlValueRef};
+use xlfn::value::{InputIdentityEncoder, PrepareExcel};
+use xlfn::value::raw::{XlValueRef};
 use xlfn::XllResult;
 
 fn escape<'call>(value: XlValueRef<'call>, identity: &mut InputIdentityEncoder)

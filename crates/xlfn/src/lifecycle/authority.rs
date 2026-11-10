@@ -4,7 +4,7 @@
 //! mutate only the lifecycle coordinator; runtime-wide orchestration belongs
 //! to `crate::runtime::orchestration`.
 
-use crate::addin::Addin;
+use crate::addin_impl::Addin;
 use crate::generation::{OpenAttemptId, OpeningGeneration, RemovalAttemptId, RemovalEpoch};
 use crate::lifecycle::{
     FinalRemovalReady, HostLifecycleIntent, LifecycleAccess, LifecycleCoordinator,
@@ -23,8 +23,8 @@ pub(crate) type PublishGenerationFailure<A> = Box<(
     Option<OpeningGeneration<A>>,
     Box<
         crate::runtime_components::GenerationServices<
-            crate::addin::AddinSubscription<A>,
-            crate::addin::AddinSources<A>,
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
         >,
     >,
     crate::module_runtime::ModuleEpochLease,
@@ -166,8 +166,8 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         generation: crate::generation::RuntimeGeneration,
         services: Box<
             crate::runtime_components::GenerationServices<
-                crate::addin::AddinSubscription<A>,
-                crate::addin::AddinSources<A>,
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
             >,
         >,
         module_epoch: crate::module_runtime::ModuleEpochLease,

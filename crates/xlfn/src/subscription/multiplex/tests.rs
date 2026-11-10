@@ -694,7 +694,7 @@ fn blocking_and_multiplexed_adapters_share_the_runtime_worker_budget() {
     let (blocking_tx, blocking_rx) = mpsc::channel();
     let blocking = registration
         .register(super::super::channel::RtdChannelSource::new(
-            std::num::NonZeroUsize::new(1).unwrap(),
+            crate::rtd::RtdFifo::new(std::num::NonZeroUsize::new(1).unwrap()),
             move |_| {
                 let blocking_tx = blocking_tx.clone();
                 Ok(move |sender: RtdSender<i32>| {

@@ -529,7 +529,7 @@ mod tests {
         let (sender_tx, sender_rx) = mpsc::sync_channel(1);
         let source = registration
             .register(RtdChannelSource::new(
-                NonZeroUsize::new(64).unwrap(),
+                crate::rtd::RtdFifo::new(NonZeroUsize::new(64).unwrap()),
                 move |_| {
                     let sender_tx = sender_tx.clone();
                     Ok(move |sender: RtdSender<i32>| {
@@ -789,26 +789,29 @@ mod tests {
         );
         let source = registration
             .register(
-                RtdChannelSource::new(NonZeroUsize::new(8).unwrap(), move |_| {
-                    let sequence = started.fetch_add(1, Ordering::Relaxed);
-                    let sender_tx = sender_tx.clone();
-                    let joining_tx = joining_tx.clone();
-                    let release = StdArc::clone(&release);
-                    Ok(move |sender: RtdSender<i32>| {
-                        sender_tx.send(sender.clone()).unwrap();
-                        assert!(sender.wait_closed(DEADLINE));
-                        if sequence == 0 {
-                            joining_tx.send(()).unwrap();
-                            release
-                                .lock()
-                                .take()
-                                .unwrap()
-                                .recv_timeout(DEADLINE)
-                                .unwrap();
-                        }
-                        Ok(())
-                    })
-                })
+                RtdChannelSource::new(
+                    crate::rtd::RtdFifo::new(NonZeroUsize::new(8).unwrap()),
+                    move |_| {
+                        let sequence = started.fetch_add(1, Ordering::Relaxed);
+                        let sender_tx = sender_tx.clone();
+                        let joining_tx = joining_tx.clone();
+                        let release = StdArc::clone(&release);
+                        Ok(move |sender: RtdSender<i32>| {
+                            sender_tx.send(sender.clone()).unwrap();
+                            assert!(sender.wait_closed(DEADLINE));
+                            if sequence == 0 {
+                                joining_tx.send(()).unwrap();
+                                release
+                                    .lock()
+                                    .take()
+                                    .unwrap()
+                                    .recv_timeout(DEADLINE)
+                                    .unwrap();
+                            }
+                            Ok(())
+                        })
+                    },
+                )
                 .with_max_producers(NonZeroUsize::new(1).unwrap()),
             )
             .unwrap();
@@ -891,7 +894,7 @@ mod tests {
             );
             let source = registration
                 .register(RtdChannelSource::new(
-                    NonZeroUsize::new(8).unwrap(),
+                    crate::rtd::RtdFifo::new(NonZeroUsize::new(8).unwrap()),
                     move |_| {
                         let sender_tx = sender_tx.clone();
                         let joining_tx = joining_tx.clone();
@@ -981,16 +984,19 @@ mod tests {
             );
             let source = registration
                 .register(
-                    RtdChannelSource::new(NonZeroUsize::new(8).unwrap(), move |_| {
-                        if called.fetch_add(1, Ordering::Relaxed) == 0 {
-                            assert!(!panic, "injected source setup panic");
-                            return Err(XllError::Overloaded);
-                        }
-                        Ok(move |sender: RtdSender<i32>| {
-                            assert!(sender.wait_closed(DEADLINE));
-                            Ok(())
-                        })
-                    })
+                    RtdChannelSource::new(
+                        crate::rtd::RtdFifo::new(NonZeroUsize::new(8).unwrap()),
+                        move |_| {
+                            if called.fetch_add(1, Ordering::Relaxed) == 0 {
+                                assert!(!panic, "injected source setup panic");
+                                return Err(XllError::Overloaded);
+                            }
+                            Ok(move |sender: RtdSender<i32>| {
+                                assert!(sender.wait_closed(DEADLINE));
+                                Ok(())
+                            })
+                        },
+                    )
                     .with_max_producers(NonZeroUsize::new(1).unwrap()),
                 )
                 .unwrap();

@@ -164,7 +164,7 @@ impl<A: Addin, P: UnloadPolicy<A>> Runtime<A, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addin::{OpenContext, Opened, PhysicallyUnloadableAddin};
+    use crate::addin_impl::{OpenContext, Opened, PhysicallyUnloadableAddin};
     use crate::runtime::PhysicalUnload;
 
     struct Probe;
@@ -179,7 +179,7 @@ mod tests {
         type Error = crate::XllError;
         #[cfg(feature = "async")]
         type AsyncExecutor = crate::NoAsyncExecutor;
-        fn open(_: &OpenContext<Self>) -> crate::addin::OpenResult<Self> {
+        fn open(_: &OpenContext<Self>) -> crate::addin_impl::OpenResult<Self> {
             Ok(Opened::new(()))
         }
     }

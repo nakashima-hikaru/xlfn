@@ -4,7 +4,10 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use xlfn::prelude::*;
-use xlfn::{AsyncExecutor, AsyncTask, RuntimeConfig};
+
+use xlfn::addin::RuntimeConfig;
+use xlfn::task::AsyncExecutor;
+use xlfn::task::AsyncTask;
 
 struct ApplicationExecutor {
     drops: Arc<AtomicUsize>,

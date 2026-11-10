@@ -19,7 +19,7 @@ fn populated_cache(
     drops: &Arc<AtomicUsize>,
     during_initializer: &Arc<AtomicUsize>,
 ) -> CalculationCache<u32, DropProbe> {
-    let cache = CalculationCache::new(1);
+    let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(1));
     drop(
         cache
             .get_or_try_insert_weighted(
@@ -43,7 +43,7 @@ fn clearing_or_dropping_another_cache_inside_initializer_preserves_owned_retirem
         let drops = Arc::new(AtomicUsize::new(0));
         let during_initializer = Arc::new(AtomicUsize::new(0));
         let mut other = Some(populated_cache(&drops, &during_initializer));
-        let outer = CalculationCache::<u32, u32>::new(1);
+        let outer = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(1));
         drop(
             outer
                 .get_or_try_insert_weighted(
@@ -91,7 +91,7 @@ impl Eq for OwnedKey {}
 fn detached_keys_outlive_their_cache_when_dropped_inside_an_initializer() {
     let drops = Arc::new(AtomicUsize::new(0));
     let during_initializer = Arc::new(AtomicUsize::new(0));
-    let other = CalculationCache::<OwnedKey, u32>::new(1);
+    let other = CalculationCache::<OwnedKey, u32>::new(crate::cache::CacheBudget::weight_units(1));
     let key = OwnedKey {
         _owner: Arc::new(DropProbe {
             drops: Arc::clone(&drops),
@@ -103,7 +103,7 @@ fn detached_keys_outlive_their_cache_when_dropped_inside_an_initializer() {
             .get_or_try_insert_weighted(key, |_| 1, || Ok(1))
             .unwrap(),
     );
-    let outer = CalculationCache::<u32, u32>::new(1);
+    let outer = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(1));
     drop(
         outer
             .get_or_try_insert_weighted(
@@ -126,7 +126,7 @@ fn unrelated_cache_reader_does_not_delay_a_different_caches_clear() {
     let drops = Arc::new(AtomicUsize::new(0));
     let during_initializer = Arc::new(AtomicUsize::new(0));
     let other = populated_cache(&drops, &during_initializer);
-    let reading = CalculationCache::<u32, u32>::new(1);
+    let reading = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(1));
     let reader = reading.domain.enter().unwrap();
     other.clear();
     assert_eq!(drops.load(Ordering::Acquire), 1);
@@ -170,7 +170,7 @@ fn thread_local_cache_reclaims_after_reader_tls_teardown() {
             }
         }
         thread_local! {
-            static CACHE: ThreadLocalCache = ThreadLocalCache(CalculationCache::new(1));
+            static CACHE: ThreadLocalCache = ThreadLocalCache(CalculationCache::new(crate::cache::CacheBudget::weight_units(1)));
         }
         std::thread::spawn(|| {
             CACHE.with(|cache| {

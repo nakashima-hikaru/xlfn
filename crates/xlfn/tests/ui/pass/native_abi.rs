@@ -15,7 +15,7 @@ impl Addin for TestAddin {
 }
 
 #[excel_function(thread_safe)]
-fn native(number: f64, enabled: bool, count: i32, text: String, borrowed: &str) -> f64 {
+fn native(#[excel_arg(native)] number: f64, #[excel_arg(native)] enabled: bool, #[excel_arg(native)] count: i32, #[excel_arg(native)] text: String, #[excel_arg(native)] borrowed: &str) -> f64 {
     number + f64::from(count) + if enabled { (text.len() + borrowed.len()) as f64 } else { 0.0 }
 }
 
@@ -50,7 +50,7 @@ fn fallback(number: NumberAlias, count: i64, optional: Option<f64>) -> f64 {
 macro_rules! forward_type {
     ($ty:ty) => {
         #[excel_function]
-        fn forwarded(number: $ty) -> f64 { number }
+        fn forwarded(#[excel_arg(native)] number: $ty) -> f64 { number }
     };
 }
 forward_type!(::core::primitive::f64);
@@ -70,3 +70,6 @@ fn main() {
     let _: unsafe extern "system" fn(f64) -> Value = xll_forwarded;
     let _: unsafe extern "system" fn(Value, Value, Value, *const xlfn::__private::v1::FP12) -> Value = xll_strict_function;
 }
+
+#[excel_function]
+fn explicit_alias(#[excel_arg(native = f64)] number: NumberAlias) -> f64 { number }

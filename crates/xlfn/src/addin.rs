@@ -67,15 +67,15 @@ impl BuildInfo {
 ///
 /// Initialization runs on Excel's lifecycle thread. Read installed sidecars
 /// relative to [`Self::module_directory`] rather than Excel's working directory.
-pub struct OpenContext<A: Addin = ()> {
+pub struct OpenContext<A: Addin> {
     marker: PhantomData<fn() -> A>,
     module_path: PathBuf,
     module_directory: PathBuf,
     build_info: BuildInfo,
     #[cfg(feature = "rtd")]
     source_registration: crate::subscription::SourceRegistration<
-        crate::addin::AddinSubscription<A>,
-        crate::addin::AddinSources<A>,
+        crate::addin_impl::AddinSubscription<A>,
+        crate::addin_impl::AddinSources<A>,
     >,
 }
 
@@ -137,9 +137,7 @@ impl<A: Addin> OpenContext<A> {
     /// Provides the RTD source-registration capability for this open.
     #[cfg(feature = "rtd")]
     #[must_use]
-    pub fn rtd(
-        &self,
-    ) -> RtdOpenContext<'_, crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>> {
+    pub fn rtd(&self) -> RtdOpenContext<'_, A::RtdSubscription, A::RtdSources> {
         RtdOpenContext {
             registration: &self.source_registration,
         }
@@ -148,8 +146,8 @@ impl<A: Addin> OpenContext<A> {
     pub(crate) fn into_service_inputs(
         self,
     ) -> crate::runtime_components::GenerationServiceInputs<
-        crate::addin::AddinSubscription<A>,
-        crate::addin::AddinSources<A>,
+        crate::addin_impl::AddinSubscription<A>,
+        crate::addin_impl::AddinSources<A>,
     > {
         #[cfg(feature = "rtd")]
         {
@@ -207,7 +205,7 @@ impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdOpenContext<'_
 /// Process-wide diagnostic sink configuration capability available during add-in open.
 ///
 /// This shared router is independent of each runtime's [`crate::diagnostics::DiagnosticHistory`].
-pub struct DiagnosticsSetup<'a, A: Addin = ()> {
+pub struct DiagnosticsSetup<'a, A: Addin> {
     context: &'a OpenContext<A>,
 }
 
@@ -232,15 +230,6 @@ impl<A: Addin> DiagnosticsSetup<'_, A> {
         S: DiagnosticSink,
     {
         crate::diagnostics::set_diagnostic_sink(sink)
-    }
-
-    /// Installs or replaces the process-wide diagnostic sink with a custom implementation.
-    #[deprecated(note = "use install_sink or replace_sink to make shared ownership explicit")]
-    pub fn set_sink<S>(&self, sink: S) -> Result<(), DiagnosticInitError>
-    where
-        S: DiagnosticSink,
-    {
-        self.replace_sink(sink)
     }
 }
 
@@ -268,12 +257,10 @@ impl HandleBindingLimit {
 
 #[cfg(feature = "handles")]
 impl TryFrom<u32> for HandleBindingLimit {
-    type Error = crate::XllError;
+    type Error = crate::error::InvalidLimit;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
-        Self::new(value).ok_or(crate::XllError::Domain {
-            code: crate::error::DomainErrorCode::InvalidInput,
-        })
+        Self::new(value).ok_or(crate::error::InvalidLimit)
     }
 }
 
@@ -459,12 +446,10 @@ impl AsyncTaskLimit {
 
 #[cfg(feature = "async")]
 impl TryFrom<usize> for AsyncTaskLimit {
-    type Error = crate::XllError;
+    type Error = crate::error::InvalidLimit;
 
     fn try_from(task_limit: usize) -> Result<Self, Self::Error> {
-        Self::new(task_limit).ok_or(crate::XllError::Domain {
-            code: crate::error::DomainErrorCode::InvalidInput,
-        })
+        Self::new(task_limit).ok_or(crate::error::InvalidLimit)
     }
 }
 
@@ -647,6 +632,11 @@ impl<S, L, U, E> Opened<S, L, U, E> {
 /// best-effort lifecycle cleanup begins. The shared state is dropped only
 /// after quiescence; lifecycle cleanup receives the dedicated lifecycle state.
 ///
+/// Implement this trait through [`crate::excel_addin`] on an impl block.
+/// Bare implementations and the former struct attribute are unsupported.
+/// The macro follows unified facade features, so applications must not gate
+/// RTD or async associated types with consumer-side cfg attributes.
+///
 /// Apply [`crate::excel_addin`] to the implementation to generate the exports
 /// and supply empty RTD configuration when these types are omitted. The RTD
 /// associated types exist only with the `rtd` feature; add-ins using sources
@@ -785,6 +775,7 @@ pub unsafe trait PhysicallyUnloadableAddin: Addin {
     }
 }
 
+#[doc(hidden)]
 impl Addin for () {
     #[cfg(feature = "rtd")]
     type RtdSubscription = ();
@@ -947,7 +938,7 @@ pub struct MainThreadContext<'call, A: Addin> {
     state: &'call A::SharedState,
     diagnostics: &'call crate::diagnostics::DiagnosticHistory,
     #[cfg(feature = "rtd")]
-    rtd: RtdCallContext<'call, crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+    rtd: RtdCallContext<'call, A::RtdSubscription, A::RtdSources>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
@@ -1076,8 +1067,8 @@ impl<A: Addin> MainThreadContext<'_, A> {
         diagnostics: &'ctx crate::diagnostics::DiagnosticHistory,
         rtd: RtdCallContext<
             'ctx,
-            crate::addin::AddinSubscription<A>,
-            crate::addin::AddinSources<A>,
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
         >,
     ) -> MainThreadContext<'ctx, A> {
         MainThreadContext {
@@ -1120,10 +1111,7 @@ impl<'call, A: Addin> MainThreadContext<'call, A> {
     #[cfg(feature = "rtd")]
     #[must_use]
     /// Returns the RTD subscription capability for this invocation.
-    pub fn rtd(
-        &self,
-    ) -> RtdCallContext<'call, crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>
-    {
+    pub fn rtd(&self) -> RtdCallContext<'call, A::RtdSubscription, A::RtdSources> {
         self.rtd
     }
 }
@@ -1169,7 +1157,7 @@ impl<A: Addin> std::fmt::Debug for DiagnosticsSetup<'_, A> {
 macro_rules! __xlfn_addin_rtd_types {
     (@default) => {
         type RtdSubscription = ();
-        type RtdSources = $crate::DynamicRtdSources<Self::RtdSubscription>;
+        type RtdSources = $crate::rtd::DynamicRtdSources<Self::RtdSubscription>;
     };
     (@configured subscription: $subscription:ty, sources: $sources:ty) => {
         type RtdSubscription = $subscription;
@@ -1193,7 +1181,7 @@ macro_rules! __xlfn_addin_rtd_types {
 #[macro_export]
 macro_rules! __xlfn_addin_async_type {
     (@default) => {
-        type AsyncExecutor = $crate::NoAsyncExecutor;
+        type AsyncExecutor = $crate::task::NoAsyncExecutor;
     };
     (@configured $executor:ty) => {
         type AsyncExecutor = $executor;
@@ -1245,8 +1233,8 @@ mod tests {
     assert_impl_all!(ThreadSafeContext<'static, ()>: Copy, Clone, Send, Sync);
     assert_impl_all!(MainThreadContext<'static, ()>: Clone);
     assert_impl_all!(MacroSheetContext<'static, ()>: Clone);
-    assert_impl_all!(DiagnosticsSetup<'static>: Copy, Clone, Send, Sync);
-    assert_not_impl_any!(super::OpenContext: Clone);
+    assert_impl_all!(DiagnosticsSetup<'static, ()>: Copy, Clone, Send, Sync);
+    assert_not_impl_any!(super::OpenContext<()>: Clone);
     assert_not_impl_any!(MainThreadContext<'static, ()>: Send, Sync);
     assert_not_impl_any!(MacroSheetContext<'static, ()>: Send, Sync);
 
@@ -1624,7 +1612,7 @@ mod tests {
 
     #[test]
     fn open_context_exposes_diagnostics_setup() {
-        let build_info = crate::addin::BuildInfo::new(
+        let build_info = crate::addin_impl::BuildInfo::new(
             crate::diagnostics::AddinId::parse("test-addin").unwrap(),
             "0.1.0",
             "x86_64-pc-windows-msvc",

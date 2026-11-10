@@ -7,7 +7,7 @@ use xlfn::benchmark_support::{
     RegistrationBenchmark, ScalarOutputBenchmark, SemanticIdentityBenchmark,
     Utf16IdentityBenchmark,
 };
-use xlfn::output::XlArrayBuilder;
+use xlfn::output::ExcelArrayBuilder;
 
 const WARMUP_CALLS: usize = 100;
 const MEASURED_CALLS: usize = 10_000;
@@ -107,7 +107,7 @@ fn main() {
     {
         use xlfn::cache::{CacheEndpoint, CacheRegistry, CalculationCache};
         let key = "key".repeat(256);
-        let cache = CalculationCache::<String, u64>::new(8);
+        let cache = CalculationCache::<String, u64>::new(xlfn::cache::CacheBudget::weight_units(8));
         drop(
             cache
                 .get_or_try_insert_borrowed(key.as_str(), || Ok(7))
@@ -138,7 +138,7 @@ fn main() {
             assert_eq!(owned.requested_bytes, MEASURED_CALLS * key.len());
             assert_eq!(owned.reallocations, 0);
         }
-        let registry = CacheRegistry::new(8);
+        let registry = CacheRegistry::new(xlfn::cache::CacheBudget::weight_units(8));
         let endpoint = CacheEndpoint::<String, u64>::new("borrowed_probe");
         drop(
             registry
@@ -324,7 +324,7 @@ fn main() {
     }
     for cells in [1, 1_000] {
         measure(&format!("array{cells}/one_string_rest_numbers"), || {
-            let mut builder = XlArrayBuilder::new(1, cells).unwrap();
+            let mut builder = ExcelArrayBuilder::new(1, cells).unwrap();
             builder.push("Ready").unwrap();
             for _ in 1..cells {
                 builder.push_f64(1.0).unwrap();
@@ -333,14 +333,14 @@ fn main() {
         });
     }
     let strings = measure("array1000/str", || {
-        let mut builder = XlArrayBuilder::new(1, ARRAY_CELLS).unwrap();
+        let mut builder = ExcelArrayBuilder::new(1, ARRAY_CELLS).unwrap();
         for _ in 0..ARRAY_CELLS {
             builder.push(black_box("Ready")).unwrap();
         }
         black_box(builder.finish().unwrap());
     });
     let enums = measure("array1000/enum", || {
-        let mut builder = XlArrayBuilder::new(1, ARRAY_CELLS).unwrap();
+        let mut builder = ExcelArrayBuilder::new(1, ARRAY_CELLS).unwrap();
         for _ in 0..ARRAY_CELLS {
             builder.push(black_box(Status::Ready)).unwrap();
         }

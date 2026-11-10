@@ -24,6 +24,6 @@ fn inner_cfg_attr_disabled() -> f64 {
 
 #[xlfn::excel_addin(name = "Disabled", id = "disabled", category = "Test")]
 #[cfg(any())]
-pub struct DisabledAddin;
+impl xlfn::Addin for DisabledAddin {}
 
 fn main() {}

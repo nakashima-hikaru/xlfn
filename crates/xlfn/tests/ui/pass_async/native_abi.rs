@@ -19,7 +19,7 @@ impl Addin for TestAddin {
 }
 
 #[excel_function]
-async fn native(number: f64, enabled: bool, count: i32, text: String) -> f64 {
+async fn native(#[excel_arg(native)] number: f64, #[excel_arg(native)] enabled: bool, #[excel_arg(native)] count: i32, #[excel_arg(native)] text: String) -> f64 {
     std::future::ready(()).await;
     number + f64::from(count) + if enabled { text.len() as f64 } else { 0.0 }
 }

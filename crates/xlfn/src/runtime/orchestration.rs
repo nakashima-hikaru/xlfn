@@ -7,7 +7,7 @@
 
 #[cfg(test)]
 use crate::XllError;
-use crate::addin::Addin;
+use crate::addin_impl::Addin;
 use crate::generation::{ExecutionGeneration, OpenAttemptId, OpeningGeneration, RuntimeGeneration};
 use crate::lifecycle::{LifecycleControl, LifecyclePhase, OpenFailureDisposition};
 use crate::runtime::capabilities::OpenDeps;

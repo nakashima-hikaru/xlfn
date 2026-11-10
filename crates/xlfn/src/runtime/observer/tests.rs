@@ -91,7 +91,7 @@ fn terminal_snapshot_observes_an_unstopped_async_executor() {
                 .async_runtime()
                 .start(
                     crate::NoAsyncExecutor,
-                    crate::addin::AsyncTaskLimit::DEFAULT,
+                    crate::addin_impl::AsyncTaskLimit::DEFAULT,
                 )
                 .unwrap();
             let control = runtime.lifecycle.access();

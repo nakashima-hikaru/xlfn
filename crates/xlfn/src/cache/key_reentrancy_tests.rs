@@ -134,7 +134,7 @@ fn assert_reentered(observed: &Observation, expected: usize) {
 
 #[test]
 fn clear_destroys_keys_after_releasing_all_cache_locks() {
-    let cache = CalculationCache::new(8);
+    let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(8));
     let cache = StdArc::new(cache);
     let observed = StdArc::new(Observation::default());
     insert_owned_key(&cache, &observed, 1, false);
@@ -145,7 +145,7 @@ fn clear_destroys_keys_after_releasing_all_cache_locks() {
 
 #[test]
 fn eviction_destroys_keys_after_releasing_all_cache_locks() {
-    let cache = CalculationCache::new(4);
+    let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(4));
     let cache = StdArc::new(cache);
     let observed = StdArc::new(Observation::default());
     for id in 0..4 {
@@ -164,7 +164,7 @@ fn eviction_destroys_keys_after_releasing_all_cache_locks() {
 
 #[test]
 fn panicking_key_does_not_skip_remaining_retirement_or_final_drop() {
-    let cache = CalculationCache::new(8);
+    let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(8));
     let cache = StdArc::new(cache);
     let observed = StdArc::new(Observation::default());
     for id in 0..3 {
@@ -182,7 +182,7 @@ fn panicking_key_does_not_skip_remaining_retirement_or_final_drop() {
 fn nested_key_callbacks_defer_destructors_until_outer_lookup_leaves() {
     for panics in [false, true] {
         for capacity in [1, 8] {
-            let cache = CalculationCache::new(capacity);
+            let cache = CalculationCache::new(crate::cache::CacheBudget::weight_units(capacity));
             let cache = StdArc::new(cache);
             let observed = StdArc::new(Observation::default());
             insert_owned_key(&cache, &observed, 1, false);

@@ -18,7 +18,7 @@ impl Addin for TestAddin {
     }
 }
 
-use xlfn::AsyncContext as WorkerContext;
+use xlfn::task::AsyncContext as WorkerContext;
 
 #[excel_function]
 async fn bad(context: WorkerContext<'_, TestAddin>) -> f64 {

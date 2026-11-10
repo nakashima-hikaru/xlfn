@@ -217,7 +217,9 @@ impl RegistryCacheBenchmark {
 
     fn marker_cycle<const COUNT: usize>(iterations: usize) -> Self {
         assert!(iterations != 0 && iterations.is_multiple_of(COUNT));
-        let registry = Arc::new(CacheRegistry::new(LOOKUP_WEIGHT_BUDGET));
+        let registry = Arc::new(CacheRegistry::new(crate::cache::CacheBudget::weight_units(
+            LOOKUP_WEIGHT_BUDGET,
+        )));
         let workers = WorkerPool::new(1, move |_, receiver, done| {
             // Seed and verify on the measured worker, warming its TLS as well.
             visit_registry_markers::<COUNT, true>(&registry);
@@ -270,7 +272,9 @@ impl RegistryCacheBenchmark {
             .expect("registry benchmark endpoint count fits usize");
         assert_eq!(endpoint_count, ids.len());
 
-        let registry = Arc::new(CacheRegistry::new(LOOKUP_WEIGHT_BUDGET));
+        let registry = Arc::new(CacheRegistry::new(crate::cache::CacheBudget::weight_units(
+            LOOKUP_WEIGHT_BUDGET,
+        )));
         let endpoints: Vec<CacheEndpoint<u64, u64>> =
             ids.iter().map(|id| CacheEndpoint::new(id)).collect();
         for (value, endpoint) in endpoints.iter().enumerate() {

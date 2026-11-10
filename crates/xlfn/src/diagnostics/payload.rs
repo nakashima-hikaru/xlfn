@@ -17,6 +17,14 @@ pub(super) fn clone_bytes(error: &XllError) -> Option<usize> {
     for _ in 0..MAX_ERROR_DEPTH {
         let (local, source) = match current {
             XllError::Native { message, .. } => (message.len(), None),
+            XllError::Application {
+                message, source, ..
+            } => (
+                message
+                    .len()
+                    .checked_add(source.as_ref().map_or(0, |source| source.retained_bytes()))?,
+                None,
+            ),
             XllError::Custom { message, .. } => (
                 match message {
                     Cow::Borrowed(_) => 0,
@@ -155,6 +163,20 @@ struct DisplayError<'a>(&'a XllError);
 impl fmt::Display for DisplayError<'_> {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
+            XllError::Application {
+                message, source, ..
+            } => {
+                output.write_str(message)?;
+                let mut cause = source
+                    .as_deref()
+                    .map(|source| source as &dyn std::error::Error);
+                while let Some(current) = cause {
+                    write!(output, ": {current}")?;
+                    cause = current.source();
+                }
+                Ok(())
+            }
+
             XllError::Input {
                 argument,
                 reason: InputError::UnknownEnum { actual, expected },

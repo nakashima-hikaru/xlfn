@@ -11,7 +11,7 @@ impl Addin for OldExportAddin {
     type Error = XllError;
     type Layers = ();
     #[cfg(feature = "async")]
-    type AsyncExecutor = xlfn::NoAsyncExecutor;
+    type AsyncExecutor = xlfn::task::NoAsyncExecutor;
 
     fn open(_: &OpenContext<Self>) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
         Ok(Opened::new(State))

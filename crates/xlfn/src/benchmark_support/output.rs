@@ -1,4 +1,4 @@
-use crate::return_abi::XlArrayBuilder;
+use crate::return_abi::ExcelArrayBuilder;
 
 /// Scalar construction, primitive writer dispatch, return publication and
 /// cleanup through the production synchronous boundary. Fixture text is
@@ -112,8 +112,8 @@ impl NumericArrayOutputBenchmark {
         .expect("benchmark array dimensions must be valid")
     }
 
-    fn build_direct(&self) -> crate::XllResult<crate::return_abi::XlArrayOutput> {
-        let mut builder = XlArrayBuilder::new(self.values.len(), 1)?;
+    fn build_direct(&self) -> crate::XllResult<crate::return_abi::ExcelArrayOutput> {
+        let mut builder = ExcelArrayBuilder::new(self.values.len(), 1)?;
         for &value in std::hint::black_box(&self.values) {
             builder.push(Self::result_value(value))?;
         }
@@ -143,7 +143,7 @@ impl NumericArrayOutputBenchmark {
 
     /// The numeric slice copy under Q, matching BENCH.MAT.COPY's output path.
     pub fn run_numeric_slice_q(&self, values: &[f64]) {
-        self.run(|| XlArrayBuilder::from_f64(values.len(), 1, values)?.finish());
+        self.run(|| ExcelArrayBuilder::from_f64(values.len(), 1, values)?.finish());
     }
 
     pub fn run_prepared_matrix(&self, matrix: crate::value::Matrix<f64>) {
@@ -255,8 +255,8 @@ impl BorrowedStringArrayOutputBenchmark {
 
     #[inline]
     pub fn run_borrowed(&self) {
-        let mut builder =
-            XlArrayBuilder::new(self.cells, 1).expect("benchmark array dimensions must be valid");
+        let mut builder = ExcelArrayBuilder::new(self.cells, 1)
+            .expect("benchmark array dimensions must be valid");
         for _ in 0..self.cells {
             builder
                 .push(self.payload.as_str())

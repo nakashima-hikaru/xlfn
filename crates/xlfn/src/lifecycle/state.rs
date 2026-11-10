@@ -50,7 +50,10 @@ pub(crate) use removal::{FinalCloseDecision, IssuedRemovalClaim, RollbackDecisio
 struct PublishedGeneration<A: crate::Addin> {
     root: NonNull<ExecutionGeneration<A>>,
     services: NonNull<
-        GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+        GenerationServices<
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
+        >,
     >,
 }
 
@@ -58,8 +61,8 @@ impl<A: crate::Addin> PublishedGeneration<A> {
     fn new(
         root: &ExecutionGeneration<A>,
         services: &GenerationServices<
-            crate::addin::AddinSubscription<A>,
-            crate::addin::AddinSources<A>,
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
         >,
     ) -> Self {
         Self {
@@ -76,8 +79,10 @@ impl<A: crate::Addin> PublishedGeneration<A> {
 
     fn services(
         &self,
-    ) -> &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>
-    {
+    ) -> &GenerationServices<
+        crate::addin_impl::AddinSubscription<A>,
+        crate::addin_impl::AddinSources<A>,
+    > {
         // SAFETY: publication implies generation services are valid for the
         // duration of the read-side lease.
         unsafe { self.services.as_ref() }
@@ -201,8 +206,10 @@ impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
 
     pub(crate) fn services(
         &self,
-    ) -> &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>
-    {
+    ) -> &GenerationServices<
+        crate::addin_impl::AddinSubscription<A>,
+        crate::addin_impl::AddinSources<A>,
+    > {
         self.publication().services()
     }
 }
@@ -211,7 +218,10 @@ impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
 pub(crate) struct OpenGeneration<A: crate::Addin> {
     generation: PublishedOwner<ExecutionGeneration<A>>,
     services: PublishedOwner<
-        GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+        GenerationServices<
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
+        >,
     >,
     publication: PublishedOwner<PublishedGeneration<A>>,
     module_epoch: ModuleEpochLease,
@@ -222,7 +232,10 @@ pub(crate) struct OpenGeneration<A: crate::Addin> {
 pub(crate) struct ClosingGeneration<A: crate::Addin> {
     generation: PublishedOwner<ExecutionGeneration<A>>,
     services: PublishedOwner<
-        GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+        GenerationServices<
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
+        >,
     >,
     publication: PublishedOwner<PublishedGeneration<A>>,
 }
@@ -233,7 +246,10 @@ pub(crate) struct ClosingGeneration<A: crate::Addin> {
 pub(crate) struct OpenRetirement<A: crate::Addin> {
     generation: RuntimeGeneration,
     services: PublishedOwner<
-        GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+        GenerationServices<
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
+        >,
     >,
     _publication: PublishedOwner<PublishedGeneration<A>>,
 }
@@ -389,7 +405,10 @@ impl<A: crate::Addin> ClosePayload<A> {
     fn retiring_services(
         &self,
     ) -> Option<
-        &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+        &GenerationServices<
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
+        >,
     > {
         match self {
             Self::Retiring(retirement) => Some(retirement.services.as_ref()),
@@ -491,8 +510,10 @@ impl<A: crate::Addin> PublishedClosePayload<A> {
 
     fn retiring_services(
         &self,
-    ) -> &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>
-    {
+    ) -> &GenerationServices<
+        crate::addin_impl::AddinSubscription<A>,
+        crate::addin_impl::AddinSources<A>,
+    > {
         match self {
             Self::Published(closing) => closing.services.as_ref(),
             Self::Retiring(retirement) => retirement.services.as_ref(),
@@ -701,7 +722,10 @@ impl<A: crate::Addin> CloseResources<A> {
     fn retiring_services(
         &self,
     ) -> Option<
-        &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+        &GenerationServices<
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
+        >,
     > {
         self.payload().and_then(ClosePayload::retiring_services)
     }
@@ -995,7 +1019,10 @@ impl<A: crate::Addin> ClosingState<A> {
     fn retiring_services(
         &self,
     ) -> Option<
-        &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+        &GenerationServices<
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
+        >,
     > {
         match self {
             Self::OpeningActive {
@@ -1246,7 +1273,10 @@ impl<A: crate::Addin> LifecycleState<A> {
     fn generation_services(
         &self,
     ) -> Option<
-        &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+        &GenerationServices<
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
+        >,
     > {
         match self {
             Self::Opening {
@@ -1425,7 +1455,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
         self.next_lifecycle_attempt = value;
     }
 
-    fn opening_config(&self) -> Option<crate::addin::RuntimeConfig> {
+    fn opening_config(&self) -> Option<crate::addin_impl::RuntimeConfig> {
         self.state.opening().map(|opening| opening.init_config)
     }
 
@@ -1436,7 +1466,10 @@ impl<A: crate::Addin> LifecycleCore<A> {
     fn generation_services(
         &self,
     ) -> Option<
-        &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+        &GenerationServices<
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
+        >,
     > {
         self.state.generation_services()
     }
@@ -1597,7 +1630,7 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
         self.core.removal_attempt()
     }
 
-    pub(crate) fn opening_config(&self) -> Option<crate::addin::RuntimeConfig> {
+    pub(crate) fn opening_config(&self) -> Option<crate::addin_impl::RuntimeConfig> {
         self.core.opening_config()
     }
 
@@ -1614,7 +1647,10 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
     pub(crate) fn generation_services(
         &self,
     ) -> Option<
-        &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+        &GenerationServices<
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
+        >,
     > {
         self.core.generation_services()
     }
@@ -1643,8 +1679,12 @@ pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
 pub(crate) struct PublishOpeningError<A: crate::Addin> {
     pub(crate) error: crate::XllError,
     pub(crate) opening: Option<OpeningGeneration<A>>,
-    pub(crate) services:
-        Box<GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>>,
+    pub(crate) services: Box<
+        GenerationServices<
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
+        >,
+    >,
     pub(crate) module_epoch: ModuleEpochLease,
 }
 
@@ -2470,7 +2510,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         core: &mut LifecycleAccess<'_, A>,
         generation: RuntimeGeneration,
         services: Box<
-            GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+            GenerationServices<
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
+            >,
         >,
         module_epoch: ModuleEpochLease,
     ) -> Result<(), Box<PublishOpeningError<A>>> {
@@ -2558,7 +2601,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(crate) fn with_generation_services<R>(
         &self,
         operation: impl FnOnce(
-            &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+            &GenerationServices<
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
+            >,
         ) -> R,
     ) -> Option<R> {
         if let Ok(admission) = self.try_admit() {

@@ -1,5 +1,6 @@
 use xlfn::prelude::*;
-use xlfn::value::{FromExcel, XlValueRef};
+use xlfn::value::{FromExcel};
+use xlfn::value::raw::{XlValueRef};
 
 struct TestAddin;
 #[excel_addin(name = "Eager Inputs", id = "eager-inputs")]

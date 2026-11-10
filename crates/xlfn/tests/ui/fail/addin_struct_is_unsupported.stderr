@@ -1,0 +1,5 @@
+error: apply #[excel_addin] to impl Addin, not the struct; the macro supplies feature-dependent associated types
+ --> tests/ui/fail/addin_struct_is_unsupported.rs:2:1
+  |
+2 | struct App;
+  | ^^^^^^^^^^^

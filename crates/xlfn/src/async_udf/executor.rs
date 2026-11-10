@@ -1,7 +1,7 @@
 //! Executor extension contract independent of task lifecycle and delivery.
 
 use super::AsyncTask;
-use crate::addin::NoAsyncExecutor;
+use crate::addin_impl::NoAsyncExecutor;
 use crate::{XllError, XllResult};
 use std::future::Future;
 

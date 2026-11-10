@@ -6,8 +6,8 @@ fn open<'runtime, A: crate::Addin>(
     host: crate::host_callback::HostCallbackSession,
     lifecycle_state: A::LifecycleState,
     inputs: crate::runtime_components::GenerationServiceInputs<
-        crate::addin::AddinSubscription<A>,
-        crate::addin::AddinSources<A>,
+        crate::addin_impl::AddinSubscription<A>,
+        crate::addin_impl::AddinSources<A>,
     >,
     generation: crate::generation::OpeningGeneration<A>,
     access: &super::AddinLifecycleAccess<'_, A>,

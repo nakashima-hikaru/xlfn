@@ -3,6 +3,17 @@
 use crate::error::InputError;
 use crate::{XllError, XllResult};
 
+/// Gregorian calendar components returned by an Excel serial-date conversion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CalendarDate {
+    /// Gregorian year.
+    pub year: i16,
+    /// Month in 1..=12.
+    pub month: i8,
+    /// Day of month in 1..=31.
+    pub day: i8,
+}
+
 /// The workbook convention used to interpret an Excel serial date.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ExcelDateSystem {
@@ -75,19 +86,9 @@ impl ExcelSerialDate {
     /// convention, the fictitious 1900 leap day, and dates outside years
     /// `1..=9999` return an error.
     /// The returned component types match [`Self::from_ymd`].
-    pub fn to_ymd(self) -> XllResult<(i16, i8, i8)> {
-        self.to_ymd_with_argument("date")
-    }
-
-    /// Converts the calendar day, labeling conversion errors with `argument`.
-    ///
-    /// Use this when the serial came from a named worksheet parameter. Calendar
-    /// validation and fractional-day handling are identical to [`Self::to_ymd`].
-    pub fn to_ymd_with_argument(self, argument: &'static str) -> XllResult<(i16, i8, i8)> {
-        self.calendar_day().map_err(|error| match error {
-            XllError::Input { reason, .. } => XllError::input(argument, reason),
-            error => error,
-        })
+    pub fn to_ymd(self) -> XllResult<CalendarDate> {
+        self.calendar_day()
+            .map(|(year, month, day)| CalendarDate { year, month, day })
     }
 
     fn calendar_day(self) -> XllResult<(i16, i8, i8)> {
@@ -149,6 +150,7 @@ impl ExcelSerialDate {
     /// # fn example() -> xlfn::XllResult<()> {
     /// use xlfn::value::{ExcelDateSystem, ExcelSerialDate};
     ///
+    ///
     /// let calendar = jiff::civil::Date::new(2026, 10, 5).unwrap();
     /// let serial = ExcelSerialDate::from_jiff(calendar, ExcelDateSystem::Windows1900)?;
     /// assert_eq!(serial.serial(), 46300.0);
@@ -160,17 +162,8 @@ impl ExcelSerialDate {
     /// ```
     #[cfg(feature = "jiff")]
     pub fn to_jiff(self) -> XllResult<jiff::civil::Date> {
-        self.to_jiff_with_argument("date")
-    }
-
-    /// Converts to a Jiff civil date, labeling conversion errors with `argument`.
-    ///
-    /// The same rules as [`Self::to_jiff`] apply; no time-of-day rounding occurs.
-    #[cfg(feature = "jiff")]
-    pub fn to_jiff_with_argument(self, argument: &'static str) -> XllResult<jiff::civil::Date> {
-        let (year, month, day) = self.to_ymd_with_argument(argument)?;
-        jiff::civil::Date::new(year, month, day)
-            .map_err(|_| XllError::input(argument, InputError::OutOfRange))
+        let date = self.to_ymd()?;
+        jiff::civil::Date::new(date.year, date.month, date.day).map_err(|_| date_out_of_range())
     }
 
     /// Returns the original finite serial, including its fractional day.
@@ -189,7 +182,7 @@ impl ExcelSerialDate {
     ///
     /// This reinterprets the stored number; it does not preserve a calendar date
     /// by shifting the serial between epochs. For a workbook setting, use
-    /// [`MacroSheetContext::workbook_date_system`](crate::MacroSheetContext::workbook_date_system).
+    /// [`MacroSheetContext::workbook_date_system`](crate::addin::MacroSheetContext::workbook_date_system).
     #[must_use]
     pub const fn with_date_system(mut self, date_system: ExcelDateSystem) -> Self {
         self.date_system = date_system;
@@ -252,7 +245,7 @@ fn date_out_of_range() -> XllError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExcelDateSystem, ExcelSerialDate};
+    use super::{CalendarDate, ExcelDateSystem, ExcelSerialDate};
 
     #[test]
     fn known_calendar_dates_cover_both_epochs_and_the_1900_gap() {
@@ -285,7 +278,7 @@ mod tests {
             for ((year, month, day), serial) in dates {
                 let date = ExcelSerialDate::from_ymd(year, month, day, system).unwrap();
                 assert_eq!(date.serial(), serial);
-                assert_eq!(date.to_ymd().unwrap(), (year, month, day));
+                assert_eq!(date.to_ymd().unwrap(), CalendarDate { year, month, day });
                 assert_eq!(date.date_system(), system);
             }
         }
@@ -311,7 +304,11 @@ mod tests {
                 .unwrap()
                 .to_ymd()
                 .unwrap(),
-            (1904, 3, 1)
+            CalendarDate {
+                year: 1904,
+                month: 3,
+                day: 1
+            }
         );
     }
 
@@ -340,12 +337,30 @@ mod tests {
                     .unwrap()
                     .to_ymd()
                     .unwrap(),
-                (2000, 2, 29)
+                CalendarDate {
+                    year: 2000,
+                    month: 2,
+                    day: 29
+                }
             );
             let minimum = ExcelSerialDate::from_ymd(1, 1, 1, system).unwrap();
             let maximum = ExcelSerialDate::from_ymd(9999, 12, 31, system).unwrap();
-            assert_eq!(minimum.to_ymd().unwrap(), (1, 1, 1));
-            assert_eq!(maximum.to_ymd().unwrap(), (9999, 12, 31));
+            assert_eq!(
+                minimum.to_ymd().unwrap(),
+                CalendarDate {
+                    year: 1,
+                    month: 1,
+                    day: 1
+                }
+            );
+            assert_eq!(
+                maximum.to_ymd().unwrap(),
+                CalendarDate {
+                    year: 9999,
+                    month: 12,
+                    day: 31
+                }
+            );
             for serial in [
                 minimum.serial() - 1.0,
                 maximum.serial() + 1.0,
@@ -364,7 +379,11 @@ mod tests {
                     .unwrap()
                     .to_ymd()
                     .unwrap(),
-                (9999, 12, 31)
+                CalendarDate {
+                    year: 9999,
+                    month: 12,
+                    day: 31
+                }
             );
         }
     }
@@ -373,7 +392,14 @@ mod tests {
     fn fractional_serials_use_floor_even_near_negative_zero() {
         for serial in [-0.25, -f64::EPSILON / 4.0] {
             let date = ExcelSerialDate::new(serial, ExcelDateSystem::Windows1900).unwrap();
-            assert_eq!(date.to_ymd().unwrap(), (1899, 12, 30));
+            assert_eq!(
+                date.to_ymd().unwrap(),
+                CalendarDate {
+                    year: 1899,
+                    month: 12,
+                    day: 30
+                }
+            );
         }
         assert_eq!(
             ExcelSerialDate::new(-f64::EPSILON / 4.0, ExcelDateSystem::Windows1900)
@@ -386,7 +412,11 @@ mod tests {
                 .unwrap()
                 .to_ymd()
                 .unwrap(),
-            (1900, 3, 1)
+            CalendarDate {
+                year: 1900,
+                month: 3,
+                day: 1
+            }
         );
     }
 
@@ -399,7 +429,8 @@ mod tests {
         ] {
             let date = ExcelSerialDate::new(serial, system).unwrap();
             assert!(matches!(
-                date.to_ymd_with_argument("settlement"),
+                date.to_ymd()
+                    .map_err(|error| error.with_argument("settlement")),
                 Err(crate::XllError::Input {
                     argument: "settlement",
                     ..
@@ -407,7 +438,8 @@ mod tests {
             ));
             #[cfg(feature = "jiff")]
             assert!(matches!(
-                date.to_jiff_with_argument("settlement"),
+                date.to_jiff()
+                    .map_err(|error| error.with_argument("settlement")),
                 Err(crate::XllError::Input {
                     argument: "settlement",
                     ..
@@ -416,8 +448,14 @@ mod tests {
         }
         let date = ExcelSerialDate::new(61.999_999, ExcelDateSystem::Windows1900).unwrap();
         assert_eq!(
-            date.to_ymd_with_argument("settlement").unwrap(),
-            (1900, 3, 1)
+            date.to_ymd()
+                .map_err(|error| error.with_argument("settlement"))
+                .unwrap(),
+            CalendarDate {
+                year: 1900,
+                month: 3,
+                day: 1
+            }
         );
     }
 
