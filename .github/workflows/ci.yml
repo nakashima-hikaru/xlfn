@@ -33,7 +33,7 @@ jobs:
             - name: Install Just
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just@1.59.0
+                  tool: just@1.58.0
                   fallback: none
 
             - name: Reject unreviewed direct panic boundaries
@@ -75,7 +75,7 @@ jobs:
             - name: Install development tools
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just@1.59.0,cargo-semver-checks@0.50.0,cargo-deny@0.20.2,mdbook@0.5.4
+                  tool: just@1.58.0,cargo-semver-checks@0.50.0,cargo-deny@0.20.2,mdbook@0.5.4
                   fallback: none
 
             - name: Check Python tooling
@@ -157,7 +157,7 @@ jobs:
             - name: Install development tools
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just@1.59.0,cargo-nextest@0.9.151,cargo-hack@0.6.46
+                  tool: just@1.58.0,cargo-nextest@0.9.143,cargo-hack@0.6.45
                   fallback: none
 
             # The typestate runner deliberately checks temporary workspaces
@@ -185,7 +185,7 @@ jobs:
             - name: Install development tools
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just@1.59.0,cargo-hack@0.6.46
+                  tool: just@1.58.0,cargo-hack@0.6.45
                   fallback: none
 
             - name: Run production feature tests
@@ -238,7 +238,7 @@ jobs:
             - name: Install just
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just@1.59.0
+                  tool: just@1.58.0
                   fallback: none
 
             - name: Install Miri
@@ -493,7 +493,7 @@ jobs:
             - name: Install Just
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just@1.59.0
+                  tool: just@1.58.0
                   fallback: none
 
             - name: Install Verus

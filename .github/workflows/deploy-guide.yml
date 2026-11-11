@@ -41,7 +41,7 @@ jobs:
       - name: Install guide validation tools
         uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
         with:
-          tool: just@1.59.0,mdbook@0.5.4
+          tool: just@1.58.0,mdbook@0.5.4
           fallback: none
 
       - name: Build and validate the user guide and its Rust examples
