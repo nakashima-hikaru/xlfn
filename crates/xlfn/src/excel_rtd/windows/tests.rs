@@ -823,7 +823,7 @@ fn final_remove_retains_com_shells_without_blocking_close_or_reviving_on_reopen(
         "closed ingress still initializes output"
     );
     let mut topic_count = 123;
-    let mut refresh_result = std::ptr::dangling_mut::<SAFEARRAY>();
+    let mut refresh_result = std::ptr::dangling_mut();
     assert_eq!(
         // SAFETY: outputs are writable; the retained server is closed.
         unsafe { refresh_data(server, &mut topic_count, &mut refresh_result) },
