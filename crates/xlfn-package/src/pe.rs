@@ -706,6 +706,11 @@ fn validate_mapped_sections<Pe: ImageNtHeaders>(
     let mut previous_end = align_end(headers_size)?;
     let mut sections = Vec::new();
     for section in pe.section_table().iter() {
+        let raw_end = u64::from(section.pointer_to_raw_data.get(LE))
+            + u64::from(section.size_of_raw_data.get(LE));
+        if section.size_of_raw_data.get(LE) != 0 && raw_end > pe.data().len() as u64 {
+            return Err("PE section raw data exceeds file bounds".into());
+        }
         let start = section.virtual_address.get(LE);
         // SizeOfRawData includes file-alignment padding and may exceed
         // VirtualSize in ordinary LLVM/MSVC images. Preserve that initialized
@@ -738,10 +743,28 @@ fn validate_mapped_sections<Pe: ImageNtHeaders>(
     Ok(sections)
 }
 
+fn checked_pe_name<'a>(bytes: &'a [u8], remaining: &mut usize) -> PackageResult<&'a str> {
+    if bytes.len() > 4096 {
+        return Err("PE symbol name exceeds 4096 bytes".into());
+    }
+    *remaining = remaining
+        .checked_sub(bytes.len())
+        .ok_or("PE symbol text budget exceeded")?;
+    Ok(std::str::from_utf8(bytes)?)
+}
+
 pub(crate) fn parse_pe_file<Pe>(pe: PeFile<'_, Pe>) -> PackageResult<PeInfo>
 where
     Pe: ImageNtHeaders,
 {
+    let mut remaining_text = 64 * 1024 * 1024_usize;
+    let mut remaining_items = 1_000_000_usize;
+    let mut charge_item = || -> PackageResult {
+        remaining_items = remaining_items
+            .checked_sub(1)
+            .ok_or("PE symbol budget exceeded")?;
+        Ok(())
+    };
     let mapped_sections = validate_mapped_sections(&pe)?;
     let file_header = pe.nt_headers().file_header();
     let machine = file_header.machine.get(LE);
@@ -755,6 +778,7 @@ where
     if let Some(table) = pe.export_table()? {
         let mut export_targets = BTreeMap::new();
         for (ordinal_index, exported_ordinal, address) in table.address_iter() {
+            charge_item()?;
             if address == 0 {
                 export_targets.insert(ordinal_index, None);
                 continue;
@@ -776,7 +800,10 @@ where
                 }
                 ExportTarget::ForwardByOrdinal(library, target_ordinal) => {
                     let forwarded = ForwardedExport {
-                        library: normalize_forwarder_library(std::str::from_utf8(library)?)?,
+                        library: normalize_forwarder_library(checked_pe_name(
+                            library,
+                            &mut remaining_text,
+                        )?)?,
                         symbol: ExportSymbol::Ordinal(target_ordinal),
                     };
                     forwarded_exports.insert(ExportSymbol::Ordinal(exported_ordinal), forwarded);
@@ -784,8 +811,13 @@ where
                 }
                 ExportTarget::ForwardByName(library, target_name) => {
                     let forwarded = ForwardedExport {
-                        library: normalize_forwarder_library(std::str::from_utf8(library)?)?,
-                        symbol: ExportSymbol::Name(std::str::from_utf8(target_name)?.to_owned()),
+                        library: normalize_forwarder_library(checked_pe_name(
+                            library,
+                            &mut remaining_text,
+                        )?)?,
+                        symbol: ExportSymbol::Name(
+                            checked_pe_name(target_name, &mut remaining_text)?.to_owned(),
+                        ),
                     };
                     forwarded_exports.insert(ExportSymbol::Ordinal(exported_ordinal), forwarded);
                     false
@@ -795,7 +827,14 @@ where
             export_targets.insert(ordinal_index, Some((executable, exported_ordinal)));
         }
 
+        let mut previous_name: Option<&[u8]> = None;
         for (name_pointer, ordinal_index) in table.name_iter() {
+            charge_item()?;
+            let name_bytes = table.name_from_pointer(name_pointer)?;
+            if previous_name.is_some_and(|previous| previous >= name_bytes) {
+                return Err("PE export names are duplicated or not sorted".into());
+            }
+            previous_name = Some(name_bytes);
             named_export_slots.insert(ordinal_index);
             let target = export_targets
                 .get(&ordinal_index)
@@ -806,7 +845,7 @@ where
                 // export and must not satisfy lifecycle or import validation.
                 continue;
             };
-            let name = std::str::from_utf8(table.name_from_pointer(name_pointer)?)?.to_owned();
+            let name = checked_pe_name(name_bytes, &mut remaining_text)?.to_owned();
             // A name is an alias of its EAT ordinal, including forwarding.
             // Preserve that edge so named chains and cycles are validated
             // exactly like ordinal imports instead of appearing terminal.
@@ -869,7 +908,9 @@ where
     if let Some(table) = pe.import_table()? {
         let mut descriptors = table.descriptors()?;
         while let Some(descriptor) = descriptors.next()? {
-            let name = std::str::from_utf8(table.name(descriptor.name.get(LE))?)?.to_owned();
+            charge_item()?;
+            let name = checked_pe_name(table.name(descriptor.name.get(LE))?, &mut remaining_text)?
+                .to_owned();
             let lookup_rva = {
                 let original = descriptor.original_first_thunk.get(LE);
                 if original == 0 {
@@ -882,13 +923,14 @@ where
             if lookup_rva != 0 {
                 let mut thunks = table.thunks(lookup_rva)?;
                 while let Some(thunk) = thunks.next::<Pe>()? {
+                    charge_item()?;
                     match table.import::<Pe>(thunk)? {
                         PeImport::Ordinal(ordinal) => {
                             targets.insert(ImportTarget::Ordinal(ordinal));
                         }
                         PeImport::Name(_, symbol) => {
                             targets.insert(ImportTarget::Name(
-                                std::str::from_utf8(symbol)?.to_owned(),
+                                checked_pe_name(symbol, &mut remaining_text)?.to_owned(),
                             ));
                         }
                     }
@@ -907,11 +949,15 @@ where
     {
         let mut descriptors = table.descriptors()?;
         while let Some(descriptor) = descriptors.next()? {
+            charge_item()?;
             if descriptor.attributes.get(LE) & 1 == 0 {
                 return Err("unsupported VA-based delay load import descriptor".into());
             }
-            let name =
-                std::str::from_utf8(table.name(descriptor.dll_name_rva.get(LE))?)?.to_owned();
+            let name = checked_pe_name(
+                table.name(descriptor.dll_name_rva.get(LE))?,
+                &mut remaining_text,
+            )?
+            .to_owned();
             let lookup_rva = descriptor.import_name_table_rva.get(LE);
             if lookup_rva == 0 {
                 return Err(format!("delay import {name:?} has no import name table").into());
@@ -919,12 +965,15 @@ where
             let mut targets = BTreeSet::new();
             let mut thunks = table.thunks(lookup_rva)?;
             while let Some(thunk) = thunks.next::<Pe>()? {
+                charge_item()?;
                 match table.import::<Pe>(thunk)? {
                     PeImport::Ordinal(ordinal) => {
                         targets.insert(ImportTarget::Ordinal(ordinal));
                     }
                     PeImport::Name(_, symbol) => {
-                        targets.insert(ImportTarget::Name(std::str::from_utf8(symbol)?.to_owned()));
+                        targets.insert(ImportTarget::Name(
+                            checked_pe_name(symbol, &mut remaining_text)?.to_owned(),
+                        ));
                     }
                 }
             }

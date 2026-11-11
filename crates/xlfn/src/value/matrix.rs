@@ -242,12 +242,66 @@ impl<'a, T> IntoIterator for &'a mut Matrix<T> {
 }
 
 #[cfg(feature = "serde")]
+fn deserialize_bounded<'de, T: serde::Deserialize<'de>, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    limit: usize,
+) -> Result<Vec<T>, D::Error> {
+    struct Bounded<T>(usize, std::marker::PhantomData<T>);
+    impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for Bounded<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "a sequence of at most {} elements", self.0)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Vec<T>, A::Error> {
+            use serde::de::Error;
+            if sequence.size_hint().is_some_and(|len| len > self.0) {
+                return Err(A::Error::custom("sequence exceeds its element limit"));
+            }
+            let mut values = Vec::new();
+            while values.len() < self.0 {
+                let Some(value) = sequence.next_element()? else {
+                    return Ok(values);
+                };
+                values.try_reserve(1).map_err(A::Error::custom)?;
+                values.push(value);
+            }
+            // The seed fails before deserializing an excess value, even when
+            // that value itself would allocate an arbitrarily large object.
+            struct Reject;
+            impl<'de> serde::de::DeserializeSeed<'de> for Reject {
+                type Value = ();
+                fn deserialize<D: serde::Deserializer<'de>>(self, _: D) -> Result<(), D::Error> {
+                    Err(serde::de::Error::custom(
+                        "sequence exceeds its element limit",
+                    ))
+                }
+            }
+            sequence.next_element_seed(Reject)?;
+            Ok(values)
+        }
+    }
+    deserializer.deserialize_seq(Bounded(limit, std::marker::PhantomData))
+}
+
+#[cfg(feature = "serde")]
+fn deserialize_matrix_data<'de, T: serde::Deserialize<'de>, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<T>, D::Error> {
+    deserialize_bounded(d, MAX_ARRAY_ELEMENTS)
+}
+
+#[cfg(feature = "serde")]
 impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Matrix<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(serde::Deserialize)]
+        #[serde(bound(deserialize = "T: serde::Deserialize<'de>"))]
         struct SerializedMatrix<T> {
             rows: usize,
             columns: usize,
+            #[serde(deserialize_with = "deserialize_matrix_data")]
             data: Vec<T>,
         }
 
@@ -580,7 +634,7 @@ impl<T, const MAX: usize> BoundedVarArgs<T, MAX> {
 }
 
 macro_rules! impl_sequence_traits {
-    ($name:ident $(, $max:ident)?) => {
+    ($name:ident, $limit:expr $(, $max:ident)?) => {
         impl<T $(, const $max: usize)?> Deref for $name<T $(, $max)?> {
             type Target = [T];
 
@@ -653,16 +707,16 @@ macro_rules! impl_sequence_traits {
             for $name<T $(, $max)?>
         {
             fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let values = Vec::<T>::deserialize(deserializer)?;
+                let values = deserialize_bounded(deserializer, $limit)?;
                 Self::new(values).map_err(serde::de::Error::custom)
             }
         }
     };
 }
 
-impl_sequence_traits!(Row);
-impl_sequence_traits!(Column);
-impl_sequence_traits!(BoundedVarArgs, MAX);
+impl_sequence_traits!(Row, EXCEL_MAX_COLUMNS.min(MAX_ARRAY_ELEMENTS));
+impl_sequence_traits!(Column, EXCEL_MAX_ROWS.min(MAX_ARRAY_ELEMENTS));
+impl_sequence_traits!(BoundedVarArgs, MAX, MAX);
 
 macro_rules! impl_oriented_conversions {
     ($name:ident) => {
@@ -1037,5 +1091,18 @@ mod tests {
         assert!(serde_json::from_str::<BoundedVarArgs<i32, 0>>("[]").is_err());
         assert!(serde_json::from_str::<BoundedVarArgs<i32, 2>>("[1,2,3]").is_err());
         assert!(serde_json::from_str::<BoundedVarArgs<i32, 3>>("[]").is_ok());
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod bounded_deserialize_tests {
+    use super::*;
+    #[test]
+    fn excess_elements_are_rejected_before_their_deserializer_runs() {
+        // The second value has the wrong type; the bound must win before T is read.
+        let error =
+            serde_json::from_str::<BoundedVarArgs<u8, 1>>(r#"[1, "oversized"]"#).unwrap_err();
+        assert!(error.to_string().contains("element limit"));
+        assert!(serde_json::from_str::<BoundedVarArgs<u8, 1>>("[1]").is_ok());
     }
 }

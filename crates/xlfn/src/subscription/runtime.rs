@@ -108,7 +108,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             servers: Mutex::new(FxHashMap::default()),
             catalog: Mutex::new(SubscriptionCatalog {
                 entries: FxHashMap::default(),
-                pending_topic_bytes: 0,
+                retained_topic_bytes: 0,
                 pending_count: 0,
                 identities: super::identity::SubscriptionIdentityIndex::default(),
                 next_subscription_id: 1,

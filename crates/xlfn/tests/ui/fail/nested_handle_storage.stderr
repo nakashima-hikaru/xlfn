@@ -14,6 +14,7 @@ help: the trait `xlfn::handle::ExcelHandleObject` is conditionally implemented f
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
@@ -66,6 +67,7 @@ help: the trait `xlfn::handle::ExcelHandleObject` is conditionally implemented f
    |          |
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
@@ -120,6 +122,7 @@ help: the trait `xlfn::handle::ExcelHandleObject` is conditionally implemented f
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
@@ -172,6 +175,72 @@ note: required by a bound in `require_handle_object`
    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `require_handle_object`
    = note: this error originates in the derive macro `ExcelHandleObject` (in Nightly builds, run with -Z macro-backtrace for more info)
 
+error[E0277]: `Cell<usize>` cannot be shared between threads safely
+  --> tests/ui/fail/nested_handle_storage.rs:14:29
+   |
+14 |     require_handle_object::<Nested<'static>>();
+   |                             ^^^^^^^^^^^^^^^ `Cell<usize>` cannot be shared between threads safely
+   |
+   = help: within `xlfn::__private::v1::CallScope<'_>`, the trait `Sync` is not implemented for `Cell<usize>`
+   = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` or `std::sync::atomic::AtomicUsize` instead
+help: the trait `xlfn::handle::ExcelHandleObject` is conditionally implemented for `Nested<'_>`
+  --> tests/ui/fail/nested_handle_storage.rs:6:10
+   |
+ 6 | #[derive(ExcelHandleObject)]
+   |          ^^^^^^^^^^^^^^^^^
+   |          |
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
+note: required because it appears within the type `xlfn::call::CallScratch`
+  --> src/call.rs
+   |
+   | pub(crate) struct CallScratch {
+   |                   ^^^^^^^^^^^
+note: required because it appears within the type `xlfn::__private::v1::CallScope<'_>`
+  --> src/call.rs
+   |
+   | pub struct CallScope<'call> {
+   |            ^^^^^^^^^
+   = note: required for `&xlfn::__private::v1::CallScope<'_>` to implement `Send`
+note: required because it appears within the type `PhantomData<&xlfn::__private::v1::CallScope<'_>>`
+  --> $RUST/core/src/marker.rs
+   |
+   | pub struct PhantomData<T: PointeeSized>;
+   |            ^^^^^^^^^^^
+note: required because it appears within the type `xlfn::handle::Handle<'_, Inner>`
+  --> src/handle/typed.rs
+   |
+   | pub struct Handle<'call, T: ExcelHandleObject> {
+   |            ^^^^^^
+note: required because it appears within the type `Nested<'_>`
+  --> tests/ui/fail/nested_handle_storage.rs:7:8
+   |
+ 7 | struct Nested<'call> {
+   |        ^^^^^^
+note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObject`
+  --> tests/ui/fail/nested_handle_storage.rs:7:8
+   |
+ 6 | #[derive(ExcelHandleObject)]
+   |          ----------------- type parameter would need to implement `xlfn::handle::ExcelHandleObject`
+ 7 | struct Nested<'call> {
+   |        ^^^^^^^^^^^^^
+   = help: consider manually implementing `xlfn::handle::ExcelHandleObject` to avoid undesired bounds caused by "imperfect derives"
+   = note: to learn more, visit <https://github.com/rust-lang/rust/issues/26925>
+note: required by a bound in `require_handle_object`
+  --> tests/ui/fail/nested_handle_storage.rs:11:29
+   |
+11 | fn require_handle_object<T: xlfn::handle::ExcelHandleObject>() {}
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `require_handle_object`
+   = note: this error originates in the derive macro `ExcelHandleObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
 error[E0277]: `NonNull<handle::domain::HandleReadDomain>` cannot be shared between threads safely
   --> tests/ui/fail/nested_handle_storage.rs:14:29
    |
@@ -187,6 +256,7 @@ help: the trait `xlfn::handle::ExcelHandleObject` is conditionally implemented f
    |          |
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
@@ -256,6 +326,7 @@ help: the trait `xlfn::handle::ExcelHandleObject` is conditionally implemented f
    |          |
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
@@ -327,6 +398,7 @@ help: the trait `xlfn::handle::ExcelHandleObject` is conditionally implemented f
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
@@ -397,6 +469,7 @@ help: the trait `xlfn::handle::ExcelHandleObject` is conditionally implemented f
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
@@ -466,6 +539,7 @@ help: the trait `xlfn::handle::ExcelHandleObject` is conditionally implemented f
    |          |
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
@@ -541,6 +615,7 @@ help: the trait `xlfn::handle::ExcelHandleObject` is conditionally implemented f
    |          |
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
+   |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`
    |          unsatisfied requirement introduced here: `Nested<'_>: Sync`
    |          unsatisfied requirement introduced here: `Nested<'_>: Send`

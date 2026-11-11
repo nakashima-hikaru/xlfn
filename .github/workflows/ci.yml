@@ -19,6 +19,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
 
             - name: Set up uv and Python
               uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -31,7 +33,7 @@ jobs:
             - name: Install Just
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just
+                  tool: just@1.59.0
                   fallback: none
 
             - name: Reject unreviewed direct panic boundaries
@@ -43,6 +45,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
             - name: Install pinned extraction toolchain and targets
               run: rustup toolchain install nightly-2026-09-28 --profile minimal --target aarch64-apple-darwin,x86_64-pc-windows-msvc
             - name: Install API extractor
@@ -57,6 +61,7 @@ jobs:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
+                  persist-credentials: false
                   fetch-depth: 0
 
             - name: Set up uv and Python
@@ -70,7 +75,7 @@ jobs:
             - name: Install development tools
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just,cargo-semver-checks@0.50.0,cargo-deny@0.20.2,mdbook@0.5.4
+                  tool: just@1.59.0,cargo-semver-checks@0.50.0,cargo-deny@0.20.2,mdbook@0.5.4
                   fallback: none
 
             - name: Check Python tooling
@@ -137,6 +142,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
 
             - name: Set up uv and Python
               if: matrix.check.name == 'lifecycle typestate contracts'
@@ -150,7 +157,7 @@ jobs:
             - name: Install development tools
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just,cargo-nextest,cargo-hack
+                  tool: just@1.59.0,cargo-nextest@0.9.151,cargo-hack@0.6.46
                   fallback: none
 
             # The typestate runner deliberately checks temporary workspaces
@@ -172,11 +179,13 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
 
             - name: Install development tools
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just,cargo-hack
+                  tool: just@1.59.0,cargo-hack@0.6.46
                   fallback: none
 
             - name: Run production feature tests
@@ -200,6 +209,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
 
             - name: Check and lint standalone consumers
               shell: pwsh
@@ -221,11 +232,13 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
 
             - name: Install just
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just
+                  tool: just@1.59.0
                   fallback: none
 
             - name: Install Miri
@@ -246,6 +259,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
 
             - name: Reject direct windows-sys dependencies
               shell: pwsh
@@ -373,6 +388,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
 
             - name: Download and extract the pinned Excel SDK
               shell: pwsh
@@ -423,6 +440,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
 
             - name: Set up uv and Python
               uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -460,6 +479,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
 
             - name: Set up uv and Python
               uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -472,7 +493,7 @@ jobs:
             - name: Install Just
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just
+                  tool: just@1.59.0
                   fallback: none
 
             - name: Install Verus
@@ -499,6 +520,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
 
             - name: Require every verification job to pass
               env:
@@ -533,6 +556,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
 
             - name: Download Windows RTD shutdown traces
               uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

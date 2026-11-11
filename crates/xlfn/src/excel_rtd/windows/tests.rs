@@ -812,12 +812,25 @@ fn final_remove_retains_com_shells_without_blocking_close_or_reviving_on_reopen(
     assert!(!runtime.test_release_module_residency().unwrap());
     assert!(runtime.module_residency_held());
     assert_eq!(dll_can_unload_now(), S_FALSE);
-    let mut heartbeat_result = 0;
+    let mut heartbeat_result = 123;
     assert_eq!(
         // SAFETY: server and result are valid; closed ingress rejects new work.
         unsafe { heartbeat(server, &mut heartbeat_result) },
         CO_E_SERVER_STOPPING
     );
+    assert_eq!(
+        heartbeat_result, 0,
+        "closed ingress still initializes output"
+    );
+    let mut topic_count = 123;
+    let mut refresh_result = std::ptr::dangling_mut::<SAFEARRAY>();
+    assert_eq!(
+        // SAFETY: outputs are writable; the retained server is closed.
+        unsafe { refresh_data(server, &mut topic_count, &mut refresh_result) },
+        CO_E_SERVER_STOPPING
+    );
+    assert_eq!(topic_count, 0);
+    assert!(refresh_result.is_null());
     let first_trace = runtime.shutdown_trace_json();
     assert!(first_trace.contains("returned_success"));
 

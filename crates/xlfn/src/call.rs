@@ -19,9 +19,11 @@ use std::panic::AssertUnwindSafe;
 const LARGE_TYPED_COLLECTION_BYTES: usize = 64 * 1024;
 const LARGE_COLLECTION_TEXT_CAPACITY: usize = 64 * 1024;
 const INLINE_TEXT_CAPACITY: usize = 23;
+const MAX_CALL_SCRATCH_BYTES: usize = crate::value::MAX_ARRAY_BYTES;
 
 pub(crate) struct CallScratch {
     arena: AssertUnwindSafe<bumpalo::Bump>,
+    requested_bytes: Cell<usize>,
     strings: AssertUnwindSafe<OnceCell<Box<bumpalo::Bump>>>,
     large_collection: AssertUnwindSafe<Cell<bool>>,
     // Only new_inline initializes this slot: it never owns a heap allocation.
@@ -33,10 +35,22 @@ impl CallScratch {
     fn new() -> Self {
         Self {
             arena: AssertUnwindSafe(bumpalo::Bump::new()),
+            requested_bytes: Cell::new(0),
             strings: AssertUnwindSafe(OnceCell::new()),
             large_collection: AssertUnwindSafe(Cell::new(false)),
             inline_text: AssertUnwindSafe(OnceCell::new()),
         }
+    }
+
+    fn charge(&self, bytes: usize) -> XllResult<()> {
+        let total = self
+            .requested_bytes
+            .get()
+            .checked_add(bytes)
+            .filter(|&total| total <= MAX_CALL_SCRATCH_BYTES)
+            .ok_or(crate::XllError::Overloaded)?;
+        self.requested_bytes.set(total);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -68,6 +82,7 @@ impl CallScratch {
                 .get_or_init(|| ManuallyDrop::new(smol_str::SmolStr::new_inline(text)));
             return Ok(stored.as_str());
         }
+        self.charge(decoder.utf8_len())?;
         // Scalar and small collection text share the primary arena. A large
         // typed collection can fill a matrix-sized chunk before its first
         // string, so text that cannot use the inline slot gets a separate
@@ -75,16 +90,21 @@ impl CallScratch {
         // tiny growing chunks; numeric-only collections never create it.
         // Both arenas live until scope teardown.
         let strings = if self.large_collection.get() {
+            if self.strings.get().is_none() {
+                let arena = bumpalo::Bump::try_with_capacity(LARGE_COLLECTION_TEXT_CAPACITY)
+                    .map_err(|_| crate::XllError::Overloaded)?;
+                let _ = self.strings.set(Box::new(arena));
+            }
             self.strings
-                .get_or_init(|| {
-                    Box::new(bumpalo::Bump::with_capacity(LARGE_COLLECTION_TEXT_CAPACITY))
-                })
+                .get()
+                .expect("initialized string arena")
                 .as_ref()
         } else {
             &self.arena.0
         };
-        let output =
-            strings.alloc_slice_fill_with(decoder.utf8_len(), |_| std::mem::MaybeUninit::uninit());
+        let output = strings
+            .try_alloc_slice_fill_with(decoder.utf8_len(), |_| std::mem::MaybeUninit::uninit())
+            .map_err(|_| crate::XllError::Overloaded)?;
         decoder.decode_into(output, argument)
     }
 
@@ -93,10 +113,17 @@ impl CallScratch {
         len: usize,
         mut build: impl FnMut(usize) -> XllResult<T>,
     ) -> XllResult<&[T]> {
+        self.charge(
+            len.checked_mul(std::mem::size_of::<T>())
+                .ok_or(crate::XllError::Overloaded)?,
+        )?;
         if len.saturating_mul(std::mem::size_of::<T>()) >= LARGE_TYPED_COLLECTION_BYTES {
             self.large_collection.set(true);
         }
-        let mut values = bumpalo::collections::Vec::with_capacity_in(len, &self.arena.0);
+        let mut values = bumpalo::collections::Vec::new_in(&self.arena.0);
+        values
+            .try_reserve_exact(len)
+            .map_err(|_| crate::XllError::Overloaded)?;
         for index in 0..len {
             values.push(build(index)?);
         }
@@ -338,7 +365,8 @@ mod scratch_tests {
     #[test]
     fn ghostcell_storage_preserves_layout_budget() {
         use std::mem::size_of;
-        assert_eq!(size_of::<super::CallStorage<'_, '_>>(), 96);
+        // One additional word tracks the aggregate input scratch budget.
+        assert_eq!(size_of::<super::CallStorage<'_, '_>>(), 104);
         assert_eq!(size_of::<ghost_cell::GhostToken<'_>>(), 0);
         assert_eq!(size_of::<super::HandleDomainWitness<'_>>(), 16);
         assert!(size_of::<crate::value::DecodeCallContext<'_, '_>>() <= 80);
@@ -454,5 +482,20 @@ mod scratch_tests {
             let scratch = CallScratch::new();
             proptest::prop_assert_eq!(scratch.decode_utf16(&units, "text").unwrap(), text);
         }
+    }
+}
+
+#[cfg(test)]
+mod scratch_budget_tests {
+    use super::*;
+    #[test]
+    fn aggregate_scratch_budget_rejects_before_building_elements() {
+        let scratch = CallScratch::new();
+        scratch.charge(MAX_CALL_SCRATCH_BYTES - 1).unwrap();
+        assert!(matches!(
+            scratch.collect_copy::<u16>(1, |_| panic!("must reject before conversion")),
+            Err(crate::XllError::Overloaded)
+        ));
+        assert_eq!(scratch.allocated_bytes(), 0);
     }
 }

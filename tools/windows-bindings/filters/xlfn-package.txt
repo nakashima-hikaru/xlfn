@@ -50,3 +50,4 @@
     Windows.Win32.GetFileInformationByHandleEx
     Windows.Win32.GetCurrentProcess
     Windows.Win32.OpenProcessToken
+    Windows.Win32.GetSecurityInfo

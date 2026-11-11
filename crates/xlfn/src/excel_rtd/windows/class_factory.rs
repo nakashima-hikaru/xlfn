@@ -73,6 +73,10 @@ pub(crate) unsafe fn dll_get_class_object<E: RtdSubscription, C: crate::RtdSourc
     interface_id: *const c_void,
     output: *mut *mut c_void,
 ) -> i32 {
+    if !output.is_null() {
+        // SAFETY: COM supplies writable output storage for this entrypoint.
+        unsafe { output.write(ptr::null_mut()) };
+    }
     com_boundary("DllGetClassObject", || {
         // SAFETY: the raw pointers are forwarded unchanged from the COM export.
         // The inner function validates them before dereferencing.
@@ -99,7 +103,7 @@ unsafe fn dll_get_class_object_inner<E: RtdSubscription, C: crate::RtdSourceCata
 
     // SAFETY: COM supplied a readable pointer to a GUID and it was validated as
     // non-null above.
-    let requested_class = unsafe { *(class_id.cast::<GUID>()) };
+    let requested_class = unsafe { class_id.cast::<GUID>().read_unaligned() };
 
     let active = ACTIVE_SERVER.lock();
     let Some(entry) = active.as_ref().filter(|entry| {
@@ -165,7 +169,7 @@ unsafe extern "system" fn factory_query_interface<
 
         // SAFETY: `interface_id` was validated as non-null and COM supplies a
         // readable GUID for the duration of this method.
-        let interface_id = unsafe { *interface_id };
+        let interface_id = unsafe { interface_id.read_unaligned() };
 
         if guid_eq(interface_id, IID_IUNKNOWN) || guid_eq(interface_id, IID_ICLASS_FACTORY) {
             // SAFETY: `output` is writable and `this` is a live factory pointer.
@@ -186,6 +190,9 @@ unsafe extern "system" fn factory_add_ref<E: RtdSubscription, C: crate::RtdSourc
     this: *mut ClassFactory<E, C>,
 ) -> u32 {
     com_lifetime_boundary("IClassFactory::AddRef", 0, || {
+        if this.is_null() {
+            return 0;
+        }
         // SAFETY: COM calls AddRef only on a live object pointer. The atomic update
         // preserves the shared COM reference count.
         let references = unsafe { &(*this).references };

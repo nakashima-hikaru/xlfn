@@ -2,7 +2,7 @@ use super::ActiveServer;
 use crate::sync::{Mutex, MutexGuard};
 use crate::win32::{
     CloseHandle, CreateMutexW, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GUID,
-    GetLastError, HANDLE, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
+    GetLastError, HANDLE, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_VOLATILE,
     REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW,
     RegQueryValueExW, RegSetValueExW, ReleaseMutex, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0,
     WaitForSingleObject,
@@ -185,60 +185,72 @@ pub(super) fn scavenge_owned_registrations(
     module_path: &str,
     keep_prog_id: Option<&str>,
 ) -> XllResult<()> {
+    let mut first_error = None;
     for prog_id in rtd_prog_ids()? {
         if keep_prog_id.is_some_and(|keep| prog_id.eq_ignore_ascii_case(keep)) {
             continue;
         }
 
-        let prog_key = format!("Software\\Classes\\{prog_id}");
-        let owner = read_registry_string(&prog_key, "XlFnOwner")?;
-        let schema = read_registry_string(&prog_key, "XlFnRegistrationSchema")?;
-        let owner_module = read_registry_string(&prog_key, "XlFnOwnerModule")?;
-        let class_id = read_registry_string(&prog_key, "XlFnClassId")?;
+        let result = (|| -> XllResult<()> {
+            let prog_key = format!("Software\\Classes\\{prog_id}");
+            let owner = read_registry_string(&prog_key, "XlFnOwner")?;
+            let schema = read_registry_string(&prog_key, "XlFnRegistrationSchema")?;
+            let owner_module = read_registry_string(&prog_key, "XlFnOwnerModule")?;
+            let class_id = read_registry_string(&prog_key, "XlFnClassId")?;
 
-        if owner.as_deref() != Some(RTD_REGISTRATION_OWNER)
-            || schema.as_deref() != Some(RTD_REGISTRATION_SCHEMA)
-            || !owner_module
+            if owner.as_deref() != Some(RTD_REGISTRATION_OWNER)
+                || schema.as_deref() != Some(RTD_REGISTRATION_SCHEMA)
+                || !owner_module.as_deref().is_some_and(|owner| {
+                    owner.eq_ignore_ascii_case(module_path)
+                        || std::path::Path::new(owner)
+                            .try_exists()
+                            .is_ok_and(|exists| !exists)
+                })
+            {
+                return Ok(());
+            }
+
+            let expected_class = class_id_from_prog_id(&prog_id);
+            let Some(class_id) = class_id.filter(|value| {
+                expected_class
+                    .as_deref()
+                    .is_some_and(|expected| value.eq_ignore_ascii_case(expected))
+            }) else {
+                report_unowned_registration();
+                return Ok(());
+            };
+            let class_key = format!("Software\\Classes\\CLSID\\{class_id}");
+            let prog_class = read_registry_string(&format!("{prog_key}\\CLSID"), "")?;
+            let class_prog = read_registry_string(&format!("{class_key}\\ProgID"), "")?;
+            let class_module = read_registry_string(&format!("{class_key}\\InProcServer32"), "")?;
+            if !prog_class
                 .as_deref()
-                .is_some_and(|owner| owner.eq_ignore_ascii_case(module_path))
-        {
-            continue;
+                .is_some_and(|value| value.eq_ignore_ascii_case(&class_id))
+                || !class_prog
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(&prog_id))
+                || !class_module.as_deref().is_some_and(|value| {
+                    owner_module
+                        .as_deref()
+                        .is_some_and(|owner| value.eq_ignore_ascii_case(owner))
+                })
+            {
+                report_unowned_registration();
+                return Ok(());
+            }
+
+            // Delete the CLSID first. If it fails, the marked ProgID remains so a
+            // later startup can retry instead of orphaning an undiscoverable CLSID.
+            delete_registry_tree(&format!("Software\\Classes\\CLSID\\{class_id}"))?;
+            delete_registry_tree(&prog_key)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
         }
-
-        let expected_class = class_id_from_prog_id(&prog_id);
-        let Some(class_id) = class_id.filter(|value| {
-            expected_class
-                .as_deref()
-                .is_some_and(|expected| value.eq_ignore_ascii_case(expected))
-        }) else {
-            report_unowned_registration();
-            continue;
-        };
-        let class_key = format!("Software\\Classes\\CLSID\\{class_id}");
-        let prog_class = read_registry_string(&format!("{prog_key}\\CLSID"), "")?;
-        let class_prog = read_registry_string(&format!("{class_key}\\ProgID"), "")?;
-        let class_module = read_registry_string(&format!("{class_key}\\InProcServer32"), "")?;
-        if !prog_class
-            .as_deref()
-            .is_some_and(|value| value.eq_ignore_ascii_case(&class_id))
-            || !class_prog
-                .as_deref()
-                .is_some_and(|value| value.eq_ignore_ascii_case(&prog_id))
-            || !class_module
-                .as_deref()
-                .is_some_and(|value| value.eq_ignore_ascii_case(module_path))
-        {
-            report_unowned_registration();
-            continue;
-        }
-
-        // Delete the CLSID first. If it fails, the marked ProgID remains so a
-        // later startup can retry instead of orphaning an undiscoverable CLSID.
-        delete_registry_tree(&format!("Software\\Classes\\CLSID\\{class_id}"))?;
-        delete_registry_tree(&prog_key)?;
     }
 
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 fn delete_registry_tree(path: &str) -> XllResult<()> {
@@ -464,7 +476,7 @@ pub(super) fn set_registry_value(path: &str, name: Option<&str>, value: &str) ->
             path.as_ptr(),
             0,
             ptr::null(),
-            REG_OPTION_NON_VOLATILE as u32,
+            REG_OPTION_VOLATILE as u32,
             KEY_WRITE as u32,
             ptr::null(),
             &mut key,

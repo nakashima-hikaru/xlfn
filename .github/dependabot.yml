@@ -5,6 +5,27 @@ updates:
     schedule:
       interval: weekly
   - package-ecosystem: cargo
-    directory: "/"
+    directories:
+      - "/"
+      - "/benchmarks/excel-comparison/xlfn"
+      - "/examples/basic-xll"
+      - "/examples/rtd-source"
+      - "/probes/excel-abi-probe"
+      - "/probes/ghostcell-call-model"
+      - "/probes/lifecycle-stack-model"
+      - "/tests/rtd-api-fixture"
+      - "/tests/xlfn-e2e-fixture"
+    schedule:
+      interval: weekly
+  - package-ecosystem: uv
+    directories:
+      - "/tools"
+      - "/benchmarks/excel-comparison"
+    schedule:
+      interval: weekly
+  - package-ecosystem: nuget
+    directories:
+      - "/benchmarks/excel-comparison/excel_dna"
+      - "/benchmarks/excel-comparison/control-tests"
     schedule:
       interval: weekly

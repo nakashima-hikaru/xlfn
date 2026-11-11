@@ -1061,7 +1061,7 @@ pub(super) unsafe extern "system" fn server_query_interface<
 
         // SAFETY: `interface_id` was validated as non-null and COM supplies a
         // readable GUID for the duration of this method.
-        let interface_id = unsafe { *interface_id };
+        let interface_id = unsafe { interface_id.read_unaligned() };
 
         if guid_eq(interface_id, IID_IUNKNOWN)
             || guid_eq(interface_id, IID_IDISPATCH)
@@ -1088,6 +1088,9 @@ pub(super) unsafe extern "system" fn server_add_ref<
     this: *mut RtdServer<E, C>,
 ) -> u32 {
     com_lifetime_boundary("IRtdServer::AddRef", 0, || {
+        if this.is_null() {
+            return 0;
+        }
         // SAFETY: COM and internal callers invoke AddRef only on a live RtdServer<E, C>.
         let references = unsafe { &(*this).references };
         references
@@ -1187,6 +1190,10 @@ pub(super) unsafe extern "system" fn server_start<
     callback: *mut c_void,
     result: *mut i32,
 ) -> i32 {
+    if !result.is_null() {
+        // SAFETY: COM supplies writable output storage for this entrypoint.
+        unsafe { result.write(0) };
+    }
     com_boundary("IRtdServer::ServerStart", || {
         // SAFETY: the arguments are forwarded from the COM vtable call. The
         // inner function validates each pointer before dereferencing it.
@@ -1300,6 +1307,14 @@ pub(super) unsafe extern "system" fn connect_data<
     new_values: *mut VARIANT_BOOL,
     result: *mut VARIANT,
 ) -> i32 {
+    if !result.is_null() {
+        // SAFETY: COM supplies writable output storage for this entrypoint.
+        unsafe { result.write(VARIANT::default()) };
+    }
+    if !new_values.is_null() {
+        // SAFETY: COM supplies writable output storage for this entrypoint.
+        unsafe { new_values.write(VARIANT_FALSE) };
+    }
     com_boundary("IRtdServer::ConnectData", || {
         // SAFETY: arguments are forwarded from the COM vtable invocation. The
         // inner function validates all pointers before dereferencing them.
@@ -1413,6 +1428,14 @@ pub(super) unsafe extern "system" fn refresh_data<
     topic_count: *mut i32,
     result: *mut *mut SAFEARRAY,
 ) -> i32 {
+    if !result.is_null() {
+        // SAFETY: COM supplies writable output storage for this entrypoint.
+        unsafe { result.write(ptr::null_mut()) };
+    }
+    if !topic_count.is_null() {
+        // SAFETY: COM supplies writable output storage for this entrypoint.
+        unsafe { topic_count.write(0) };
+    }
     com_boundary("IRtdServer::RefreshData", || {
         // SAFETY: arguments are forwarded from the COM vtable invocation. The
         // inner function validates all pointers before dereferencing them.
@@ -1584,6 +1607,10 @@ pub(super) unsafe extern "system" fn heartbeat<
     this: *mut RtdServer<E, C>,
     result: *mut i32,
 ) -> i32 {
+    if !result.is_null() {
+        // SAFETY: COM supplies writable output storage for this entrypoint.
+        unsafe { result.write(0) };
+    }
     com_boundary("IRtdServer::Heartbeat", || {
         if result.is_null() {
             return E_POINTER;

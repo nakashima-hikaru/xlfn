@@ -182,7 +182,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         {
             let mut catalog = self.runtime.catalog.lock();
             catalog.identities.clear();
-            catalog.pending_topic_bytes = 0;
+            catalog.retained_topic_bytes = 0;
             catalog.pending_count = 0;
             catalog.entries.clear();
         }

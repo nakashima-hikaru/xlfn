@@ -1470,8 +1470,8 @@ mod tests {
         let logged_error = record["error"].as_str().unwrap();
         assert!(logged_error.len() <= DIAGNOSTIC_TEXT_MAX_BYTES);
         assert!(logged_error.ends_with(DIAGNOSTIC_TRUNCATION_SUFFIX));
-        assert!(contents.contains("\\n"));
-        assert!(contents.contains("\\t"));
+        assert!(!contents.contains("\\n"));
+        assert!(!contents.contains("\\t"));
         assert!(contents.len() < LOG_MAX_BYTES as usize);
     }
 

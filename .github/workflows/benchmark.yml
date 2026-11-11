@@ -16,7 +16,6 @@ name: Benchmarks
 
 permissions:
   contents: read
-  checks: write
 
 concurrency:
   group: benchmarks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -32,9 +31,14 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install just
         uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d # just
+        with:
+          tool: just@1.59.0
+          fallback: none
 
       - name: Lint benchmark targets
         shell: bash
@@ -45,92 +49,82 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     permissions:
       contents: read
-      checks: write
-      pull-requests: write
     runs-on: windows-2025
     env:
       BENCHER_TESTBED: github-windows-2025
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install just
         uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d # just
+        with:
+          tool: just@1.59.0
+          fallback: none
+
+      - name: Measure benchmarks
+        shell: bash
+        run: |
+          set -o pipefail
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            just bench-pr | tee benchmark-results.txt
+          else
+            just bench | tee benchmark-results.txt
+          fi
+
+      - name: Upload measurements
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: benchmark-results
+          path: benchmark-results.txt
+          if-no-files-found: error
+
+  publish:
+    name: Publish benchmark measurements
+    needs: benchmark
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    steps:
+      - name: Download measurements
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: benchmark-results
+          path: measurements
 
       - name: Install Bencher CLI
         uses: bencherdev/bencher@24c333d7030390d2f3e130569386f4f1f8577113 # v0.6.15
 
-      - name: Check Bencher configuration
-        id: bencher-config
+      - name: Publish existing results
         shell: bash
         env:
           BENCHER_API_KEY: ${{ secrets.BENCHER_API_KEY }}
           BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BENCHER_BRANCH: ${{ github.head_ref || github.ref_name }}
+          BENCHER_BASE: ${{ github.base_ref }}
+          BENCHER_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if [[ -n "$BENCHER_API_KEY" && -n "$BENCHER_PROJECT" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Set the BENCHER_API_KEY secret and BENCHER_PROJECT repository variable to publish benchmark history."
+          if [[ -z "$BENCHER_API_KEY" || -z "$BENCHER_PROJECT" ]]; then
+            echo "::notice::Bencher is not configured; measurements remain in the artifact."
+            exit 0
           fi
-
-      - name: Track benchmarks with Bencher (branch / nightly)
-        if: steps.bencher-config.outputs.enabled == 'true' && github.event_name != 'pull_request'
-        shell: bash
-        env:
-          BENCHER_API_KEY: ${{ secrets.BENCHER_API_KEY }}
-          BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          bencher run \
-            --project "$BENCHER_PROJECT" \
-            --key "$BENCHER_API_KEY" \
-            --branch "$GITHUB_REF_NAME" \
-            --testbed "$BENCHER_TESTBED" \
-            --adapter rust_criterion \
-            --github-actions "$GITHUB_TOKEN" \
-            --threshold-measure latency \
-            --threshold-test t_test \
-            --threshold-min-sample-size 10 \
-            --threshold-max-sample-size 30 \
-            --threshold-upper-boundary 0.99 \
-            --thresholds-reset \
-            --error-on-alert \
-            --ci-only-on-alert \
-            "just bench"
-
-      - name: Track PR benchmarks with Bencher
-        if: steps.bencher-config.outputs.enabled == 'true' && github.event_name == 'pull_request'
-        shell: bash
-        env:
-          BENCHER_API_KEY: ${{ secrets.BENCHER_API_KEY }}
-          BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          bencher run \
-            --project "$BENCHER_PROJECT" \
-            --key "$BENCHER_API_KEY" \
-            --branch "$GITHUB_HEAD_REF" \
-            --start-point "$GITHUB_BASE_REF" \
-            --start-point-hash "${{ github.event.pull_request.base.sha }}" \
-            --start-point-clone-thresholds \
-            --start-point-reset \
-            --testbed "$BENCHER_TESTBED" \
-            --adapter rust_criterion \
-            --github-actions "$GITHUB_TOKEN" \
-            --error-on-alert \
-            --ci-only-on-alert \
-            "just bench-pr"
-
-      - name: Run PR benchmarks without publishing
-        if: steps.bencher-config.outputs.enabled != 'true' && github.event_name == 'pull_request'
-        shell: bash
-        run: just bench-pr
-
-      - name: Run benchmarks without publishing (main / nightly)
-        if: steps.bencher-config.outputs.enabled != 'true' && github.event_name != 'pull_request'
-        shell: bash
-        run: just bench
+          options=()
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            options+=(--start-point "$BENCHER_BASE" --start-point-hash "$BENCHER_BASE_SHA" --start-point-clone-thresholds --start-point-reset)
+          else
+            options+=(--threshold-measure latency --threshold-test t_test --threshold-min-sample-size 10 --threshold-max-sample-size 30 --threshold-upper-boundary 0.99 --thresholds-reset)
+          fi
+          bencher run --project "$BENCHER_PROJECT" --key "$BENCHER_API_KEY" \
+            --branch "$BENCHER_BRANCH" --hash "$GITHUB_SHA" --testbed github-windows-2025 \
+            --adapter rust_criterion --github-actions "$GITHUB_TOKEN" \
+            --error-on-alert --ci-only-on-alert "${options[@]}" \
+            --file measurements/benchmark-results.txt
 
   archive-closed-pr:
     name: Archive closed PR benchmark branch

@@ -419,6 +419,7 @@ dependencies = [
  "ghost-cell",
  "indexmap",
  "inventory",
+ "libc",
  "parking_lot",
  "rustc-hash",
  "scopeguard",

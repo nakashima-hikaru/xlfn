@@ -5,7 +5,8 @@ use crate::XllResult;
 use crate::win32::*;
 use core::ffi::c_void;
 
-const INFORMATION: u32 = (OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION) as u32;
+const INFORMATION: u32 =
+    (OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION) as u32;
 
 struct LocalAllocation(*mut c_void);
 
@@ -21,7 +22,8 @@ pub(super) struct Descriptor(LocalAllocation);
 
 impl Descriptor {
     pub(super) fn private() -> XllResult<Self> {
-        let sid = current_user_sid()?;
+        let sid = token_sid(TokenUser)?;
+        let integrity = token_sid(TokenIntegrityLevel)?;
         // SECTION_ALL_ACCESS uses concrete bits so retrieval cannot expand
         // GENERIC_ALL differently from our expected descriptor.
         let user_ace = if sid == "S-1-5-18" {
@@ -29,7 +31,9 @@ impl Descriptor {
         } else {
             format!("(A;;0x000f001f;;;{sid})")
         };
-        Self::from_sddl(&format!("O:{sid}D:P(A;;0x000f001f;;;SY){user_ace}"))
+        Self::from_sddl(&format!(
+            "O:{sid}D:P(A;;0x000f001f;;;SY){user_ace}S:(ML;;NWNR;;;{integrity})"
+        ))
     }
 
     fn from_sddl(sddl: &str) -> XllResult<Self> {
@@ -84,7 +88,7 @@ impl Descriptor {
         // differently privileged ACLs, including on pre-created objects.
         if canonical_descriptor(actual.0)? != canonical_descriptor(self.0.0)? {
             return Err(invalid_state(
-                "accounting mapping owner or DACL does not match",
+                "accounting mapping owner, DACL or integrity label does not match",
             ));
         }
         Ok(())
@@ -129,7 +133,7 @@ fn canonical_descriptor(descriptor: PSECURITY_DESCRIPTOR) -> XllResult<Vec<u16>>
     ))
 }
 
-fn current_user_sid() -> XllResult<String> {
+fn token_sid(class: TOKEN_INFORMATION_CLASS) -> XllResult<String> {
     // SAFETY: The current-process pseudo handle has no preconditions.
     let process = unsafe { GetCurrentProcess() };
     let mut token = std::ptr::null_mut();
@@ -147,7 +151,7 @@ fn current_user_sid() -> XllResult<String> {
     let token = Token(token);
     let mut length = 0;
     // SAFETY: Null buffer is the documented size query; length is writable.
-    unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut length) };
+    unsafe { GetTokenInformation(token.0, class, std::ptr::null_mut(), 0, &mut length) };
     if (length as usize) < size_of::<TOKEN_USER>() || length > 65536 {
         return Err(invalid_state("invalid accounting token information size"));
     }
@@ -158,7 +162,7 @@ fn current_user_sid() -> XllResult<String> {
     if unsafe {
         GetTokenInformation(
             token.0,
-            TokenUser,
+            class,
             storage.as_mut_ptr().cast(),
             capacity,
             &mut length,
@@ -171,11 +175,22 @@ fn current_user_sid() -> XllResult<String> {
         return Err(invalid_state("invalid accounting token information result"));
     }
     // SAFETY: The successful API initialized TOKEN_USER in aligned storage.
-    let user = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() };
+    let sid = if class == TokenUser {
+        // SAFETY: TokenUser initialized this aligned TOKEN_USER buffer.
+        unsafe { (*storage.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+    } else {
+        // SAFETY: The only other caller requests TokenIntegrityLevel, whose
+        // leading SID_AND_ATTRIBUTES has the same size and alignment.
+        unsafe {
+            (*storage.as_ptr().cast::<TOKEN_MANDATORY_LABEL>())
+                .Label
+                .Sid
+        }
+    };
     let mut output = std::ptr::null_mut();
     // SAFETY: user.User.Sid is the live SID returned within the token buffer;
     // output receives a LocalFree-owned NUL-terminated SID string.
-    if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut output) } == 0 {
+    if unsafe { ConvertSidToStringSidW(sid, &mut output) } == 0 {
         return Err(os_error("ConvertSidToStringSidW"));
     }
     let _allocation = LocalAllocation(output.cast());
@@ -198,6 +213,43 @@ fn current_user_sid() -> XllResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_owner_mapping_without_integrity_label_is_rejected() {
+        let name = format!(
+            "Local\\xlfn.label-test.{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+        .encode_utf16()
+        .chain([0])
+        .collect::<Vec<_>>();
+        let sid = token_sid(TokenUser).unwrap();
+        let descriptor = Descriptor::from_sddl(&format!(
+            "O:{sid}D:P(A;;0x000f001f;;;SY)(A;;0x000f001f;;;{sid})S:(ML;;NW;;;LW)"
+        ))
+        .unwrap();
+        let attributes = descriptor.attributes();
+        // SAFETY: the descriptor and name remain live throughout creation.
+        let handle = unsafe {
+            super::super::CreateFileMappingW(
+                std::ptr::without_provenance_mut(usize::MAX),
+                (&raw const attributes).cast(),
+                super::super::PAGE_READWRITE,
+                0,
+                4096,
+                name.as_ptr(),
+            )
+        };
+        assert!(!handle.is_null());
+        let rejected = super::super::Mapping::open(&name).is_err();
+        // SAFETY: the test owns this successfully created handle.
+        unsafe { CloseHandle(handle) };
+        assert!(rejected);
+    }
 
     #[test]
     fn permissive_precreated_mapping_is_rejected() {

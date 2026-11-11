@@ -51,7 +51,7 @@ impl PrivateStagingDirectory {
             ))
         })?;
         let metadata = handle.metadata()?;
-        validate_private_directory(path, &metadata)?;
+        validate_private_directory(path, &handle, &metadata)?;
         let identity =
             DirectoryIdentity::from_file_identity(file_snapshot_state(&handle)?.identity);
         Ok(Self {
@@ -83,7 +83,7 @@ impl PrivateStagingDirectory {
                 .map_err(|_| PackageError::StagingDirectoryReplaced {
                     path: self.path.clone(),
                 })?;
-        if validate_private_directory(&self.path, &path_metadata).is_err()
+        if validate_private_directory(&self.path, &path_handle, &path_metadata).is_err()
             || DirectoryIdentity::from_file_identity(file_snapshot_state(&path_handle)?.identity)
                 != self.identity
         {
@@ -93,7 +93,7 @@ impl PrivateStagingDirectory {
         }
 
         let handle_metadata = self.handle.metadata()?;
-        validate_private_directory(&self.path, &handle_metadata)?;
+        validate_private_directory(&self.path, &self.handle, &handle_metadata)?;
         let handle_identity =
             DirectoryIdentity::from_file_identity(file_snapshot_state(&self.handle)?.identity);
         if handle_identity != self.identity {
@@ -126,6 +126,11 @@ impl SnapshotObserver for NoopSnapshotObserver {}
 pub(crate) fn open_bundle_source_for_snapshot(path: &Path) -> io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
 
     #[cfg(target_os = "windows")]
     {
@@ -250,6 +255,7 @@ pub(crate) fn create_private_directory(path: &Path) -> PackageResult {
 #[allow(unsafe_code, reason = "Low-level staging directory validation")]
 pub(crate) fn validate_private_directory(
     path: &Path,
+    handle: &std::fs::File,
     metadata: &std::fs::Metadata,
 ) -> PackageResult {
     if !metadata.is_dir() || is_reparse_point(metadata) {
@@ -284,7 +290,9 @@ pub(crate) fn validate_private_directory(
     }
 
     #[cfg(target_os = "windows")]
-    validate_private_windows_directory(path)?;
+    validate_private_windows_directory(handle)?;
+    #[cfg(not(target_os = "windows"))]
+    let _ = handle;
 
     Ok(())
 }
@@ -434,7 +442,9 @@ pub(crate) fn create_private_windows_directory(path: &Path) -> PackageResult {
     // relying on the token's default owner can select the Administrators group
     // on hosted runners and make the private-directory invariant fail.
     let user_sid = current_windows_user_sid_string()?;
-    let descriptor_string = wide_nul(&format!("O:{user_sid}D:P(A;;FA;;;SY)(A;;FA;;;{user_sid})"));
+    let descriptor_string = wide_nul(&format!(
+        "O:{user_sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{user_sid})"
+    ));
     let mut descriptor = std::ptr::null_mut::<std::ffi::c_void>();
     // SAFETY: the SDDL literal is NUL-terminated and `descriptor` points to
     // writable storage for the API-owned security descriptor pointer.
@@ -480,27 +490,22 @@ pub(crate) fn create_private_windows_directory(path: &Path) -> PackageResult {
 
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code, reason = "Windows security API for ACL validation")]
-pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
+pub(crate) fn validate_private_windows_directory(directory: &std::fs::File) -> PackageResult {
     // PrivateStagingDirectory::create supplies a protected DACL atomically.
     // Existing directories are accepted only through the explicit `open`
     // adoption path, which is used for OS-created temporary directories.
     use crate::win32::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, CloseHandle,
         ConvertStringSidToSidW, DACL_SECURITY_INFORMATION, ERROR_SUCCESS, EqualSid, GetAce,
-        GetAclInformation, GetCurrentProcess, GetLengthSid, GetNamedSecurityInfoW,
-        GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetTokenInformation, HLOCAL,
-        IsValidSid, LocalFree, OWNER_SECURITY_INFORMATION, OpenProcessToken, SE_DACL_PROTECTED,
-        SE_FILE_OBJECT, SECURITY_DESCRIPTOR_CONTROL, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        GetAclInformation, GetCurrentProcess, GetLengthSid, GetSecurityDescriptorControl,
+        GetSecurityDescriptorDacl, GetSecurityInfo, GetTokenInformation, HLOCAL, IsValidSid,
+        LocalFree, OWNER_SECURITY_INFORMATION, OpenProcessToken, SE_DACL_PROTECTED, SE_FILE_OBJECT,
+        SECURITY_DESCRIPTOR_CONTROL, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
     use std::mem::{MaybeUninit, align_of, size_of};
-    use std::os::windows::ffi::OsStrExt;
     use std::ptr::read_unaligned;
 
-    let path_wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+    use std::os::windows::io::AsRawHandle;
     let mut owner = std::ptr::null_mut::<std::ffi::c_void>();
     let mut dacl = std::ptr::null_mut::<ACL>();
     let mut security_descriptor = std::ptr::null_mut::<std::ffi::c_void>();
@@ -512,8 +517,8 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
         // output pointers refer to local storage owned for this call. The API
         // allocates `security_descriptor`, which is released below.
         let status = unsafe {
-            GetNamedSecurityInfoW(
-                path_wide.as_ptr(),
+            GetSecurityInfo(
+                directory.as_raw_handle(),
                 SE_FILE_OBJECT,
                 (DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION) as u32,
                 &mut owner,
@@ -675,7 +680,7 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
             // SAFETY: the preceding range check covers the complete header;
             // `GetAce` may return an unaligned pointer, so read it unaligned.
             let header = unsafe { read_unaligned(ace.cast::<ACE_HEADER>()) };
-            if header.AceType != 0 || header.AceFlags != 0 {
+            if header.AceType != 0 || !matches!(header.AceFlags, 0 | 3) {
                 return Err("private staging directory DACL contains a non-private ACE".into());
             }
             let ace_size = header.AceSize as usize;
@@ -826,7 +831,7 @@ pub(crate) fn read_stable_snapshot(
     file: &mut std::fs::File,
     observer: &impl SnapshotObserver,
 ) -> PackageResult<SharedBytes> {
-    read_stable_snapshot_with_limit(target, path, file, observer, None)
+    read_stable_snapshot_with_limit(target, path, file, observer, Some(MAX_PREPARED_BYTES))
 }
 
 pub(crate) fn read_stable_snapshot_with_limit(

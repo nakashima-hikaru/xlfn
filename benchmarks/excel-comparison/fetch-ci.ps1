@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][string]$RunId,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9]+$')][string]$RunId,
     [string]$Repository,
     [string]$Destination
 )
@@ -28,9 +28,23 @@ try {
         }
         $Repository = $Repository.Trim()
     }
+    if ($Repository -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$') {
+        throw 'Repository must be OWNER/REPO.'
+    }
+    $runJson = gh api "repos/$Repository/actions/runs/$RunId"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read CI run provenance.' }
+    $run = $runJson | ConvertFrom-Json
+    if ($run.event -notin @('push', 'workflow_dispatch') -or
+        $run.head_repository.full_name -ne $Repository -or
+        $run.head_branch -ne 'main' -or
+        $run.path -ne '.github/workflows/excel-comparison-xll.yml' -or
+        $run.status -ne 'completed' -or $run.conclusion -ne 'success' -or
+        $run.head_sha -notmatch '^[0-9a-fA-F]{40}$') {
+        throw 'Only successful main-branch XLL builds from this repository are trusted.'
+    }
     gh run download $RunId --repo $Repository --name excel-comparison-x86_64 --dir $staging
     if ($LASTEXITCODE -ne 0) { throw "Could not download CI run $RunId" }
-    uv run --project $here --locked excel-comparison manifest-verify --root $staging --run-id $RunId
+    uv run --project $here --locked excel-comparison manifest-verify --root $staging --run-id $RunId --commit $run.head_sha
     if ($LASTEXITCODE -ne 0) { throw "CI artifact verification failed for run $RunId" }
     $destinationParent = Split-Path -Parent $destinationPath
     New-Item -ItemType Directory -Force -Path $destinationParent | Out-Null

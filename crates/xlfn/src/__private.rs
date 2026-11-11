@@ -1751,6 +1751,105 @@ pub mod v1 {
             script.assert_calls(&[XL_GET_NAME, XL_EVENT_REGISTER, XLF_EVALUATE, XLF_REGISTER]);
         }
     }
+    /// Type-check the generated callback in its own safe lexical context.
+    #[doc(hidden)]
+    pub fn prepare_sync_udf_with_mode<A: Addin, R: ExcelReturn, X: ExecutionMode, F>(
+        _runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
+        execute: F,
+    ) -> F
+    where
+        F: for<'brand, 'call> FnOnce(
+            &'call A::SharedState,
+            CallFrame<
+                'brand,
+                'call,
+                R::InputMode,
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
+                X,
+            >,
+        ) -> XllResult<R::Payload>,
+    {
+        execute
+    }
+
+    /// Type-check the generated callback in its own safe lexical context.
+    #[doc(hidden)]
+    pub fn prepare_sync_udf_fp12_with_mode<A: Addin, R: NumericReturn, X: ExecutionMode, F>(
+        _runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
+        execute: F,
+    ) -> F
+    where
+        F: for<'brand, 'call> FnOnce(
+            &'call A::SharedState,
+            CallFrame<
+                'brand,
+                'call,
+                R::InputMode,
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
+                X,
+            >,
+        ) -> XllResult<crate::output::NumericArrayOutput>,
+    {
+        execute
+    }
+
+    /// Type-check the generated callback in its own safe lexical context.
+    #[doc(hidden)]
+    #[cfg(feature = "async")]
+    pub fn prepare_async_udf<A, R, F, Fut>(
+        _runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
+        execute: F,
+    ) -> F
+    where
+        A: Addin,
+        R: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
+        F: for<'brand, 'call> FnOnce(
+            &'call crate::runtime::CallGuard<'call, A>,
+            crate::generation::ExecutionLease<A>,
+            CancellationToken,
+            CallFrame<
+                'brand,
+                'call,
+                R::InputMode,
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
+                AsyncLaunchMode,
+            >,
+        ) -> XllResult<Fut>,
+        Fut: Future<Output = XllResult<R>> + Send + 'static,
+    {
+        execute
+    }
+
+    /// Type-check the generated callback in its own safe lexical context.
+    #[doc(hidden)]
+    #[cfg(all(feature = "async", feature = "handles"))]
+    pub fn prepare_async_udf_handle<A, R, F, Build>(
+        _runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
+        execute: F,
+    ) -> F
+    where
+        A: Addin,
+        R: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
+        F: for<'brand, 'call> FnOnce(
+            &'call crate::runtime::CallGuard<'call, A>,
+            crate::generation::ExecutionLease<A>,
+            CancellationToken,
+            CallFrame<
+                'brand,
+                'call,
+                R::InputMode,
+                crate::addin_impl::AddinSubscription<A>,
+                crate::addin_impl::AddinSources<A>,
+                AsyncLaunchMode,
+            >,
+        ) -> XllResult<Build>,
+        Build: HandleScopedBuilder<R> + Send + 'static,
+    {
+        execute
+    }
 }
 
 #[cfg(all(feature = "handles", feature = "bench-internals"))]
@@ -1802,7 +1901,7 @@ mod tests {
             crate::error::InputError::UnknownEnum { actual, expected }
                 if actual == "unknown日本語" && *expected == "[\"Fast mode\", \"Slow\"]"
         ));
-        assert!(error.to_string().contains("unknown日本語"));
+        assert!(!error.to_string().contains("unknown日本語"));
         assert_eq!(error.to_excel_error(), crate::ExcelError::Value);
     }
 

@@ -1250,8 +1250,11 @@ pub(super) fn lower(spec: UdfSpec) -> UdfPlan {
             ty: argument.ty,
             excel_name: argument.excel_name,
             description: argument.description,
-            raw_ident: format_ident!("__raw_{index}"),
-            local_ident: format_ident!("__argument_{index}"),
+            raw_ident: format_ident!("__raw_{index}", span = proc_macro2::Span::mixed_site()),
+            local_ident: format_ident!(
+                "__argument_{index}",
+                span = proc_macro2::Span::mixed_site()
+            ),
             conversion: argument.conversion,
         })
         .collect();

@@ -1,4 +1,6 @@
 [package]
+publish = false
+license = "MIT OR Apache-2.0"
 name = "lifecycle-stack-model"
 version = "0.1.0"
 edition = "2024"

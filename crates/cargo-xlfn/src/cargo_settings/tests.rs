@@ -250,3 +250,26 @@ fn cargo_home_is_not_reapplied_above_its_ancestor_position() {
         Some(PathBuf::from("member-wrapper"))
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn aliased_include_diamond_is_rejected_by_physical_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(
+        root,
+        ".cargo/config.toml",
+        "include = ['left/shared.toml', 'right/shared.toml']\n",
+    );
+    write(
+        root,
+        ".cargo/physical/shared.toml",
+        "[build]\nrustc-wrapper = ''\n",
+    );
+    std::os::unix::fs::symlink("physical", root.join(".cargo/left")).unwrap();
+    std::os::unix::fs::symlink("physical", root.join(".cargo/right")).unwrap();
+    let error = CargoSettings::load_with(root, None, |_| None)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("filesystem alias"));
+}

@@ -1,9 +1,11 @@
 use super::source::SourceHandleId;
 use crate::{XllError, XllResult};
-use rustc_hash::FxHasher;
 use smol_str::SmolStr;
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
+use std::sync::LazyLock;
 
 pub(crate) const MAX_RTD_TOPIC_PARTS: usize = 253;
 pub(crate) const MAX_RTD_TOPIC_BYTES: usize = 1024 * 1024;
@@ -556,6 +558,8 @@ struct TopicMetadata {
     hash: u64,
 }
 
+static HASHER: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+
 fn validate_topic_parts<'a>(
     parts: impl Clone + ExactSizeIterator<Item = &'a str>,
 ) -> XllResult<TopicMetadata> {
@@ -585,7 +589,8 @@ fn validate_topic_parts<'a>(
         }
     }
     let mut total_bytes = 0_usize;
-    let mut hasher = FxHasher::default();
+    // All owned and borrowed topics in this image share one secret seed.
+    let mut hasher = HASHER.build_hasher();
     parts.len().hash(&mut hasher);
     for part in parts.clone() {
         total_bytes = total_bytes.checked_add(part.len()).ok_or_else(|| {
@@ -731,7 +736,8 @@ mod borrowed_tests {
                 assert!(borrowed.matches(&owned));
                 assert_eq!(borrowed.metadata.byte_len, owned.byte_len());
                 // Independently verify the canonical hash recipe.
-                let mut hasher = FxHasher::default();
+                // All owned and borrowed topics in this image share one secret seed.
+                let mut hasher = HASHER.build_hasher();
                 N.hash(&mut hasher);
                 for part in parts {
                     part.hash(&mut hasher);

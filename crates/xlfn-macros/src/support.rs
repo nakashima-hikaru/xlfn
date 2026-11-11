@@ -18,37 +18,37 @@ pub(super) fn resolve_crate_path(explicit_crate: Option<&syn::Path>) -> syn::Pat
 }
 
 pub(super) fn extract_gating_attributes(attributes: &[Attribute]) -> Vec<Attribute> {
-    let mut gating = Vec::new();
-    for attribute in attributes {
-        if attribute.path().is_ident("cfg") {
-            let mut attribute = attribute.clone();
-            // Gating copied from inside a function body is attached to new
-            // sibling items, where only outer attributes are valid.
-            attribute.style = syn::AttrStyle::Outer;
-            gating.push(attribute);
-            continue;
-        }
-        if !attribute.path().is_ident("cfg_attr") {
-            continue;
-        }
+    attributes
+        .iter()
+        .filter_map(|attribute| {
+            let meta = gating_meta(&attribute.meta)?;
+            Some(syn::parse_quote!(#[#meta]))
+        })
+        .collect()
+}
 
-        let Ok(entries) =
-            attribute.parse_args_with(Punctuated::<Meta, syn::Token![,]>::parse_terminated)
-        else {
-            continue;
-        };
-        let mut entries = entries.into_iter();
-        let Some(predicate) = entries.next() else {
-            continue;
-        };
-        let nested_gating = entries
-            .filter(|meta| meta.path().is_ident("cfg") || meta.path().is_ident("cfg_attr"))
-            .collect::<Vec<_>>();
-        if !nested_gating.is_empty() {
-            gating.push(syn::parse_quote!(#[cfg_attr(#predicate, #(#nested_gating),*)]));
-        }
+fn gating_meta(meta: &Meta) -> Option<Meta> {
+    if meta.path().is_ident("cfg") {
+        return Some(meta.clone());
     }
-    gating
+    let Meta::List(list) = meta else {
+        return None;
+    };
+    if !list.path.is_ident("cfg_attr") {
+        return None;
+    }
+    let mut entries = list
+        .parse_args_with(Punctuated::<Meta, syn::Token![,]>::parse_terminated)
+        .ok()?
+        .into_iter();
+    let predicate = entries.next()?;
+    let nested = entries
+        .filter_map(|meta| gating_meta(&meta))
+        .collect::<Vec<_>>();
+    if nested.is_empty() {
+        return None;
+    }
+    Some(syn::parse_quote!(cfg_attr(#predicate, #(#nested),*)))
 }
 
 pub(super) fn doc_comment(attributes: &[Attribute]) -> String {
@@ -72,4 +72,20 @@ pub(super) fn doc_comment(attributes: &[Attribute]) -> String {
         })
         .collect::<Vec<_>>();
     lines.join("\n").trim().to_owned()
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    #[test]
+    fn nested_cfg_attr_keeps_only_gating() {
+        let attrs = vec![
+            syn::parse_quote!(#[cfg_attr(all(), cfg_attr(all(), unsafe(export_name = "injected"), cfg(any())), inline)]),
+        ];
+        let result = extract_gating_attributes(&attrs);
+        let text = quote::quote!(#(#result)*).to_string();
+        assert!(!text.contains("export_name"));
+        assert!(!text.contains("inline"));
+        assert!(text.contains("cfg (any ())"));
+    }
 }

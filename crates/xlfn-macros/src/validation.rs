@@ -65,6 +65,12 @@ pub(super) fn validate_addin_metadata(
 }
 
 pub(super) fn validate_export_id(id: &str, span: &impl quote::ToTokens) -> syn::Result<()> {
+    if id.len() > 251 {
+        return Err(syn::Error::new_spanned(
+            span,
+            "`xll_` plus `id` must fit 255 ASCII bytes",
+        ));
+    }
     if id.is_empty()
         || !id
             .chars()

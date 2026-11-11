@@ -52,6 +52,7 @@ windows_link::link!("oleaut32.dll" "system" fn SysAllocStringLen(strin : *const 
 windows_link::link!("oleaut32.dll" "system" fn SysFreeString(bstrstring : BSTR));
 windows_link::link!("oleaut32.dll" "system" fn SysStringLen(pbstr : BSTR) -> u32);
 windows_link::link!("oleaut32.dll" "system" fn VariantClear(pvarg : *mut VARIANTARG) -> HRESULT);
+windows_link::link!("kernel32.dll" "system" fn VirtualQuery(lpaddress : *const core::ffi::c_void, lpbuffer : *mut MEMORY_BASIC_INFORMATION, dwlength : usize) -> usize);
 windows_link::link!("kernel32.dll" "system" fn WaitForSingleObject(hhandle : HANDLE, dwmilliseconds : u32) -> u32);
 pub type ACCESS_MASK = u32;
 #[repr(C)]
@@ -537,13 +538,46 @@ pub struct IUnknown_Vtbl {
 }
 pub const KEY_READ: i32 = 131097;
 pub const KEY_WRITE: i32 = 131078;
+pub const LABEL_SECURITY_INFORMATION: i32 = 16;
 pub type LCID = u32;
 pub type LPPARAMDESCEX = *mut PARAMDESCEX;
 pub type LSTATUS = i32;
 pub type MEMBERID = DISPID;
+#[repr(C)]
+#[cfg(target_arch = "x86")]
+#[derive(Clone, Copy, Default)]
+pub struct MEMORY_BASIC_INFORMATION {
+    pub BaseAddress: *mut core::ffi::c_void,
+    pub AllocationBase: *mut core::ffi::c_void,
+    pub AllocationProtect: u32,
+    pub RegionSize: usize,
+    pub State: u32,
+    pub Protect: u32,
+    pub Type: u32,
+}
+#[repr(C)]
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "arm64ec",
+    target_arch = "x86_64"
+))]
+#[derive(Clone, Copy, Default)]
+pub struct MEMORY_BASIC_INFORMATION {
+    pub BaseAddress: *mut core::ffi::c_void,
+    pub AllocationBase: *mut core::ffi::c_void,
+    pub AllocationProtect: u32,
+    pub PartitionId: u16,
+    pub RegionSize: usize,
+    pub State: u32,
+    pub Protect: u32,
+    pub Type: u32,
+}
+pub const MEM_COMMIT: i32 = 4096;
+pub const MEM_MAPPED: i32 = 262144;
 pub type OLECHAR = u16;
 pub const OWNER_SECURITY_INFORMATION: i32 = 1;
 pub type PACL = *mut ACL;
+pub const PAGE_READWRITE: i32 = 4;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct PARAMDESC {
@@ -567,6 +601,7 @@ pub type PSID = *mut core::ffi::c_void;
 pub type PWSTR = *mut u16;
 pub type REGSAM = ACCESS_MASK;
 pub const REG_OPTION_NON_VOLATILE: i32 = 0;
+pub const REG_OPTION_VOLATILE: i32 = 1;
 pub const REG_SZ: u32 = 1;
 pub const RPC_E_CHANGED_MODE: HRESULT = 0x80010106_u32 as _;
 #[repr(C)]
@@ -635,6 +670,11 @@ pub struct TLIBATTR {
     pub wLibFlags: u16,
 }
 pub type TOKEN_INFORMATION_CLASS = i32;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct TOKEN_MANDATORY_LABEL {
+    pub Label: SID_AND_ATTRIBUTES,
+}
 pub const TOKEN_QUERY: i32 = 8;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -692,6 +732,7 @@ impl Default for TYPEDESC_0 {
     }
 }
 pub type TYPEKIND = i32;
+pub const TokenIntegrityLevel: TOKEN_INFORMATION_CLASS = 25;
 pub const TokenUser: TOKEN_INFORMATION_CLASS = 1;
 #[repr(C)]
 #[derive(Clone, Copy)]

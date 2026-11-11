@@ -1,4 +1,5 @@
 [package]
+license = "MIT OR Apache-2.0"
 name = "xlfn-rtd-api-fixture"
 version = "0.1.0"
 edition = "2024"
@@ -14,4 +15,4 @@ streaming = ["framework/rtd"]
 objects = ["framework/handles"]
 
 [dependencies]
-framework = { package = "xlfn", path = "../../crates/xlfn" }
+framework = { package = "xlfn", version = "=0.2.0", path = "../../crates/xlfn" }
