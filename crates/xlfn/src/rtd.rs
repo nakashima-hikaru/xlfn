@@ -1,12 +1,3 @@
-#![cfg_attr(
-    not(feature = "rtd"),
-    allow(
-        dead_code,
-        unreachable_pub,
-        reason = "The RTD implementation is private in core-only builds"
-    )
-)]
-
 use crate::XllResult;
 pub use crate::addin_impl::{RtdConfig, RtdOpenContext};
 use crate::host_api::ExcelHost;

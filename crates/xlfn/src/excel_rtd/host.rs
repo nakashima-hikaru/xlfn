@@ -9,11 +9,12 @@ pub(crate) struct RtdSubscriptionHost {
 }
 
 impl RtdSubscriptionHost {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "rtd"))]
     pub(crate) const fn detached() -> Self {
         Self { ingress: None }
     }
 
+    #[cfg(feature = "rtd")]
     pub(crate) const fn production(ingress: &'static ExportIngress) -> Self {
         Self {
             ingress: Some(ingress),

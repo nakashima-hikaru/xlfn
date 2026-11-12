@@ -155,13 +155,9 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         SubscriptionRuntime::connect_from_handle(self, topic_id, id)
     }
 
-    #[cfg_attr(
-        windows,
-        allow(
-            dead_code,
-            reason = "synchronous backend disconnection retains its sink-user barrier contract; COM uses the deferred entry point"
-        )
-    )]
+    // Synchronous backend disconnection retains its sink-user barrier contract;
+    // COM uses the deferred entry point.
+    #[cfg(any(not(windows), test, feature = "bench-internals"))]
     pub(crate) fn disconnect(&self, topic_id: TopicId) -> XllResult<()> {
         SubscriptionRuntime::disconnect_from_handle(self, topic_id)
     }

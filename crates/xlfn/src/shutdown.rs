@@ -99,10 +99,7 @@ impl<'a> CleanupReporter<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UnloadHazard {
     HostCallbackStillRegistered,
-    #[allow(
-        dead_code,
-        reason = "Async hazard variant used in async feature builds"
-    )]
+    #[cfg(feature = "async")]
     AsyncExecutorStillRunning,
     SubscriptionProducerStillRunning,
     HandleStoreNotQuiescent,
@@ -123,6 +120,7 @@ impl UnloadHazard {
             Self::HostCallbackStillRegistered | Self::RegistrationStateUnknown => {
                 crate::shutdown_trace::ShutdownFailure::UnregisterFailed
             }
+            #[cfg(feature = "async")]
             Self::AsyncExecutorStillRunning => {
                 crate::shutdown_trace::ShutdownFailure::AsyncShutdownFailed
             }

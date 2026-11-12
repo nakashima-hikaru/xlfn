@@ -236,6 +236,7 @@ impl DiagnosticRouter {
                 }
                 Ok(())
             }
+            #[cfg(test)]
             Err(
                 DiagnosticShutdownError::RouterClosed | DiagnosticShutdownError::InvariantViolation,
             ) => Err(DiagnosticInitError::RouterClosed),
@@ -362,7 +363,11 @@ impl DiagnosticRouter {
                 Err(DiagnosticShutdownError::ReentrantShutdown) => {
                     return Err(DiagnosticTerminalCloseError::ReentrantShutdown);
                 }
-                Err(_) => {
+                #[cfg(test)]
+                Err(
+                    DiagnosticShutdownError::RouterClosed
+                    | DiagnosticShutdownError::InvariantViolation,
+                ) => {
                     return Err(DiagnosticTerminalCloseError::InvariantViolation);
                 }
             }

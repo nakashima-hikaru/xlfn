@@ -32,6 +32,7 @@ unsafe impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Send for BackendS
 // SAFETY: SubscriptionRuntime serializes operations on the shared pointer.
 unsafe impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Sync for BackendSubscriptions<E, C> {}
 impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> BackendSubscriptions<E, C> {
+    #[cfg(any(test, feature = "rtd"))]
     pub(super) fn new(runtime: &SubscriptionRuntime<E, C>) -> Self {
         Self(NonNull::from(runtime))
     }
@@ -66,6 +67,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Clone for BackendSubscri
     }
 }
 impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> BackendSubscriptionServer<E, C> {
+    #[cfg(any(test, feature = "rtd"))]
     pub(super) fn claim(&self, key: SubscriptionKey) -> XllResult<()> {
         self.0.claim(self.0.resolve_transport_key(key)?)
     }

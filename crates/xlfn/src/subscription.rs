@@ -70,7 +70,7 @@ pub use topic::{RtdTopic, RtdTopicInput, RtdTopicParts};
 pub use value::IntoRtdValue;
 #[cfg(feature = "rtd")]
 pub use value::RtdValue;
-#[cfg(not(feature = "rtd"))]
+#[cfg(all(test, not(feature = "rtd"), target_os = "windows"))]
 pub(crate) use value::RtdValue;
 
 #[cfg(any(
@@ -112,6 +112,7 @@ pub(crate) use source::{SourceArena, SourceRegistration};
 pub(crate) use topic::BorrowedTopicParts;
 #[cfg(all(test, feature = "rtd"))]
 pub(crate) use topic::SubscriptionId;
+#[cfg(any(feature = "rtd", all(target_os = "windows", feature = "handles")))]
 pub(crate) use topic::SubscriptionKey;
 #[cfg(any(
     all(test, feature = "rtd"),

@@ -361,8 +361,7 @@ macro_rules! impl_udf_layers {
 
             #[allow(
                 non_snake_case,
-                unused_variables,
-                reason = "Variables used for unwinding earlier guards"
+                reason = "Tuple guard bindings match generic type names"
             )]
             fn enter_layers(&self, metadata: &CallMetadata) -> XllResult<Self::Guards> {
                 impl_udf_layers_enter!(@step self, metadata; $($T, $idx);+)

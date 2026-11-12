@@ -92,18 +92,16 @@ pub enum DiagnosticInitError {
     RouterClosed,
 }
 
-#[allow(
-    dead_code,
-    reason = "Shutdown error is retained for internal lifecycle diagnostics"
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum DiagnosticShutdownError {
     #[error("diagnostic logger worker panicked")]
     WorkerPanicked,
     #[error("diagnostic logger cannot join itself")]
     ReentrantShutdown,
+    #[cfg(test)]
     #[error("the diagnostic router is closed")]
     RouterClosed,
+    #[cfg(test)]
     #[error("diagnostic router invariant violated")]
     InvariantViolation,
 }

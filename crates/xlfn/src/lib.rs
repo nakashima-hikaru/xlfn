@@ -66,10 +66,6 @@ mod call;
 mod call_return;
 mod callback_gate;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-#[allow(
-    dead_code,
-    reason = "Callback release state is an internal protocol witness"
-)]
 mod callback_value;
 #[cfg(feature = "async")]
 #[allow(unsafe_code, reason = "Generational cancellation slot raw pointers")]
@@ -130,105 +126,48 @@ mod source_catalog;
 #[cfg(any(feature = "rtd", feature = "handles"))]
 mod subscription;
 mod subscription_owner;
-#[cfg(feature = "rtd")]
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
-pub(crate) use source_catalog::{DynamicRtdSources, RtdSourceCatalog};
-#[cfg(not(feature = "rtd"))]
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
 pub(crate) use source_catalog::{DynamicRtdSources, RtdSourceCatalog};
 mod utf16;
 /// Safe worksheet input views, owned values, and explicit output shapes.
 pub mod value;
 
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
 pub(crate) use xlfn_kernel::sync;
 
+#[cfg(any(
+    all(feature = "async", test),
+    all(feature = "async-builtin", feature = "bench-internals")
+))]
+pub(crate) use addin_impl::AsyncTaskLimit;
+#[cfg(all(
+    feature = "async",
+    any(test, all(feature = "bench-internals", not(feature = "async-builtin")))
+))]
+pub(crate) use addin_impl::NoAsyncExecutor;
+#[cfg(all(feature = "async", test))]
+pub(crate) use addin_impl::{AsyncContext, BuildInfo};
+#[cfg(all(feature = "handles", test))]
+pub(crate) use addin_impl::{HandleBindingLimit, HandleConfig, RuntimeConfig};
+#[cfg(test)]
+pub(crate) use addin_impl::{MacroSheetContext, Opened, PhysicallyUnloadableAddin};
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) use addin_impl::{OpenContext, OpenResult};
 #[cfg(feature = "async")]
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
-pub(crate) use addin_impl::{AsyncConfig, AsyncContext, AsyncTaskLimit};
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
-pub(crate) use addin_impl::{
-    BuildInfo, DiagnosticsSetup, MacroSheetContext, MainThreadContext, NoAsyncExecutor,
-    OpenContext, OpenResult, Opened, PhysicallyUnloadableAddin, RuntimeConfig, ThreadSafeContext,
-};
-#[cfg(feature = "handles")]
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
-pub(crate) use addin_impl::{HandleBindingLimit, HandleConfig};
-#[cfg(feature = "rtd")]
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
-pub(crate) use addin_impl::{RtdConfig, RtdOpenContext};
-#[cfg(feature = "async")]
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
-pub(crate) use async_udf::{AsyncExecutor, AsyncTask};
-#[cfg(feature = "async-builtin")]
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
+pub(crate) use async_udf::AsyncExecutor;
+#[cfg(all(feature = "async", test))]
+pub(crate) use async_udf::AsyncTask;
+#[cfg(all(feature = "async-builtin", any(test, feature = "bench-internals")))]
 pub(crate) use async_udf::{AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig};
-#[cfg(feature = "async")]
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
-pub(crate) use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
 pub use error::{
     ExcelApiFailure, ExcelApiFunction, ExcelCallbackStatus, ExcelError, UdfError, UdfResult,
     XllError, XllResult,
 };
+#[cfg(all(feature = "async", test))]
+pub(crate) use shutdown::CleanupReporter;
 #[cfg(feature = "rtd")]
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
-pub(crate) use rtd::RtdCallContext;
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
-pub(crate) use shutdown::{CleanupIssueKind, CleanupReporter};
-#[cfg(all(not(feature = "rtd"), any(test, feature = "handles")))]
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
+pub(crate) use subscription_owner::BoxedRtdSubscription;
+#[cfg(any(feature = "rtd", feature = "handles"))]
 pub(crate) use subscription_owner::IntoRtdSubscription;
-#[cfg(not(feature = "rtd"))]
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
 pub(crate) use subscription_owner::RtdSubscription;
-#[cfg(feature = "rtd")]
-#[allow(
-    unused_imports,
-    reason = "Internal aliases also serve feature-specific tests"
-)]
-pub(crate) use subscription_owner::{BoxedRtdSubscription, IntoRtdSubscription, RtdSubscription};
 
 mod ingress;
 

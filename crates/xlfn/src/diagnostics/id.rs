@@ -9,11 +9,6 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DiagnosticId(u64);
 
-// Some codes are only referenced by platform- or feature-gated paths.
-#[allow(
-    dead_code,
-    reason = "some diagnostic codes are only used by platform- or feature-gated paths"
-)]
 impl DiagnosticId {
     /// Creates a diagnostic code from an eight-byte ASCII mnemonic.
     pub(crate) const fn from_ascii8(bytes: [u8; 8]) -> Self {
@@ -29,6 +24,7 @@ impl DiagnosticId {
         Self(value)
     }
 
+    #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
     pub(crate) const fn with_low_u32(self, value: u32) -> Self {
         Self((self.0 & 0xffff_ffff_0000_0000) | value as u64)
     }

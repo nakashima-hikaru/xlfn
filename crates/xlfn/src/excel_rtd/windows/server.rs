@@ -25,6 +25,7 @@ use super::{com_boundary, guid_eq};
 use crate::error::InputError;
 use crate::formula_lifetime::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
 use crate::subscription::ServerGeneration;
+#[cfg(any(test, feature = "rtd"))]
 use crate::subscription::SubscriptionRuntime;
 use crate::sync::Mutex;
 use crate::win32::E_UNEXPECTED;
@@ -104,7 +105,10 @@ pub(super) struct EnsuredServer<
     pub(super) active: ActiveServer,
     #[cfg(test)]
     pub(super) newly_created: bool,
+    #[cfg(any(test, feature = "rtd"))]
     pub(super) subscription_server: Option<BackendSubscriptionServer<E, C>>,
+    #[cfg(not(any(test, feature = "rtd")))]
+    _marker: ::core::marker::PhantomData<(E, C)>,
 }
 
 impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> EnsuredServer<E, C> {
@@ -710,6 +714,7 @@ pub(crate) fn shutdown<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     }
 }
 
+#[cfg(any(test, feature = "rtd"))]
 pub(crate) fn shutdown_subscriptions<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     subscriptions: &SubscriptionRuntime<E, C>,
 ) -> XllResult<()> {
@@ -800,6 +805,7 @@ pub(super) fn ensure_server<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     ensure_server_impl(handles, subscriptions)
 }
 
+#[cfg(any(test, feature = "rtd"))]
 pub(super) fn ensure_server_without_handles<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     subscriptions: Option<BackendSubscriptions<E, C>>,
 ) -> XllResult<EnsuredServer<E, C>> {
@@ -959,11 +965,17 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
             // the count to create the separate temporary reference held by the guard.
             unsafe { server_add_ref(server) };
 
+            #[cfg(not(any(test, feature = "rtd")))]
+            let _ = subscription_handle;
+
             return Ok(EnsuredServer::<E, C> {
                 active: existing.clone(),
                 #[cfg(test)]
                 newly_created: false,
+                #[cfg(any(test, feature = "rtd"))]
                 subscription_server: subscription_handle,
+                #[cfg(not(any(test, feature = "rtd")))]
+                _marker: ::core::marker::PhantomData,
             });
         }
 
@@ -1031,11 +1043,17 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
         // Incrementing here creates a separate temporary reference for EnsuredServer<E, C>.
         unsafe { server_add_ref(pointer as *mut RtdServer<E, C>) };
 
+        #[cfg(not(any(test, feature = "rtd")))]
+        let _ = subscription_handle;
+
         return Ok(EnsuredServer::<E, C> {
             active: entry,
             #[cfg(test)]
             newly_created: true,
+            #[cfg(any(test, feature = "rtd"))]
             subscription_server: subscription_handle,
+            #[cfg(not(any(test, feature = "rtd")))]
+            _marker: ::core::marker::PhantomData,
         });
     }
 }

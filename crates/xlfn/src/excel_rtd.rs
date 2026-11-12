@@ -4,14 +4,6 @@
 //! remains in [`crate::rtd`], while formula handles depend only on the
 //! lifetime capability declared by `crate::formula_lifetime`.
 
-#![cfg_attr(
-    not(feature = "rtd"),
-    allow(
-        dead_code,
-        reason = "Generic RTD operations are private transport support when only handles are enabled"
-    )
-)]
-
 use crate::XllResult;
 #[cfg(feature = "handles")]
 use crate::formula_lifetime::FormulaLifetimeBackend;
@@ -206,6 +198,7 @@ pub(crate) fn observe_handle<E: crate::RtdSubscription, C: crate::RtdSourceCatal
     }
 }
 
+#[cfg(feature = "rtd")]
 pub(crate) fn observe_subscription<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     subscriptions: &crate::subscription::SubscriptionRuntime<E, C>,
     key: &crate::subscription::SubscriptionKey,
@@ -240,6 +233,7 @@ pub(crate) fn shutdown_handle_topics(handles: &FormulaLifetimeBackend) -> XllRes
     }
 }
 
+#[cfg(feature = "rtd")]
 pub(crate) fn shutdown_subscriptions<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     subscriptions: &crate::subscription::SubscriptionRuntime<E, C>,
 ) -> XllResult<()> {

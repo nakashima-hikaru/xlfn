@@ -118,10 +118,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SubscriptionServiceSlot<
         Ok(stopped)
     }
 
-    #[allow(
-        dead_code,
-        reason = "trace wiring is used only when the runtime observer is enabled"
-    )]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
         self.observer.set_trace_sink(triomphe::Arc::clone(&trace));
         self.service.with_published(|runtime| {

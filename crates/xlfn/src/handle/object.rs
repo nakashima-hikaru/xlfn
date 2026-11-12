@@ -717,20 +717,6 @@ impl<'registry, T: Send + Sync + 'static> PendingObjectBinding<'registry, T> {
     pub(crate) fn id(&self) -> ObjectId {
         self.binding.id()
     }
-
-    #[cfg(test)]
-    #[allow(dead_code, reason = "Test accessor fixture")]
-    #[inline]
-    pub(crate) fn object(&self) -> &ObjectCell {
-        self.binding.object()
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code, reason = "Test accessor fixture")]
-    #[inline]
-    pub(crate) fn arena(&self) -> NonNull<ObjectArena> {
-        self.binding.arena()
-    }
 }
 
 impl Drop for ObjectBinding {

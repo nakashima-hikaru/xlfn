@@ -1,7 +1,10 @@
 use super::registration::TemporaryRegistration;
 #[cfg(feature = "handles")]
 use super::server::ensure_server;
-use super::server::{SERVER_STARTED, ServerObservation, ensure_server_without_handles};
+#[cfg(any(test, feature = "rtd"))]
+use super::server::ensure_server_without_handles;
+use super::server::{SERVER_STARTED, ServerObservation};
+#[cfg(any(test, feature = "rtd"))]
 use super::subscription_backend::BackendSubscriptions;
 #[cfg(feature = "handles")]
 use crate::XllError;
@@ -12,7 +15,9 @@ use crate::formula_lifetime::{FormulaLifetimeBackend, FormulaLifetimeGeneration}
 use crate::host_api::ExcelHost;
 #[cfg(feature = "handles")]
 use crate::ingress::ExportIngress;
+#[cfg(any(test, feature = "rtd"))]
 use crate::subscription::{RtdValue, SubscriptionRuntime};
+#[cfg(any(test, feature = "rtd"))]
 use crate::value::ExcelValue;
 use std::ptr::NonNull;
 use xlfn_sys::{XLF_RTD, XLOPER12};
@@ -73,6 +78,7 @@ pub(crate) fn observe<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     Ok(())
 }
 
+#[cfg(any(test, feature = "rtd"))]
 pub(crate) fn observe_subscription<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     subscriptions: &SubscriptionRuntime<E, C>,
     key: &crate::subscription::SubscriptionKey,

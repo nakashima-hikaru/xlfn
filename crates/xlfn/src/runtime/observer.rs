@@ -49,10 +49,6 @@ impl RuntimeObserver {
         self.event(crate::shutdown_trace::ShutdownEvent::StopDiagnostics);
     }
 
-    #[allow(
-        dead_code,
-        reason = "The no-op production observer keeps one API across builds"
-    )]
     pub(crate) fn mark_returned_success(&self) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace_handle().mark_returned_success();

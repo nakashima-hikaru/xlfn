@@ -165,10 +165,6 @@ mod mock {
         ASYNC_RETURN_CALLS.load(Ordering::Acquire)
     }
 
-    #[allow(
-        dead_code,
-        reason = "Used in tests under certain feature configurations"
-    )]
     pub(crate) fn free_calls() -> usize {
         FREE_CALLS.load(Ordering::Relaxed)
     }

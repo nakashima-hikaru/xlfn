@@ -262,6 +262,7 @@ impl<'session> ExcelCallbackValue<'session> {
     /// The returned raw pointer is valid only while this owner remains live and
     /// stationary, including the whole synchronous callback that consumes it.
     /// The pointer itself carries no lifetime and must not be retained.
+    #[cfg(feature = "handles")]
     pub(crate) fn raw_pointer(&mut self) -> NonNull<XLOPER12> {
         NonNull::from_mut(&mut self.owner.raw)
     }
