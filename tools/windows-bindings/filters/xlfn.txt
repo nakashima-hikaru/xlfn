@@ -136,3 +136,17 @@
     Windows.Win32.SE_KERNEL_OBJECT
     Windows.Win32.SDDL_REVISION_1
     Windows.Win32.LocalFree
+    Windows.Win32.TokenIntegrityLevel
+    Windows.Win32.LABEL_SECURITY_INFORMATION
+    Windows.Win32.GetSecurityDescriptorSacl
+    Windows.Win32.GetAce
+    Windows.Win32.EqualSid
+    Windows.Win32.SYSTEM_MANDATORY_LABEL_ACE
+    Windows.Win32.SYSTEM_MANDATORY_LABEL_ACE_TYPE
+    Windows.Win32.TOKEN_MANDATORY_LABEL
+    Windows.Win32.VirtualQuery
+    Windows.Win32.MEMORY_BASIC_INFORMATION
+    Windows.Win32.MEM_COMMIT
+    Windows.Win32.MEM_MAPPED
+    Windows.Win32.PAGE_READWRITE
+    Windows.Win32.REG_OPTION_VOLATILE

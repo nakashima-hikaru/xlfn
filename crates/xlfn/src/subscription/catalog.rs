@@ -77,7 +77,7 @@ impl SubscriptionEntry {
         matches!(self.phase, SubscriptionPhase::Active { .. })
     }
 
-    pub(crate) fn tracks_pending_bytes(&self) -> bool {
+    pub(crate) fn counts_as_pending(&self) -> bool {
         !matches!(
             self.phase,
             SubscriptionPhase::Active {
@@ -357,7 +357,7 @@ impl SubscriptionEntry {
 
 pub(crate) struct SubscriptionCatalog {
     pub(crate) entries: FxHashMap<SubscriptionId, SubscriptionEntry>,
-    pub(crate) pending_topic_bytes: usize,
+    pub(crate) retained_topic_bytes: usize,
     pub(crate) pending_count: usize,
     pub(crate) identities: SubscriptionIdentityIndex,
     pub(crate) next_subscription_id: u64,
@@ -371,10 +371,10 @@ struct PendingInsertPlan<'catalog, 'parts, Part: AsRef<str>> {
     key: SubscriptionKey,
     source_id: SourceId,
     next_id: &'catalog mut u64,
-    pending_bytes: &'catalog mut usize,
+    retained_bytes: &'catalog mut usize,
     pending_count: &'catalog mut usize,
     next_subscription_id: u64,
-    pending_topic_bytes: usize,
+    retained_topic_bytes: usize,
 }
 impl<Part: AsRef<str>> PendingInsertPlan<'_, '_, Part> {
     fn commit(self) -> (SubscriptionId, SubscriptionKey) {
@@ -392,7 +392,7 @@ impl<Part: AsRef<str>> PendingInsertPlan<'_, '_, Part> {
             },
         });
         *self.next_id = self.next_subscription_id;
-        *self.pending_bytes = self.pending_topic_bytes;
+        *self.retained_bytes = self.retained_topic_bytes;
         *self.pending_count += 1;
         (self.id, self.key)
     }
@@ -427,8 +427,8 @@ impl SubscriptionCatalog {
         if self.pending_count >= limits.max_pending.get() {
             return Err(XllError::Overloaded);
         }
-        let pending_topic_bytes = self
-            .pending_topic_bytes
+        let retained_topic_bytes = self
+            .retained_topic_bytes
             .checked_add(topic.byte_len())
             .filter(|&total| total <= limits.max_total_topic_bytes.get())
             .ok_or(XllError::Overloaded)?;
@@ -456,10 +456,10 @@ impl SubscriptionCatalog {
             key,
             source_id,
             next_id: &mut self.next_subscription_id,
-            pending_bytes: &mut self.pending_topic_bytes,
+            retained_bytes: &mut self.retained_topic_bytes,
             pending_count: &mut self.pending_count,
             next_subscription_id,
-            pending_topic_bytes,
+            retained_topic_bytes,
         })
     }
 
@@ -485,32 +485,12 @@ impl SubscriptionCatalog {
         id: SubscriptionId,
         update: impl FnOnce(&mut SubscriptionEntry) -> R,
     ) -> Option<R> {
-        let (was_pending, is_pending, topic_bytes, result) = {
-            let entry = self.entries.get_mut(&id)?;
-            let was_pending = entry.tracks_pending_bytes();
-            let topic_bytes = entry.topic.byte_len();
-            let result = update(entry);
-            (
-                was_pending,
-                entry.tracks_pending_bytes(),
-                topic_bytes,
-                result,
-            )
-        };
-
-        match (was_pending, is_pending) {
-            (false, true) => {
-                self.pending_count += 1;
-                self.pending_topic_bytes = self
-                    .pending_topic_bytes
-                    .checked_add(topic_bytes)
-                    .expect("pending topic byte accounting overflow");
-            }
-            (true, false) => {
-                self.pending_count = checked_sub_or_abort(self.pending_count, 1);
-                self.pending_topic_bytes =
-                    checked_sub_or_abort(self.pending_topic_bytes, topic_bytes);
-            }
+        let entry = self.entries.get_mut(&id)?;
+        let was_pending = entry.counts_as_pending();
+        let result = update(entry);
+        match (was_pending, entry.counts_as_pending()) {
+            (false, true) => self.pending_count += 1,
+            (true, false) => self.pending_count = checked_sub_or_abort(self.pending_count, 1),
             _ => {}
         }
 
@@ -519,11 +499,11 @@ impl SubscriptionCatalog {
 
     pub(crate) fn remove_entry(&mut self, id: SubscriptionId) -> Option<SubscriptionEntry> {
         let removed = self.entries.remove(&id)?;
-        if removed.tracks_pending_bytes() {
+        if removed.counts_as_pending() {
             self.pending_count = checked_sub_or_abort(self.pending_count, 1);
-            self.pending_topic_bytes =
-                checked_sub_or_abort(self.pending_topic_bytes, removed.topic.byte_len());
         }
+        self.retained_topic_bytes =
+            checked_sub_or_abort(self.retained_topic_bytes, removed.topic.byte_len());
         let identity_key = SubscriptionIdentityKey::new(removed.source_id, &removed.topic);
         if !self.identities.remove(identity_key, id) {
             xlfn_kernel::invariant::fail_stop();
@@ -553,18 +533,17 @@ impl SubscriptionCatalog {
         }
         assert_eq!(seen_ids.len(), self.entries.len());
 
-        let expected_pending_bytes = self
+        let expected_retained_bytes = self
             .entries
             .values()
-            .filter(|entry| entry.tracks_pending_bytes())
             .map(|entry| entry.topic.byte_len())
             .sum::<usize>();
-        assert_eq!(self.pending_topic_bytes, expected_pending_bytes);
+        assert_eq!(self.retained_topic_bytes, expected_retained_bytes);
         assert_eq!(
             self.pending_count,
             self.entries
                 .values()
-                .filter(|entry| entry.tracks_pending_bytes())
+                .filter(|entry| entry.counts_as_pending())
                 .count()
         );
 

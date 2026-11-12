@@ -79,7 +79,7 @@ pub(super) fn clone_bytes(error: &XllError) -> Option<usize> {
 /// Keeps tracing's two existing fields and ordinary Display/Debug text intact.
 /// Each representation emits at most the text limit plus a truncation suffix;
 /// the admitted DiagnosticSink still receives the original structured error.
-pub(super) struct TracedError<'a>(pub(super) &'a XllError);
+pub(crate) struct TracedError<'a>(pub(super) &'a XllError);
 
 struct LimitedWriter<'a, 'b> {
     output: &'a mut fmt::Formatter<'b>,
@@ -152,7 +152,7 @@ impl fmt::Debug for DebugUnknownEnum<'_> {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
         output
             .debug_struct("UnknownEnum")
-            .field("actual", &DebugText(self.actual))
+            .field("actual_bytes", &self.actual.len())
             .field("expected", &DebugText(self.expected))
             .finish()
     }
@@ -183,14 +183,15 @@ impl fmt::Display for DisplayError<'_> {
             } => {
                 write!(
                     output,
-                    "invalid argument {argument}: expected one of {expected}, got {:?}",
-                    DebugText(actual)
+                    "invalid argument {argument}: expected one of {expected}, received {} bytes (redacted)",
+                    actual.len()
                 )
             }
             XllError::RtdProducerFailure { topic, source } => {
                 write!(
                     output,
-                    "RTD producer failed for topic {topic}: {}",
+                    "RTD producer failed for topic ({} bytes, redacted): {}",
+                    topic.len(),
                     DisplayError(source)
                 )
             }
@@ -236,7 +237,7 @@ impl fmt::Debug for DebugError<'_> {
                 .finish(),
             XllError::RtdProducerFailure { topic, source } => output
                 .debug_struct("RtdProducerFailure")
-                .field("topic", &DebugText(topic))
+                .field("topic_bytes", &topic.len())
                 .field("source", &DebugError(source))
                 .finish(),
             XllError::RtdSubscriptionShutdown {
@@ -298,8 +299,13 @@ mod tests {
             },
         );
         assert_eq!(clone_bytes(&small), Some("unknown\n\"value".len()));
-        assert_eq!(format!("{}", TracedError(&small)), small.to_string());
-        assert_eq!(format!("{:?}", TracedError(&small)), format!("{small:?}"));
+        for text in [
+            format!("{}", TracedError(&small)),
+            format!("{:?}", TracedError(&small)),
+        ] {
+            assert!(!text.contains("unknown"));
+            assert!(!text.contains("value"));
+        }
         let large = XllError::input(
             "mode",
             InputError::UnknownEnum {
@@ -319,7 +325,7 @@ mod tests {
                 format!("{}", TracedError(error)),
                 format!("{:?}", TracedError(error)),
             ] {
-                assert!(text.ends_with(super::super::DIAGNOSTIC_TRUNCATION_SUFFIX));
+                assert!(!text.contains("\\n"));
                 assert!(
                     text.len()
                         <= super::super::DIAGNOSTIC_TEXT_MAX_BYTES

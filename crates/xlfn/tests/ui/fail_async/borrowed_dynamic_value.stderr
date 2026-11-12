@@ -55,6 +55,44 @@ note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
    |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
    |                                                         ^^^^ required by this bound in `assert_async_parameter`
 
+error[E0277]: `Cell<usize>` cannot be shared between threads safely
+  --> tests/ui/fail_async/borrowed_dynamic_value.rs:25:34
+   |
+25 | async fn borrowed_dynamic(value: DynamicInput<'_>) -> f64 {
+   |                                  ^^^^^^^^^^^^^^^^ `Cell<usize>` cannot be shared between threads safely
+   |
+   = help: within `xlfn::call::CallScratch`, the trait `Sync` is not implemented for `Cell<usize>`
+   = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` or `std::sync::atomic::AtomicUsize` instead
+note: required because it appears within the type `AssertUnwindSafe<Cell<usize>>`
+  --> $RUST/core/src/panic/unwind_safe.rs
+   |
+   | pub struct AssertUnwindSafe<T>(#[stable(feature = "catch_unwind", since = "1.9.0")] pub T);
+   |            ^^^^^^^^^^^^^^^^
+note: required because it appears within the type `xlfn::call::CallScratch`
+  --> src/call.rs
+   |
+   | pub(crate) struct CallScratch {
+   |                   ^^^^^^^^^^^
+   = note: required for `&xlfn::call::CallScratch` to implement `Send`
+note: required because it appears within the type `ExcelArrayRef<'_>`
+  --> src/value.rs
+   |
+   | pub struct ExcelArrayRef<'call> {
+   |            ^^^^^^^^^^^^^
+note: required because it appears within the type `ExcelValueRef<'_>`
+  --> src/value.rs
+   |
+   | pub enum ExcelValueRef<'call> {
+   |          ^^^^^^^^^^^^^
+note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
+  --> src/call_return/traits.rs
+   |
+   | pub fn assert_async_parameter<R, T>()
+   |        ---------------------- required by a bound in this function
+...
+   |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
+   |                                                         ^^^^ required by this bound in `assert_async_parameter`
+
 error[E0277]: `OnceCell<Box<bumpalo::Bump>>` cannot be shared between threads safely
   --> tests/ui/fail_async/borrowed_dynamic_value.rs:25:34
    |

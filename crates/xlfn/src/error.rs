@@ -191,7 +191,7 @@ pub enum InputError {
     #[error("malformed input: {0}")]
     Malformed(&'static str),
     /// A string does not match any declared Excel enum value.
-    #[error("expected one of {expected}, got {actual:?}")]
+    #[error("expected one of {expected}, received value redacted")]
     UnknownEnum {
         /// The received value, possibly truncated by the generated decoder.
         actual: String,

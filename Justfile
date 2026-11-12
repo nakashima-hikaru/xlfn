@@ -210,7 +210,15 @@ features:
         --locked
 
 deny:
-    cargo deny check
+    cargo deny --locked check
+    cargo deny --manifest-path benchmarks/excel-comparison/xlfn/Cargo.toml --locked --config deny.toml check
+    cargo deny --manifest-path examples/basic-xll/Cargo.toml --locked --config deny.toml check
+    cargo deny --manifest-path examples/rtd-source/Cargo.toml --locked --config deny.toml check
+    cargo deny --manifest-path probes/excel-abi-probe/Cargo.toml --locked --config deny.toml check
+    cargo deny --manifest-path probes/ghostcell-call-model/Cargo.toml --locked --config deny.toml check
+    cargo deny --manifest-path probes/lifecycle-stack-model/Cargo.toml --locked --config deny.toml check
+    cargo deny --manifest-path tests/rtd-api-fixture/Cargo.toml --locked --config deny.toml check
+    cargo deny --manifest-path tests/xlfn-e2e-fixture/Cargo.toml --locked --config deny.toml check
 
 semver:
     # Derive compatibility requirements from each crate's actual version.

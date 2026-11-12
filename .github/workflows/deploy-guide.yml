@@ -15,23 +15,20 @@ name: Deploy user guide
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
   cancel-in-progress: true
 
 jobs:
-  deploy:
-    name: Build and deploy mdBook
+  build:
+    name: Build and validate mdBook
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -44,7 +41,7 @@ jobs:
       - name: Install guide validation tools
         uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
         with:
-          tool: just,mdbook@0.5.4
+          tool: just@1.58.0,mdbook@0.5.4
           fallback: none
 
       - name: Build and validate the user guide and its Rust examples
@@ -58,6 +55,17 @@ jobs:
         with:
           path: guide/book
 
+  deploy:
+    name: Deploy validated guide
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

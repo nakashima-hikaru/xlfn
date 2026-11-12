@@ -7,6 +7,7 @@ use serde::Deserialize;
 use std::ffi::{OsStr, OsString};
 
 const MAX_CONFIG_INCLUDE_DEPTH: usize = 64;
+const MAX_CONFIG_INCLUDE_FILES: usize = 128;
 
 #[derive(Default)]
 pub(crate) struct CargoSettings {
@@ -95,7 +96,13 @@ impl CargoSettings {
         if active.contains(&identity) {
             bail!("Cargo configuration include cycle through a filesystem alias at {path:?}");
         }
-        seen.push(path.clone());
+        if seen.contains(&identity) {
+            bail!("Cargo configuration include cycle through a filesystem alias at {path:?}");
+        }
+        if seen.len() >= MAX_CONFIG_INCLUDE_FILES {
+            bail!("Cargo configuration include count exceeds {MAX_CONFIG_INCLUDE_FILES}");
+        }
+        seen.push(identity.clone());
         active.push(identity);
         let result = Self::read_active_file(&path, seen, active);
         active.pop();
@@ -107,7 +114,15 @@ impl CargoSettings {
         seen: &mut Vec<PathBuf>,
         active: &mut Vec<PathBuf>,
     ) -> Result<Self> {
-        let config: ConfigFile = toml::from_str(&fs::read_to_string(path)?)
+        use std::io::Read;
+        let mut text = String::new();
+        fs::File::open(path)?
+            .take(1024 * 1024 + 1)
+            .read_to_string(&mut text)?;
+        if text.len() > 1024 * 1024 {
+            bail!("Cargo configuration exceeds 1 MiB: {path:?}");
+        }
+        let config: ConfigFile = toml::from_str(&text)
             .with_context(|| format!("could not parse Cargo configuration {path:?}"))?;
         let directory = path.parent().context("Cargo configuration has no parent")?;
         let root = directory

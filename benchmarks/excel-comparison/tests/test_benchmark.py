@@ -102,6 +102,23 @@ class RegistrationGeneratorTests(unittest.TestCase):
 
 
 class ArtifactManifestTests(unittest.TestCase):
+    def test_manifest_rejects_extra_payload_and_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_fake_ci_artifacts(root)
+            artifact_manifest.create(root, "trusted", "99", "1")
+            extra = root / "xlfn" / "side-load.dll"
+            extra.write_bytes(b"unexpected")
+            with self.assertRaisesRegex(ValueError, "unexpected files"):
+                artifact_manifest.verify(root)
+            extra.unlink()
+            try:
+                extra.symlink_to(root / "xlfn" / "benchmark.xll")
+            except OSError:
+                return  # Windows may not grant symlink creation to this runner.
+            with self.assertRaisesRegex(ValueError, "contains a link"):
+                artifact_manifest.verify(root)
+
     def test_create_and_verify_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

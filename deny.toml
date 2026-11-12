@@ -1,12 +1,18 @@
 # cargo-deny configuration for xlfn
 
+[graph]
+all-features = true
+
 [advisories]
+yanked = "deny"
 unmaintained = "workspace"
 
 [licenses]
 confidence-threshold = 0.93
 allow = [
     "MIT",
+    "BSD-3-Clause", # bindgen in the independent Excel ABI probe
+    "ISC", # libloading used by bindgen/clang-sys
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "CC0-1.0",
@@ -19,6 +25,10 @@ allow = [
 multiple-versions = "deny"
 wildcards = "deny"
 skip = [
+    { crate = "lock_api@0.4.14", reason = "parking_lot 0.12 from quick_cache requires lock_api 0.4." },
+    { crate = "redox_syscall@0.5.18", reason = "parking_lot_core 0.9 from quick_cache requires the older Redox ABI." },
+    { crate = "parking_lot@0.12.5", reason = "quick_cache still uses parking_lot 0.12; xlfn uses 0.13." },
+    { crate = "parking_lot_core@0.9.12", reason = "Transitive dependency of parking_lot 0.12 required by quick_cache." },
     { crate = "constant_time_eq@0.4.2", reason = "Required transitively by blake3 1.8.7 while xlfn uses constant_time_eq 0.6.0 directly." },
     { crate = "windows-link@0.2.1", reason = "Required transitively by windows-sys 0.61.2 and parking_lot_core while xlfn uses windows-link 0.100.0 directly." },
 ]

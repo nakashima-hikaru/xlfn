@@ -195,7 +195,7 @@ impl Eq for InitializationPtr {}
 
 pub(crate) struct TopicTableState {
     pub(crate) by_key: FxHashMap<HandleTopicKey, Topic>,
-    pub(crate) by_lifetime_key: FxHashMap<String, HandleTopicKey>,
+    pub(crate) by_lifetime_key: std::collections::HashMap<String, HandleTopicKey>,
     pub(crate) by_observer_id: FxHashMap<FormulaObserverId, HandleTopicKey>,
     pub(crate) initializing: FxHashMap<HandleTopicKey, InitializationPtr>,
     pub(crate) generation: TopicGeneration,
@@ -206,7 +206,7 @@ impl Default for TopicTableState {
     fn default() -> Self {
         Self {
             by_key: FxHashMap::default(),
-            by_lifetime_key: FxHashMap::default(),
+            by_lifetime_key: std::collections::HashMap::new(),
             by_observer_id: FxHashMap::default(),
             initializing: FxHashMap::default(),
             generation: TopicGeneration::ONE,

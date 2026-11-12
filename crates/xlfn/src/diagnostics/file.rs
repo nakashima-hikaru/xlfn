@@ -113,10 +113,17 @@ impl BoundedDiagnosticText {
     }
 }
 
-fn bounded_diagnostic_error(error: &crate::XllError) -> String {
+pub(crate) fn bounded_diagnostic_error(error: &crate::XllError) -> String {
     let mut output = BoundedDiagnosticText::default();
-    let _ = fmt::write(&mut output, format_args!("{error}"));
-    output.finish()
+    let _ = fmt::write(
+        &mut output,
+        format_args!("{}", super::payload::TracedError(error)),
+    );
+    output
+        .finish()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 pub(crate) struct FileDiagnosticSink {
@@ -155,6 +162,61 @@ pub(crate) struct RotatingLog {
     pub(crate) generations: usize,
 }
 
+fn reject_log_links(path: &Path) -> io::Result<()> {
+    for ancestor in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                #[cfg(target_os = "windows")]
+                let linked = {
+                    use std::os::windows::fs::MetadataExt;
+                    metadata.file_attributes() & 0x400 != 0
+                };
+                #[cfg(not(target_os = "windows"))]
+                let linked = metadata.is_symlink();
+                if linked {
+                    return Err(io::Error::other(
+                        "log path contains a link or reparse point",
+                    ));
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+fn open_log_file(path: &Path, lock: bool) -> io::Result<fs::File> {
+    reject_log_links(path)?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).write(true).read(lock).append(!lock);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::other("log destination is not a regular file"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err(io::Error::other("log destination is a reparse point"));
+        }
+    }
+    Ok(file)
+}
+
 struct LogLock(fs::File);
 
 impl LogLock {
@@ -162,12 +224,7 @@ impl LogLock {
         let mut lock_name = path.file_name().unwrap_or_default().to_os_string();
         lock_name.push(".lock");
         let lock_path = path.with_file_name(lock_name);
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)?;
+        let file = open_log_file(&lock_path, true)?;
         // Logging is best effort: contention must never stall the worker or
         // startup. report() accounts this WouldBlock as a failed write.
         file.try_lock().map_err(io::Error::from)?;
@@ -200,10 +257,7 @@ impl RotatingLog {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        open_log_file(&path, false)?;
         Ok(Self {
             path,
             maximum_bytes,
@@ -223,18 +277,12 @@ impl RotatingLog {
         // Another instance or process may have appended or rotated since the
         // previous write. Resolve both the active file and its size while the
         // shared lock is held; retaining a file handle would target an archive.
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        let mut file = open_log_file(&self.path, false)?;
         let size = file.metadata()?.len();
         if size > 0 && size.saturating_add(incoming) > self.maximum_bytes {
             drop(file);
             rotate_log_files(&self.path, self.generations)?;
-            file = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)?;
+            file = open_log_file(&self.path, false)?;
         }
         writeln!(file, "{line}")?;
         Ok(())
@@ -290,7 +338,16 @@ pub(crate) fn install_file_diagnostic_sink(
 }
 
 fn validated_log_base(base: Option<std::ffi::OsString>) -> io::Result<PathBuf> {
-    let base = base.map(PathBuf::from).filter(|path| path.is_absolute());
+    let base = base.map(PathBuf::from).filter(|path| {
+        if !path.is_absolute() { return false; }
+        #[cfg(target_os = "windows")]
+        {
+            matches!(path.components().next(), Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)))
+        }
+        #[cfg(not(target_os = "windows"))]
+        true
+    });
     base.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -304,7 +361,16 @@ pub(crate) fn log_directory(addin_id: &super::AddinId) -> io::Result<PathBuf> {
     // directory or a shared temporary directory when its location is missing.
     let base = validated_log_base(std::env::var_os("LOCALAPPDATA"))?;
     let directory = base.join(addin_id.as_str()).join("logs");
-    fs::create_dir_all(&directory)?;
+    reject_log_links(&directory)?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&directory)?;
+    reject_log_links(&directory)?;
     Ok(directory)
 }
 
@@ -321,8 +387,27 @@ pub(crate) fn install_file_diagnostic_sink_at(
 }
 
 #[cfg(test)]
+pub(super) fn test_log_directory() -> tempfile::TempDir {
+    // On macOS the system temp path can traverse /var, a symlink.
+    let base = std::env::temp_dir().canonicalize().unwrap();
+    tempfile::tempdir_in(base).unwrap()
+}
+
+#[cfg(test)]
 mod bounded_text_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn logs_reject_links_without_touching_their_targets() {
+        let directory = test_log_directory();
+        let target = directory.path().join("secret");
+        fs::write(&target, "unchanged").unwrap();
+        let log = directory.path().join("diagnostics.log");
+        std::os::unix::fs::symlink(&target, &log).unwrap();
+        assert!(RotatingLog::open(log).is_err());
+        assert_eq!(fs::read_to_string(target).unwrap(), "unchanged");
+    }
 
     #[test]
     fn log_base_requires_an_explicit_absolute_path() {
@@ -349,7 +434,7 @@ mod bounded_text_tests {
 
     #[test]
     fn log_contention_fails_promptly_and_recovery_preserves_rotation() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_log_directory();
         let path = directory.path().join("diagnostics.log");
         let mut log = RotatingLog::open_with_policy(path.clone(), 8, 1).unwrap();
         log.write_line("first").unwrap();
@@ -369,7 +454,7 @@ mod bounded_text_tests {
 
     #[test]
     fn contended_diagnostic_event_is_counted_and_following_event_is_written() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_log_directory();
         let path = directory.path().join("diagnostics.log");
         let sink = FileDiagnosticSink {
             log: Mutex::new(RotatingLog::open(path.clone()).unwrap()),

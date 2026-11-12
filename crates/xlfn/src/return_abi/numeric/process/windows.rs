@@ -160,6 +160,28 @@ impl Mapping {
         {
             return Err(invalid_state("unaligned accounting view"));
         }
+        use crate::win32::{MEM_COMMIT, MEM_MAPPED, MEMORY_BASIC_INFORMATION, VirtualQuery};
+        let mut information = MEMORY_BASIC_INFORMATION::default();
+        // SAFETY: VirtualQuery inspects an address without dereferencing it;
+        // the output is a writable complete MEMORY_BASIC_INFORMATION.
+        let queried = unsafe {
+            VirtualQuery(
+                self.view.as_ptr(),
+                &mut information,
+                size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if queried != size_of::<MEMORY_BASIC_INFORMATION>()
+            || information.BaseAddress != self.view.as_ptr()
+            || information.RegionSize < size_of::<ProcessState>()
+            || information.State != MEM_COMMIT as u32
+            || information.Type != MEM_MAPPED as u32
+            || information.Protect != PAGE_READWRITE
+        {
+            return Err(invalid_state(
+                "accounting view is not committed read/write mapped memory",
+            ));
+        }
         // SAFETY: the view owns sizeof(ProcessState) writable bytes, aligned
         // above. Its atomic fields accept all bit patterns; initialization
         // never resets live accounting from another attachment.
@@ -246,5 +268,43 @@ mod tests {
                 });
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod reserved_mapping_tests {
+    use super::*;
+    #[test]
+    fn reserved_uncommitted_mapping_is_rejected_before_access() {
+        let name = format!(
+            "Local\\xlfn.reserved.{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+        .encode_utf16()
+        .chain([0])
+        .collect::<Vec<_>>();
+        let descriptor = security::Descriptor::private().unwrap();
+        let attributes = descriptor.attributes();
+        // SAFETY: live name and security descriptor create a pagefile section;
+        // SEC_RESERVE deliberately leaves its pages uncommitted.
+        let handle = unsafe {
+            CreateFileMappingW(
+                std::ptr::without_provenance_mut(usize::MAX),
+                (&raw const attributes).cast(),
+                PAGE_READWRITE | 0x04000000,
+                0,
+                4096,
+                name.as_ptr(),
+            )
+        };
+        assert!(!handle.is_null());
+        let result = Mapping::open(&name).and_then(Mapping::initialize_and_retain);
+        // SAFETY: this test owns the section handle and has released its view.
+        unsafe { CloseHandle(handle) };
+        assert!(result.is_err());
     }
 }

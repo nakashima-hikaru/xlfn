@@ -59,7 +59,7 @@ fn export_manifest_rejects_corrupt_data_and_duplicate_sections() {
         .copy_from_slice(&0x1000_u32.to_le_bytes());
     let error = parse_pe_bytes(&unreadable).unwrap_err();
     assert!(
-        error.to_string().contains("failed to read .xllexp"),
+        error.to_string().contains("raw data exceeds file bounds"),
         "{error}"
     );
 
@@ -2144,4 +2144,28 @@ fn verify_xll_exports_rejects_unmanifested_ordinal_only_export() {
             .to_string(),
         "test.xll has unmanifested ordinal-only export(s)"
     );
+}
+
+#[test]
+fn export_names_must_be_strictly_sorted_even_for_zero_slots() {
+    for names in [&[(0, "Z"), (1, "A")][..], &[(0, "A"), (1, "A")][..]] {
+        let image = synthetic_export_pe(
+            1,
+            &[SyntheticExportTarget::Direct, SyntheticExportTarget::Zero],
+            names,
+        );
+        assert!(
+            parse_pe_bytes(&image)
+                .unwrap_err()
+                .to_string()
+                .contains("not sorted")
+        );
+    }
+}
+
+#[test]
+fn destination_names_reject_win32_aliases() {
+    for name in ["dist.", "dist ", "NUL", "dir/CON"] {
+        assert!(validate_directory_path(Path::new(name)).is_err(), "{name}");
+    }
 }

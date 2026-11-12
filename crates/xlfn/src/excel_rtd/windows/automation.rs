@@ -45,6 +45,12 @@ pub(super) unsafe extern "system" fn server_get_ids_of_names<
     _locale: u32,
     ids: *mut i32,
 ) -> i32 {
+    if !ids.is_null() {
+        for index in 0..count as usize {
+            // SAFETY: COM supplies count writable DISPID output slots.
+            unsafe { ids.wrapping_add(index).write(DISPID_UNKNOWN) };
+        }
+    }
     com_boundary("IDispatch::GetIDsOfNames", || {
         // SAFETY: raw COM arguments are validated before the inner function
         // dereferences them.
@@ -72,7 +78,7 @@ unsafe fn server_get_ids_of_names_inner<
 
     // SAFETY: `riid` was validated as non-null and points to the IID supplied
     // by COM for this call.
-    if !guid_eq(unsafe { *riid }, IID_NULL) {
+    if !guid_eq(unsafe { riid.read_unaligned() }, IID_NULL) {
         return DISP_E_UNKNOWNINTERFACE;
     }
 
@@ -117,6 +123,18 @@ pub(super) unsafe extern "system" fn server_invoke<
     exception: *mut EXCEPINFO,
     argument_error: *mut u32,
 ) -> i32 {
+    if !result.is_null() {
+        // SAFETY: COM supplies writable output storage for this entrypoint.
+        unsafe { result.write(VARIANT::default()) };
+    }
+    if !exception.is_null() {
+        // SAFETY: COM supplies writable output storage for this entrypoint.
+        unsafe { exception.write(EXCEPINFO::default()) };
+    }
+    if !argument_error.is_null() {
+        // SAFETY: COM supplies writable output storage for this entrypoint.
+        unsafe { argument_error.write(0) };
+    }
     com_boundary("IDispatch::Invoke", || {
         // SAFETY: raw COM arguments are validated before the inner function
         // dereferences them.
@@ -168,7 +186,7 @@ unsafe fn server_invoke_inner<E: crate::RtdSubscription, C: crate::RtdSourceCata
     }
 
     // SAFETY: `riid` was validated as non-null and points to a readable GUID.
-    if !guid_eq(unsafe { *riid }, IID_NULL) {
+    if !guid_eq(unsafe { riid.read_unaligned() }, IID_NULL) {
         return DISP_E_UNKNOWNINTERFACE;
     }
 
@@ -339,14 +357,6 @@ unsafe fn collect_dispatch_arguments(
         return Err(E_POINTER);
     }
 
-    let raw_variants: &mut [VARIANT] = if expected != 0 {
-        // SAFETY: `parameters.rgvarg` is non-null and points to `argument_count`
-        // VARIANT values kept live by COM for the duration of Invoke.
-        unsafe { std::slice::from_raw_parts_mut(parameters.rgvarg, argument_count) }
-    } else {
-        &mut []
-    };
-
     let named_dispid_slice: &[i32] = if named_count != 0 {
         // SAFETY: `parameters.rgdispidNamedArgs` is non-null and points to
         // `named_count` DISPIDs (i32) kept live by COM for the duration of Invoke.
@@ -374,13 +384,13 @@ unsafe fn collect_dispatch_arguments(
             return Err(DISP_E_PARAMNOTFOUND);
         }
 
-        arguments[parameter_index] = &raw mut raw_variants[named_index];
+        arguments[parameter_index] = parameters.rgvarg.wrapping_add(named_index);
     }
 
     let mut value_index = named_count;
     for parameter_index in (0..expected).rev() {
         if arguments[parameter_index].is_null() {
-            arguments[parameter_index] = &raw mut raw_variants[value_index];
+            arguments[parameter_index] = parameters.rgvarg.wrapping_add(value_index);
             value_index += 1;
         }
     }
@@ -400,12 +410,9 @@ unsafe fn set_dispatch_argument_error(
     if count == 0 || parameters.rgvarg.is_null() {
         return;
     }
-    // SAFETY: `parameters.rgvarg` points to `count` elements of VARIANT.
-    let variants = unsafe { std::slice::from_raw_parts(parameters.rgvarg, count) };
-    // SAFETY: `argument` is a non-null pointer provided by the caller.
-    let target = unsafe { &*argument };
-    if let Some(index) = variants.element_offset(target) {
-        // SAFETY: `argument_error` was checked as non-null and is writable.
+    if let Some(index) = (0..count).find(|&index| parameters.rgvarg.wrapping_add(index) == argument)
+    {
+        // SAFETY: COM supplies a writable optional argument-error slot.
         unsafe { *argument_error = index as u32 };
     }
 }

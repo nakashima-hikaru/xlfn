@@ -48,6 +48,7 @@ pub(crate) fn report_cleanup_issue(issue: &crate::shutdown::CleanupIssue) {
 pub(crate) fn report_boundary_error(boundary: &'static str, error: &XllError) {
     let _ = catch_no_unwind(AssertUnwindSafe(|| {
         crate::diagnostics::report_no_unwind(boundary, error);
+        let error = crate::diagnostics::file::bounded_diagnostic_error(error);
         let message = format!("xlfn {boundary}: {error}\n");
         #[cfg(target_os = "windows")]
         {

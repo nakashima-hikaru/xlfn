@@ -1,0 +1,32 @@
+error[E0425]: cannot find value `__raw_0` in this scope
+  --> tests/ui/fail/default_requires_unsafe.rs:15:58
+   |
+15 | fn raw_names_are_private(#[excel_arg(default = { let _ = __raw_0; 1.0 })] value: f64) -> f64 { value }
+   |                                                          ^^^^^^^ not found in this scope
+   |
+help: an identifier with the same name is defined here, but is not accessible due to macro hygiene
+  --> tests/ui/fail/default_requires_unsafe.rs:14:1
+   |
+14 | #[excel_function]
+   | ^^^^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0133]: call to unsafe function `unsafe_default` is unsafe and requires unsafe block
+  --> tests/ui/fail/default_requires_unsafe.rs:13:44
+   |
+13 | fn unsafe_expression(#[excel_arg(default = unsafe_default())] value: f64) -> f64 { value }
+   |                                            ^^^^^^^^^^^^^^^^ call to unsafe function
+   |
+   = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+  --> tests/ui/fail/default_requires_unsafe.rs:12:1
+   |
+12 | #[excel_function]
+   | ^^^^^^^^^^^^^^^^^
+   = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+note: the lint level is defined here
+  --> tests/ui/fail/default_requires_unsafe.rs:12:1
+   |
+12 | #[excel_function]
+   | ^^^^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -9,14 +9,14 @@ note: expected this to be `xlfn::__private::v1::PlainInputMode`
    |
  3 | #[derive(ExcelHandleObject)]
    |          ^^^^^^^^^^^^^^^^^
-note: required by a bound in `xlfn::__private::v1::async_udf`
+note: required by a bound in `xlfn::__private::v1::prepare_async_udf`
   --> src/__private.rs
    |
-   |     pub unsafe fn async_udf<A, R, F, Fut>(
-   |                   --------- required by a bound in this function
+   |     pub fn prepare_async_udf<A, R, F, Fut>(
+   |            ----------------- required by a bound in this function
 ...
    |         R: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
-   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `async_udf`
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `prepare_async_udf`
    = note: this error originates in the derive macro `ExcelHandleObject` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `Dataset` cannot be returned from an asynchronous Excel function

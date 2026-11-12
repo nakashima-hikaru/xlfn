@@ -174,13 +174,12 @@ pub(crate) fn resolve_bundle_files_with_policy_impl(
     let mut files = Vec::with_capacity(configured.len());
     for configured_path in configured {
         validate_relative("bundle file", configured_path)?;
-        if strict_paths {
+        // Windows reparse points may initiate an SMB connection even during
+        // canonicalization. Reject them before resolving/opening any source.
+        if strict_paths || cfg!(target_os = "windows") {
             reject_reparse_points(&canonical_root, configured_path)?;
         }
         let unresolved_source = canonical_root.join(configured_path);
-        let mut opened_source = open_bundle_source_for_snapshot(&unresolved_source)
-            .map_err(|error| map_snapshot_open_error(target, &unresolved_source, error))?;
-        observer.after_open();
         let source = fs::canonicalize(&unresolved_source).map_err(|error| {
             PackageError::Message(format!(
                 "{target}: failed to resolve {}: {error}",
@@ -195,9 +194,17 @@ pub(crate) fn resolve_bundle_files_with_policy_impl(
             )
             .into());
         }
+        let mut opened_source = open_bundle_source_for_snapshot(&source)
+            .map_err(|error| map_snapshot_open_error(target, &unresolved_source, error))?;
+        observer.after_open();
+
         let opened_metadata = opened_source.metadata()?;
         if !opened_metadata.is_file() {
             return Err(format!("{target}: missing {}", source.display()).into());
+        }
+        let current_source = fs::canonicalize(&unresolved_source)?;
+        if current_source != source {
+            return Err(unstable_bundle_source(target, &unresolved_source));
         }
         let canonical_source = open_bundle_source_for_snapshot(&source)
             .map_err(|error| map_snapshot_open_error(target, &source, error))?;

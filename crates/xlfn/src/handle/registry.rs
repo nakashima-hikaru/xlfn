@@ -377,9 +377,11 @@ impl HandleRegistry {
             return Err(XllError::Closing);
         }
         let removal = self.bindings.begin_removal(verified.id)?;
-        tracing::trace!(operation, "handle binding retired");
         let reusable = removal.commit();
         on_linearized(reusable);
+        let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            tracing::trace!(operation, "handle binding retired");
+        }));
         #[cfg(any(test, feature = "refinement"))]
         self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveHandle);
         Ok(reusable)

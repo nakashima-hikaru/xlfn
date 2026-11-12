@@ -761,9 +761,11 @@ fn is_detached_error_pointer(pointer: *mut XLOPER12) -> bool {
 }
 
 unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFreeGuard> {
-    // SAFETY: The caller supplies a live root or null. Primitive roots carry
-    // no free bit, and must never be interpreted as an owning ReturnBlock.
-    if pointer.is_null() || unsafe { (*pointer).xltype & XLBIT_DLL_FREE == 0 } {
+    if pointer.is_null() || !pointer.is_aligned() {
+        return None;
+    }
+    // SAFETY: The caller supplies a live root. Primitive roots carry no free bit.
+    if unsafe { (*pointer).xltype & XLBIT_DLL_FREE == 0 } {
         return None;
     }
     let block = pointer.cast::<ReturnBlock>();
@@ -791,7 +793,9 @@ unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFre
     // SAFETY: caller contract guarantees pointer refers to a live
     // ReturnBlock produced by publish_excel or its heap fallback.
     let block = unsafe { block_pointer.as_mut() };
-    debug_assert_eq!(block.magic, RETURN_MAGIC);
+    if block.magic != RETURN_MAGIC {
+        xlfn_kernel::invariant::fail_stop();
+    }
 
     debug_assert!(block.obligation.is_none());
     operation.obligation.observe_release_block();

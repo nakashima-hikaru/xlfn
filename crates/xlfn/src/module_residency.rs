@@ -88,7 +88,10 @@ impl Drop for ModuleResidencyLease {
         #[cfg(target_os = "windows")]
         {
             if self.try_release().is_err() {
-                tracing::error!("failed to release the xlfn module residency lease");
+                let _ =
+                    crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+                        tracing::error!("failed to release the xlfn module residency lease");
+                    }));
             }
         }
     }

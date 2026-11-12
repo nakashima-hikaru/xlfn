@@ -4,8 +4,10 @@ use super::{invalid_state, os_error};
 use crate::XllResult;
 use crate::win32::*;
 use core::ffi::c_void;
+use std::mem::MaybeUninit;
+use std::ptr::NonNull;
 
-const INFORMATION: u32 = (OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION) as u32;
+const OWNER_AND_DACL: u32 = (OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION) as u32;
 
 struct LocalAllocation(*mut c_void);
 
@@ -21,7 +23,8 @@ pub(super) struct Descriptor(LocalAllocation);
 
 impl Descriptor {
     pub(super) fn private() -> XllResult<Self> {
-        let sid = current_user_sid()?;
+        let sid = token_sid(TokenUser)?;
+        let integrity = token_sid(TokenIntegrityLevel)?;
         // SECTION_ALL_ACCESS uses concrete bits so retrieval cannot expand
         // GENERIC_ALL differently from our expected descriptor.
         let user_ace = if sid == "S-1-5-18" {
@@ -29,7 +32,9 @@ impl Descriptor {
         } else {
             format!("(A;;0x000f001f;;;{sid})")
         };
-        Self::from_sddl(&format!("O:{sid}D:P(A;;0x000f001f;;;SY){user_ace}"))
+        Self::from_sddl(&format!(
+            "O:{sid}D:P(A;;0x000f001f;;;SY){user_ace}S:(ML;;NWNR;;;{integrity})"
+        ))
     }
 
     fn from_sddl(sddl: &str) -> XllResult<Self> {
@@ -61,33 +66,91 @@ impl Descriptor {
     }
 
     pub(super) fn validate_mapping(&self, handle: HANDLE) -> XllResult<()> {
-        let mut actual = LocalAllocation(std::ptr::null_mut());
+        let mut actual = Self(LocalAllocation(std::ptr::null_mut()));
         // SAFETY: handle is an owned open section handle; only the final output
         // is requested and it receives a LocalFree-owned security descriptor.
         let status = unsafe {
             GetSecurityInfo(
                 handle,
                 SE_KERNEL_OBJECT,
-                INFORMATION,
+                OWNER_AND_DACL | LABEL_SECURITY_INFORMATION as u32,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut actual.0,
+                &mut actual.0.0,
             )
         };
         if status != 0 {
             return Err(invalid_state("accounting mapping security is unavailable"));
         }
-        // Serialize both descriptors with the same OS implementation. Exact
-        // comparison deliberately rejects inherited, null, additional, or
-        // differently privileged ACLs, including on pre-created objects.
-        if canonical_descriptor(actual.0)? != canonical_descriptor(self.0.0)? {
+        // Compare owner and DACL exactly. The kernel may set SACL control
+        // flags on creation, so compare the mandatory label ACE itself.
+        if canonical_descriptor(actual.0.0)? != canonical_descriptor(self.0.0)? {
             return Err(invalid_state(
                 "accounting mapping owner or DACL does not match",
             ));
         }
+        let actual = actual.mandatory_label().ok_or_else(|| {
+            invalid_state("accounting mapping has no unique mandatory integrity label")
+        })?;
+        let expected = self
+            .mandatory_label()
+            .ok_or_else(|| invalid_state("expected accounting mapping label is invalid"))?;
+        // SAFETY: both SID pointers are into live mandatory label ACEs
+        // returned by Windows. EqualSid does not mutate them.
+        let same_sid = unsafe {
+            EqualSid(
+                (&raw const actual.SidStart).cast_mut().cast(),
+                (&raw const expected.SidStart).cast_mut().cast(),
+            )
+        } != 0;
+        if !same_sid
+            || actual.Mask != expected.Mask
+            || actual.Header.AceFlags != expected.Header.AceFlags
+        {
+            return Err(invalid_state(
+                "accounting mapping integrity label does not match",
+            ));
+        }
         Ok(())
+    }
+
+    fn mandatory_label(&self) -> Option<&SYSTEM_MANDATORY_LABEL_ACE> {
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut acl = MaybeUninit::<PACL>::uninit();
+        // SAFETY: The descriptor is live and the outputs are writable.
+        if unsafe {
+            GetSecurityDescriptorSacl(self.0.0, &mut present, acl.as_mut_ptr(), &mut defaulted)
+        } == 0
+            || present == 0
+        {
+            return None;
+        }
+        // SAFETY: Success with a present SACL initializes the pointer output.
+        let acl = NonNull::new(unsafe { acl.assume_init() })?;
+        // SAFETY: A non-null SACL returned by Windows contains its ACL header.
+        if unsafe { acl.as_ref() }.AceCount != 1 {
+            return None;
+        }
+        let mut ace = MaybeUninit::<*mut c_void>::uninit();
+        // SAFETY: Index zero is the only entry in the live ACL.
+        if unsafe { GetAce(acl.as_ptr(), 0, ace.as_mut_ptr()) } == 0 {
+            return None;
+        }
+        // SAFETY: GetAce initialized the pointer output on success.
+        let ace = NonNull::new(unsafe { ace.assume_init() })?;
+        // SAFETY: The live entry starts with an ACE header.
+        let header = unsafe { ace.cast::<ACE_HEADER>().as_ref() };
+        if i32::from(header.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE
+            || usize::from(header.AceSize) < size_of::<SYSTEM_MANDATORY_LABEL_ACE>()
+        {
+            return None;
+        }
+        // SAFETY: The entry type and size cover the fixed fields. Its storage
+        // is owned by the security descriptor for the lifetime of self.
+        Some(unsafe { ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>().as_ref() })
     }
 }
 
@@ -100,7 +163,7 @@ fn canonical_descriptor(descriptor: PSECURITY_DESCRIPTOR) -> XllResult<Vec<u16>>
         ConvertSecurityDescriptorToStringSecurityDescriptorW(
             descriptor,
             SDDL_REVISION_1 as u32,
-            INFORMATION,
+            OWNER_AND_DACL,
             &mut output,
             &mut length,
         )
@@ -129,7 +192,7 @@ fn canonical_descriptor(descriptor: PSECURITY_DESCRIPTOR) -> XllResult<Vec<u16>>
     ))
 }
 
-fn current_user_sid() -> XllResult<String> {
+fn token_sid(class: TOKEN_INFORMATION_CLASS) -> XllResult<String> {
     // SAFETY: The current-process pseudo handle has no preconditions.
     let process = unsafe { GetCurrentProcess() };
     let mut token = std::ptr::null_mut();
@@ -147,7 +210,7 @@ fn current_user_sid() -> XllResult<String> {
     let token = Token(token);
     let mut length = 0;
     // SAFETY: Null buffer is the documented size query; length is writable.
-    unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut length) };
+    unsafe { GetTokenInformation(token.0, class, std::ptr::null_mut(), 0, &mut length) };
     if (length as usize) < size_of::<TOKEN_USER>() || length > 65536 {
         return Err(invalid_state("invalid accounting token information size"));
     }
@@ -158,7 +221,7 @@ fn current_user_sid() -> XllResult<String> {
     if unsafe {
         GetTokenInformation(
             token.0,
-            TokenUser,
+            class,
             storage.as_mut_ptr().cast(),
             capacity,
             &mut length,
@@ -171,11 +234,22 @@ fn current_user_sid() -> XllResult<String> {
         return Err(invalid_state("invalid accounting token information result"));
     }
     // SAFETY: The successful API initialized TOKEN_USER in aligned storage.
-    let user = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() };
+    let sid = if class == TokenUser {
+        // SAFETY: TokenUser initialized this aligned TOKEN_USER buffer.
+        unsafe { (*storage.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+    } else {
+        // SAFETY: The only other caller requests TokenIntegrityLevel, whose
+        // leading SID_AND_ATTRIBUTES has the same size and alignment.
+        unsafe {
+            (*storage.as_ptr().cast::<TOKEN_MANDATORY_LABEL>())
+                .Label
+                .Sid
+        }
+    };
     let mut output = std::ptr::null_mut();
     // SAFETY: user.User.Sid is the live SID returned within the token buffer;
     // output receives a LocalFree-owned NUL-terminated SID string.
-    if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut output) } == 0 {
+    if unsafe { ConvertSidToStringSidW(sid, &mut output) } == 0 {
         return Err(os_error("ConvertSidToStringSidW"));
     }
     let _allocation = LocalAllocation(output.cast());
@@ -198,6 +272,43 @@ fn current_user_sid() -> XllResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_owner_mapping_without_integrity_label_is_rejected() {
+        let name = format!(
+            "Local\\xlfn.label-test.{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+        .encode_utf16()
+        .chain([0])
+        .collect::<Vec<_>>();
+        let sid = token_sid(TokenUser).unwrap();
+        let descriptor = Descriptor::from_sddl(&format!(
+            "O:{sid}D:P(A;;0x000f001f;;;SY)(A;;0x000f001f;;;{sid})S:(ML;;NW;;;LW)"
+        ))
+        .unwrap();
+        let attributes = descriptor.attributes();
+        // SAFETY: the descriptor and name remain live throughout creation.
+        let handle = unsafe {
+            super::super::CreateFileMappingW(
+                std::ptr::without_provenance_mut(usize::MAX),
+                (&raw const attributes).cast(),
+                super::super::PAGE_READWRITE,
+                0,
+                4096,
+                name.as_ptr(),
+            )
+        };
+        assert!(!handle.is_null());
+        let rejected = super::super::Mapping::open(&name).is_err();
+        // SAFETY: the test owns this successfully created handle.
+        unsafe { CloseHandle(handle) };
+        assert!(rejected);
+    }
 
     #[test]
     fn permissive_precreated_mapping_is_rejected() {

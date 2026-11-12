@@ -2566,7 +2566,7 @@ fn miri_rejected_topic_admission_never_reads_parts_to_copy_them() {
         let catalog = runtime.catalog.lock();
         assert_eq!(catalog.next_subscription_id, next_id);
         assert!(catalog.entries.is_empty());
-        assert_eq!(catalog.pending_topic_bytes, 0);
+        assert_eq!(catalog.retained_topic_bytes, 0);
         catalog.assert_identity_invariants();
     }
 }
@@ -3392,7 +3392,7 @@ fn preparation_rejects_missing_source_without_catalog_reservation() {
     ));
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
-    assert_eq!(catalog.pending_topic_bytes, 0);
+    assert_eq!(catalog.retained_topic_bytes, 0);
     catalog.assert_identity_invariants();
 }
 
@@ -4407,7 +4407,7 @@ fn runtime_close_reclaims_all_inflight_slots() {
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
     assert_eq!(catalog.pending_count, 0);
-    assert_eq!(catalog.pending_topic_bytes, 0);
+    assert_eq!(catalog.retained_topic_bytes, 0);
 }
 
 #[test]
@@ -4461,4 +4461,38 @@ fn server_handle_access_does_not_reenter_the_server_registry() {
         worker.join().unwrap();
         assert_eq!(result.unwrap(), ServerGeneration::new(1).unwrap());
     });
+}
+
+#[test]
+fn active_topics_keep_their_byte_charge_until_removal() {
+    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+    let mut runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    runtime.limits = RtdLimits::standard().with_max_total_topic_bytes(RtdCapacity::bounded(
+        std::num::NonZeroUsize::new(6).unwrap(),
+    ));
+    let server = runtime.register_test_server(1);
+    let first = runtime
+        .prepare(&source, BorrowedTopicParts::new(&["active"]).unwrap())
+        .unwrap();
+    let id = first.id();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    first.commit();
+    assert_eq!(runtime.catalog.lock().pending_len(), 0);
+    assert_eq!(runtime.catalog.lock().retained_topic_bytes, 6);
+    assert!(matches!(
+        runtime.prepare(&source, BorrowedTopicParts::new(&["next"]).unwrap()),
+        Err(XllError::Overloaded)
+    ));
+    runtime
+        .terminate_server(ServerGeneration::new(1).unwrap())
+        .unwrap();
+    assert_eq!(runtime.catalog.lock().retained_topic_bytes, 0);
+    runtime
+        .prepare(&source, BorrowedTopicParts::new(&["next"]).unwrap())
+        .unwrap()
+        .rollback();
 }

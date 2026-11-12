@@ -79,6 +79,12 @@ def create(root: Path, commit: str, run_id: str, run_attempt: str) -> dict[str, 
 
 
 def verify(root: Path, *, run_id: str | None = None, commit: str | None = None) -> dict[str, Any]:
+    # Reject links (including Windows junctions) before opening any payload.
+    for path in (root, *root.rglob("*")):
+        if path.is_symlink() or path.is_junction():
+            raise ValueError(f"artifact contains a link: {path}")
+        if not (path.is_dir() or path.is_file()):
+            raise ValueError(f"artifact contains a special file: {path}")
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     expected = {
         "schema": 1,
@@ -99,6 +105,10 @@ def verify(root: Path, *, run_id: str | None = None, commit: str | None = None) 
         raise ValueError(f"artifact came from commit {manifest['commit']}, expected {commit}")
     if set(manifest.get("files", {})) != set(FILES):
         raise ValueError("artifact file set is incomplete or contains unexpected entries")
+    allowed = {"manifest.json", *FILES, *manifest.get("symbols", {})}
+    actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+    if actual != allowed:
+        raise ValueError("artifact contains missing or unexpected files")
     for relative in FILES:
         path = root / relative
         if not path.is_file():

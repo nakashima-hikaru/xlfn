@@ -474,6 +474,7 @@ dependencies = [
  "ghost-cell",
  "indexmap",
  "inventory",
+ "libc",
  "papaya",
  "parking_lot",
  "rustc-hash",

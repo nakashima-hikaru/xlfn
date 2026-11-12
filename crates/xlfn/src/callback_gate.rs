@@ -51,10 +51,12 @@ impl ModuleCallbackAdmission {
         let _transition = self.transition.lock();
         let active = self.callbacks.active();
         if active != 0 {
-            tracing::error!(
-                active,
-                "callback admission reopened while callbacks are still active"
-            );
+            let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+                tracing::error!(
+                    active,
+                    "callback admission reopened while callbacks are still active"
+                );
+            }));
             std::process::abort();
         }
         // A closed gate stays unavailable until every stripe has reopened.
