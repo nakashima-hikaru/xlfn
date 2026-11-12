@@ -19,10 +19,13 @@ windows_link::link!("advapi32.dll" "system" fn ConvertSidToStringSidW(sid : PSID
 windows_link::link!("advapi32.dll" "system" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(stringsecuritydescriptor : PCWSTR, stringsdrevision : u32, securitydescriptor : *mut PSECURITY_DESCRIPTOR, securitydescriptorsize : *mut u32) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn CreateEventW(lpeventattributes : *const SECURITY_ATTRIBUTES, bmanualreset : BOOL, binitialstate : BOOL, lpname : PCWSTR) -> HANDLE);
 windows_link::link!("kernel32.dll" "system" fn CreateMutexW(lpmutexattributes : *const SECURITY_ATTRIBUTES, binitialowner : BOOL, lpname : PCWSTR) -> HANDLE);
+windows_link::link!("advapi32.dll" "system" fn EqualSid(psid1 : PSID, psid2 : PSID) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn FreeLibrary(hlibmodule : HMODULE) -> BOOL);
+windows_link::link!("advapi32.dll" "system" fn GetAce(pacl : *const ACL, dwaceindex : u32, pace : *mut *mut core::ffi::c_void) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn GetCurrentProcess() -> HANDLE);
 windows_link::link!("kernel32.dll" "system" fn GetLastError() -> u32);
 windows_link::link!("kernel32.dll" "system" fn GetModuleHandleExW(dwflags : u32, lpmodulename : PCWSTR, phmodule : *mut HMODULE) -> BOOL);
+windows_link::link!("advapi32.dll" "system" fn GetSecurityDescriptorSacl(psecuritydescriptor : PSECURITY_DESCRIPTOR, lpbsaclpresent : *mut BOOL, psacl : *mut PACL, lpbsacldefaulted : *mut BOOL) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn GetSecurityInfo(handle : HANDLE, objecttype : SE_OBJECT_TYPE, securityinfo : SECURITY_INFORMATION, ppsidowner : *mut PSID, ppsidgroup : *mut PSID, ppdacl : *mut PACL, ppsacl : *mut PACL, ppsecuritydescriptor : *mut PSECURITY_DESCRIPTOR) -> u32);
 windows_link::link!("advapi32.dll" "system" fn GetTokenInformation(tokenhandle : HANDLE, tokeninformationclass : TOKEN_INFORMATION_CLASS, tokeninformation : *mut core::ffi::c_void, tokeninformationlength : u32, returnlength : *mut u32) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn LocalFree(hmem : HLOCAL) -> HLOCAL);
@@ -55,6 +58,13 @@ windows_link::link!("oleaut32.dll" "system" fn VariantClear(pvarg : *mut VARIANT
 windows_link::link!("kernel32.dll" "system" fn VirtualQuery(lpaddress : *const core::ffi::c_void, lpbuffer : *mut MEMORY_BASIC_INFORMATION, dwlength : usize) -> usize);
 windows_link::link!("kernel32.dll" "system" fn WaitForSingleObject(hhandle : HANDLE, dwmilliseconds : u32) -> u32);
 pub type ACCESS_MASK = u32;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct ACE_HEADER {
+    pub AceType: u8,
+    pub AceFlags: u8,
+    pub AceSize: u16,
+}
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct ACL {
@@ -604,7 +614,6 @@ pub const REG_OPTION_NON_VOLATILE: i32 = 0;
 pub const REG_OPTION_VOLATILE: i32 = 1;
 pub const REG_SZ: u32 = 1;
 pub const RPC_E_CHANGED_MODE: HRESULT = 0x80010106_u32 as _;
-pub const SACL_SECURITY_INFORMATION: i32 = 8;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SAFEARRAY {
@@ -645,6 +654,14 @@ pub struct SID_AND_ATTRIBUTES {
     pub Attributes: u32,
 }
 pub type SYSKIND = i32;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SYSTEM_MANDATORY_LABEL_ACE {
+    pub Header: ACE_HEADER,
+    pub Mask: ACCESS_MASK,
+    pub SidStart: u32,
+}
+pub const SYSTEM_MANDATORY_LABEL_ACE_TYPE: i32 = 17;
 pub const SYS_MAC: SYSKIND = 2;
 pub const SYS_WIN16: SYSKIND = 0;
 pub const SYS_WIN32: SYSKIND = 1;

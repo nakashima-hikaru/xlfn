@@ -387,13 +387,20 @@ pub(crate) fn install_file_diagnostic_sink_at(
 }
 
 #[cfg(test)]
+pub(super) fn test_log_directory() -> tempfile::TempDir {
+    // On macOS the system temp path can traverse /var, a symlink.
+    let base = std::env::temp_dir().canonicalize().unwrap();
+    tempfile::tempdir_in(base).unwrap()
+}
+
+#[cfg(test)]
 mod bounded_text_tests {
     use super::*;
 
     #[cfg(unix)]
     #[test]
     fn logs_reject_links_without_touching_their_targets() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_log_directory();
         let target = directory.path().join("secret");
         fs::write(&target, "unchanged").unwrap();
         let log = directory.path().join("diagnostics.log");
@@ -427,7 +434,7 @@ mod bounded_text_tests {
 
     #[test]
     fn log_contention_fails_promptly_and_recovery_preserves_rotation() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_log_directory();
         let path = directory.path().join("diagnostics.log");
         let mut log = RotatingLog::open_with_policy(path.clone(), 8, 1).unwrap();
         log.write_line("first").unwrap();
@@ -447,7 +454,7 @@ mod bounded_text_tests {
 
     #[test]
     fn contended_diagnostic_event_is_counted_and_following_event_is_written() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_log_directory();
         let path = directory.path().join("diagnostics.log");
         let sink = FileDiagnosticSink {
             log: Mutex::new(RotatingLog::open(path.clone()).unwrap()),

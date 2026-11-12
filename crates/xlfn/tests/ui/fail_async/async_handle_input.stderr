@@ -97,6 +97,11 @@ error[E0277]: `Cell<usize>` cannot be shared between threads safely
    |
    = help: within `xlfn::__private::v1::CallScope<'_>`, the trait `Sync` is not implemented for `Cell<usize>`
    = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` or `std::sync::atomic::AtomicUsize` instead
+note: required because it appears within the type `AssertUnwindSafe<Cell<usize>>`
+  --> $RUST/core/src/panic/unwind_safe.rs
+   |
+   | pub struct AssertUnwindSafe<T>(#[stable(feature = "catch_unwind", since = "1.9.0")] pub T);
+   |            ^^^^^^^^^^^^^^^^
 note: required because it appears within the type `xlfn::call::CallScratch`
   --> src/call.rs
    |

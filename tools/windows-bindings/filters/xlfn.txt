@@ -138,7 +138,11 @@
     Windows.Win32.LocalFree
     Windows.Win32.TokenIntegrityLevel
     Windows.Win32.LABEL_SECURITY_INFORMATION
-    Windows.Win32.SACL_SECURITY_INFORMATION
+    Windows.Win32.GetSecurityDescriptorSacl
+    Windows.Win32.GetAce
+    Windows.Win32.EqualSid
+    Windows.Win32.SYSTEM_MANDATORY_LABEL_ACE
+    Windows.Win32.SYSTEM_MANDATORY_LABEL_ACE_TYPE
     Windows.Win32.TOKEN_MANDATORY_LABEL
     Windows.Win32.VirtualQuery
     Windows.Win32.MEMORY_BASIC_INFORMATION

@@ -64,7 +64,7 @@ impl Descriptor {
     }
 
     pub(super) fn validate_mapping(&self, handle: HANDLE) -> XllResult<()> {
-        let mut actual = LocalAllocation(std::ptr::null_mut());
+        let mut actual = Self(LocalAllocation(std::ptr::null_mut()));
         // SAFETY: handle is an owned open section handle; only the final output
         // is requested and it receives a LocalFree-owned security descriptor.
         let status = unsafe {
@@ -76,33 +76,75 @@ impl Descriptor {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut actual.0,
+                &mut actual.0.0,
             )
         };
         if status != 0 {
             return Err(invalid_state("accounting mapping security is unavailable"));
         }
-        // Serialize both descriptors with the same OS implementation. Exact
-        // comparison deliberately rejects inherited, null, additional, or
-        // differently privileged ACLs, including on pre-created objects.
-        let actual = canonical_descriptor(actual.0)?;
-        let expected = canonical_descriptor(self.0.0)?;
-        if actual != expected {
-            #[cfg(test)]
-            {
-                let actual = String::from_utf16_lossy(&actual);
-                let expected = String::from_utf16_lossy(&expected);
-                let actual_label = actual.split_once("S:").map(|(_, label)| label);
-                let expected_label = expected.split_once("S:").map(|(_, label)| label);
-                eprintln!(
-                    "mapping integrity label: actual={actual_label:?}, expected={expected_label:?}"
-                );
-            }
+        // Compare owner and DACL exactly. The kernel may set SACL control
+        // flags on creation, so compare the mandatory label ACE itself.
+        if canonical_descriptor(actual.0.0)? != canonical_descriptor(self.0.0)? {
             return Err(invalid_state(
-                "accounting mapping owner, DACL or integrity label does not match",
+                "accounting mapping owner or DACL does not match",
+            ));
+        }
+        let actual = actual.mandatory_label().ok_or_else(|| {
+            invalid_state("accounting mapping has no unique mandatory integrity label")
+        })?;
+        let expected = self
+            .mandatory_label()
+            .ok_or_else(|| invalid_state("expected accounting mapping label is invalid"))?;
+        // SAFETY: both SID pointers are into live mandatory label ACEs
+        // returned by Windows. EqualSid does not mutate them.
+        let same_sid = unsafe {
+            EqualSid(
+                (&raw const actual.SidStart).cast_mut().cast(),
+                (&raw const expected.SidStart).cast_mut().cast(),
+            )
+        } != 0;
+        if !same_sid
+            || actual.Mask != expected.Mask
+            || actual.Header.AceFlags != expected.Header.AceFlags
+        {
+            return Err(invalid_state(
+                "accounting mapping integrity label does not match",
             ));
         }
         Ok(())
+    }
+
+    fn mandatory_label(&self) -> Option<&SYSTEM_MANDATORY_LABEL_ACE> {
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut acl = std::ptr::null_mut();
+        // SAFETY: The descriptor is live and the outputs are writable.
+        if unsafe { GetSecurityDescriptorSacl(self.0.0, &mut present, &mut acl, &mut defaulted) }
+            == 0
+            || present == 0
+            || acl.is_null()
+        {
+            return None;
+        }
+        // SAFETY: A non-null SACL returned by Windows contains its ACL header.
+        if unsafe { (*acl).AceCount } != 1 {
+            return None;
+        }
+        let mut ace = std::ptr::null_mut();
+        // SAFETY: Index zero is the only entry in the live ACL.
+        if unsafe { GetAce(acl, 0, &mut ace) } == 0 || ace.is_null() {
+            return None;
+        }
+        // SAFETY: The live entry starts with an ACE header.
+        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+        if i32::from(header.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE
+            || usize::from(header.AceSize) < size_of::<SYSTEM_MANDATORY_LABEL_ACE>()
+        {
+            return None;
+        }
+        // SAFETY: The entry type and size cover the fixed fields. Its storage
+        // is owned by the security descriptor for the lifetime of self.
+        Some(unsafe { &*ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>() })
     }
 }
 
@@ -115,8 +157,7 @@ fn canonical_descriptor(descriptor: PSECURITY_DESCRIPTOR) -> XllResult<Vec<u16>>
         ConvertSecurityDescriptorToStringSecurityDescriptorW(
             descriptor,
             SDDL_REVISION_1 as u32,
-            // The queried label is stored as an ACE in the returned SACL.
-            OWNER_AND_DACL | SACL_SECURITY_INFORMATION as u32,
+            OWNER_AND_DACL,
             &mut output,
             &mut length,
         )

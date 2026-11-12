@@ -1406,7 +1406,7 @@ mod tests {
         let _router_guard = prepare_global_router();
         let delivered = Arc::new(AtomicUsize::new(0));
         set_diagnostic_sink(PreservedSink(Arc::clone(&delivered))).unwrap();
-        let directory = tempfile::tempdir().unwrap();
+        let directory = file::test_log_directory();
 
         let result = install_file_diagnostic_sink_at(directory.path().to_path_buf());
         assert!(matches!(result, Err(DiagnosticInitError::Io(_))));
@@ -1418,7 +1418,7 @@ mod tests {
     #[test]
     fn file_delivery_failures_are_counted() {
         let before = diagnostic_stats().file_write_failures;
-        let tempdir = tempfile::tempdir().unwrap();
+        let tempdir = file::test_log_directory();
         let sink = FileDiagnosticSink {
             log: Mutex::new(RotatingLog {
                 path: tempdir.path().join("missing-directory/unavailable.log"),
@@ -1440,7 +1440,7 @@ mod tests {
 
     #[test]
     fn file_diagnostic_records_are_single_bounded_json_lines() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = file::test_log_directory();
         let path = directory.path().join("diagnostics.log");
         let sink = FileDiagnosticSink {
             log: Mutex::new(RotatingLog::open(path.clone()).unwrap()),
@@ -1788,7 +1788,7 @@ mod tests {
 
     #[test]
     fn file_log_rotates_and_caps_generations() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = file::test_log_directory();
         let path = directory.path().join("diagnostics.log");
 
         for value in ["first", "second", "third", "fourth"] {
@@ -1810,7 +1810,7 @@ mod tests {
 
     #[test]
     fn rotating_log_rejects_a_record_larger_than_the_log_limit() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = file::test_log_directory();
         let path = directory.path().join("diagnostics.log");
         let mut log = RotatingLog::open_with_policy(path, 4, 2).unwrap();
 
@@ -1820,7 +1820,7 @@ mod tests {
 
     #[test]
     fn rotating_log_writers_follow_each_others_rotation_and_size() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = file::test_log_directory();
         let path = directory.path().join("diagnostics.log");
         let mut first = RotatingLog::open_with_policy(path.clone(), 12, 2).unwrap();
         let mut second = RotatingLog::open_with_policy(path.clone(), 12, 2).unwrap();
