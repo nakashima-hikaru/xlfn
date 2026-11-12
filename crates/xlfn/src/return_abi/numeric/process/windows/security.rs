@@ -4,6 +4,8 @@ use super::{invalid_state, os_error};
 use crate::XllResult;
 use crate::win32::*;
 use core::ffi::c_void;
+use std::mem::MaybeUninit;
+use std::ptr::NonNull;
 
 const OWNER_AND_DACL: u32 = (OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION) as u32;
 
@@ -117,26 +119,30 @@ impl Descriptor {
     fn mandatory_label(&self) -> Option<&SYSTEM_MANDATORY_LABEL_ACE> {
         let mut present = 0;
         let mut defaulted = 0;
-        let mut acl = std::ptr::null_mut();
+        let mut acl = MaybeUninit::<PACL>::uninit();
         // SAFETY: The descriptor is live and the outputs are writable.
-        if unsafe { GetSecurityDescriptorSacl(self.0.0, &mut present, &mut acl, &mut defaulted) }
-            == 0
+        if unsafe {
+            GetSecurityDescriptorSacl(self.0.0, &mut present, acl.as_mut_ptr(), &mut defaulted)
+        } == 0
             || present == 0
-            || acl.is_null()
         {
             return None;
         }
+        // SAFETY: Success with a present SACL initializes the pointer output.
+        let acl = NonNull::new(unsafe { acl.assume_init() })?;
         // SAFETY: A non-null SACL returned by Windows contains its ACL header.
-        if unsafe { (*acl).AceCount } != 1 {
+        if unsafe { acl.as_ref() }.AceCount != 1 {
             return None;
         }
-        let mut ace = std::ptr::null_mut();
+        let mut ace = MaybeUninit::<*mut c_void>::uninit();
         // SAFETY: Index zero is the only entry in the live ACL.
-        if unsafe { GetAce(acl, 0, &mut ace) } == 0 || ace.is_null() {
+        if unsafe { GetAce(acl.as_ptr(), 0, ace.as_mut_ptr()) } == 0 {
             return None;
         }
+        // SAFETY: GetAce initialized the pointer output on success.
+        let ace = NonNull::new(unsafe { ace.assume_init() })?;
         // SAFETY: The live entry starts with an ACE header.
-        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+        let header = unsafe { ace.cast::<ACE_HEADER>().as_ref() };
         if i32::from(header.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE
             || usize::from(header.AceSize) < size_of::<SYSTEM_MANDATORY_LABEL_ACE>()
         {
@@ -144,7 +150,7 @@ impl Descriptor {
         }
         // SAFETY: The entry type and size cover the fixed fields. Its storage
         // is owned by the security descriptor for the lifetime of self.
-        Some(unsafe { &*ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>() })
+        Some(unsafe { ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>().as_ref() })
     }
 }
 
