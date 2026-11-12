@@ -2,10 +2,9 @@ use super::ActiveServer;
 use crate::sync::{Mutex, MutexGuard};
 use crate::win32::{
     CloseHandle, CreateMutexW, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GUID,
-    GetLastError, HANDLE, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_VOLATILE,
-    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW,
-    RegQueryValueExW, RegSetValueExW, ReleaseMutex, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0,
-    WaitForSingleObject,
+    GetLastError, HANDLE, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ, RegCloseKey,
+    RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW,
+    RegSetValueExW, ReleaseMutex, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WaitForSingleObject,
 };
 use crate::{XllError, XllResult};
 use std::ptr;
@@ -19,6 +18,12 @@ pub(super) const RTD_REGISTRATION_SCHEMA: &str = "2";
 pub(super) const RTD_PROG_ID_PREFIX: &str = "XlFnRtd_";
 pub(super) static REGISTRATION_MAINTENANCE: Mutex<()> = Mutex::new(());
 const REGISTRATION_MUTEX_TIMEOUT_MS: u32 = 1_000;
+// WOW64 rejects volatile creation under the redirected CLSID key. Keep both
+// keys persistent on x86 so scavenging can still find the CLSID after a reboot.
+#[cfg(target_arch = "x86")]
+const REGISTRATION_KEY_OPTIONS: u32 = crate::win32::REG_OPTION_NON_VOLATILE as u32;
+#[cfg(not(target_arch = "x86"))]
+const REGISTRATION_KEY_OPTIONS: u32 = crate::win32::REG_OPTION_VOLATILE as u32;
 
 pub(super) struct TemporaryRegistration {
     prog_key: Vec<u16>,
@@ -476,7 +481,7 @@ pub(super) fn set_registry_value(path: &str, name: Option<&str>, value: &str) ->
             path.as_ptr(),
             0,
             ptr::null(),
-            REG_OPTION_VOLATILE as u32,
+            REGISTRATION_KEY_OPTIONS,
             KEY_WRITE as u32,
             ptr::null(),
             &mut key,
