@@ -604,6 +604,7 @@ pub const REG_OPTION_NON_VOLATILE: i32 = 0;
 pub const REG_OPTION_VOLATILE: i32 = 1;
 pub const REG_SZ: u32 = 1;
 pub const RPC_E_CHANGED_MODE: HRESULT = 0x80010106_u32 as _;
+pub const SACL_SECURITY_INFORMATION: i32 = 8;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SAFEARRAY {

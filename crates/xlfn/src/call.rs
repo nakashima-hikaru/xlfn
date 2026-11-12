@@ -23,7 +23,8 @@ const MAX_CALL_SCRATCH_BYTES: usize = crate::value::MAX_ARRAY_BYTES;
 
 pub(crate) struct CallScratch {
     arena: AssertUnwindSafe<bumpalo::Bump>,
-    requested_bytes: Cell<usize>,
+    // A panic may leave a conservative charge, but cannot invalidate a borrow.
+    requested_bytes: AssertUnwindSafe<Cell<usize>>,
     strings: AssertUnwindSafe<OnceCell<Box<bumpalo::Bump>>>,
     large_collection: AssertUnwindSafe<Cell<bool>>,
     // Only new_inline initializes this slot: it never owns a heap allocation.
@@ -35,7 +36,7 @@ impl CallScratch {
     fn new() -> Self {
         Self {
             arena: AssertUnwindSafe(bumpalo::Bump::new()),
-            requested_bytes: Cell::new(0),
+            requested_bytes: AssertUnwindSafe(Cell::new(0)),
             strings: AssertUnwindSafe(OnceCell::new()),
             large_collection: AssertUnwindSafe(Cell::new(false)),
             inline_text: AssertUnwindSafe(OnceCell::new()),

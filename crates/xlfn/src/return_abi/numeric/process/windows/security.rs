@@ -5,8 +5,7 @@ use crate::XllResult;
 use crate::win32::*;
 use core::ffi::c_void;
 
-const INFORMATION: u32 =
-    (OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION) as u32;
+const OWNER_AND_DACL: u32 = (OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION) as u32;
 
 struct LocalAllocation(*mut c_void);
 
@@ -72,7 +71,7 @@ impl Descriptor {
             GetSecurityInfo(
                 handle,
                 SE_KERNEL_OBJECT,
-                INFORMATION,
+                OWNER_AND_DACL | LABEL_SECURITY_INFORMATION as u32,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
@@ -86,7 +85,19 @@ impl Descriptor {
         // Serialize both descriptors with the same OS implementation. Exact
         // comparison deliberately rejects inherited, null, additional, or
         // differently privileged ACLs, including on pre-created objects.
-        if canonical_descriptor(actual.0)? != canonical_descriptor(self.0.0)? {
+        let actual = canonical_descriptor(actual.0)?;
+        let expected = canonical_descriptor(self.0.0)?;
+        if actual != expected {
+            #[cfg(test)]
+            {
+                let actual = String::from_utf16_lossy(&actual);
+                let expected = String::from_utf16_lossy(&expected);
+                let actual_label = actual.split_once("S:").map(|(_, label)| label);
+                let expected_label = expected.split_once("S:").map(|(_, label)| label);
+                eprintln!(
+                    "mapping integrity label: actual={actual_label:?}, expected={expected_label:?}"
+                );
+            }
             return Err(invalid_state(
                 "accounting mapping owner, DACL or integrity label does not match",
             ));
@@ -104,7 +115,8 @@ fn canonical_descriptor(descriptor: PSECURITY_DESCRIPTOR) -> XllResult<Vec<u16>>
         ConvertSecurityDescriptorToStringSecurityDescriptorW(
             descriptor,
             SDDL_REVISION_1 as u32,
-            INFORMATION,
+            // The queried label is stored as an ACE in the returned SACL.
+            OWNER_AND_DACL | SACL_SECURITY_INFORMATION as u32,
             &mut output,
             &mut length,
         )

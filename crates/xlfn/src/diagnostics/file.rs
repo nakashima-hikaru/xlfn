@@ -342,8 +342,8 @@ fn validated_log_base(base: Option<std::ffi::OsString>) -> io::Result<PathBuf> {
         if !path.is_absolute() { return false; }
         #[cfg(target_os = "windows")]
         {
-            return matches!(path.components().next(), Some(std::path::Component::Prefix(prefix))
-                if matches!(prefix.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)));
+            matches!(path.components().next(), Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)))
         }
         #[cfg(not(target_os = "windows"))]
         true
