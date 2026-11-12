@@ -7,4 +7,4 @@ edition = "2024"
 [workspace]
 
 [dev-dependencies]
-smallvec = { version = "=1.16.3", features = ["const_new"] }
+smallvec = { version = "=1.16.5", features = ["const_new"] }
