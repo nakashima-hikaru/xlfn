@@ -236,7 +236,7 @@ fn reentered_events_do_not_enable_further_callbacks_after_unregister_errors() {
             let _fixture = StaticTestRuntime::from_static(runtime.runtime());
             // Quarantine retains the production router; release fixture-owned
             // process-global diagnostics after checking that path.
-            let _diagnostics = scopeguard::guard((), |_| {
+            let _diagnostics = std::mem::DropGuard::new((), |()| {
                 let _ = crate::diagnostics::close_diagnostic_router();
             });
             open(runtime);
@@ -309,7 +309,7 @@ fn an_event_admitted_before_close_finishes_before_unregister_begins() {
     let observer = std::thread::spawn(move || {
         // Always release the paused event, including on an assertion failure,
         // so the lifecycle owner can finish and the test can report normally.
-        let release = scopeguard::guard(release_tx, |sender| {
+        let release = std::mem::DropGuard::new(release_tx, |sender| {
             let _ = sender.send(());
         });
         let deadline = Instant::now() + Duration::from_secs(5);

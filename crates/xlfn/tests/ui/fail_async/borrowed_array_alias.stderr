@@ -19,7 +19,6 @@ note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
   --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
-   |        ---------------------- required by a bound in this function
 ...
    |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
    |                                                         ^^^^ required by this bound in `assert_async_parameter`
@@ -52,7 +51,6 @@ note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
   --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
-   |        ---------------------- required by a bound in this function
 ...
    |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
    |                                                         ^^^^ required by this bound in `assert_async_parameter`
@@ -90,7 +88,6 @@ note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
   --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
-   |        ---------------------- required by a bound in this function
 ...
    |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
    |                                                         ^^^^ required by this bound in `assert_async_parameter`
@@ -128,7 +125,6 @@ note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
   --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
-   |        ---------------------- required by a bound in this function
 ...
    |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
    |                                                         ^^^^ required by this bound in `assert_async_parameter`
@@ -171,7 +167,6 @@ note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
   --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
-   |        ---------------------- required by a bound in this function
 ...
    |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
    |                                                         ^^^^ required by this bound in `assert_async_parameter`
@@ -214,7 +209,6 @@ note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
   --> src/call_return/traits.rs
    |
    | pub fn assert_async_parameter<R, T>()
-   |        ---------------------- required by a bound in this function
 ...
    |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
    |                                                         ^^^^ required by this bound in `assert_async_parameter`

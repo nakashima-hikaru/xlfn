@@ -121,15 +121,38 @@ impl CallScratch {
         if len.saturating_mul(std::mem::size_of::<T>()) >= LARGE_TYPED_COLLECTION_BYTES {
             self.large_collection.set(true);
         }
-        let mut values = bumpalo::collections::Vec::new_in(&self.arena.0);
+        let mut values = std::vec::Vec::new_in(BumpAllocator(&self.arena.0));
         values
             .try_reserve_exact(len)
             .map_err(|_| crate::XllError::Overloaded)?;
         for index in 0..len {
             values.push(build(index)?);
         }
-        Ok(values.into_bump_slice())
+        Ok(values.leak())
     }
+}
+
+#[derive(Clone, Copy)]
+struct BumpAllocator<'a>(&'a bumpalo::Bump);
+
+// SAFETY: `BumpAllocator` delegates allocations to `bumpalo::Bump::try_alloc_layout`,
+// which returns memory valid for at least the arena's lifetime `'a`. `deallocate`
+// is a no-op because the bump arena reclaims all chunks together on drop, so
+// leaked allocations stay valid until the arena is dropped.
+unsafe impl std::alloc::Allocator for BumpAllocator<'_> {
+    #[inline]
+    fn allocate(
+        &self,
+        layout: std::alloc::Layout,
+    ) -> Result<std::ptr::NonNull<[u8]>, std::alloc::AllocError> {
+        self.0
+            .try_alloc_layout(layout)
+            .map(|ptr| std::ptr::NonNull::slice_from_raw_parts(ptr, layout.size()))
+            .map_err(|_| std::alloc::AllocError)
+    }
+
+    #[inline]
+    unsafe fn deallocate(&self, _ptr: std::ptr::NonNull<u8>, _layout: std::alloc::Layout) {}
 }
 
 #[cfg(feature = "handles")]

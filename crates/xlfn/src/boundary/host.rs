@@ -794,7 +794,7 @@ mod tests {
                 let _callbacks = ReloadCallbacks::install(&runtime);
                 // Quarantine deliberately retains the production router.
                 // This fixture must release that global test state itself.
-                let _diagnostics = scopeguard::guard((), |_| {
+                let _diagnostics = std::mem::DropGuard::new((), |()| {
                     let _ = crate::diagnostics::close_diagnostic_router();
                 });
                 runtime

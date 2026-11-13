@@ -21,7 +21,7 @@ use crate::{XllError, XllResult, error::InputError};
 #[cfg(not(any(feature = "handles", test)))]
 pub struct InputIdentityEncoder {
     // No safe construction path exists without the formula-handle backend.
-    unavailable: std::convert::Infallible,
+    unavailable: !,
 }
 
 #[cfg(not(any(feature = "handles", test)))]

@@ -1,10 +1,11 @@
 # Developer and CI command surface. Keep CI workflows and the testing guide
 # aligned with these recipes.
 
-# Supports the Rust 1.99 ownership APIs and MSRV. Newer Miri rejects the
-# reference passed to Linux's variadic futex syscall by parking_lot_core 0.9.12
-# (upstream #542 / fix #539). Revisit this pin after an upstream release.
-miri-toolchain := "nightly-2026-09-02"
+# Supports the Rust 1.100.0 stabilized APIs (`DropGuard`, `Allocator`,
+# `UnsafeCell::as_mut_unchecked`). On `target_os = "linux"` (CI only), `xlfn`
+# leaves `quick_cache/parking_lot` disabled so Linux Miri avoids
+# `parking_lot_core` 0.9.12's variadic `futex` syscall check (upstream #542 / fix #539).
+miri-toolchain := "nightly-2026-09-28"
 
 default:
     @just --list
@@ -78,8 +79,8 @@ miri-setup:
     rustup toolchain install {{miri-toolchain}} --profile minimal --component miri,rust-src
 
 miri:
-    cargo +{{miri-toolchain}} miri test --manifest-path probes/ghostcell-call-model/Cargo.toml --locked
-    MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test --manifest-path probes/ghostcell-call-model/Cargo.toml --locked
+    CARGO_BUILD_WARNINGS=allow cargo +{{miri-toolchain}} miri test --manifest-path probes/ghostcell-call-model/Cargo.toml --locked
+    CARGO_BUILD_WARNINGS=allow MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test --manifest-path probes/ghostcell-call-model/Cargo.toml --locked
     # Layer metadata reads wall-clock time, so run these reentry cases without isolation.
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --lib --locked -- scalar_publication_survives --test-threads=1
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-kernel --lib --locked -- miri_

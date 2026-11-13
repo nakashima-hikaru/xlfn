@@ -51,7 +51,7 @@ pub trait AsyncExecutor: Send + Sync + 'static {
 impl AsyncExecutor for NoAsyncExecutor {
     const ENABLED: bool = false;
 
-    type Reservation = std::convert::Infallible;
+    type Reservation = !;
 
     fn start(&self) -> XllResult<()> {
         Ok(())

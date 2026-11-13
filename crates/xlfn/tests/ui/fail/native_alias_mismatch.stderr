@@ -4,7 +4,7 @@ error[E0308]: `?` operator has incompatible types
 5 | #[excel_function]
   | ^^^^^^^^^^^^^^^^^ expected `PreparedArgument<String, _, _>`, found `PreparedArgument<f64>`
   |
-  = note: `?` operator cannot convert from `PreparedArgument<f64, Infallible, value::input::NoMaterialization>` to `PreparedArgument<std::string::String, _, _>`
+  = note: `?` operator cannot convert from `PreparedArgument<f64, !, value::input::NoMaterialization>` to `PreparedArgument<std::string::String, _, _>`
   = note: expected enum `PreparedArgument<std::string::String, _, _>`
-             found enum `PreparedArgument<f64, Infallible, value::input::NoMaterialization>`
+             found enum `PreparedArgument<f64, !, value::input::NoMaterialization>`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

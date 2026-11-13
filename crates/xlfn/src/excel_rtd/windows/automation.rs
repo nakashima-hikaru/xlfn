@@ -661,7 +661,7 @@ pub(super) unsafe fn write_bstr_variant(result: *mut VARIANT, value: &str) -> i3
     let Some(bstr) = NonNull::new(bstr.cast_mut()) else {
         return E_FAIL;
     };
-    let owner = scopeguard::guard(bstr, |bstr| {
+    let owner = std::mem::DropGuard::new(bstr, |bstr| {
         // SAFETY: this guard owns the allocation until the completed VARIANT
         // receives it; unwind before transfer frees it exactly once.
         unsafe { SysFreeString(bstr.as_ptr()) };
@@ -688,7 +688,7 @@ pub(super) unsafe fn write_bstr_variant(result: *mut VARIANT, value: &str) -> i3
     // SAFETY: the caller guarantees that `result` points to writable VARIANT
     // output storage. Ownership of `bstr` transfers into the written VARIANT.
     unsafe { *result = variant };
-    let _ = scopeguard::ScopeGuard::into_inner(owner);
+    let _ = std::mem::DropGuard::dismiss(owner);
 
     S_OK
 }

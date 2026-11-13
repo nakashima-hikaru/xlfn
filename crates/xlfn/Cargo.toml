@@ -16,11 +16,11 @@ jiff = ["dep:jiff"]
 async = ["dep:futures-util"]
 async-builtin = ["async", "dep:async-task", "dep:crossbeam-deque"]
 # Enables the RTD/COM subsystem and its add-in capability surface.
-rtd = []
+rtd = ["dep:indexmap"]
 # Formula handles use the private Excel RTD transport internally, but do not
 # expose the generic RTD subscription capability.
-handles = ["dep:blake3", "dep:constant_time_eq", "dep:getrandom", "dep:papaya"]
-cache = ["dep:papaya", "dep:quick_cache"]
+handles = ["dep:blake3", "dep:constant_time_eq", "dep:getrandom", "dep:indexmap", "dep:papaya"]
+cache = ["dep:indexmap", "dep:papaya", "dep:quick_cache"]
 refinement = ["serde/derive"]
 # Internal instrumentation for production-path benchmarks.
 bench-internals = ["handles", "xlfn-sys/abi-probe"]
@@ -135,7 +135,7 @@ ghost-cell.workspace = true
 xlfn-macros.workspace = true
 xlfn-sys.workspace = true
 inventory.workspace = true
-indexmap.workspace = true
+indexmap = { workspace = true, optional = true }
 async-task = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
 jiff = { workspace = true, optional = true }
@@ -147,8 +147,6 @@ futures-util = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 papaya = { workspace = true, optional = true }
 parking_lot.workspace = true
-quick_cache = { workspace = true, optional = true }
-scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rustc-hash.workspace = true
@@ -165,6 +163,14 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-link.workspace = true
+
+# Linux is only exercised for CI portability and Miri; avoid `parking_lot_core` 0.9.12's
+# Linux `futex` syscall under newer Miri while keeping `quick_cache/parking_lot` everywhere else.
+[target.'cfg(target_os = "linux")'.dependencies]
+quick_cache = { workspace = true, optional = true }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+quick_cache = { workspace = true, features = ["parking_lot"], optional = true }
 
 [dev-dependencies]
 blake3.workspace = true

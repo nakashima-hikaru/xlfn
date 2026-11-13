@@ -507,7 +507,7 @@ fn miri_notification_reentry_can_read_the_handed_off_raw_outputs() {
     *notifier.callback.lock() = Some(Box::new(move || witness.inspect()));
     // Also remove the raw-pointer witness on an unexpected test failure before
     // the output stack storage ends; it must never survive into later cleanup.
-    let _clear = scopeguard::guard(Arc::clone(&notifier), |notifier| {
+    let _clear = std::mem::DropGuard::new(Arc::clone(&notifier), |notifier| {
         notifier.callback.lock().take();
     });
     // SAFETY: writable non-overlapping output locations remain live for this

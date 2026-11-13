@@ -32,10 +32,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Inne
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
 note: required because it appears within the type `Nested<'_>`
-  --> tests/ui/fail/nested_handle_storage.rs:7:8
+  --> tests/ui/fail/nested_handle_storage.rs:8:5
    |
  7 | struct Nested<'call> {
-   |        ^^^^^^
+ 8 |     inner: Handle<'call, Inner>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this field
 note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObject`
   --> tests/ui/fail/nested_handle_storage.rs:7:8
    |
@@ -43,8 +44,6 @@ note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObje
    |          ----------------- type parameter would need to implement `xlfn::handle::ExcelHandleObject`
  7 | struct Nested<'call> {
    |        ^^^^^^^^^^^^^
-   = help: consider manually implementing `xlfn::handle::ExcelHandleObject` to avoid undesired bounds caused by "imperfect derives"
-   = note: to learn more, visit <https://github.com/rust-lang/rust/issues/26925>
 note: required by a bound in `require_handle_object`
   --> tests/ui/fail/nested_handle_storage.rs:11:29
    |
@@ -86,10 +85,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Inne
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
 note: required because it appears within the type `Nested<'_>`
-  --> tests/ui/fail/nested_handle_storage.rs:7:8
+  --> tests/ui/fail/nested_handle_storage.rs:8:5
    |
  7 | struct Nested<'call> {
-   |        ^^^^^^
+ 8 |     inner: Handle<'call, Inner>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this field
 note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObject`
   --> tests/ui/fail/nested_handle_storage.rs:7:8
    |
@@ -97,8 +97,6 @@ note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObje
    |          ----------------- type parameter would need to implement `xlfn::handle::ExcelHandleObject`
  7 | struct Nested<'call> {
    |        ^^^^^^^^^^^^^
-   = help: consider manually implementing `xlfn::handle::ExcelHandleObject` to avoid undesired bounds caused by "imperfect derives"
-   = note: to learn more, visit <https://github.com/rust-lang/rust/issues/26925>
 note: required by a bound in `require_handle_object`
   --> tests/ui/fail/nested_handle_storage.rs:11:29
    |
@@ -155,10 +153,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Inne
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
 note: required because it appears within the type `Nested<'_>`
-  --> tests/ui/fail/nested_handle_storage.rs:7:8
+  --> tests/ui/fail/nested_handle_storage.rs:8:5
    |
  7 | struct Nested<'call> {
-   |        ^^^^^^
+ 8 |     inner: Handle<'call, Inner>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this field
 note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObject`
   --> tests/ui/fail/nested_handle_storage.rs:7:8
    |
@@ -166,8 +165,6 @@ note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObje
    |          ----------------- type parameter would need to implement `xlfn::handle::ExcelHandleObject`
  7 | struct Nested<'call> {
    |        ^^^^^^^^^^^^^
-   = help: consider manually implementing `xlfn::handle::ExcelHandleObject` to avoid undesired bounds caused by "imperfect derives"
-   = note: to learn more, visit <https://github.com/rust-lang/rust/issues/26925>
 note: required by a bound in `require_handle_object`
   --> tests/ui/fail/nested_handle_storage.rs:11:29
    |
@@ -224,10 +221,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Inne
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
 note: required because it appears within the type `Nested<'_>`
-  --> tests/ui/fail/nested_handle_storage.rs:7:8
+  --> tests/ui/fail/nested_handle_storage.rs:8:5
    |
  7 | struct Nested<'call> {
-   |        ^^^^^^
+ 8 |     inner: Handle<'call, Inner>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this field
 note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObject`
   --> tests/ui/fail/nested_handle_storage.rs:7:8
    |
@@ -235,8 +233,6 @@ note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObje
    |          ----------------- type parameter would need to implement `xlfn::handle::ExcelHandleObject`
  7 | struct Nested<'call> {
    |        ^^^^^^^^^^^^^
-   = help: consider manually implementing `xlfn::handle::ExcelHandleObject` to avoid undesired bounds caused by "imperfect derives"
-   = note: to learn more, visit <https://github.com/rust-lang/rust/issues/26925>
 note: required by a bound in `require_handle_object`
   --> tests/ui/fail/nested_handle_storage.rs:11:29
    |
@@ -295,10 +291,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Inne
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
 note: required because it appears within the type `Nested<'_>`
-  --> tests/ui/fail/nested_handle_storage.rs:7:8
+  --> tests/ui/fail/nested_handle_storage.rs:8:5
    |
  7 | struct Nested<'call> {
-   |        ^^^^^^
+ 8 |     inner: Handle<'call, Inner>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this field
 note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObject`
   --> tests/ui/fail/nested_handle_storage.rs:7:8
    |
@@ -306,8 +303,6 @@ note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObje
    |          ----------------- type parameter would need to implement `xlfn::handle::ExcelHandleObject`
  7 | struct Nested<'call> {
    |        ^^^^^^^^^^^^^
-   = help: consider manually implementing `xlfn::handle::ExcelHandleObject` to avoid undesired bounds caused by "imperfect derives"
-   = note: to learn more, visit <https://github.com/rust-lang/rust/issues/26925>
 note: required by a bound in `require_handle_object`
   --> tests/ui/fail/nested_handle_storage.rs:11:29
    |
@@ -366,10 +361,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Inne
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
 note: required because it appears within the type `Nested<'_>`
-  --> tests/ui/fail/nested_handle_storage.rs:7:8
+  --> tests/ui/fail/nested_handle_storage.rs:8:5
    |
  7 | struct Nested<'call> {
-   |        ^^^^^^
+ 8 |     inner: Handle<'call, Inner>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this field
 note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObject`
   --> tests/ui/fail/nested_handle_storage.rs:7:8
    |
@@ -377,8 +373,6 @@ note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObje
    |          ----------------- type parameter would need to implement `xlfn::handle::ExcelHandleObject`
  7 | struct Nested<'call> {
    |        ^^^^^^^^^^^^^
-   = help: consider manually implementing `xlfn::handle::ExcelHandleObject` to avoid undesired bounds caused by "imperfect derives"
-   = note: to learn more, visit <https://github.com/rust-lang/rust/issues/26925>
 note: required by a bound in `require_handle_object`
   --> tests/ui/fail/nested_handle_storage.rs:11:29
    |
@@ -437,10 +431,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Inne
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
 note: required because it appears within the type `Nested<'_>`
-  --> tests/ui/fail/nested_handle_storage.rs:7:8
+  --> tests/ui/fail/nested_handle_storage.rs:8:5
    |
  7 | struct Nested<'call> {
-   |        ^^^^^^
+ 8 |     inner: Handle<'call, Inner>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this field
 note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObject`
   --> tests/ui/fail/nested_handle_storage.rs:7:8
    |
@@ -448,8 +443,6 @@ note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObje
    |          ----------------- type parameter would need to implement `xlfn::handle::ExcelHandleObject`
  7 | struct Nested<'call> {
    |        ^^^^^^^^^^^^^
-   = help: consider manually implementing `xlfn::handle::ExcelHandleObject` to avoid undesired bounds caused by "imperfect derives"
-   = note: to learn more, visit <https://github.com/rust-lang/rust/issues/26925>
 note: required by a bound in `require_handle_object`
   --> tests/ui/fail/nested_handle_storage.rs:11:29
    |
@@ -508,10 +501,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Inne
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
 note: required because it appears within the type `Nested<'_>`
-  --> tests/ui/fail/nested_handle_storage.rs:7:8
+  --> tests/ui/fail/nested_handle_storage.rs:8:5
    |
  7 | struct Nested<'call> {
-   |        ^^^^^^
+ 8 |     inner: Handle<'call, Inner>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this field
 note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObject`
   --> tests/ui/fail/nested_handle_storage.rs:7:8
    |
@@ -519,8 +513,6 @@ note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObje
    |          ----------------- type parameter would need to implement `xlfn::handle::ExcelHandleObject`
  7 | struct Nested<'call> {
    |        ^^^^^^^^^^^^^
-   = help: consider manually implementing `xlfn::handle::ExcelHandleObject` to avoid undesired bounds caused by "imperfect derives"
-   = note: to learn more, visit <https://github.com/rust-lang/rust/issues/26925>
 note: required by a bound in `require_handle_object`
   --> tests/ui/fail/nested_handle_storage.rs:11:29
    |
@@ -584,10 +576,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Inne
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
 note: required because it appears within the type `Nested<'_>`
-  --> tests/ui/fail/nested_handle_storage.rs:7:8
+  --> tests/ui/fail/nested_handle_storage.rs:8:5
    |
  7 | struct Nested<'call> {
-   |        ^^^^^^
+ 8 |     inner: Handle<'call, Inner>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this field
 note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObject`
   --> tests/ui/fail/nested_handle_storage.rs:7:8
    |
@@ -595,8 +588,6 @@ note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObje
    |          ----------------- type parameter would need to implement `xlfn::handle::ExcelHandleObject`
  7 | struct Nested<'call> {
    |        ^^^^^^^^^^^^^
-   = help: consider manually implementing `xlfn::handle::ExcelHandleObject` to avoid undesired bounds caused by "imperfect derives"
-   = note: to learn more, visit <https://github.com/rust-lang/rust/issues/26925>
 note: required by a bound in `require_handle_object`
   --> tests/ui/fail/nested_handle_storage.rs:11:29
    |
@@ -660,10 +651,11 @@ note: required because it appears within the type `xlfn::handle::Handle<'_, Inne
    | pub struct Handle<'call, T: ExcelHandleObject> {
    |            ^^^^^^
 note: required because it appears within the type `Nested<'_>`
-  --> tests/ui/fail/nested_handle_storage.rs:7:8
+  --> tests/ui/fail/nested_handle_storage.rs:8:5
    |
  7 | struct Nested<'call> {
-   |        ^^^^^^
+ 8 |     inner: Handle<'call, Inner>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this field
 note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObject`
   --> tests/ui/fail/nested_handle_storage.rs:7:8
    |
@@ -671,8 +663,6 @@ note: required for `Nested<'static>` to implement `xlfn::handle::ExcelHandleObje
    |          ----------------- type parameter would need to implement `xlfn::handle::ExcelHandleObject`
  7 | struct Nested<'call> {
    |        ^^^^^^^^^^^^^
-   = help: consider manually implementing `xlfn::handle::ExcelHandleObject` to avoid undesired bounds caused by "imperfect derives"
-   = note: to learn more, visit <https://github.com/rust-lang/rust/issues/26925>
 note: required by a bound in `require_handle_object`
   --> tests/ui/fail/nested_handle_storage.rs:11:29
    |

@@ -8,16 +8,16 @@ impl crate::Addin for PhysicalAddin {
     type LifecycleState = ();
     type Error = crate::XllError;
     type Layers = ();
-    type AsyncExecutor = crate::NoAsyncExecutor;
+    type AsyncExecutor = crate::addin_impl::NoAsyncExecutor;
 
-    fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
-        Ok(crate::Opened::new(()))
+    fn open(_: &crate::addin_impl::OpenContext<Self>) -> crate::addin_impl::OpenResult<Self> {
+        Ok(crate::addin_impl::Opened::new(()))
     }
 }
 
 #[allow(unsafe_code, reason = "The fixture has no application state or executable sources")]
 // SAFETY: this add-in owns only () and starts no callbacks, threads, or timers.
-unsafe impl crate::PhysicallyUnloadableAddin for PhysicalAddin {}
+unsafe impl crate::addin_impl::PhysicallyUnloadableAddin for PhysicalAddin {}
 
 static LOGICAL: Runtime<PhysicalAddin, LogicalUnload> = Runtime::new();
 static PHYSICAL: Runtime<PhysicalAddin, PhysicalUnload> =

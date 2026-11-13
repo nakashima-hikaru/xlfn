@@ -354,7 +354,7 @@ impl ObjectArena {
             .active_releases
             .checked_add(1)
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-        scopeguard::guard(self.state(id), |shard| {
+        std::mem::DropGuard::new(self.state(id), |shard| {
             let mut state = shard.lock();
             state.active_releases = state
                 .active_releases

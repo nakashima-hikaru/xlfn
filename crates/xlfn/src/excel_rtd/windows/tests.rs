@@ -598,7 +598,7 @@ impl Drop for RtdTestGuard {
 }
 
 impl RtdTestLock {
-    fn lock(&self) -> Result<RtdTestGuard, std::convert::Infallible> {
+    fn lock(&self) -> Result<RtdTestGuard, !> {
         // Runtime and async tests already use this lock around operations
         // that mutate the same process-global state. Recover poisoning so
         // one genuine RTD assertion failure does not turn every later
@@ -2653,7 +2653,7 @@ fn topic_key_from_safearray_preserves_bstr_ownership_and_text_errors() {
             // SAFETY: the bound describes one element of the requested type.
             let array = unsafe { SafeArrayCreate(element_type, 1, &bound) };
             assert!(!array.is_null());
-            let array = scopeguard::guard(array, |array| {
+            let array = std::mem::DropGuard::new(array, |array| {
                 // SAFETY: this guard uniquely owns the live test array.
                 assert_eq!(unsafe { SafeArrayDestroy(array) }, S_OK);
             });
@@ -2666,7 +2666,7 @@ fn topic_key_from_safearray_preserves_bstr_ownership_and_text_errors() {
             // the source guard takes ownership.
             source.Anonymous.Anonymous.vt = VT_BSTR;
             source.Anonymous.Anonymous.Anonymous.bstrVal = bstr;
-            let mut source = scopeguard::guard(source, |mut source| {
+            let mut source = std::mem::DropGuard::new(source, |mut source| {
                 // SAFETY: this guard uniquely owns the initialized BSTR variant.
                 assert_eq!(unsafe { VariantClear(&mut source) }, S_OK);
             });
@@ -4174,7 +4174,7 @@ fn typed_com_port_keeps_mixed_owners_and_rolls_back_failed_value_conversion() {
 
     let _guard = TEST_LOCK.lock().unwrap();
     let _apartment = TestComApartment::enter();
-    let _reset_failure = scopeguard::guard((), |()| {
+    let _reset_failure = std::mem::DropGuard::new((), |()| {
         FAIL_NEXT_SUBSCRIPTION_WRITE.store(false, Ordering::Release);
     });
     let first_disconnected = Arc::new(AtomicBool::new(false));

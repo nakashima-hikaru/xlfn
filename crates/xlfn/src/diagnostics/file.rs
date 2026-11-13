@@ -339,14 +339,19 @@ pub(crate) fn install_file_diagnostic_sink(
 
 fn validated_log_base(base: Option<std::ffi::OsString>) -> io::Result<PathBuf> {
     let base = base.map(PathBuf::from).filter(|path| {
-        if !path.is_absolute() { return false; }
         #[cfg(target_os = "windows")]
         {
-            matches!(path.components().next(), Some(std::path::Component::Prefix(prefix))
-                if matches!(prefix.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)))
+            path.is_absolute()
+                && matches!(
+                    path.components().next(),
+                    Some(std::path::Component::Prefix(prefix))
+                        if matches!(prefix.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_))
+                )
         }
         #[cfg(not(target_os = "windows"))]
-        true
+        {
+            path.is_absolute()
+        }
     });
     base.ok_or_else(|| {
         io::Error::new(

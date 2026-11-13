@@ -5,7 +5,6 @@ use crate::call::CallScope;
 use crate::input_identity::InputFingerprintBuilder;
 use crate::input_identity::InputIdentityEncoder;
 use crate::{XllError, XllResult};
-use std::convert::Infallible;
 use std::marker::PhantomData;
 use xlfn_sys::XLOPER12;
 
@@ -565,8 +564,8 @@ pub trait ArgumentMaterializer<T, P> {
 /// No deferred state can be constructed for an already converted argument.
 #[doc(hidden)]
 pub struct NoMaterialization;
-impl<T> ArgumentMaterializer<T, Infallible> for NoMaterialization {
-    fn materialize(value: Infallible) -> XllResult<T> {
+impl<T> ArgumentMaterializer<T, !> for NoMaterialization {
+    fn materialize(value: !) -> XllResult<T> {
         match value {}
     }
 }
@@ -629,7 +628,7 @@ pub type PreparedElement<'call, T, M> = PreparedArgument<
 pub type PreparedParameterSequence<'call, T, M> =
     PreparedExcelSequence<'call, T, PreparedElement<'call, T, M>, ParameterSequence<'call, T, M>>;
 #[doc(hidden)]
-pub type ReadyArgument<T> = PreparedArgument<T, Infallible>;
+pub type ReadyArgument<T> = PreparedArgument<T, !>;
 
 /// Static conversions for retained preparation and validated borrowed cells.
 #[doc(hidden)]
@@ -724,7 +723,7 @@ impl<'source, T, P, D: SequenceMaterializer<'source, T, P>>
 
 /// Internal wrapper also retaining explicitly supplied default values.
 #[doc(hidden)]
-pub enum PreparedArgument<T, P = Infallible, D = NoMaterialization> {
+pub enum PreparedArgument<T, P = !, D = NoMaterialization> {
     Ready(T),
     Prepared {
         value: P,
@@ -830,12 +829,12 @@ pub trait ExcelParameter<'call, M: InputMode>:
 impl<'call, T: FromExcel<'call>> sealed::ExcelParameterSealed<'call, PlainInputMode> for T {}
 
 impl<'call, T: FromExcel<'call>> ExcelParameter<'call, PlainInputMode> for T {
-    type Prepared = Infallible;
-    fn materialize_prepared(value: Infallible) -> XllResult<Self> {
+    type Prepared = !;
+    fn materialize_prepared(value: !) -> XllResult<Self> {
         match value {}
     }
     type ElementPrepared = Self::Prepared;
-    fn materialize_element(value: Infallible) -> XllResult<Self> {
+    fn materialize_element(value: !) -> XllResult<Self> {
         match value {}
     }
     fn prepare_element(
@@ -2024,7 +2023,7 @@ mod preparation_tests {
         }
 
         type Text<'a> = PreparedElement<'a, &'a str, FormulaInputMode>;
-        check::<&str, Infallible>();
+        check::<&str, !>();
         check::<Option<&str>, Option<Text<'_>>>();
         check::<OptionalExcelValue<&str>, OptionalExcelValue<Text<'_>>>();
         check::<Option<Option<&str>>, Option<PreparedElement<'_, Option<&str>, FormulaInputMode>>>(

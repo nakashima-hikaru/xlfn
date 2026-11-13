@@ -1625,7 +1625,7 @@ mod tests {
         crate::diagnostics::reset_diagnostic_router().unwrap();
         let (events_tx, events_rx) = mpsc::channel();
         crate::diagnostics::set_diagnostic_sink(Capture(events_tx)).unwrap();
-        let _cleanup = scopeguard::guard((), |_| {
+        let _cleanup = std::mem::DropGuard::new((), |()| {
             let _ = crate::diagnostics::clear_diagnostic_sink();
             ingress.begin_close_with(|| {});
             let _ = ingress.seal_and_drain();

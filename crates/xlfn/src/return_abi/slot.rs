@@ -89,13 +89,11 @@ impl<'slot> ReservedSlot<'slot> {
     #[inline]
     pub(super) fn initialize(self, block: ReturnBlock) -> InitializedSlot<'slot> {
         let reserved = ManuallyDrop::new(self);
-        let pointer = reserved.slot.pointer().as_ptr();
-        // SAFETY: this sole reservation owns uninitialized storage; the write
-        // is infallible and invokes no user code between the two phase changes.
-        unsafe { pointer.write(block) };
-        // SAFETY: the block is initialized but not published, and this sole
-        // reservation still owns it. Set the backing in place after the move.
-        unsafe { (*pointer).backing = ReturnBlockBacking::ThreadLocal };
+        // SAFETY: this sole reservation owns the exclusive pre-publication
+        // `MaybeUninit<ReturnBlock>` storage; writing is infallible and invokes
+        // no user code before advancing the slot state to `Initialized`.
+        let written = unsafe { reserved.slot.block.as_mut_unchecked() }.write(block);
+        written.backing = ReturnBlockBacking::ThreadLocal;
         reserved.slot.state.set(SlotState::Initialized);
         InitializedSlot {
             slot: reserved.slot,

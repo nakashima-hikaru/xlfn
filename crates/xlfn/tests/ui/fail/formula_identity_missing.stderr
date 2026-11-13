@@ -24,7 +24,6 @@ note: required by a bound in `xlfn::__private::v1::assert_excel_parameter`
   --> src/__private.rs
    |
    |     pub fn assert_excel_parameter<
-   |            ---------------------- required by a bound in this function
 ...
    |         T: ExcelParameter<'call, R::InputMode>,
    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_excel_parameter`

@@ -87,16 +87,12 @@ impl<'runtime, A: Addin> OpeningTxn<'runtime, A, Initialized<A>> {
         match self.stage_opening_generation(opening) {
             Ok(transaction) => Ok(transaction),
             Err((error, transaction, opening)) => {
-                let transaction = *transaction;
                 transaction.deps().quarantine_opening_generation(
                     transaction.deps().protocol_generation(),
                     *opening,
                     crate::runtime_components::QuarantineReason::OpenStateInvariant,
                 );
-                Err(OpenFailure::Initialized {
-                    transaction: Box::new(transaction),
-                    error,
-                })
+                Err(OpenFailure::Initialized { transaction, error })
             }
         }
     }

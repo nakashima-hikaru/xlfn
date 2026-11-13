@@ -2,21 +2,21 @@
 name = "excel-abi-probe"
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace]
 
 [features]
-sdk-bindgen = ["dep:bindgen"]
+sdk-bindgen = ["dep:bindgen", "dep:cc", "dep:xlfn-sys"]
 
 [dependencies]
-xlfn-sys = { version = "=0.2.0", path = "../../crates/xlfn-sys", features = ["abi-probe"] }
+xlfn-sys = { version = "=0.2.0", path = "../../crates/xlfn-sys", features = ["abi-probe"], optional = true }
 
 [build-dependencies]
 bindgen = { version = "0.73.2", optional = true }
-cc = "1.8.0"
+cc = { version = "1.8.0", optional = true }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

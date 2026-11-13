@@ -77,7 +77,6 @@ pub use input::{ExcelInputIdentity, FromExcel, PrepareExcel};
 pub(crate) use input::{InputMode, PlainInputMode};
 use input::{PreparedArgument, PreparedElement, PreparedParameter, PreparedParameterSequence};
 pub use output::IntoExcel;
-use std::convert::Infallible;
 
 pub use date::{CalendarDate, ExcelDateSystem, ExcelSerialDate};
 pub(crate) use matrix::validate_matrix_dimensions;
@@ -644,7 +643,7 @@ impl<'call, M: InputMode> input::sealed::ExcelParameterSealed<'call, M> for &'ca
 impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
     type Prepared = PreparedBorrowedString<'call>;
 
-    type ElementPrepared = Infallible;
+    type ElementPrepared = !;
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -658,7 +657,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
     fn materialize_prepared(value: Self::Prepared) -> XllResult<Self> {
         value.materialize()
     }
-    fn materialize_element(value: Infallible) -> XllResult<Self> {
+    fn materialize_element(value: !) -> XllResult<Self> {
         match value {}
     }
 
@@ -1775,7 +1774,7 @@ fn decode_cell_ref<'call>(
 impl<'call, M: InputMode> input::sealed::ExcelParameterSealed<'call, M> for ExcelCellRef<'call> {}
 
 impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {
-    type Prepared = Infallible;
+    type Prepared = !;
 
     type ElementPrepared = Self::Prepared;
     fn prepare_element(
@@ -1788,7 +1787,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {
             .map(PreparedArgument::with_materializer)
     }
 
-    fn materialize_prepared(value: Infallible) -> XllResult<Self> {
+    fn materialize_prepared(value: !) -> XllResult<Self> {
         match value {}
     }
     fn materialize_element(value: Self::ElementPrepared) -> XllResult<Self> {
@@ -2135,7 +2134,7 @@ where
     M: InputMode,
     T: crate::handle::ExcelHandleObject,
 {
-    type Prepared = Infallible;
+    type Prepared = !;
 
     type ElementPrepared = Self::Prepared;
     fn prepare_element(
@@ -2148,7 +2147,7 @@ where
             .map(PreparedArgument::with_materializer)
     }
 
-    fn materialize_prepared(value: Infallible) -> XllResult<Self> {
+    fn materialize_prepared(value: !) -> XllResult<Self> {
         match value {}
     }
     fn materialize_element(value: Self::ElementPrepared) -> XllResult<Self> {

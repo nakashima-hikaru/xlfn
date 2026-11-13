@@ -19,7 +19,6 @@ note: required by a bound in `xlfn::__private::v1::assert_excel_parameter`
  --> src/__private.rs
   |
   |     pub fn assert_excel_parameter<
-  |            ---------------------- required by a bound in this function
 ...
   |         T: ExcelParameter<'call, R::InputMode>,
   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_excel_parameter`
@@ -45,7 +44,7 @@ error[E0277]: `ThreadSafeContext<'_, ()>` cannot be converted from an Excel argu
   = note: required for `ThreadSafeContext<'_, ()>` to implement `xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0599]: the method `materialize` exists for enum `xlfn::__private::v1::PreparedArgument<ThreadSafeContext<'_, ()>, Infallible, value::input::ParameterMaterializer<'_, ThreadSafeContext<'_, ()>, xlfn::__private::v1::PlainInputMode>>`, but its trait bounds were not satisfied
+error[E0599]: the method `materialize` exists for enum `xlfn::__private::v1::PreparedArgument<ThreadSafeContext<'_, ()>, !, value::input::ParameterMaterializer<'_, ThreadSafeContext<'_, ()>, xlfn::__private::v1::PlainInputMode>>`, but its trait bounds were not satisfied
  --> tests/ui/fail/context_import_rename.rs:8:1
   |
 8 | #[excel_function]
@@ -59,9 +58,9 @@ error[E0599]: the method `materialize` exists for enum `xlfn::__private::v1::Pre
  ::: src/value/input.rs
   |
   | pub struct ParameterMaterializer<'call, T, M>(MaterializerMarker<'call, T, M>);
-  | --------------------------------------------- doesn't satisfy `_: ArgumentMaterializer<ThreadSafeContext<'_, ()>, Infallible>`
+  | --------------------------------------------- doesn't satisfy `_: ArgumentMaterializer<ThreadSafeContext<'_, ()>, !>`
   |
   = note: the following trait bounds were not satisfied:
           `ThreadSafeContext<'_, ()>: FromExcel<'_>`
-          which is required by `value::input::ParameterMaterializer<'_, ThreadSafeContext<'_, ()>, xlfn::__private::v1::PlainInputMode>: xlfn::__private::v1::ArgumentMaterializer<ThreadSafeContext<'_, ()>, Infallible>`
+          which is required by `value::input::ParameterMaterializer<'_, ThreadSafeContext<'_, ()>, xlfn::__private::v1::PlainInputMode>: xlfn::__private::v1::ArgumentMaterializer<ThreadSafeContext<'_, ()>, !>`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -79,6 +79,10 @@ mod tests {
     }
     #[test]
     fn forgotten_capability_does_not_forget_registration() {
+        #[expect(
+            clippy::forget_non_drop,
+            reason = "test explicitly verifies forgetting Access leaves Registration intact"
+        )]
         with_lifecycle(1, |access| std::mem::forget(access));
         assert!(HEAD.with(|h| h.get().is_null()));
         assert_eq!(with_lifecycle(1, |_| 4), Some(4));

@@ -2,7 +2,7 @@ error[E0521]: borrowed data escapes outside of function
   --> tests/ui/fail_async/handle_lease_static_storage.rs:10:6
    |
  9 | fn stash<'a>(lease: HandleLease<'a, Dataset>) {
-   |          --  ----- `lease` is a reference that is only valid in the function body
+   |          --  ----- `lease` is only valid in the function body
    |          |
    |          lifetime `'a` defined here
 10 |     *SAVED.lock().unwrap() = Some(lease);

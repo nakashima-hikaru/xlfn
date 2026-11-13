@@ -422,7 +422,6 @@ dependencies = [
  "libc",
  "parking_lot",
  "rustc-hash",
- "scopeguard",
  "serde",
  "serde_json",
  "smallvec",

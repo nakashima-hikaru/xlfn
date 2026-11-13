@@ -1884,7 +1884,7 @@ pub(crate) mod tests {
         };
         struct ProbeExecutor;
         impl crate::AsyncExecutor for ProbeExecutor {
-            type Reservation = std::convert::Infallible;
+            type Reservation = !;
             fn start(&self) -> XllResult<()> {
                 COUNTS.starts.fetch_add(1, Ordering::Relaxed);
                 if COUNTS.fail_start.load(Ordering::Relaxed) {
@@ -1990,7 +1990,7 @@ pub(crate) mod tests {
 
     #[cfg(feature = "async")]
     impl crate::AsyncExecutor for AsyncStopProbe {
-        type Reservation = std::convert::Infallible;
+        type Reservation = !;
 
         fn start(&self) -> XllResult<()> {
             Ok(())

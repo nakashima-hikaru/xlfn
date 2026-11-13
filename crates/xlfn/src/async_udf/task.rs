@@ -248,7 +248,7 @@ impl Drop for CompletionGuard {
         // SAFETY: active_tasks and the exact RegistryActivity pair retain the
         // registry through observer updates, before final activity release.
         let registry = unsafe { activity.registry.get() };
-        let calculation = scopeguard::guard(calculation, move |calculation| {
+        let calculation = std::mem::DropGuard::new(calculation, move |calculation| {
             drop(calculation);
             activity.release();
         });

@@ -18,7 +18,6 @@ use crate::value::{
 };
 use crate::{XllError, XllResult};
 use smallvec::SmallVec;
-use std::convert::Infallible;
 use std::path::PathBuf;
 use std::ptr::NonNull;
 
@@ -549,12 +548,12 @@ pub(crate) struct ModuleName {
 impl<'call, M: InputMode> ExcelParameterSealed<'call, M> for ModuleName {}
 
 impl<'call, M: InputMode> ExcelParameter<'call, M> for ModuleName {
-    type Prepared = Infallible;
-    fn materialize_prepared(value: Infallible) -> XllResult<Self> {
+    type Prepared = !;
+    fn materialize_prepared(value: !) -> XllResult<Self> {
         match value {}
     }
     type ElementPrepared = Self::Prepared;
-    fn materialize_element(value: Infallible) -> XllResult<Self> {
+    fn materialize_element(value: !) -> XllResult<Self> {
         match value {}
     }
     fn prepare_element(

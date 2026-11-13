@@ -151,6 +151,11 @@ fn selected_build_features_come_from_completed_build_when_lockfile_changes() {
         format!("{manifest}\n[dependencies]\nprovenance-support = {{ path = \"../support\" }}\n"),
     )
     .unwrap();
+    fs::write(
+        root.join("addin/src/lib.rs"),
+        "pub fn value() -> u32 { provenance_support::support(); 1 }\n",
+    )
+    .unwrap();
 
     for selected in [false, true, true] {
         let mut command = cargo_command();

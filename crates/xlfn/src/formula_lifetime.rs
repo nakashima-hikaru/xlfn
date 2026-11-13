@@ -68,7 +68,7 @@ impl FormulaLifetimeBackend {
 
 #[cfg(all(target_os = "windows", not(feature = "handles")))]
 pub(crate) struct FormulaLifetimeConnection<'runtime> {
-    never: std::convert::Infallible,
+    never: !,
     _runtime: std::marker::PhantomData<&'runtime ()>,
 }
 

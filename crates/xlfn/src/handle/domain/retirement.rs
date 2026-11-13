@@ -70,7 +70,7 @@ impl Drop for ReclaimBatch<'_> {
         let count = records.len();
         let address = std::ptr::from_ref(owner).addr();
         RECLAIMING.with(|stack| stack.borrow_mut().push(address));
-        let _guard = scopeguard::guard(address, |address| {
+        let _guard = std::mem::DropGuard::new(address, |address| {
             RECLAIMING.with(|stack| assert_eq!(stack.borrow_mut().pop(), Some(address)));
         });
         // Kernel locks ended before batch construction. The caller must also

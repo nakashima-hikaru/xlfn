@@ -1482,7 +1482,6 @@ dependencies = [
  "proptest",
  "quick_cache",
  "rustc-hash",
- "scopeguard",
  "serde",
  "serde_json",
  "smallvec",

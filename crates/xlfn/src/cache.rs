@@ -1581,11 +1581,13 @@ where
         // an outer lookup still holds admission. Never wait for readers
         // during unwinding: a key callback may have invoked this operation
         // while holding a permit.
-        let _reclaim_on_unwind = scopeguard::guard_on_unwind(self, |cache| {
-            let _ = catch_no_unwind(AssertUnwindSafe(|| {
-                cache.maintain_keys();
-                reclaim_cache_entries::<V>(cache.domain.try_quiesce_and_drain());
-            }));
+        let _reclaim_on_unwind = std::mem::DropGuard::new(self, |cache| {
+            if std::thread::panicking() {
+                let _ = catch_no_unwind(AssertUnwindSafe(|| {
+                    cache.maintain_keys();
+                    reclaim_cache_entries::<V>(cache.domain.try_quiesce_and_drain());
+                }));
+            }
         });
 
         let _operation = CacheOperationGuard::enter();

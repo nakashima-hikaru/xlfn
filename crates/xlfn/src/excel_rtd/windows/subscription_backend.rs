@@ -155,7 +155,7 @@ pub(super) unsafe fn finish_connect_data<C>(
         drop(connection);
         return status;
     }
-    let initialized = scopeguard::guard(result, |result| {
+    let initialized = std::mem::DropGuard::new(result, |result| {
         // SAFETY: write reported an initialized VARIANT. Keep ownership until
         // commit succeeds so both an error and unwinding clear its resources.
         let _ = unsafe { VariantClear(result) };
@@ -164,7 +164,7 @@ pub(super) unsafe fn finish_connect_data<C>(
         crate::diagnostics::report_no_unwind("IRtdServer::ConnectData commit", &error);
         return E_FAIL;
     }
-    let _ = scopeguard::ScopeGuard::into_inner(initialized);
+    let _ = std::mem::DropGuard::dismiss(initialized);
     S_OK
 }
 
