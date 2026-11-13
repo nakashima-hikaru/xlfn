@@ -165,6 +165,11 @@ mod mock {
         ASYNC_RETURN_CALLS.load(Ordering::Acquire)
     }
 
+    #[cfg(any(
+        not(target_os = "windows"),
+        feature = "async-builtin",
+        feature = "handles"
+    ))]
     pub(crate) fn free_calls() -> usize {
         FREE_CALLS.load(Ordering::Relaxed)
     }

@@ -1170,7 +1170,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         Ok(self.plan_refresh()?.collect())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "rtd"))]
     pub(crate) fn pending_update_count(&self) -> usize {
         self.deliverable_pending.load(Ordering::Acquire)
     }

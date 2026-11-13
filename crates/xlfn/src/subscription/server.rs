@@ -117,7 +117,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         self.server()?.publish.begin_refresh()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "rtd"))]
     pub(crate) fn pending_update_count(&self) -> usize {
         self.server()
             .expect("test server remains registered")

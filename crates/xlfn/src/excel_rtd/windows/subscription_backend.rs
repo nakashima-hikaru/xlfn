@@ -132,7 +132,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> BackendSubscriptionServe
     pub(super) fn terminate(&self) -> XllResult<()> {
         self.0.terminate()
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "rtd"))]
     pub(super) fn pending_update_count(&self) -> usize {
         self.0.pending_update_count()
     }

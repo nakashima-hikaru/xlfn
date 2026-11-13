@@ -266,14 +266,20 @@ fn miri_fixed_key_owner_preserves_retirement_after_key_callback_panics() {
             index.insert_resident(&second, nodes[1].entry(1));
         }));
         assert!(result.is_err());
-        assert!(
-            index
-                .get(&VersionedKeyRef {
-                    epoch: 0,
-                    key: &first.key
-                })
-                .is_some()
-        );
+        // Linux CI disables `quick_cache/parking_lot` to avoid
+        // `parking_lot_core` 0.9.12's variadic `futex` syscall under Miri,
+        // so `quick_cache` falls back to `std::sync::RwLock` and poisons the
+        // shard when an equality callback unwinds inside the shard write lock.
+        if cfg!(not(target_os = "linux")) || fault != 3 {
+            assert!(
+                index
+                    .get(&VersionedKeyRef {
+                        epoch: 0,
+                        key: &first.key
+                    })
+                    .is_some()
+            );
+        }
         index.maintenance();
         drop(index);
         let expected = if fault == 1 { vec![1] } else { vec![1, 2] };

@@ -157,7 +157,6 @@ dependencies = [
  "cargo_metadata",
  "fs-err",
  "home",
- "libc",
  "serde",
  "serde_json",
  "serde_path_to_error",
