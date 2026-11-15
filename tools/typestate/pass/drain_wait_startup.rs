@@ -1,7 +1,13 @@
 // module: excel_rtd/windows
-use crate::excel_rtd::drain_wait::{DrainWaitStartup, with_drain_wait};
-fn recover<F>(startup: DrainWaitStartup<'_, F>) -> F { startup.recover() }
+use crate::excel_rtd::drain_wait::UnstartedDrain;
+
 fn ordered() {
-    let value = with_drain_wait(7_u32, recover);
-    assert_eq!(value, 7);
+    let result = std::thread::scope(|scope| {
+        let drain = UnstartedDrain::new(|| 7_u32);
+        match drain.spawn(scope, std::thread::Builder::new(), || {}) {
+            Ok(transferred) => transferred.join().into_output(),
+            Err((_, unstarted)) => unstarted.into_work()(),
+        }
+    });
+    assert_eq!(result, 7);
 }

@@ -103,10 +103,13 @@
     Windows.Win32.RegSetValueExW
     Windows.Win32.CreateEventW
     Windows.Win32.CreateMutexW
+    Windows.Win32.DuplicateHandle
+    Windows.Win32.GetCurrentThread
     Windows.Win32.INFINITE
     Windows.Win32.ReleaseMutex
     Windows.Win32.ResetEvent
     Windows.Win32.SetEvent
+    Windows.Win32.SYNCHRONIZE
     Windows.Win32.WaitForSingleObject
     Windows.Win32.VARIANT
     Windows.Win32.VT_ARRAY

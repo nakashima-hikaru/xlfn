@@ -19,12 +19,7 @@ use std::sync::Arc;
 ))]
 mod counted_string;
 
-#[cfg(any(test, all(windows, any(feature = "rtd", feature = "handles"))))]
-#[allow(
-    unsafe_code,
-    reason = "private consuming startup claims authorize one move from caller-owned closure storage"
-)]
-mod drain_wait;
+pub(crate) mod drain_wait;
 
 mod host;
 #[cfg(any(test, all(windows, any(feature = "rtd", feature = "handles"))))]
@@ -50,6 +45,9 @@ pub(crate) use windows::ComModuleLifetime;
 
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
 pub(crate) use windows::drain_with_com_dispatch;
+
+#[cfg(all(test, windows, feature = "rtd"))]
+pub(crate) use windows::{DrainPreparationStage, fail_next_drain_preparation};
 
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
 pub(crate) use windows::ComApartmentGuard;

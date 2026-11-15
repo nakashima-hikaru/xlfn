@@ -29,8 +29,8 @@ struct FreshObject<'arena> {
 impl FreshObject<'_> {
     /// The registry retains its arena through all bindings and final releases.
     unsafe fn insert<T: Send + Sync + 'static>(self, value: T) -> XllResult<ObjectBinding> {
-        let cell = ObjectAllocationOwner::new(NonNull::from(self.arena.as_ref()), self.id, value);
-        let pointer = NonNull::from(cell.as_ref());
+        let owner = ObjectAllocationOwner::new(self.arena.as_non_null(), self.id, value);
+        let pointer = owner.cell;
         let mut state = self.arena.state(self.id).lock();
         if state.sealed {
             return Err(XllError::Closing);
@@ -38,7 +38,7 @@ impl FreshObject<'_> {
         state.objects.insert(
             self.id,
             ObjectEntry {
-                cell,
+                cell: owner,
                 bindings: 1,
                 pins: 0,
             },
@@ -212,7 +212,7 @@ impl ObjectArena {
             return Err(XllError::Closing);
         }
         let entry = state.objects.get_mut(&id).ok_or(XllError::StaleHandle)?;
-        if NonNull::from(entry.cell.as_ref()) != cell {
+        if entry.cell.cell != cell {
             return Err(XllError::StaleHandle);
         }
         entry.bindings = entry.bindings.checked_add(1).ok_or(XllError::Domain {
@@ -235,7 +235,7 @@ impl ObjectArena {
             code: crate::error::DomainErrorCode::Overflow,
         })?;
         let entry = state.objects.get_mut(&id).ok_or(XllError::StaleHandle)?;
-        if NonNull::from(entry.cell.as_ref()) != cell {
+        if entry.cell.cell != cell {
             return Err(XllError::StaleHandle);
         }
         entry.pins = entry.pins.checked_add(1).ok_or(XllError::Domain {
@@ -505,20 +505,21 @@ impl ObjectAllocationOwner {
             },
             payload: value,
         });
-        let pointer = allocation.as_ptr();
-        // SAFETY: PublishedOwner has consumed the Box before either pointer
-        // is published. Raw field projections retain its original provenance;
-        // initialization touches only the header, not the payload projection.
-        let payload_pointer = unsafe { &raw mut (*pointer).payload };
-        let payload: NonNull<dyn ErasedObject> =
-            NonNull::new(payload_pointer).expect("allocated payload pointer is nonnull");
+        let pointer = allocation.as_non_null();
+        // SAFETY: repr(C) places this nonzero-sized payload at its aligned
+        // field offset within the uniquely owned allocation.
+        let payload = unsafe {
+            pointer
+                .byte_add(std::mem::offset_of!(ObjectAllocation<T>, payload))
+                .cast::<T>()
+        };
+        // repr(C) places cell at offset zero, preserving allocation provenance.
+        let cell = pointer.cast::<ObjectCell>();
         // SAFETY: this unpublished header is uniquely owned by allocation.
-        let payload_slot = unsafe { &raw mut (*pointer).cell.payload };
+        let payload_slot = unsafe { &raw mut (*cell.as_ptr()).payload };
         // SAFETY: the raw slot points to the live, initialized header field;
         // replacing the initial non-owning pointer cannot drop any payload.
         unsafe { payload_slot.write(payload) };
-        // repr(C) places cell at offset zero, preserving allocation provenance.
-        let cell = NonNull::new(pointer.cast::<ObjectCell>()).expect("allocated header is nonnull");
         // Transfer the unique allocation obligation to the matching concrete
         // destructor without ever recovering or moving a published Box.
         let _allocation = std::mem::ManuallyDrop::new(allocation);
@@ -531,14 +532,13 @@ impl ObjectAllocationOwner {
         value: T,
     ) -> Self {
         let payload = PublishedOwner::new(value);
-        let pointer = NonNull::new(payload.as_ptr()).expect("published owner is nonnull");
         let cell = PublishedOwner::new(ObjectCell {
             arena,
             id,
-            payload: pointer,
+            payload: payload.as_non_null(),
             type_id: TypeId::of::<T>(),
         });
-        let pointer = NonNull::new(cell.as_ptr()).expect("published owner is nonnull");
+        let pointer = cell.as_non_null();
         let _payload = std::mem::ManuallyDrop::new(payload);
         let _cell = std::mem::ManuallyDrop::new(cell);
         Self { cell: pointer }
@@ -1000,8 +1000,8 @@ mod tests {
         let left = unsafe { own.insert(1_u32) }.unwrap();
         // SAFETY: same independent owner-lifetime guarantee for the second arena.
         let right = unsafe { foreign.insert(2_u32) }.unwrap();
-        assert_eq!(left.arena(), NonNull::from(first.as_ref()));
-        assert_eq!(right.arena(), NonNull::from(second.as_ref()));
+        assert_eq!(left.arena(), first.as_non_null());
+        assert_eq!(right.arena(), second.as_non_null());
         drop(left);
         drop(right);
         assert!(first.finish_quiescence().is_ok());
@@ -1304,6 +1304,7 @@ mod tests {
             }
         }
 
+        assert!(combine_object_allocation::<Payload>());
         let arena = PublishedOwner::new(ObjectArena::new());
         let drops = Arc::new(AtomicUsize::new(0));
         // SAFETY: bindings and the final pin drain before arena recovery.
@@ -1347,6 +1348,7 @@ mod tests {
         #[repr(align(256))]
         struct Aligned;
 
+        assert!(!combine_object_allocation::<Aligned>());
         let arena = PublishedOwner::new(ObjectArena::new());
         // SAFETY: the binding drains before arena recovery.
         let binding = unsafe { ObjectArena::insert(&arena, ObjectId::new(1, 1), Aligned) }.unwrap();
@@ -1386,6 +1388,7 @@ mod tests {
             }
         }
 
+        assert!(!combine_object_allocation::<Payload>());
         for panic in [false, true] {
             let arena = PublishedOwner::new(ObjectArena::new());
             let drops = Arc::new(AtomicUsize::new(0));

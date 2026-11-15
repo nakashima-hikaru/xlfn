@@ -19,10 +19,12 @@ windows_link::link!("advapi32.dll" "system" fn ConvertSidToStringSidW(sid : PSID
 windows_link::link!("advapi32.dll" "system" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(stringsecuritydescriptor : PCWSTR, stringsdrevision : u32, securitydescriptor : *mut PSECURITY_DESCRIPTOR, securitydescriptorsize : *mut u32) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn CreateEventW(lpeventattributes : *const SECURITY_ATTRIBUTES, bmanualreset : BOOL, binitialstate : BOOL, lpname : PCWSTR) -> HANDLE);
 windows_link::link!("kernel32.dll" "system" fn CreateMutexW(lpmutexattributes : *const SECURITY_ATTRIBUTES, binitialowner : BOOL, lpname : PCWSTR) -> HANDLE);
+windows_link::link!("kernel32.dll" "system" fn DuplicateHandle(hsourceprocesshandle : HANDLE, hsourcehandle : HANDLE, htargetprocesshandle : HANDLE, lptargethandle : *mut HANDLE, dwdesiredaccess : u32, binherithandle : BOOL, dwoptions : u32) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn EqualSid(psid1 : PSID, psid2 : PSID) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn FreeLibrary(hlibmodule : HMODULE) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn GetAce(pacl : *const ACL, dwaceindex : u32, pace : *mut *mut core::ffi::c_void) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn GetCurrentProcess() -> HANDLE);
+windows_link::link!("kernel32.dll" "system" fn GetCurrentThread() -> HANDLE);
 windows_link::link!("kernel32.dll" "system" fn GetLastError() -> u32);
 windows_link::link!("kernel32.dll" "system" fn GetModuleHandleExW(dwflags : u32, lpmodulename : PCWSTR, phmodule : *mut HMODULE) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn GetSecurityDescriptorSacl(psecuritydescriptor : PSECURITY_DESCRIPTOR, lpbsaclpresent : *mut BOOL, psacl : *mut PACL, lpbsacldefaulted : *mut BOOL) -> BOOL);
@@ -653,6 +655,7 @@ pub struct SID_AND_ATTRIBUTES {
     pub Sid: PSID,
     pub Attributes: u32,
 }
+pub const SYNCHRONIZE: i32 = 1048576;
 pub type SYSKIND = i32;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]

@@ -548,7 +548,13 @@ impl ExportIngress {
         }
         #[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
         {
-            crate::excel_rtd::drain_with_com_dispatch(wait).map_err(|(error, _wait)| error)
+            use crate::excel_rtd::drain_wait::UnstartedDrain;
+
+            let prepared = crate::excel_rtd::drain_with_com_dispatch(UnstartedDrain::new(wait))
+                .map_err(|(error, _unstarted)| error)?;
+            let joined = prepared.run().map_err(|(error, _unstarted)| error)?;
+            joined.into_output();
+            Ok(())
         }
         #[cfg(not(all(windows, any(feature = "rtd", feature = "handles"))))]
         {

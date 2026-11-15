@@ -31,14 +31,23 @@ impl<T: ?Sized> PublishedOwner<T> {
         }
     }
 
-    /// Returns the retained allocation pointer without creating a reference.
+    /// Returns the retained non-owning pointer with its provenance and metadata.
+    ///
+    /// Copying the pointer does not extend the allocation's lifetime.
     /// Dereferencing it requires the usual aliasing and lifetime guarantees;
     /// in particular, callers cannot mutate through it while shared borrows
     /// of the same data remain live.
     ///
     /// [PO-3] Exposes the pointer value without moving or consuming owner capability.
+    #[inline]
+    pub fn as_non_null(&self) -> NonNull<T> {
+        self.pointer
+    }
+
+    /// Returns the retained non-owning pointer in raw form.
+    /// See [Self::as_non_null] for the access requirements.
     pub fn as_ptr(&self) -> *mut T {
-        self.pointer.as_ptr()
+        self.as_non_null().as_ptr()
     }
 
     /// Recovers ordinary exclusive ownership. Before calling, the publication
@@ -103,7 +112,7 @@ mod tests {
     #[test]
     fn miri_published_pointer_survives_owner_moves_and_container_growth() {
         let owner = PublishedOwner::new(AtomicUsize::new(0));
-        let published = AtomicPtr::new(NonNull::from(owner.as_ref()).as_ptr());
+        let published = AtomicPtr::new(owner.as_non_null().as_ptr());
         let mut owners = vec![owner];
         std::thread::scope(|scope| {
             let reader = scope.spawn(|| {
@@ -157,7 +166,7 @@ mod tests {
             drops: std::sync::Arc::clone(&drops),
         });
         let owner = PublishedOwner::from_box(boxed);
-        let port = NonNull::from(owner.as_ref());
+        let port = owner.as_non_null();
         // Publish the immutable fat-pointer slot through an atomic thin pointer
         // so the reader retains its vtable metadata without unsafe Send wrappers.
         let published = AtomicPtr::new((&raw const port).cast_mut());
@@ -191,6 +200,33 @@ mod tests {
         assert_eq!(recovered.value(), 64);
         drop(recovered);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn miri_non_null_slice_keeps_metadata_through_owner_move() {
+        let owner = PublishedOwner::from_box(vec![2_u32, 3, 5].into_boxed_slice());
+        let pointer = owner.as_non_null();
+        let moved = std::hint::black_box(owner);
+        assert_eq!(pointer.len(), 3);
+        assert!(std::ptr::eq(pointer.as_ptr(), moved.as_ptr()));
+        // SAFETY: the moved owner retains the complete slice.
+        assert_eq!(unsafe { pointer.as_ref() }, &[2, 3, 5]);
+        assert_eq!(*moved.into_box(), [2, 3, 5]);
+    }
+
+    #[test]
+    fn miri_non_null_owner_preserves_overaligned_zero_sized_pointer() {
+        #[repr(align(256))]
+        struct Aligned;
+
+        let owner = PublishedOwner::new(Aligned);
+        let pointer = owner.as_non_null();
+        let moved = std::hint::black_box(owner);
+        assert_eq!(pointer.addr().get() % align_of::<Aligned>(), 0);
+        assert_eq!(pointer.as_ptr(), moved.as_ptr());
+        // SAFETY: the owner retains the aligned zero-sized payload.
+        let _value = unsafe { pointer.as_ref() };
+        drop(moved.into_box());
     }
 
     #[test]

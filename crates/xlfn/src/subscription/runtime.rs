@@ -643,18 +643,20 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         {
             return Err(XllError::Overloaded);
         }
-        let mut source_result = Ok(());
-        let sources = &self.sources;
-        let join_sources = || source_result = sources.shutdown_and_wait();
-        #[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
-        crate::excel_rtd::drain_with_com_dispatch(join_sources)
-            .map_err(|(error, _unused_join)| error)?;
-        #[cfg(not(all(windows, any(feature = "rtd", feature = "handles"))))]
+        #[cfg(windows)]
         {
-            let mut join_sources = join_sources;
-            join_sources();
+            use crate::excel_rtd::drain_wait::UnstartedDrain;
+
+            let drain = UnstartedDrain::new(|| self.sources.shutdown_and_wait());
+            let prepared = crate::excel_rtd::drain_with_com_dispatch(drain)
+                .map_err(|(error, _unstarted)| error)?;
+            let joined = prepared.run().map_err(|(error, _unstarted)| error)?;
+            Ok(joined.into_output())
         }
-        Ok(source_result)
+        #[cfg(not(windows))]
+        {
+            Ok(self.sources.shutdown_and_wait())
+        }
     }
 
     pub(crate) fn terminate_server(&self, generation: ServerGeneration) -> XllResult<()> {

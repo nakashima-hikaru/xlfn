@@ -1,6 +1,6 @@
 // module: excel_rtd/windows
-use crate::excel_rtd::drain_wait::DrainWaitStartup;
-fn invalid<F>(startup: DrainWaitStartup<'_, F>) {
-    let _first = startup.recover();
-    let _second = startup.recover(); // error: E0382
+use crate::excel_rtd::drain_wait::UnstartedDrain;
+fn invalid<F>(startup: UnstartedDrain<F>) {
+    let _first = startup.into_work();
+    let _second = startup.into_work(); // error: E0382
 }

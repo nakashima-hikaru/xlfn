@@ -70,6 +70,8 @@ use class_factory::{
 use com_abi::IUnknown_Vtbl;
 use com_abi::{IID_IUNKNOWN, com_boundary, guid_eq};
 pub(crate) use event::drain_with_com_dispatch;
+#[cfg(all(test, feature = "rtd"))]
+pub(crate) use event::{DrainPreparationStage, fail_next_drain_preparation};
 #[cfg(feature = "handles")]
 pub(super) use excel_rtd::observe;
 #[cfg(feature = "rtd")]

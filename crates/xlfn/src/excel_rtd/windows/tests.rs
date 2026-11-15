@@ -111,6 +111,18 @@ impl TestComApartment {
             _ => panic!("CoInitializeEx failed: {status:#010x}"),
         }
     }
+
+    #[cfg(all(feature = "rtd", feature = "handles"))]
+    fn enter_sta() -> Self {
+        const COINIT_APARTMENTTHREADED: u32 = 2;
+        // SAFETY: this fresh thread initializes COM once and balances it here.
+        let status = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) };
+        assert_eq!(status, S_OK);
+        Self {
+            should_uninitialize: true,
+            _not_send_or_sync: PhantomData,
+        }
+    }
 }
 
 impl Drop for TestComApartment {
@@ -3889,12 +3901,13 @@ fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cl
     );
 }
 
-#[test]
 #[cfg(all(feature = "rtd", feature = "handles"))]
-fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() {
+mod sta_probe {
+    use super::*;
+
     // Standard IUnknown marshaling exercises real STA dispatch without an
     // Excel-installed IRtdUpdateEvent proxy/stub. A remote QueryInterface for
-    // this unknown IID triggers the callback while final removal drains RTD.
+    // this unknown IID triggers the callback on the STA.
     const PROBE_IID: GUID = GUID {
         data1: 0x43d9e1c2,
         data2: 0x8a5a,
@@ -3957,18 +3970,145 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
         Release: release,
     };
 
+    pub(super) fn new(callback: impl FnOnce() + Send + 'static) -> TestUnknownReference {
+        TestUnknownReference::new(
+            Box::into_raw(Box::new(Probe {
+                vtable: &PROBE_VTABLE,
+                references: AtomicU32::new(1),
+                callback: Mutex::new(Some(Box::new(callback))),
+            }))
+            .cast(),
+        )
+    }
+
+    pub(super) fn interface(cookie: u32) -> TestUnknownReference {
+        // SAFETY: the caller initialized COM and keeps the cookie registered.
+        let git = unsafe { super::super::global_interface_table::get_git() }.unwrap();
+        // SAFETY: the GIT returns an owned proxy for the registered IUnknown.
+        let interface = unsafe { git.get_interface(cookie, &IID_IUNKNOWN) }.unwrap();
+        TestUnknownReference::new(interface.as_ptr())
+    }
+
+    pub(super) fn call(interface: &TestUnknownReference) {
+        let mut output = ptr::null_mut();
+        // SAFETY: this apartment-local proxy and both GUID/output slots
+        // satisfy QueryInterface's ABI; the probe deliberately rejects IID.
+        let status = unsafe {
+            (interface.iunknown_vtable().QueryInterface)(
+                interface.as_ptr(),
+                &PROBE_IID,
+                &mut output,
+            )
+        };
+        assert_eq!(status, E_NOINTERFACE);
+    }
+}
+
+#[test]
+#[cfg(all(feature = "rtd", feature = "handles"))]
+fn sta_drain_pumps_com_during_helper_thread_exit() {
+    const CHILD: &str = "XLFN_TEST_STA_DRAIN_THREAD_EXIT";
+    if std::env::var_os(CHILD).is_none() {
+        // A plain join would deadlock. Bound the regression to a subprocess.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(CHILD, "1")
+            .args([
+                "--exact",
+                "excel_rtd::windows::tests::sta_drain_pumps_com_during_helper_thread_exit",
+            ])
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "STA thread exit probe failed: {status}");
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                child.wait().unwrap();
+                panic!("STA stopped dispatching COM before the drain helper exited");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    struct ExitProbe {
+        request: mpsc::Sender<()>,
+        completed: mpsc::Receiver<()>,
+    }
+
+    impl Drop for ExitProbe {
+        fn drop(&mut self) {
+            // The MTA performs COM outside the native TLS destructor.
+            if self.request.send(()).is_ok() {
+                let _ = self.completed.recv();
+            }
+        }
+    }
+
+    thread_local! {
+        static EXIT_PROBE: std::cell::RefCell<Option<ExitProbe>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    let _apartment = TestComApartment::enter_sta();
+    let sta = thread::current().id();
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&dispatched);
+    let probe = sta_probe::new(move || {
+        assert_eq!(thread::current().id(), sta);
+        observed.store(true, Ordering::Release);
+    });
+    // SAFETY: this thread owns an STA and retains the live interface.
+    let git = unsafe { super::global_interface_table::get_git() }.unwrap();
+    let mut cookie = 0;
+    // SAFETY: the interface, IID, and writable cookie remain live here.
+    let status = unsafe { git.register(probe.as_ptr(), &IID_IUNKNOWN, &mut cookie) };
+    assert_eq!(status, S_OK);
+    let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+    let (request_tx, request_rx) = mpsc::channel();
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let incoming = thread::spawn(move || {
+        {
+            let _apartment = TestComApartment::enter();
+            let interface = sta_probe::interface(cookie);
+            ready_tx.send(()).unwrap();
+            request_rx.recv().unwrap();
+            sta_probe::call(&interface);
+        }
+        completed_tx.send(()).unwrap();
+    });
+
+    let drain = crate::excel_rtd::drain_wait::UnstartedDrain::new(move || {
+        ready_rx.recv().unwrap();
+        EXIT_PROBE.with(|probe| {
+            *probe.borrow_mut() = Some(ExitProbe {
+                request: request_tx,
+                completed: completed_rx,
+            });
+        });
+    });
+    assert!(
+        drain_with_com_dispatch(drain)
+            .and_then(|prepared| prepared.run())
+            .is_ok()
+    );
+    incoming.join().unwrap();
+    assert!(dispatched.load(Ordering::Acquire));
+    // SAFETY: no proxy user remains after the MTA caller was joined.
+    assert_eq!(unsafe { git.revoke(cookie) }, S_OK);
+}
+
+#[test]
+#[cfg(all(feature = "rtd", feature = "handles"))]
+fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() {
     let (returned_tx, returned_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let fallback_release = release_tx.clone();
     let sta = thread::spawn(move || {
-        const COINIT_APARTMENTTHREADED: u32 = 2;
-        // SAFETY: this fresh thread initializes COM once and balances it here.
-        let status = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) };
-        assert_eq!(status, S_OK);
-        let _apartment = TestComApartment {
-            should_uninitialize: true,
-            _not_send_or_sync: PhantomData,
-        };
+        let _apartment = TestComApartment::enter_sta();
         let _guard = TEST_LOCK.lock().unwrap();
         close_test_ingress();
         let fixture = crate::runtime::StaticTestRuntime::<ChannelOwnerAddin>::new();
@@ -4038,26 +4178,19 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
 
         let dispatched = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&dispatched);
-        let probe = TestUnknownReference::new(
-            Box::into_raw(Box::new(Probe {
-                vtable: &PROBE_VTABLE,
-                references: AtomicU32::new(1),
-                callback: Mutex::new(Some(Box::new(move || {
-                    assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
-                    let epoch = runtime.removal_epoch();
-                    let intent = runtime.host_intent();
-                    assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
-                    assert_eq!(crate::boundary::host::host_auto_close(runtime), 1);
-                    assert_eq!(runtime.removal_epoch(), epoch);
-                    assert_eq!(runtime.host_intent(), intent);
-                    assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
-                    assert!(runtime.module_residency_held());
-                    observed.store(true, Ordering::Release);
-                    release_tx.send(()).unwrap();
-                }))),
-            }))
-            .cast(),
-        );
+        let probe = sta_probe::new(move || {
+            assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
+            let epoch = runtime.removal_epoch();
+            let intent = runtime.host_intent();
+            assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+            assert_eq!(crate::boundary::host::host_auto_close(runtime), 1);
+            assert_eq!(runtime.removal_epoch(), epoch);
+            assert_eq!(runtime.host_intent(), intent);
+            assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
+            assert!(runtime.module_residency_held());
+            observed.store(true, Ordering::Release);
+            release_tx.send(()).unwrap();
+        });
         // SAFETY: this thread owns an STA and a live IUnknown interface.
         let git = unsafe { super::global_interface_table::get_git() }.unwrap();
         let mut cookie = 0;
@@ -4071,22 +4204,7 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
             while crate::module_runtime::ingress().phase() == crate::ingress::PHASE_OPEN {
                 thread::yield_now();
             }
-            // SAFETY: this thread initialized COM; GIT owns the registered ref.
-            let git = unsafe { super::global_interface_table::get_git() }.unwrap();
-            // SAFETY: the cookie remains registered through this thread's join.
-            let interface = unsafe { git.get_interface(cookie, &IID_IUNKNOWN) }.unwrap();
-            let interface = TestUnknownReference::new(interface.as_ptr());
-            let mut output = ptr::null_mut();
-            // SAFETY: this apartment-local proxy and both GUID/output slots
-            // satisfy QueryInterface's ABI; the probe deliberately rejects IID.
-            let status = unsafe {
-                (interface.iunknown_vtable().QueryInterface)(
-                    interface.as_ptr(),
-                    &PROBE_IID,
-                    &mut output,
-                )
-            };
-            assert_eq!(status, E_NOINTERFACE);
+            sta_probe::call(&sta_probe::interface(cookie));
         });
         ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
@@ -4094,7 +4212,13 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
         // Also recover a regression that blocked the first ingress drain: the
         // test driver releases its fake notifier on timeout, then this pump
         // completes a still-queued probe before joining its MTA caller.
-        assert!(drain_with_com_dispatch(move || incoming.join().unwrap()).is_ok());
+        let drain =
+            crate::excel_rtd::drain_wait::UnstartedDrain::new(move || incoming.join().unwrap());
+        assert!(
+            drain_with_com_dispatch(drain)
+                .and_then(|prepared| prepared.run())
+                .is_ok()
+        );
         assert!(dispatched.load(Ordering::Acquire));
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert!(sender.is_closed());
