@@ -1,3 +1,4 @@
+use super::launch::UnbuiltScopedTask;
 use super::*;
 use crate::async_udf::{AsyncRuntime, AsyncTaskScope, CalculationEpoch, HandleScopedBuilder};
 use crate::{AsyncPollerCount, AsyncTaskLimit, BuiltinAsyncExecutor, BuiltinExecutorConfig};
@@ -292,7 +293,7 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
         if instrumented {
             reservation.commit_handle_scoped(
                 RuntimeGeneration::new(1).unwrap(),
-                HandleTask::new(
+                UnbuiltScopedTask::new(
                     build,
                     responder(),
                     token,
@@ -309,7 +310,7 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
         } else {
             reservation.commit_handle_scoped(
                 RuntimeGeneration::new(1).unwrap(),
-                HandleTask::new(build, responder(), token, NoObservation),
+                UnbuiltScopedTask::new(build, responder(), token, NoObservation),
                 cancellation,
             );
         }
@@ -450,7 +451,7 @@ fn miri_external_executor_retains_scoped_handle_until_opaque_task_destruction() 
         .unwrap()
         .commit_handle_scoped(
             RuntimeGeneration::new(1).unwrap(),
-            HandleTask::new(build, responder(), token, NoObservation),
+            UnbuiltScopedTask::new(build, responder(), token, NoObservation),
             cancellation,
         );
     assert_eq!(polls.load(Ordering::Relaxed), 0);

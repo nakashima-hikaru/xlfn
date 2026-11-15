@@ -18,16 +18,6 @@ impl CompletionObserver for NoObservation {
     fn finish(&mut self, _: &AsyncCompletion) {}
 }
 
-// A scoped builder may still own its observation before transferring it into
-// the task. Its temporary Drop fallback consumes that optional ownership.
-impl<O: CompletionObserver> CompletionObserver for Option<O> {
-    fn finish(&mut self, completion: &AsyncCompletion) {
-        if let Some(mut observation) = self.take() {
-            observation.finish(completion);
-        }
-    }
-}
-
 /// Observation state for one async UDF invocation uniquely owned by the running task.
 ///
 /// The observation plane owns timing, layer guards, trace metadata, and the
@@ -152,10 +142,15 @@ fn finish_active<G: UdfLayerGuard>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::async_udf::completion::PendingDelivery;
+    use crate::async_udf::transport::ExcelAsyncResponder;
     use crate::cancellation::{CancellationGuarantee, CancellationSource};
     use crate::execution::{CalculationId, CallId, UdfErrorKind};
     use std::sync::mpsc::{Receiver, Sender};
     use std::time::SystemTime;
+    use xlfn_sys::{
+        XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG_DATA,
+    };
 
     #[derive(Debug, Eq, PartialEq)]
     enum CompletionSnapshot {
@@ -236,6 +231,42 @@ mod tests {
         assert_eq!(
             receive(receiver),
             (CompletionSnapshot::Cancelled, DeliverySnapshot::Unobserved,)
+        );
+    }
+
+    #[test]
+    fn miri_pending_delivery_drop_observes_one_fallback() {
+        let _callbacks = crate::test_callback::lock();
+        crate::test_callback::install();
+        crate::test_callback::reset();
+        let mut raw = XLOPER12 {
+            value: XLOPER12Value {
+                big_data: XLOPER12BigData {
+                    handle: XLOPER12BigDataHandle {
+                        data: std::ptr::null_mut(),
+                    },
+                    byte_count: 0,
+                },
+            },
+            xltype: XLTYPE_BIG_DATA,
+        };
+        // SAFETY: the live, initialized token is copied by the responder.
+        let responder =
+            unsafe { ExcelAsyncResponder::from_raw(metadata().udf_id, &mut raw) }.unwrap();
+        let (source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let delivery = PendingDelivery::new(responder, token, observation(sender, token));
+        source.cancel();
+        drop(delivery);
+
+        assert_eq!(crate::test_callback::async_return_calls(), 1);
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            (CompletionSnapshot::Cancelled, DeliverySnapshot::Delivered),
+        );
+        assert_eq!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
         );
     }
 

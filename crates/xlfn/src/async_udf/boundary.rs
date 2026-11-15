@@ -1,9 +1,9 @@
 use super::completion::{
-    AsyncCompletion, AsyncDelivery, OwnedCompletionOutcome, OwnedDeliveryOutcome, return_error,
+    AsyncCompletion, OwnedCompletionOutcome, OwnedDeliveryOutcome, PendingDelivery, return_error,
 };
 use super::instrumentation::{AsyncObservation, CompletionObserver, NoObservation};
 #[cfg(feature = "handles")]
-use super::task_scope::{HandleScopedBuilder, HandleScopedTaskBuilder};
+use super::task_scope::HandleScopedBuilder;
 use super::transport::ExcelAsyncResponder;
 use crate::call_return::ExcelReturn;
 use crate::cancellation::{CancellationGuarantee, CancellationToken};
@@ -19,82 +19,8 @@ use launch::CapturedLaunch;
 use std::panic::AssertUnwindSafe;
 use xlfn_sys::XLOPER12;
 
-#[cfg(feature = "handles")]
-struct HandleTask<Build, O: CompletionObserver, T> {
-    build: Option<Build>,
-    delivery: Option<AsyncDelivery<O>>,
-    _result: std::marker::PhantomData<fn() -> T>,
-}
-
-#[cfg(feature = "handles")]
-impl<Build, O: CompletionObserver, T> HandleTask<Build, O, T> {
-    #[cfg(all(test, feature = "async-builtin"))]
-    fn new(
-        build: Build,
-        responder: ExcelAsyncResponder,
-        token: CancellationToken,
-        observation: O,
-    ) -> Self {
-        Self::with_delivery(build, AsyncDelivery::new(responder, token, observation))
-    }
-
-    fn with_delivery(build: Build, delivery: AsyncDelivery<O>) -> Self {
-        Self {
-            build: Some(build),
-            delivery: Some(delivery),
-            _result: std::marker::PhantomData,
-        }
-    }
-}
-
 #[cfg(all(test, feature = "handles", feature = "async-builtin"))]
 mod scoped_tests;
-
-#[cfg(feature = "handles")]
-impl<Build, O, T> HandleScopedTaskBuilder for HandleTask<Build, O, T>
-where
-    Build: HandleScopedBuilder<T> + 'static,
-    O: CompletionObserver + Send + 'static,
-    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
-{
-    type Output = XllResult<T>;
-    type Delivery = AsyncDelivery<O>;
-
-    fn build_task<'generation>(
-        mut self,
-        scope: super::task_scope::AsyncTaskScope<'generation>,
-    ) -> (
-        impl Future<Output = Self::Output> + Send + 'generation,
-        Self::Delivery,
-    ) {
-        let build = self.build.take().expect("task owns builder");
-        let future = match catch_no_unwind(AssertUnwindSafe(|| build.build(scope))) {
-            Ok(future) => futures_util::future::Either::Left(future),
-            Err(_) => futures_util::future::Either::Right(std::future::ready(Err(XllError::Panic))),
-        };
-        (future, self.delivery.take().expect("task owns delivery"))
-    }
-
-    fn deliver<'generation>(
-        delivery: Self::Delivery,
-        future: impl Future<Output = Self::Output> + Send + 'generation,
-    ) -> impl Future<Output = ()> + Send + 'generation {
-        delivery.task(future)
-    }
-}
-
-#[cfg(feature = "handles")]
-impl<Build, O: CompletionObserver, T> Drop for HandleTask<Build, O, T> {
-    fn drop(&mut self) {
-        // User captures release their raw pins before delivery/layer exit. A
-        // transferred delivery is absent; an abandoned one consumes its
-        // responder here, so AsyncDelivery's later Drop cannot deliver twice.
-        let panicked = catch_no_unwind(AssertUnwindSafe(|| drop(self.build.take()))).is_err();
-        if let Some(delivery) = &mut self.delivery {
-            delivery.fallback(panicked);
-        }
-    }
-}
 
 /// Runs the synchronous launch portion of a native Excel async UDF.
 ///

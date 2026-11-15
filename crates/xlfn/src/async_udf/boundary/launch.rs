@@ -3,7 +3,10 @@
 use super::*;
 use crate::async_udf::runtime::RuntimeCalculationSnapshot;
 use crate::async_udf::runtime::RuntimeReservation;
+#[cfg(feature = "handles")]
+use crate::async_udf::task_scope::{AsyncTaskScope, HandleScopedTaskBuilder};
 use crate::cancellation::TaskCancellationOwner;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 // Capturing through the admitted guard fixes the issuer before layer callbacks
 // run, without allocating cancellation state until those callbacks succeed.
@@ -44,55 +47,50 @@ pub(super) struct LaunchOwner<'guard, 'call, A: crate::Addin> {
 
 pub(super) struct PreparedLaunch<'guard, 'call, A: crate::Addin, B, O: CompletionObserver> {
     owner: LaunchOwner<'guard, 'call, A>,
-    body: LaunchBody<B, O>,
+    capture: CaptureOwner<B, O>,
 }
 
 pub(super) struct ReservedLaunch<'guard, 'call, A: crate::Addin, B, O: CompletionObserver> {
     _guard: &'guard crate::runtime::AsyncCallGuard<'call, A>,
     reservation: RuntimeReservation<'static, A::AsyncExecutor>,
     cancellation: TaskCancellationOwner,
-    body: LaunchBody<B, O>,
+    // Release reservation and admission before capture cleanup can reenter.
+    capture: CaptureOwner<B, O>,
 }
 
-/// Taking these fields disarms cleanup; otherwise user captures are destroyed
-/// before fallback delivery and observation, even when their destructor panics.
-struct LaunchBody<B, O: CompletionObserver> {
-    body: Option<B>,
-    delivery: Option<AsyncDelivery<O>>,
+struct CaptureParts<B, O: CompletionObserver> {
+    body: B,
+    delivery: PendingDelivery<O>,
 }
 
-impl<B, O: CompletionObserver> LaunchBody<B, O> {
-    fn new(body: B, delivery: AsyncDelivery<O>) -> Self {
-        Self {
-            body: Some(body),
-            delivery: Some(delivery),
-        }
+impl<B, O: CompletionObserver> Rollback for CaptureParts<B, O> {
+    fn rollback(self) {
+        let Self { body, delivery } = self;
+        // User captures, including raw pins, release before delivery and layer exit.
+        let panicked = catch_no_unwind(AssertUnwindSafe(|| drop(body))).is_err();
+        delivery.fallback(panicked);
+    }
+}
+
+/// Holds the user captures and response together until the next stage takes them.
+struct CaptureOwner<B, O: CompletionObserver>(RollbackGuard<CaptureParts<B, O>>);
+
+impl<B, O: CompletionObserver> CaptureOwner<B, O> {
+    fn new(body: B, delivery: PendingDelivery<O>) -> Self {
+        Self(RollbackGuard::new(CaptureParts { body, delivery }))
     }
 
-    fn into_parts(mut self) -> (B, AsyncDelivery<O>) {
-        (
-            self.body.take().expect("one prepared body"),
-            self.delivery.take().expect("one launch delivery"),
-        )
+    fn into_parts(self) -> (B, PendingDelivery<O>) {
+        let CaptureParts { body, delivery } = self.0.complete();
+        (body, delivery)
     }
 
-    fn fail(mut self, error: XllError) {
+    fn fail(self, error: XllError) {
+        let (body, delivery) = self.into_parts();
         // Reservation failure remains the completion cause even if destroying
         // the rejected user's captures also panics, matching launch policy.
-        let _ = catch_no_unwind(AssertUnwindSafe(|| drop(self.body.take())));
-        self.delivery
-            .take()
-            .expect("one launch delivery")
-            .fail(error);
-    }
-}
-
-impl<B, O: CompletionObserver> Drop for LaunchBody<B, O> {
-    fn drop(&mut self) {
-        let panicked = catch_no_unwind(AssertUnwindSafe(|| drop(self.body.take()))).is_err();
-        if let Some(delivery) = &mut self.delivery {
-            delivery.fallback(panicked);
-        }
+        let _ = catch_no_unwind(AssertUnwindSafe(|| drop(body)));
+        delivery.fail(error);
     }
 }
 
@@ -119,7 +117,7 @@ impl<'guard, 'call, A: crate::Addin> LaunchOwner<'guard, 'call, A> {
         observation: O,
     ) -> Option<PreparedLaunch<'guard, 'call, A, Plain<F>, O>> {
         // Bind the copied responder before any user preparation can run.
-        let delivery = AsyncDelivery::new(responder, self.token, observation);
+        let delivery = PendingDelivery::new(responder, self.token, observation);
         let body = catch_no_unwind(AssertUnwindSafe(|| {
             self.calculation.preflight()?;
             let lease = self.guard.try_execution_lease()?;
@@ -129,7 +127,7 @@ impl<'guard, 'call, A: crate::Addin> LaunchOwner<'guard, 'call, A> {
         match body {
             Ok(body) => Some(PreparedLaunch {
                 owner: self,
-                body: LaunchBody::new(body, delivery),
+                capture: CaptureOwner::new(body, delivery),
             }),
             Err(error) => {
                 delivery.fail(error);
@@ -149,7 +147,7 @@ impl<'guard, 'call, A: crate::Addin> LaunchOwner<'guard, 'call, A> {
         responder: ExcelAsyncResponder,
         observation: O,
     ) -> Option<PreparedLaunch<'guard, 'call, A, Scoped<B>, O>> {
-        let delivery = AsyncDelivery::new(responder, self.token, observation);
+        let delivery = PendingDelivery::new(responder, self.token, observation);
         let body = catch_no_unwind(AssertUnwindSafe(|| {
             self.calculation.preflight()?;
             let lease = self.guard.try_execution_lease()?;
@@ -160,7 +158,7 @@ impl<'guard, 'call, A: crate::Addin> LaunchOwner<'guard, 'call, A> {
         match body {
             Ok(body) => Some(PreparedLaunch {
                 owner: self,
-                body: LaunchBody::new(body, delivery),
+                capture: CaptureOwner::new(body, delivery),
             }),
             Err(error) => {
                 delivery.fail(error);
@@ -174,16 +172,16 @@ impl<'guard, 'call, A: crate::Addin, B, O: CompletionObserver>
     PreparedLaunch<'guard, 'call, A, B, O>
 {
     pub(super) fn reserve(self) -> Option<ReservedLaunch<'guard, 'call, A, B, O>> {
-        let Self { owner, body } = self;
+        let Self { owner, capture } = self;
         match owner.calculation.reserve() {
             Ok(reservation) => Some(ReservedLaunch {
                 _guard: owner.guard,
                 reservation,
                 cancellation: owner.cancellation,
-                body,
+                capture,
             }),
             Err(error) => {
-                body.fail(error);
+                capture.fail(error);
                 None
             }
         }
@@ -197,9 +195,9 @@ where
     T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
     pub(super) fn commit(self) {
-        let (body, delivery) = self.body.into_parts();
+        let (Plain(future), delivery) = self.capture.into_parts();
         self.reservation
-            .commit_owned(delivery.task(body.0), self.cancellation);
+            .commit_owned(delivery.task(future), self.cancellation);
     }
 }
 
@@ -212,16 +210,74 @@ impl<A: crate::Addin, B, O: CompletionObserver + Send + 'static>
         B: HandleScopedBuilder<T> + Send + 'static,
         T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
     {
-        let (body, delivery) = self.body.into_parts();
-        let build = HandleTask::with_delivery(body.build, delivery);
-        let generation = body.generation;
+        let (Scoped { build, generation }, delivery) = self.capture.into_parts();
+        let task = UnbuiltScopedTask::<B, O, T>::with_delivery(build, delivery);
         let future = async move {
             let brand = crate::handle::GenerationLeaseBrand;
-            let scope = super::super::task_scope::AsyncTaskScope::new(generation, &brand);
-            let (future, delivery) = build.build_task(scope);
-            HandleTask::<B, O, T>::deliver(delivery, future).await;
+            let scope = AsyncTaskScope::new(generation, &brand);
+            let (future, delivery) = task.build_task(scope);
+            UnbuiltScopedTask::<B, O, T>::deliver(delivery, future).await;
         };
         self.reservation.commit_owned(future, self.cancellation);
+    }
+}
+
+#[cfg(feature = "handles")]
+pub(super) struct UnbuiltScopedTask<B, O: CompletionObserver, T> {
+    capture: CaptureOwner<B, O>,
+    _result: std::marker::PhantomData<fn() -> T>,
+}
+
+#[cfg(feature = "handles")]
+impl<B, O: CompletionObserver, T> UnbuiltScopedTask<B, O, T> {
+    #[cfg(all(test, feature = "async-builtin"))]
+    pub(super) fn new(
+        builder: B,
+        responder: ExcelAsyncResponder,
+        token: CancellationToken,
+        observation: O,
+    ) -> Self {
+        Self::with_delivery(builder, PendingDelivery::new(responder, token, observation))
+    }
+
+    fn with_delivery(builder: B, delivery: PendingDelivery<O>) -> Self {
+        Self {
+            capture: CaptureOwner::new(builder, delivery),
+            _result: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "handles")]
+impl<B, O, T> HandleScopedTaskBuilder for UnbuiltScopedTask<B, O, T>
+where
+    B: HandleScopedBuilder<T> + 'static,
+    O: CompletionObserver + Send + 'static,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
+{
+    type Output = XllResult<T>;
+    type Delivery = PendingDelivery<O>;
+
+    fn build_task<'generation>(
+        self,
+        scope: AsyncTaskScope<'generation>,
+    ) -> (
+        impl Future<Output = Self::Output> + Send + 'generation,
+        Self::Delivery,
+    ) {
+        let (builder, delivery) = self.capture.into_parts();
+        let future = match catch_no_unwind(AssertUnwindSafe(|| builder.build(scope))) {
+            Ok(future) => futures_util::future::Either::Left(future),
+            Err(_) => futures_util::future::Either::Right(std::future::ready(Err(XllError::Panic))),
+        };
+        (future, delivery)
+    }
+
+    fn deliver<'generation>(
+        delivery: Self::Delivery,
+        future: impl Future<Output = Self::Output> + Send + 'generation,
+    ) -> impl Future<Output = ()> + Send + 'generation {
+        delivery.task(future)
     }
 }
 
@@ -305,12 +361,12 @@ mod tests {
         } else {
             Failure::Internal
         };
-        let body = LaunchBody::new(
+        let body = CaptureOwner::new(
             Captures {
                 drops: &drops,
                 panic,
             },
-            AsyncDelivery::new(
+            PendingDelivery::new(
                 responder(),
                 token,
                 Observation {
@@ -354,12 +410,12 @@ mod tests {
             clippy::mem_forget,
             reason = "verify safe forget cannot certify delivery or capture destruction"
         )]
-        std::mem::forget(LaunchBody::new(
+        std::mem::forget(CaptureOwner::new(
             Captures {
                 drops: &drops,
                 panic: false,
             },
-            AsyncDelivery::new(responder(), token, NoObservation),
+            PendingDelivery::new(responder(), token, NoObservation),
         ));
         assert_eq!(drops.get(), 0);
         assert_eq!(crate::test_callback::async_return_calls(), 0);
