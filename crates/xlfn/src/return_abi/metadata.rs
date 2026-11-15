@@ -222,9 +222,9 @@ mod tests {
         // A never-opened runtime starts Closed, with ingress epoch zero.
         read(crate::lifecycle::LifecyclePhase::Closed);
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
-        drop(opening);
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
+
         read(crate::lifecycle::LifecyclePhase::Open);
         assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
         read(crate::lifecycle::LifecyclePhase::Closed);

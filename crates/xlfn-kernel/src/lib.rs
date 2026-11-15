@@ -9,6 +9,7 @@ pub mod invariant;
 pub mod operation_gate;
 pub mod published_owner;
 pub mod quota;
+pub mod rollback;
 pub mod rotating_read_domain;
 pub mod sealable_counter;
 pub mod service_slot;

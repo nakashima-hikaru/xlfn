@@ -768,8 +768,8 @@ fn final_remove_retains_com_shells_without_blocking_close_or_reviving_on_reopen(
         .unwrap();
     let open = || {
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
     };
     open();
     let ensured = runtime
@@ -3930,8 +3930,8 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
             ))
             .unwrap();
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish_with_sources(opening, (), (), registration.finish());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish_with_sources(opening, (), (), registration.finish());
+        runtime.finish_open(opening, Vec::new()).unwrap();
         let ensured = runtime
             .with_subscriptions(|subscriptions| {
                 let ensured =

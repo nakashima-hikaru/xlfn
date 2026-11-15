@@ -1580,13 +1580,13 @@ mod tests {
         let runtime = Runtime::<RollbackProbe>::new();
         let opening = runtime.begin_open().unwrap();
         let generation = opening.attempt_id().into_runtime_generation();
-        let mut opening = runtime.publish_with_lifecycle(
+        let opening = runtime.publish_with_lifecycle(
             opening,
             ObservedState(Arc::new(AtomicUsize::new(0))),
             Failure::None,
             (),
         );
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        runtime.finish_open(opening, Vec::new()).unwrap();
         let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
         let owner = runtime.begin_final_removal().unwrap();
         let teardown = owner
@@ -1663,13 +1663,13 @@ mod tests {
             let runtime = Runtime::<RollbackProbe>::new();
             let drops = Arc::new(AtomicUsize::new(0));
             let opening = runtime.begin_open().unwrap();
-            let mut opening = runtime.publish_with_lifecycle(
+            let opening = runtime.publish_with_lifecycle(
                 opening,
                 ObservedState(Arc::clone(&drops)),
                 Failure::None,
                 (),
             );
-            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            runtime.finish_open(opening, Vec::new()).unwrap();
             let owner = runtime.begin_final_removal().unwrap();
             let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
             let teardown = owner
@@ -1898,7 +1898,7 @@ mod tests {
                 let drops = Arc::new(AtomicUsize::new(0));
                 let opening = runtime.begin_open().unwrap();
                 let generation = opening.attempt_id().into_runtime_generation();
-                let mut opening = runtime.publish_with_lifecycle(
+                let opening = runtime.publish_with_lifecycle(
                     opening,
                     ObservedState(Arc::clone(&drops)),
                     Failure::None,
@@ -1924,7 +1924,7 @@ mod tests {
                         .unwrap_or_else(|_| panic!("addin quiesce"));
                     assert_service_seal_failure(&runtime, teardown, generation, &drops, point);
                 } else {
-                    runtime.finish_open(&mut opening, Vec::new()).unwrap();
+                    runtime.finish_open(opening, Vec::new()).unwrap();
                     let owner = runtime.begin_final_removal().unwrap();
                     let teardown = owner.drain().unwrap_or_else(|_| panic!("execution drain"));
                     let teardown = teardown
@@ -1952,13 +1952,13 @@ mod tests {
                 let runtime = Runtime::<RollbackProbe>::new();
                 if previously_committed {
                     let opening = runtime.begin_open().unwrap();
-                    let mut opening = runtime.publish_with_lifecycle(
+                    let opening = runtime.publish_with_lifecycle(
                         opening,
                         ObservedState(Arc::new(AtomicUsize::new(0))),
                         Failure::None,
                         (),
                     );
-                    runtime.finish_open(&mut opening, Vec::new()).unwrap();
+                    runtime.finish_open(opening, Vec::new()).unwrap();
                     let lifecycle = runtime.bind_addin_lifecycle().unwrap();
                     let closed = crate::runtime::transactions::remove_addin_inner(
                         &runtime,

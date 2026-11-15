@@ -3,14 +3,29 @@
 use super::{LifecycleAccess, LifecycleCoordinator};
 use crate::generation::{OpenAttemptId, RemovalEpoch};
 use crate::{Addin, XllResult};
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 /// Owns the canonical opening attempt and its original lock until the runtime
 /// installs its existing opening owner. Abandonment retains terminal state;
 /// forgetting this owner retains the lock rather than enabling another start.
 #[must_use = "transfer this start into the opening transaction"]
 pub(crate) struct OpenStart<'coordinator, A: Addin> {
-    control: Option<LifecycleAccess<'coordinator, A>>,
+    control: RollbackGuard<OpenStartLock<'coordinator, A>>,
     attempt: OpenAttemptId,
+}
+
+struct OpenStartLock<'coordinator, A: Addin> {
+    access: LifecycleAccess<'coordinator, A>,
+}
+
+impl<A: Addin> Rollback for OpenStartLock<'_, A> {
+    fn rollback(self) {
+        let mut control = self.access;
+        // Resolve the opening while this owner still holds the canonical lock.
+        control.coordinator.record_open_failure(&mut control);
+        control.coordinator.quarantine_core(&mut control);
+        control.coordinator.notify_all();
+    }
 }
 
 /// A rejected handoff retains both recovery owners. Field order is intentional:
@@ -30,7 +45,7 @@ impl<'coordinator, A: Addin> OpenStart<'coordinator, A> {
         // Exhaustion must leave host intent and the closed state unchanged.
         let attempt = coordinator.begin_opening_if_closed(&mut control, expected_removal_epoch)?;
         Ok(Self {
-            control: Some(control),
+            control: RollbackGuard::new(OpenStartLock { access: control }),
             attempt,
         })
     }
@@ -40,14 +55,14 @@ impl<'coordinator, A: Addin> OpenStart<'coordinator, A> {
     }
 
     pub(crate) fn access(&self) -> &LifecycleAccess<'coordinator, A> {
-        self.control.as_ref().expect("open start retains its lock")
+        &self.control.get().access
     }
 
     pub(crate) fn return_module(
         &mut self,
         closing: crate::module_runtime::ModuleClosing,
     ) -> Result<(), crate::module_runtime::ModuleAuthority> {
-        let control = self.control.as_mut().expect("open start retains its lock");
+        let control = &mut self.control.get_mut().access;
         control
             .coordinator
             .complete_open_abort_locked(control, closing)
@@ -61,7 +76,7 @@ impl<'coordinator, A: Addin> OpenStart<'coordinator, A> {
         reason = "a failed handoff retains both affine recovery owners without allocating"
     )]
     pub(crate) fn transfer_to_opening(
-        mut self,
+        self,
         successor: crate::runtime::OpeningTxn<'coordinator, A, crate::runtime::Begun<A>>,
     ) -> Result<
         crate::runtime::OpeningTxn<'coordinator, A, crate::runtime::Begun<A>>,
@@ -73,20 +88,8 @@ impl<'coordinator, A: Addin> OpenStart<'coordinator, A> {
                 _successor: successor,
             });
         }
-        self.control.take();
+        drop(self.control.complete());
         Ok(successor)
-    }
-}
-
-impl<A: Addin> Drop for OpenStart<'_, A> {
-    fn drop(&mut self) {
-        if let Some(control) = self.control.as_mut() {
-            // This is the opening owner's resolution, rather than an external
-            // quarantine request that must defer to a still-active owner.
-            control.coordinator.record_open_failure(control);
-            control.coordinator.quarantine_core(control);
-            control.coordinator.notify_all();
-        }
     }
 }
 

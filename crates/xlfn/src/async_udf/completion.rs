@@ -63,7 +63,10 @@ impl<O: CompletionObserver> AsyncDelivery<O> {
     {
         AsyncUdfTask {
             future: super::future::NoUnwindFuture::new(
-                self.responder.as_ref().expect("delivery is pending").udf_id,
+                self.responder
+                    .as_ref()
+                    .expect("delivery is pending")
+                    .udf_id(),
                 future,
             ),
             delivery: self,
@@ -79,7 +82,7 @@ impl<O: CompletionObserver> AsyncDelivery<O> {
     /// preparation. Taking it first also disarms fallback during reentry.
     pub(super) fn fail(mut self, error: XllError) {
         let responder = self.responder.take().expect("delivery is pending");
-        let udf_id = responder.udf_id;
+        let udf_id = responder.udf_id();
         // SAFETY: the responder owns its validated, copied Excel handle.
         let delivery = match unsafe { responder.deliver_error(&error) } {
             Ok(()) => OwnedDeliveryOutcome::Delivered,
@@ -98,7 +101,7 @@ impl<O: CompletionObserver> AsyncDelivery<O> {
         let Some(responder) = self.responder.take() else {
             return;
         };
-        let udf_id = responder.udf_id;
+        let udf_id = responder.udf_id();
         let cancelled = self.token.is_cancelled();
         if cancelled && panicked {
             crate::diagnostics::report_no_unwind(udf_id, &XllError::Panic);
@@ -187,7 +190,7 @@ where
             hook();
         }
         let responder = this.delivery.responder.take().expect("delivery is pending");
-        let udf_id = responder.udf_id;
+        let udf_id = responder.udf_id();
         let completion = complete_evaluation(responder, this.delivery.token, evaluated);
         this.delivery.finish(udf_id, completion);
         std::task::Poll::Ready(())
@@ -254,8 +257,7 @@ fn complete_evaluation<
     }
 }
 
-/// Delivers an error for a raw async handle before ownership can be wrapped in
-/// an [`ExcelAsyncResponder`].
+/// Validates a raw async handle and attempts to deliver an error through it.
 pub(crate) unsafe fn return_error(handle: *mut XLOPER12, error: &XllError) -> OwnedDeliveryOutcome {
     // Rejected raw operands must never be forwarded back into Excel.
     // SAFETY: forwarded from the caller's live-storage contract.

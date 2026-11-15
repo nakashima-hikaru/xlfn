@@ -280,8 +280,8 @@ fn external_executor_polls_native_async_task_and_delivers_exactly_once() {
     // native boundary operation and task has completed, and then drains it.
     let runtime = unsafe { &*pointer };
     let open = runtime.begin_open().unwrap();
-    let mut open = runtime.publish(open, (), ());
-    runtime.finish_open(&mut open, Vec::new()).unwrap();
+    let open = runtime.publish(open, (), ());
+    runtime.finish_open(open, Vec::new()).unwrap();
     let polls = Arc::new(AtomicUsize::new(0));
     runtime
         .start_async(

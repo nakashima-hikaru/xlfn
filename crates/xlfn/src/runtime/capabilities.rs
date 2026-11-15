@@ -793,8 +793,8 @@ mod tests {
             .open_deps()
             .rollback_request(opening.attempt_id(), None)
             .unwrap();
-        let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
         let access = runtime.bind_addin_lifecycle().unwrap();
         runtime.remove_addin(&access, &mut HostCallbackSession::new());
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);

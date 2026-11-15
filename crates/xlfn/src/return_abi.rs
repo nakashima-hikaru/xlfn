@@ -968,9 +968,9 @@ mod tests {
     ) -> crate::runtime::StaticTestRuntime<()> {
         let runtime = fixture.runtime();
         let open_attempt = runtime.begin_open().unwrap();
-        let mut open_attempt = runtime.publish(open_attempt, (), ());
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-        drop(open_attempt);
+        let open_attempt = runtime.publish(open_attempt, (), ());
+        runtime.finish_open(open_attempt, Vec::new()).unwrap();
+
         fixture
     }
 
@@ -1101,9 +1101,9 @@ mod tests {
         let fixture = crate::runtime::StaticTestRuntime::from_static(&RUNTIME);
         let runtime = fixture.runtime();
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, (), (ReentrantLayer,));
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
-        drop(opening);
+        let opening = runtime.publish(opening, (), (ReentrantLayer,));
+        runtime.finish_open(opening, Vec::new()).unwrap();
+
         REENTRIES.store(0, Ordering::Relaxed);
 
         for value in [
@@ -1289,9 +1289,9 @@ mod tests {
             .ensure_module_residency(residency_probe_anchor as *const ())
             .unwrap();
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
-        drop(opening);
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
+
         let root = udf_boundary_named(runtime, "physical", "PHYSICAL", |_, _| {
             ReturnPayload::scalar(42.0)
         });
@@ -1999,9 +1999,8 @@ mod tests {
         let fixture = crate::runtime::StaticTestRuntime::<LayerTestAddin>::new();
         let runtime = fixture.runtime();
         let open_attempt = runtime.begin_open().unwrap();
-        let mut open_attempt = runtime.publish(open_attempt, (), (Recorder(Arc::clone(&events)),));
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-        drop(open_attempt);
+        let open_attempt = runtime.publish(open_attempt, (), (Recorder(Arc::clone(&events)),));
+        runtime.finish_open(open_attempt, Vec::new()).unwrap();
 
         let pointer = udf_boundary_named(runtime, "test_conversion", "TEST.CONVERSION", |_, _| {
             Err::<ReturnPayload, _>(XllError::input(

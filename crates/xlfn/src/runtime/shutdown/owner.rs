@@ -4,13 +4,28 @@ use crate::lifecycle::{FinalCloseDecision, IssuedRemovalClaim, RollbackDecision}
 use crate::module_runtime::{ModuleCleanupAuthority, ModuleClosing};
 use crate::runtime::capabilities::ShutdownDeps;
 use crate::runtime::orchestration::OpenRollbackAcquisition;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 /// The initial removal claim and its unique, undrained module capability.
 /// Draining consumes this value, so a caller cannot drain the same claim twice.
 pub(crate) struct RemovalOwner<'runtime, A: crate::Addin, K> {
     deps: ShutdownDeps<'runtime, A>,
-    state: Option<(RemovalClaimGuard<'runtime, A>, ModuleClosing)>,
+    pending: RollbackGuard<PendingRemoval<'runtime, A>>,
     _kind: std::marker::PhantomData<K>,
+}
+
+struct PendingRemoval<'runtime, A: crate::Addin> {
+    guard: RemovalClaimGuard<'runtime, A>,
+    closing: ModuleClosing,
+}
+
+impl<A: crate::Addin> Rollback for PendingRemoval<'_, A> {
+    fn rollback(self) {
+        drop(
+            self.guard
+                .return_module_authority(ModuleCleanupAuthority::Closing(self.closing)),
+        );
+    }
 }
 
 /// Keeps cleanup ownership until the terminal callback has returned. The
@@ -54,19 +69,19 @@ impl<'runtime, A: crate::Addin, K> RemovalOwner<'runtime, A, K> {
         };
         Ok(Self {
             deps,
-            state: Some((guard, closing)),
+            pending: RollbackGuard::new(PendingRemoval { guard, closing }),
             _kind: std::marker::PhantomData,
         })
     }
 
     pub(super) fn into_parts(
-        mut self,
+        self,
     ) -> (
         ShutdownDeps<'runtime, A>,
         RemovalClaimGuard<'runtime, A>,
         ModuleClosing,
     ) {
-        let (guard, closing) = self.state.take().expect("removal owner consumed once");
+        let PendingRemoval { guard, closing } = self.pending.complete();
         (self.deps, guard, closing)
     }
 
@@ -74,14 +89,6 @@ impl<'runtime, A: crate::Addin, K> RemovalOwner<'runtime, A, K> {
     pub(crate) fn into_test_parts(self) -> (RemovalClaimGuard<'runtime, A>, ModuleClosing) {
         let (_, guard, closing) = self.into_parts();
         (guard, closing)
-    }
-}
-
-impl<A: crate::Addin, K> Drop for RemovalOwner<'_, A, K> {
-    fn drop(&mut self) {
-        if let Some((guard, closing)) = self.state.take() {
-            drop(guard.return_module_authority(ModuleCleanupAuthority::Closing(closing)));
-        }
     }
 }
 
@@ -168,15 +175,15 @@ impl<'runtime, A: crate::Addin> RemovalAcquisition<'runtime, A> {
                         let (issuer, attempt, closing) = claim.into_issuer_parts();
                         let owner = RemovalOwner {
                             deps: self.deps,
-                            state: Some((
-                                RemovalClaimGuard {
+                            pending: RollbackGuard::new(PendingRemoval {
+                                guard: RemovalClaimGuard {
                                     lifecycle: issuer,
                                     observer: self.deps.observer(),
                                     attempt,
                                     finalization_failed: false,
                                 },
                                 closing,
-                            )),
+                            }),
                             _kind: std::marker::PhantomData,
                         };
                         drop(self.access);
@@ -219,15 +226,15 @@ impl<'runtime, A: crate::Addin> RemovalAcquisition<'runtime, A> {
                     let (issuer, attempt, closing) = claim.into_issuer_parts();
                     let owner = RemovalOwner {
                         deps: self.deps,
-                        state: Some((
-                            RemovalClaimGuard {
+                        pending: RollbackGuard::new(PendingRemoval {
+                            guard: RemovalClaimGuard {
                                 lifecycle: issuer,
                                 observer: self.deps.observer(),
                                 attempt,
                                 finalization_failed: false,
                             },
                             closing,
-                        )),
+                        }),
                         _kind: std::marker::PhantomData,
                     };
                     drop(self.access);
@@ -334,7 +341,7 @@ mod tests {
         other: &Runtime<()>,
         owner: RemovalOwner<'_, (), K>,
     ) -> RemovalAttemptId {
-        let (guard, closing) = owner.state.as_ref().unwrap();
+        let PendingRemoval { guard, closing } = owner.pending.get();
         assert!(guard.belongs_to(&runtime.lifecycle));
         assert!(!guard.belongs_to(&other.lifecycle));
         assert!(std::ptr::eq(
@@ -397,8 +404,8 @@ mod tests {
                     assert_drop_returns_to_issuer(&runtime, &other, owner)
                 );
             } else {
-                let mut opening = runtime.publish(opening, (), ());
-                runtime.finish_open(&mut opening, Vec::new()).unwrap();
+                let opening = runtime.publish(opening, (), ());
+                runtime.finish_open(opening, Vec::new()).unwrap();
                 let owner = RemovalOwner::acquire_final(runtime.shutdown_deps()).unwrap();
                 let first = assert_drop_returns_to_issuer(&runtime, &other, owner);
                 let owner = RemovalOwner::acquire_final(runtime.shutdown_deps()).unwrap();
@@ -433,8 +440,8 @@ mod tests {
         let runtime = Runtime::<()>::new();
         let other = Runtime::<()>::new();
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
         let mut access = runtime.lifecycle.access();
         access.begin_final_removal_request();
         runtime.shutdown_deps().returns().close_admission();
@@ -451,7 +458,6 @@ mod tests {
             .unwrap_or_else(|_| panic!("original issuer rejected its own final claim"));
         runtime.observer().acquire_final_close_owner();
         assert_drop_returns_to_issuer(&runtime, &other, owner);
-        drop(opening);
         drop(runtime);
 
         let rollback_runtime = Runtime::<()>::new();
@@ -540,8 +546,8 @@ mod quarantine_request_tests {
         let opening = runtime.begin_open().unwrap();
         let state = Arc::new(());
         let weak = Arc::downgrade(&state);
-        let mut opening = runtime.publish(opening, state, ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, state, ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
         let owner = runtime.begin_final_removal().unwrap();
         let attempt = runtime
             .lifecycle_control()

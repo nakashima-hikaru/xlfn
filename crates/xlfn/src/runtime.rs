@@ -510,10 +510,10 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn finish_open(
         &self,
-        attempt: &mut OpeningTxn<'_, A, LifecycleInstalled<A>>,
+        attempt: OpeningTxn<'_, A, LifecycleInstalled<A>>,
         registrations: Vec<RegistrationId>,
     ) -> XllResult<()> {
-        attempt.finish_in_place(registrations)
+        attempt.finish(registrations)
     }
 
     #[cfg(all(
@@ -1123,8 +1123,8 @@ pub(crate) mod tests {
                 cleanups: Arc::clone(&cleanups),
             };
             let opening = runtime.begin_open().unwrap();
-            let mut opening = runtime.publish_with_lifecycle(opening, state(), state(), ());
-            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            let opening = runtime.publish_with_lifecycle(opening, state(), state(), ());
+            runtime.finish_open(opening, Vec::new()).unwrap();
             runtime
                 .ensure_module_residency(drain_preparation_residency_anchor as *const ())
                 .unwrap();
@@ -1190,8 +1190,8 @@ pub(crate) mod tests {
         let fixture = StaticTestRuntime::<TestU32Addin>::new();
         let runtime = fixture.runtime();
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, 23, ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, 23, ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
         runtime
             .ensure_module_residency(drain_preparation_residency_anchor as *const ())
             .unwrap();
@@ -1226,8 +1226,8 @@ pub(crate) mod tests {
         let fixture = StaticTestRuntime::<TestU32Addin>::new();
         let runtime = fixture.runtime();
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, 23, ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, 23, ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
         runtime
             .ensure_module_residency(drain_preparation_residency_anchor as *const ())
             .unwrap();
@@ -1275,8 +1275,8 @@ pub(crate) mod tests {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::<TestU32Addin>::new();
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, 23_u32, ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, 23_u32, ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
         let admission = runtime.lifecycle.try_admit().unwrap();
 
         // Closing moves the complete ownership bundle between lifecycle
@@ -1301,8 +1301,8 @@ pub(crate) mod tests {
 
         let runtime = Runtime::<TestU32Addin>::new();
         let open_attempt = runtime.begin_open().unwrap();
-        let mut open_attempt = runtime.publish(open_attempt, 1_u32, ());
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        let open_attempt = runtime.publish(open_attempt, 1_u32, ());
+        runtime.finish_open(open_attempt, Vec::new()).unwrap();
         let ingress = admitted_export();
         assert_eq!(runtime.enter(&ingress).unwrap().state(), &1);
         let old_token = runtime
@@ -1329,8 +1329,8 @@ pub(crate) mod tests {
             .expect("test close must release its lifecycle binding");
 
         let open_attempt = runtime.begin_open().unwrap();
-        let mut open_attempt = runtime.publish(open_attempt, 2_u32, ());
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        let open_attempt = runtime.publish(open_attempt, 2_u32, ());
+        runtime.finish_open(open_attempt, Vec::new()).unwrap();
         let ingress = admitted_export();
         assert_eq!(runtime.enter(&ingress).unwrap().state(), &2);
         runtime
@@ -1385,8 +1385,8 @@ pub(crate) mod tests {
         assert!(runtime.begin_open_if_epoch(stale_epoch).is_err());
 
         let current = runtime.begin_open().unwrap();
-        let mut current = runtime.publish(current, (), ());
-        runtime.finish_open(&mut current, Vec::new()).unwrap();
+        let current = runtime.publish(current, (), ());
+        runtime.finish_open(current, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Open);
     }
 
@@ -1399,8 +1399,8 @@ pub(crate) mod tests {
         assert!(runtime.begin_open().is_err());
         assert_eq!(runtime.phase(), LifecyclePhase::Opening);
 
-        let mut first = runtime.publish(first, 11_u32, ());
-        runtime.finish_open(&mut first, Vec::new()).unwrap();
+        let first = runtime.publish(first, 11_u32, ());
+        runtime.finish_open(first, Vec::new()).unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Open);
         let ingress = admitted_export();
         assert_eq!(runtime.enter(&ingress).unwrap().state(), &11);
@@ -1432,7 +1432,7 @@ pub(crate) mod tests {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<TestU32Addin>::new());
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, 17_u32, ());
+        let opening = runtime.publish(opening, 17_u32, ());
 
         let removal_epoch = runtime.removal_epoch();
         let closing_runtime = Arc::clone(&runtime);
@@ -1464,7 +1464,7 @@ pub(crate) mod tests {
         assert_eq!(runtime.phase(), LifecyclePhase::Closing);
         assert_ne!(runtime.removal_epoch(), removal_epoch);
         assert!(matches!(
-            runtime.finish_open(&mut opening, Vec::new()),
+            runtime.finish_open(opening, Vec::new()),
             Err(XllError::Closing)
         ));
         assert_eq!(runtime.open_attempt(), None);
@@ -1482,8 +1482,8 @@ pub(crate) mod tests {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let active = Runtime::<()>::new();
         let opening = active.begin_open().unwrap();
-        let mut opening = active.publish(opening, (), ());
-        active.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = active.publish(opening, (), ());
+        active.finish_open(opening, Vec::new()).unwrap();
         let unopened = Runtime::<()>::new();
         unopened.lifecycle_orchestrator().quarantine();
         drop(unopened);
@@ -1498,8 +1498,8 @@ pub(crate) mod tests {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
 
         let removal_attempt = runtime.begin_final_removal().unwrap();
         runtime.wait_for_returns();
@@ -1594,8 +1594,8 @@ pub(crate) mod tests {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<()>::new());
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
 
         let first = runtime.begin_final_removal().unwrap();
         drop(first);
@@ -1627,8 +1627,8 @@ pub(crate) mod tests {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::<()>::new();
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
 
         let removal_attempt = runtime.begin_final_removal().unwrap();
         runtime.wait_for_returns();
@@ -1680,8 +1680,8 @@ pub(crate) mod tests {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(Runtime::<TestU32Addin>::new());
         let open_attempt = runtime.begin_open().unwrap();
-        let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        let open_attempt = runtime.publish(open_attempt, 7_u32, ());
+        runtime.finish_open(open_attempt, Vec::new()).unwrap();
 
         let ingress = crate::module_runtime::ingress()
             .enter_with(|| {})
@@ -1712,8 +1712,8 @@ pub(crate) mod tests {
         let fixture = StaticTestRuntime::<TestU32Addin>::new();
         let runtime = fixture.runtime();
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, 7_u32, ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, 7_u32, ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
 
         let ingress = admitted_export();
         let call = runtime.enter_async(&ingress).unwrap();
@@ -2060,8 +2060,8 @@ pub(crate) mod tests {
             cleanups: Arc::clone(&cleanups),
         };
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish_with_lifecycle(opening, state(), state(), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish_with_lifecycle(opening, state(), state(), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
         let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let executor_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         runtime

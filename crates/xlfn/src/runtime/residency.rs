@@ -228,8 +228,8 @@ mod tests {
         let runtime = physical();
         let acquisition = OpenResidency::acquire(&runtime, anchor as *const ()).unwrap();
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
         let access = runtime.bind_addin_lifecycle().unwrap();
         assert_eq!(
             runtime.remove_addin(

@@ -173,8 +173,8 @@ mod tests {
 
     fn pending(runtime: &Runtime<()>) -> CompletionPendingBinding<'_, (), FinalRemoval> {
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
         let lifecycle = runtime.bind_addin_lifecycle().unwrap();
         let teardown = runtime
             .begin_final_removal()

@@ -1,22 +1,27 @@
 //! Startup owns the executor and recovery responsibility until publication.
 use super::*;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 pub(super) struct StartupClaim<'a, E: AsyncExecutor> {
-    owner: StartupOwner<'a, E>,
+    owner: RollbackGuard<StartupExecutor<'a, E>>,
 }
 struct ExecutorStarted<'a, E: AsyncExecutor> {
-    owner: StartupOwner<'a, E>,
+    owner: RollbackGuard<StartingExecutor<'a, E>>,
 }
 struct RegistryArmed<'a, E: AsyncExecutor> {
-    owner: StartupOwner<'a, E>,
+    // Unlock registry management and discard its unpublished candidate
+    // before executor rollback can run callbacks.
+    registry: crate::async_udf::registry::control::RegistryPreparedStart<'a>,
+    owner: RollbackGuard<StartingExecutor<'a, E>>,
 }
 
-struct StartupOwner<'a, E: AsyncExecutor> {
+struct StartupExecutor<'a, E: AsyncExecutor> {
     runtime: &'a AsyncRuntime<E>,
-    executor: Option<PublishedOwner<E>>,
-    start_attempted: bool,
-    registry: Option<crate::async_udf::registry::control::RegistryPreparedStart<'a>>,
+    executor: PublishedOwner<E>,
 }
+
+// Acquired before start() so that partial starts also require shutdown.
+struct StartingExecutor<'a, E: AsyncExecutor>(StartupExecutor<'a, E>);
 
 impl<'a, E: AsyncExecutor> StartupClaim<'a, E> {
     pub(super) fn acquire(runtime: &'a AsyncRuntime<E>, executor: E) -> XllResult<Self> {
@@ -28,26 +33,20 @@ impl<'a, E: AsyncExecutor> StartupClaim<'a, E> {
             *state = ExecutorSlot::Starting;
         }
         Ok(Self {
-            owner: StartupOwner {
+            owner: RollbackGuard::new(StartupExecutor {
                 runtime,
-                executor: Some(PublishedOwner::new(executor)),
-                start_attempted: false,
-                registry: None,
-            },
+                executor: PublishedOwner::new(executor),
+            }),
         })
     }
 
-    fn start(mut self) -> XllResult<ExecutorStarted<'a, E>> {
-        self.owner.start_attempted = true;
+    fn start(self) -> XllResult<ExecutorStarted<'a, E>> {
+        let owner = RollbackGuard::new(StartingExecutor(self.owner.complete()));
         crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-            self.owner
-                .executor
-                .as_ref()
-                .expect("startup owns executor")
-                .start()
+            owner.get().0.executor.start()
         }))
         .unwrap_or(Err(XllError::Panic))?;
-        Ok(ExecutorStarted { owner: self.owner })
+        Ok(ExecutorStarted { owner })
     }
 
     pub(super) fn publish(self, limit: crate::addin_impl::AsyncTaskLimit) -> XllResult<()> {
@@ -57,29 +56,28 @@ impl<'a, E: AsyncExecutor> StartupClaim<'a, E> {
 }
 
 impl<'a, E: AsyncExecutor> ExecutorStarted<'a, E> {
-    fn arm(mut self, limit: crate::addin_impl::AsyncTaskLimit) -> XllResult<RegistryArmed<'a, E>> {
-        self.owner.registry = Some(self.owner.runtime.registry().prepare_start(limit)?);
-        Ok(RegistryArmed { owner: self.owner })
+    fn arm(self, limit: crate::addin_impl::AsyncTaskLimit) -> XllResult<RegistryArmed<'a, E>> {
+        let registry = self.owner.get().0.runtime.registry().prepare_start(limit)?;
+        Ok(RegistryArmed {
+            registry,
+            owner: self.owner,
+        })
     }
 }
 
 impl<E: AsyncExecutor> RegistryArmed<'_, E> {
-    fn publish(mut self) {
-        let runtime = self.owner.runtime;
+    fn publish(self) {
+        let runtime = self.owner.get().0.runtime;
         let mut state = runtime.state.lock();
         // Only this startup owner can publish or roll back Starting; close
         // waits for it and cannot replace the canonical slot meanwhile.
-        let executor = self.owner.executor.take().expect("startup owns executor");
+        let StartingExecutor(StartupExecutor { executor, .. }) = self.owner.complete();
         let pointer = NonNull::from(executor.as_ref());
         *state = ExecutorSlot::Running(executor);
         runtime
             .publication
             .store(pointer.as_ptr(), Ordering::Release);
-        self.owner
-            .registry
-            .take()
-            .expect("armed startup owns registry preparation")
-            .publish();
+        self.registry.publish();
         drop(runtime.spawn_admission.control().seal().wait().reopen());
         runtime.state_changed.notify_all();
         drop(state);
@@ -90,40 +88,44 @@ impl<E: AsyncExecutor> RegistryArmed<'_, E> {
     }
 }
 
-impl<E: AsyncExecutor> Drop for StartupOwner<'_, E> {
-    fn drop(&mut self) {
-        let Some(executor) = self.executor.take() else {
-            return;
-        };
-        // Until publication, admission stays sealed. No executor callbacks or
-        // destruction run under state, registry, or notification locks.
-        // Dropping the exact preparation unlocks its management guards and
-        // destroys only an unpublished candidate; no second close claim is
-        // acquired and no broad phase reconstruction is needed on rollback.
-        drop(self.registry.take());
-        let stopped = !self.start_attempted
-            || crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-                executor.shutdown()
-            }))
-            .unwrap_or(Err(XllError::Panic))
-            .is_ok();
+impl<E: AsyncExecutor> StartupExecutor<'_, E> {
+    fn restore_slot(self, stopped: bool) {
+        let Self { runtime, executor } = self;
+        // Executor callbacks and destruction run outside runtime locks.
         if stopped {
             let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
                 drop(executor)
             }));
-            *self.runtime.state.lock() = ExecutorSlot::Stopped;
+            *runtime.state.lock() = ExecutorSlot::Stopped;
         } else {
-            *self.runtime.state.lock() = ExecutorSlot::Closing(Some(executor));
+            *runtime.state.lock() = ExecutorSlot::Closing(Some(executor));
         }
-        self.runtime.state_changed.notify_all();
+        runtime.state_changed.notify_all();
+    }
+}
+
+impl<E: AsyncExecutor> Rollback for StartupExecutor<'_, E> {
+    fn rollback(self) {
+        self.restore_slot(true);
+    }
+}
+
+impl<E: AsyncExecutor> Rollback for StartingExecutor<'_, E> {
+    fn rollback(self) {
+        let stopped = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            self.0.executor.shutdown()
+        }))
+        .unwrap_or(Err(XllError::Panic))
+        .is_ok();
+        self.0.restore_slot(stopped);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::{Arc, Weak};
 
     #[derive(Default)]
     struct Events {
@@ -132,6 +134,7 @@ mod tests {
         drops: AtomicUsize,
         stop_fails: std::sync::atomic::AtomicBool,
         start_panics: std::sync::atomic::AtomicBool,
+        check_unlocked_on_stop: crate::sync::Mutex<Weak<AsyncRuntime<Executor>>>,
     }
     struct Executor(Arc<Events>);
     impl Drop for Executor {
@@ -161,6 +164,9 @@ mod tests {
         }
         fn shutdown(&self) -> XllResult<()> {
             self.0.stops.fetch_add(1, Ordering::Relaxed);
+            if let Some(runtime) = self.0.check_unlocked_on_stop.lock().upgrade() {
+                assert!(runtime.registry().control.try_lock().is_some());
+            }
             if self.0.stop_fails.load(Ordering::Relaxed) {
                 Err(XllError::Panic)
             } else {
@@ -204,7 +210,8 @@ mod tests {
     #[test]
     fn miri_startup_unwind_rolls_back_armed_registry() {
         let events = Arc::new(Events::default());
-        let runtime = AsyncRuntime::new();
+        let runtime = Arc::new(AsyncRuntime::new());
+        *events.check_unlocked_on_stop.lock() = Arc::downgrade(&runtime);
         let error = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
             let _armed = StartupClaim::acquire(&runtime, Executor(Arc::clone(&events)))
                 .unwrap()

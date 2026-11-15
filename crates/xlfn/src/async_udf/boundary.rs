@@ -600,8 +600,8 @@ mod numeric_launch_tests {
         let fixture = crate::runtime::StaticTestRuntime::from_static(runtime);
         let runtime = fixture.runtime();
         let open = runtime.begin_open().unwrap();
-        let mut open = runtime.publish(open, (), ());
-        runtime.finish_open(&mut open, Vec::new()).unwrap();
+        let open = runtime.publish(open, (), ());
+        runtime.finish_open(open, Vec::new()).unwrap();
         runtime
             .start_async(crate::NoAsyncExecutor, crate::AsyncTaskLimit::DEFAULT)
             .unwrap();

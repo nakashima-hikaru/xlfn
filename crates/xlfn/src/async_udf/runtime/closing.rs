@@ -1,5 +1,6 @@
 //! The sole retiring executor owns both its allocation and its restore target.
 use super::*;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 pub(super) struct PublicationsSealed;
 pub(super) struct AwaitingTasks<'a> {
@@ -13,14 +14,14 @@ pub(super) struct ExecutorTasksDrained<'a> {
 pub(super) struct ExecutorClose<'a, E: AsyncExecutor, S> {
     // Return the registry claim before making the executor available to retry.
     state: S,
-    owner: ExecutorCloseOwner<'a, E>,
+    owner: RollbackGuard<RetiringExecutor<'a, E>>,
 }
 struct RetiringExecutor<'a, E: AsyncExecutor> {
     runtime: &'a AsyncRuntime<E>,
     executor: PublishedOwner<E>,
 }
-impl<E: AsyncExecutor> RetiringExecutor<'_, E> {
-    fn restore(self) {
+impl<E: AsyncExecutor> Rollback for RetiringExecutor<'_, E> {
+    fn rollback(self) {
         // No other transition can change the vacant Closing slot: start rejects
         // it, and other closers wait. Only this private, issued owner can return
         // an executor. Forgetting it retains the vacant state and allocation.
@@ -28,28 +29,11 @@ impl<E: AsyncExecutor> RetiringExecutor<'_, E> {
         self.runtime.state_changed.notify_all();
     }
 }
-struct ExecutorCloseOwner<'a, E: AsyncExecutor> {
-    pending: Option<RetiringExecutor<'a, E>>,
-}
-impl<'a, E: AsyncExecutor> ExecutorCloseOwner<'a, E> {
-    fn retained(&self) -> &RetiringExecutor<'a, E> {
-        self.pending
-            .as_ref()
-            .expect("retiring owner retains executor")
-    }
-}
-impl<E: AsyncExecutor> Drop for ExecutorCloseOwner<'_, E> {
-    fn drop(&mut self) {
-        if let Some(retired) = self.pending.take() {
-            retired.restore();
-        }
-    }
-}
 
 impl<'a, E: AsyncExecutor> ExecutorClose<'a, E, PublicationsSealed> {
     pub(super) fn drain_readers(self) -> XllResult<ExecutorClose<'a, E, AwaitingTasks<'a>>> {
         let owner = self.owner;
-        let runtime = owner.retained().runtime;
+        let runtime = owner.get().runtime;
         drop(runtime.spawn_admission.control().wait_idle());
         let registry = runtime.registry().request_close()?.cancel();
         Ok(ExecutorClose {
@@ -83,15 +67,12 @@ impl<'a, E: AsyncExecutor> ExecutorClose<'a, E, AwaitingTasks<'a>> {
 impl<E: AsyncExecutor> ExecutorClose<'_, E, ExecutorTasksDrained<'_>> {
     pub(super) fn shutdown(self) -> XllResult<crate::shutdown::StopOutcome<AsyncStopped>> {
         crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-            self.owner.retained().executor.shutdown()
+            self.owner.get().executor.shutdown()
         }))
         .unwrap_or(Err(XllError::Panic))?;
-        let Self { state, mut owner } = self;
+        let Self { state, owner } = self;
         state.registry.finish();
-        let RetiringExecutor { runtime, executor } = owner
-            .pending
-            .take()
-            .expect("retiring owner retains executor");
+        let RetiringExecutor { runtime, executor } = owner.complete();
         let disposal =
             crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(executor)));
         *runtime.state.lock() = ExecutorSlot::Stopped;
@@ -125,12 +106,10 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
                     return None;
                 }
                 ExecutorSlot::Running(executor) | ExecutorSlot::Closing(Some(executor)) => {
-                    owner = ExecutorCloseOwner {
-                        pending: Some(RetiringExecutor {
-                            runtime: self,
-                            executor,
-                        }),
-                    };
+                    owner = RollbackGuard::new(RetiringExecutor {
+                        runtime: self,
+                        executor,
+                    });
                     drop(self.spawn_admission.control().seal());
                     self.publication
                         .store(std::ptr::null_mut(), Ordering::Release);

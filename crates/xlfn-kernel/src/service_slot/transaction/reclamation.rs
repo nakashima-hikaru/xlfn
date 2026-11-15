@@ -74,18 +74,18 @@ impl<C, R, E: Clone> Rollback for Sealing<'_, C, R, E> {
 
 #[must_use = "wait for this service's readers before finishing shutdown"]
 pub(in crate::service_slot) struct SealingTxn<'slot, C, R, E: Clone> {
-    recovery: AbortGuard<Sealing<'slot, C, R, E>>,
+    recovery: RollbackGuard<Sealing<'slot, C, R, E>>,
 }
 
 #[must_use = "finish shutdown or retain the quiesced owner as a fault"]
 pub(in crate::service_slot) struct QuiescedTxn<'slot, C, R, E: Clone> {
-    recovery: AbortGuard<Sealing<'slot, C, R, E>>,
+    recovery: RollbackGuard<Sealing<'slot, C, R, E>>,
 }
 
 impl<'slot, C, R, E: Clone> SealingTxn<'slot, C, R, E> {
     pub(in crate::service_slot) fn wait(self) -> super::QuiescedTxn<'slot, C, R, E> {
         // [SS-4]: the owner and the gate originate from the SAME withdrawal.
-        drop(self.recovery.state().slot.readers.control().seal().wait());
+        drop(self.recovery.get().slot.readers.control().seal().wait());
         QuiescedTxn {
             recovery: self.recovery,
         }
@@ -97,10 +97,10 @@ impl<C, R, E: Clone> QuiescedTxn<'_, C, R, E> {
         self,
         shutdown: impl FnOnce(&R) -> Result<S, E>,
     ) -> Result<ServiceSeal<R, S>, ServiceSlotError<E>> {
-        let result = shutdown(self.recovery.state().runtime.as_ref());
+        let result = shutdown(self.recovery.get().runtime.as_ref());
         match result {
             Ok(sealed) => {
-                let slot = self.recovery.state().slot;
+                let slot = self.recovery.get().slot;
                 let mut state = slot.state.lock();
                 *state = GenerationServiceState::Closed;
                 slot.changed.notify_all();
@@ -222,7 +222,7 @@ impl<C, R, E: Clone> GenerationServiceSlot<C, R, E> {
                     self.published
                         .store(std::ptr::null_mut(), Ordering::Release);
                     return Ok(Some(SealingTxn {
-                        recovery: AbortGuard::new(Sealing {
+                        recovery: RollbackGuard::new(Sealing {
                             slot: self,
                             runtime: runtime.withdraw(),
                         }),

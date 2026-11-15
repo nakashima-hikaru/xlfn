@@ -1289,8 +1289,8 @@ mod tests {
         let state = 17_u32;
         let runtime = crate::runtime::Runtime::<TestU32Addin>::new();
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, state, ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, state, ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
         let thread_safe = ThreadSafeContext::<TestU32Addin>::new(&state, runtime.diagnostics());
         let callbacks = crate::host_callback::HostCallbackSession::new();
         crate::call::with_excel_call_scope_and_state(&state, |state, _scope| {
@@ -1482,8 +1482,8 @@ mod tests {
             crate::rtd::test_support::TestRtdAddin<TestSubscription>,
         >::new();
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish_with_sources(opening, (), (), arena);
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish_with_sources(opening, (), (), arena);
+        runtime.finish_open(opening, Vec::new()).unwrap();
 
         let topic = crate::subscription::RtdTopic::single("shared-observation").unwrap();
         let server = runtime

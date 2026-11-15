@@ -95,17 +95,16 @@ fn publish_old_generation() -> Runtime<ReloadAddin, PhysicalUnload> {
         .ensure_module_residency(residency_probe_anchor as *const ())
         .unwrap();
     let opening = runtime.begin_open().unwrap();
-    let mut opening = runtime.publish(opening, (), ());
+    let opening = runtime.publish(opening, (), ());
     runtime
         .finish_open(
-            &mut opening,
+            opening,
             vec![RegistrationId {
                 id: 7.0,
                 excel_name: "TEST.TERMINAL.RELOAD",
             }],
         )
         .unwrap();
-    drop(opening);
     runtime
 }
 

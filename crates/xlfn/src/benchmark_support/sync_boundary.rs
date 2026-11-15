@@ -61,11 +61,10 @@ impl SyncBoundaryWorkerPool {
         let open_attempt = runtime
             .begin_open_if_epoch(removal_epoch)
             .expect("begin_open");
-        let mut open_attempt = runtime.publish(open_attempt, (), ());
+        let open_attempt = runtime.publish(open_attempt, (), ());
         runtime
-            .finish_open(&mut open_attempt, Vec::new())
+            .finish_open(open_attempt, Vec::new())
             .expect("finish_open");
-        drop(open_attempt);
 
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel(threads);
         let mut start_tx = Vec::with_capacity(threads);

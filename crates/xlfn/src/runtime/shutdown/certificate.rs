@@ -500,8 +500,8 @@ mod tests {
         runtime: &Runtime<()>,
     ) -> (RemovalClaimGuard<'_, ()>, RuntimeGeneration, ModuleEpochId) {
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
         let generation = runtime.protocol_generation().unwrap();
         let owner = RemovalOwner::acquire_final(runtime.shutdown_deps()).unwrap();
         runtime.wait_for_returns();

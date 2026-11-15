@@ -10,6 +10,7 @@ use crate::runtime::AddinLifecycleAccess;
 use crate::runtime::capabilities::{InstalledLifecycle, OpenDeps};
 use crate::runtime_components::GenerationServices;
 use crate::{XllError, XllResult};
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 use xlfn_kernel::thread_affine::ThreadAffineError;
 
 /// A state payload in the open transaction protocol.
@@ -592,9 +593,19 @@ fn check_rollback_fault() {
 }
 
 pub(crate) struct OpeningTxn<'runtime, A: crate::Addin, S: OpeningState<A>> {
+    pending: RollbackGuard<PendingOpening<'runtime, A, S>>,
+}
+
+struct PendingOpening<'runtime, A: crate::Addin, S: OpeningState<A>> {
     deps: OpenDeps<'runtime, A>,
-    state: Option<S>,
-    binding: Option<S::Binding<'runtime>>,
+    state: S,
+    binding: S::Binding<'runtime>,
+}
+
+impl<A: crate::Addin, S: OpeningState<A>> Rollback for PendingOpening<'_, A, S> {
+    fn rollback(self) {
+        self.state.abandon(&self.deps, self.binding);
+    }
 }
 
 type OpeningStageFailure<'runtime, A> = (
@@ -611,42 +622,39 @@ type LifecycleInstallFailure<'runtime, A> = (
 impl<'runtime, A: crate::Addin, S: OpeningState<A>> OpeningTxn<'runtime, A, S> {
     fn new_state(deps: OpenDeps<'runtime, A>, state: S, binding: S::Binding<'runtime>) -> Self {
         Self {
-            deps,
-            state: Some(state),
-            binding: Some(binding),
+            pending: RollbackGuard::new(PendingOpening {
+                deps,
+                state,
+                binding,
+            }),
         }
     }
 
-    fn take_state(&mut self) -> (S, S::Binding<'runtime>) {
-        (
-            self.state
-                .take()
-                .expect("opening transaction state already consumed"),
-            self.binding
-                .take()
-                .expect("opening transaction retains its binding authority"),
-        )
+    fn into_parts(self) -> (OpenDeps<'runtime, A>, S, S::Binding<'runtime>) {
+        let PendingOpening {
+            deps,
+            state,
+            binding,
+        } = self.pending.complete();
+        (deps, state, binding)
     }
 
     pub(crate) fn attempt_id(&self) -> OpenAttemptId {
-        match &self.state {
-            Some(state) => state.attempt_id(),
-            None => panic!("opening transaction state already consumed"),
-        }
+        self.pending.get().state.attempt_id()
     }
 
     pub(crate) fn deps(&self) -> OpenDeps<'runtime, A> {
-        self.deps
+        self.pending.get().deps
     }
 
-    pub(crate) fn into_rollback(mut self) -> OpenRollbackOwner<'runtime, A>
+    pub(crate) fn into_rollback(self) -> OpenRollbackOwner<'runtime, A>
     where
         S: RollbackState<A>,
     {
-        let (state, binding) = self.take_state();
+        let (deps, state, binding) = self.into_parts();
         let parts = state.into_rollback_parts(binding);
         OpenRollbackOwner {
-            deps: self.deps,
+            deps,
             core: Some(parts.core),
             host: Some(parts.host),
             lifecycle: Some(parts.lifecycle),
@@ -663,7 +671,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
         coordinator: &crate::lifecycle::LifecycleCoordinator<A>,
         attempt: OpenAttemptId,
     ) -> bool {
-        std::ptr::eq(self.deps.lifecycle(), coordinator) && self.attempt_id() == attempt
+        std::ptr::eq(self.deps().lifecycle(), coordinator) && self.attempt_id() == attempt
     }
 
     pub(crate) fn acquire(
@@ -732,10 +740,9 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
         self,
         callbacks: HostCallbackSession,
     ) -> OpeningTxn<'runtime, A, HostAttached<A>> {
-        let mut transaction = self;
-        let (Begun { core }, binding) = transaction.take_state();
+        let (deps, Begun { core }, binding) = self.into_parts();
         OpeningTxn::new_state(
-            transaction.deps,
+            deps,
             HostAttached {
                 core,
                 host: HostOpeningState::new(callbacks),
@@ -746,23 +753,20 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
 
     #[cfg(test)]
     pub(crate) fn fail_for_test(self) -> OpenFailureDisposition {
-        let mut transaction = self;
-        let attempt_id = transaction.attempt_id();
-        let disposition =
-            crate::runtime::orchestration::LifecycleOrchestrator::new(transaction.deps)
-                .mark_open_failed(attempt_id);
-        let (Begun { core }, _binding) = transaction.take_state();
+        let attempt_id = self.attempt_id();
+        let disposition = crate::runtime::orchestration::LifecycleOrchestrator::new(self.deps())
+            .mark_open_failed(attempt_id);
+        let (deps, Begun { core }, _binding) = self.into_parts();
         let (_, module_opening, _service_inputs) = core.into_parts();
-        return_open_module(&transaction.deps, module_opening.rollback(|| {}));
+        return_open_module(&deps, module_opening.rollback(|| {}));
         disposition
     }
 }
 
 impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostAttached<A>> {
     pub(crate) fn begin_initialization(self) -> OpeningTxn<'runtime, A, Initializing<A>> {
-        let mut transaction = self;
-        let (HostAttached { core, host }, binding) = transaction.take_state();
-        OpeningTxn::new_state(transaction.deps, Initializing { core, host }, binding)
+        let (deps, HostAttached { core, host }, binding) = self.into_parts();
+        OpeningTxn::new_state(deps, Initializing { core, host }, binding)
     }
 }
 
@@ -775,11 +779,10 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initializing<A>> {
             crate::addin_impl::AddinSources<A>,
         >,
     ) -> OpeningTxn<'runtime, A, Initialized<A>> {
-        let mut transaction = self;
-        let (Initializing { core, host }, binding) = transaction.take_state();
+        let (deps, Initializing { core, host }, binding) = self.into_parts();
         let core = core.initialized(service_inputs);
         OpeningTxn::new_state(
-            transaction.deps,
+            deps,
             Initialized {
                 core,
                 host,
@@ -796,23 +799,23 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initialized<A>> {
         opening: OpeningGeneration<A>,
     ) -> Result<OpeningTxn<'runtime, A, GenerationStaged<A>>, OpeningStageFailure<'runtime, A>>
     {
-        let mut transaction = self;
-        let result = transaction
-            .deps
+        let result = self
+            .deps()
             .lifecycle_control()
-            .stage_opening_generation(transaction.attempt_id(), opening);
+            .stage_opening_generation(self.attempt_id(), opening);
         match result {
             Ok(()) => {
                 let (
+                    deps,
                     Initialized {
                         core,
                         host,
                         lifecycle,
                     },
                     binding,
-                ) = transaction.take_state();
+                ) = self.into_parts();
                 Ok(OpeningTxn::new_state(
-                    transaction.deps,
+                    deps,
                     GenerationStaged {
                         core,
                         host,
@@ -821,7 +824,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initialized<A>> {
                     binding,
                 ))
             }
-            Err((error, opening)) => Err((error, Box::new(transaction), Box::new(opening))),
+            Err((error, opening)) => Err((error, Box::new(self), Box::new(opening))),
         }
     }
 }
@@ -832,28 +835,31 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
         access: &AddinLifecycleAccess<'_, A>,
     ) -> Result<OpeningTxn<'runtime, A, LifecycleInstalled<A>>, LifecycleInstallFailure<'runtime, A>>
     {
-        let mut transaction = self;
         let (
+            deps,
             GenerationStaged {
                 core,
                 host,
                 lifecycle,
             },
             _binding,
-        ) = transaction.take_state();
-        match transaction.deps.install_addin_lifecycle(access, lifecycle) {
+        ) = self.into_parts();
+        match deps.install_addin_lifecycle(access, lifecycle) {
             Ok(binding) => Ok(OpeningTxn::new_state(
-                transaction.deps,
+                deps,
                 LifecycleInstalled { core, host },
                 binding,
             )),
             Err(error) => {
-                transaction.binding = Some(());
-                transaction.state = Some(GenerationStaged {
-                    core,
-                    host,
-                    lifecycle: error.value,
-                });
+                let transaction = OpeningTxn::new_state(
+                    deps,
+                    GenerationStaged {
+                        core,
+                        host,
+                        lifecycle: error.value,
+                    },
+                    (),
+                );
                 Err((error.reason, Box::new(transaction)))
             }
         }
@@ -872,41 +878,35 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
         self,
         journal: HostMutationJournal,
     ) -> OpeningTxn<'runtime, A, HostMutated<A>> {
-        let mut transaction = self;
-        let (LifecycleInstalled { core, mut host }, binding) = transaction.take_state();
+        let (deps, LifecycleInstalled { core, mut host }, binding) = self.into_parts();
         host.journal.merge(journal);
-        OpeningTxn::new_state(transaction.deps, HostMutated { core, host }, binding)
+        OpeningTxn::new_state(deps, HostMutated { core, host }, binding)
     }
 
     #[cfg(test)]
     pub(crate) fn fail_for_test(self) -> OpenFailureDisposition {
-        let mut transaction = self;
-        let attempt_id = transaction.attempt_id();
-        let disposition =
-            crate::runtime::orchestration::LifecycleOrchestrator::new(transaction.deps)
-                .mark_open_failed(attempt_id);
-        let (LifecycleInstalled { core, host: _ }, _binding) = transaction.take_state();
+        let attempt_id = self.attempt_id();
+        let disposition = crate::runtime::orchestration::LifecycleOrchestrator::new(self.deps())
+            .mark_open_failed(attempt_id);
+        let (deps, LifecycleInstalled { core, host: _ }, _binding) = self.into_parts();
         let (_, module_opening, _service_inputs) = core.into_parts();
-        return_open_module(&transaction.deps, module_opening.rollback(|| {}));
+        return_open_module(&deps, module_opening.rollback(|| {}));
         disposition
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn finish_in_place(&mut self, registrations: Vec<RegistrationId>) -> XllResult<()> {
-        let (state, binding) = self.take_state();
-        OpeningTxn::new_state(self.deps, state, binding)
-            .stage_host_journal(HostMutationJournal::from_registrations(registrations))
+    pub(super) fn finish(self, registrations: Vec<RegistrationId>) -> XllResult<()> {
+        self.stage_host_journal(HostMutationJournal::from_registrations(registrations))
             .commit()
     }
 }
 
 impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostMutated<A>> {
     pub(crate) fn commit(self) -> XllResult<()> {
-        let mut transaction = self;
-        validate_commit_preconditions(&transaction)?;
-        let (HostMutated { core, host }, _binding) = transaction.take_state();
+        validate_commit_preconditions(&self)?;
+        let (deps, HostMutated { core, host }, _binding) = self.into_parts();
         let (_callbacks, mut journal) = host.into_parts();
-        commit_inner(transaction.deps, core, &mut journal)
+        commit_inner(deps, core, &mut journal)
     }
 }
 
@@ -915,18 +915,13 @@ where
     S: OpeningState<A> + HasHost,
 {
     pub(crate) fn callbacks_mut(&mut self) -> &mut HostCallbackSession {
-        &mut self
-            .state
-            .as_mut()
-            .expect("opening transaction state already consumed")
-            .host_mut()
-            .callbacks
+        &mut self.pending.get_mut().state.host_mut().callbacks
     }
 
     pub(crate) fn retain_journal(&mut self, journal: HostMutationJournal) {
-        self.state
-            .as_mut()
-            .expect("opening transaction state already consumed")
+        self.pending
+            .get_mut()
+            .state
             .host_mut()
             .journal
             .merge(journal);
@@ -936,10 +931,9 @@ where
 fn validate_commit_preconditions<A: crate::Addin, S: OpeningState<A>>(
     transaction: &OpeningTxn<'_, A, S>,
 ) -> XllResult<()> {
-    let control = transaction.deps.lifecycle_access();
-    transaction
-        .deps
-        .lifecycle_control()
+    let deps = transaction.deps();
+    let control = deps.lifecycle_access();
+    deps.lifecycle_control()
         .validate_open_attempt(&control, transaction.attempt_id())
 }
 
@@ -1072,17 +1066,6 @@ fn recover_uncommitted_module<A: crate::Addin>(
 ) {
     if let Some(module_opening) = module_opening.take() {
         return_open_module_locked(deps, control, module_opening.rollback(|| {}));
-    }
-}
-
-impl<A: crate::Addin, S: OpeningState<A>> Drop for OpeningTxn<'_, A, S> {
-    fn drop(&mut self) {
-        if let Some(state) = self.state.take() {
-            state.abandon(
-                &self.deps,
-                self.binding.take().expect("opening owns binding phase"),
-            );
-        }
     }
 }
 

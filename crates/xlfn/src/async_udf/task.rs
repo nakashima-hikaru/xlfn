@@ -9,6 +9,7 @@ use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 use xlfn_kernel::drain_gate::DetachedDrainPermit;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 /// Opaque framework task transferred to an application-selected executor.
 ///
@@ -121,138 +122,111 @@ pub(crate) struct TaskControl {
 pub(crate) type TaskControlBatch = SmallVec<[TaskControl; 4]>;
 
 pub(crate) struct ActiveReservation<'a> {
-    registry: Option<&'a TaskRegistry>,
-    activity: Option<RegistryActivity>,
+    activity: RollbackGuard<ReservedRegistryActivity<'a>>,
 }
 
 impl<'a> ActiveReservation<'a> {
     pub(crate) fn try_acquire(registry: &'a TaskRegistry) -> Option<Self> {
-        // This tail permit protects notification after the authority reaches
-        // zero. It never substitutes for active_tasks in the shutdown proof.
-        let activity = RegistryActivity::try_acquire(registry)?;
-        if registry
+        // SAFETY: this reservation borrows the registry. Once committed, close
+        // waits for both task accounting and the notification tail before
+        // reclaiming the allocation.
+        let tail = unsafe { registry.activity.try_enter_detached() }.ok()?;
+        registry
             .active_tasks
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
                 (active < registry.capacity()).then(|| active + 1)
             })
-            .is_err()
-        {
-            drop(activity);
-            return None;
-        }
+            .ok()?;
         Some(Self {
-            registry: Some(registry),
-            activity: Some(activity),
+            activity: RollbackGuard::new(ReservedRegistryActivity { registry, tail }),
         })
     }
 
-    pub(crate) fn commit(mut self, calculation: CalculationPin, id: u64) -> CompletionGuard {
-        self.registry.take().expect("reservation owns active count");
+    pub(crate) fn commit(self, calculation: CalculationPin, id: u64) -> CompletionGuard {
         CompletionGuard {
-            activity: self.activity.take(),
-            calculation: Some(calculation),
+            calculation,
+            activity: self.activity.complete().into_activity(),
             id,
             observation: CompletionObservation::new(),
         }
     }
 }
 
-impl Drop for ActiveReservation<'_> {
-    fn drop(&mut self) {
-        if self.registry.take().is_some() {
-            self.activity
-                .take()
-                .expect("reservation owns its activity permit")
-                .release();
+/// Keeps the registry borrowed through reservation rollback or transfer.
+struct ReservedRegistryActivity<'a> {
+    registry: &'a TaskRegistry,
+    tail: DetachedDrainPermit,
+}
+
+impl ReservedRegistryActivity<'_> {
+    fn into_activity(self) -> RegistryActivity {
+        RegistryActivity {
+            registry: RegistryPtr::from_ref(self.registry),
+            _tail: self.tail,
         }
     }
 }
 
-// The production and Loom release protocol share this ordering. The extra
-// tail lease protects notification after active_tasks publishes zero; it is
-// never an alternative task-lifetime certificate.
+impl Rollback for ReservedRegistryActivity<'_> {
+    fn rollback(self) {
+        drop(self.into_activity());
+    }
+}
+
+// The production and Loom release protocol share the active count update and
+// notification. Their notification-tail permits are released afterwards.
 macro_rules! release_task_activity {
-    ($decrement:expr, $notify:expr, $release_tail:expr) => {{
+    ($decrement:expr, $notify:expr) => {{
         let previous = $decrement;
         if previous == 1 {
             $notify;
         }
-        $release_tail;
     }};
 }
 
-/// Exact registry/notification-tail pairing, never assembled by a caller from
-/// independently supplied owner and gate arguments.
+/// One reserved task slot and its matching notification-tail permit.
 struct RegistryActivity {
     registry: RegistryPtr,
-    permit: DetachedDrainPermit,
+    // Drop glue releases this after the count update and notification.
+    _tail: DetachedDrainPermit,
 }
 
-impl RegistryActivity {
-    fn try_acquire(registry: &TaskRegistry) -> Option<Self> {
-        // SAFETY: the reservation borrows this live registry. Once committed,
-        // task accounting and this exact tail permit retain it until close
-        // seals and drains both before allocation reclamation.
-        let permit = unsafe { registry.activity.try_enter_detached() }.ok()?;
-        Some(Self {
-            registry: RegistryPtr::from_ref(registry),
-            permit,
-        })
-    }
-
-    fn release(self) {
-        let Self {
-            registry,
-            permit: activity,
-        } = self;
-        // Do not pass &TaskRegistry across final release. A waiter may reclaim
-        // the allocation immediately afterwards; all reference-bearing helper
-        // calls and notification guards must have returned before that point.
+impl Drop for RegistryActivity {
+    fn drop(&mut self) {
         release_task_activity!(
             {
-                // SAFETY: this activity permit retains the exact registry through
-                // the count update and subsequent notification tail.
-                let registry = unsafe { registry.get() };
+                // SAFETY: the tail permit retains the exact registry through
+                // the count update and subsequent notification.
+                let registry = unsafe { self.registry.get() };
                 xlfn_kernel::invariant::checked_atomic_dec_release(&registry.active_tasks)
             },
             {
-                // SAFETY: activity remains live until after this block unlocks.
-                let registry = unsafe { registry.get() };
+                // SAFETY: the tail permit is released after this block unlocks.
+                let registry = unsafe { self.registry.get() };
                 let _lock = registry.idle_lock.lock();
                 registry.idle.notify_all();
-            },
-            // Final registry access. Its owner waits the authority count and this
-            // notification tail before reclaiming the stable allocation.
-            activity.release()
+            }
         );
+        // The permit's destructor is the final registry access. All registry
+        // references and notification guards have gone out of scope by then.
     }
 }
 
 pub(crate) struct CompletionGuard {
-    activity: Option<RegistryActivity>,
-    calculation: Option<CalculationPin>,
+    // After removing the task and recording its completion, drop the pin
+    // before releasing registry activity, including during unwinding.
+    calculation: CalculationPin,
+    activity: RegistryActivity,
     id: u64,
     observation: CompletionObservation,
 }
 
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
-        let calculation = self
-            .calculation
-            .take()
-            .expect("completion owns calculation pin");
-        let activity = self
-            .activity
-            .take()
-            .expect("completion owns its activity permit");
+        self.calculation.get().remove_task(self.id);
         // SAFETY: active_tasks and the exact RegistryActivity pair retain the
         // registry through observer updates, before final activity release.
-        let registry = unsafe { activity.registry.get() };
-        let calculation = std::mem::DropGuard::new(calculation, move |calculation| {
-            drop(calculation);
-            activity.release();
-        });
-        calculation.get().remove_task(self.id);
+        let registry = unsafe { self.activity.registry.get() };
         registry
             .observer
             .record(crate::shutdown_trace::ShutdownEvent::EndAsyncTask(
@@ -260,10 +234,6 @@ impl Drop for CompletionGuard {
             ));
     }
 }
-
-// SAFETY: synchronized states are retained by task accounting and calculation
-// pins. No property of any executor participates in this lifetime proof.
-unsafe impl Send for CompletionGuard {}
 
 pub(crate) struct CompletionObservation {
     #[cfg(any(test, feature = "refinement"))]
@@ -331,22 +301,17 @@ mod loom_tests {
             let finishing = Arc::clone(&registry);
             let task = thread::spawn(move || {
                 finishing.cleanup.store(7, Ordering::Relaxed);
-                release_task_activity!(
-                    finishing.active_tasks.fetch_sub(1, Ordering::Release),
-                    {
-                        let _guard = finishing.idle.0.lock().unwrap();
-                        assert!(!finishing.reclaimed.load(Ordering::Acquire));
-                        finishing.idle.1.notify_all();
-                    },
-                    {
-                        // Model the kernel DrainGate release-tail grace period:
-                        // it retains its final count through notification.
-                        let _guard = finishing.tail_idle.0.lock().unwrap();
-                        assert!(!finishing.reclaimed.load(Ordering::Acquire));
-                        finishing.release_tail.store(0, Ordering::Release);
-                        finishing.tail_idle.1.notify_all();
-                    }
-                );
+                release_task_activity!(finishing.active_tasks.fetch_sub(1, Ordering::Release), {
+                    let _guard = finishing.idle.0.lock().unwrap();
+                    assert!(!finishing.reclaimed.load(Ordering::Acquire));
+                    finishing.idle.1.notify_all();
+                });
+                // Model the kernel DrainGate release-tail grace period:
+                // it retains its final count through notification.
+                let _guard = finishing.tail_idle.0.lock().unwrap();
+                assert!(!finishing.reclaimed.load(Ordering::Acquire));
+                finishing.release_tail.store(0, Ordering::Release);
+                finishing.tail_idle.1.notify_all();
             });
             let mut idle = registry.idle.0.lock().unwrap();
             while registry.active_tasks.load(Ordering::Acquire) != 0 {

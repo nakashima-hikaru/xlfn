@@ -1,6 +1,7 @@
 //! Unique termination ownership and terminal-result publication.
 use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 /// The single initial transition permission, moved out rather than recreated
 /// from a status observation. It cannot be cloned, reset or independently issued.
@@ -47,7 +48,7 @@ impl TerminationCoordinator {
         let mut state = self.state.lock();
         if let Some(start) = state.unclaimed.take() {
             return TerminationClaim::Owner(TerminationOwner {
-                permit: Some(TerminationPermit {
+                permit: RollbackGuard::new(TerminationPermit {
                     coordinator: self,
                     _start: start,
                 }),
@@ -95,33 +96,26 @@ impl TerminationPermit<'_> {
     }
 }
 
+impl Rollback for TerminationPermit<'_> {
+    fn rollback(self) {
+        self.publish(TerminalResult::Failed(XllError::Panic));
+    }
+}
+
 #[must_use = "complete termination, report failure, or leave failed state on Drop"]
 pub(super) struct TerminationOwner<'a> {
-    permit: Option<TerminationPermit<'a>>,
+    permit: RollbackGuard<TerminationPermit<'a>>,
 }
 impl TerminationOwner<'_> {
-    pub(super) fn complete(mut self, result: XllResult<()>) -> XllResult<()> {
+    pub(super) fn complete(self, result: XllResult<()>) -> XllResult<()> {
         let terminal = TerminalResult::Completed(result.clone());
-        self.permit
-            .take()
-            .expect("live termination owner")
-            .publish(terminal);
+        self.permit.complete().publish(terminal);
         result
     }
-    pub(super) fn fail(mut self, error: XllError) -> XllError {
+    pub(super) fn fail(self, error: XllError) -> XllError {
         let terminal = TerminalResult::Failed(error.clone());
-        self.permit
-            .take()
-            .expect("live termination owner")
-            .publish(terminal);
+        self.permit.complete().publish(terminal);
         error
-    }
-}
-impl Drop for TerminationOwner<'_> {
-    fn drop(&mut self) {
-        if let Some(permit) = self.permit.take() {
-            permit.publish(TerminalResult::Failed(XllError::Panic));
-        }
     }
 }
 

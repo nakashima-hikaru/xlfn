@@ -1,5 +1,13 @@
 [
   {
+    "path": "crates/xlfn-kernel/src/rollback.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn miri_rollback_consumes_the_owner_even_if_it_panics",
+    "code": "let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(guard)));",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes a deliberate fixed panic and checks that the rollback action and payload destructor each ran once."
+  },
+  {
     "path": "crates/xlfn-kernel/src/service_slot.rs",
     "context": "# [ cfg ( test ) ] mod tests",
     "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",

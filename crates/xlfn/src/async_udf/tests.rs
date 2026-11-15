@@ -612,8 +612,8 @@ fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
         exited_tx.send(()).unwrap();
     });
     let open_attempt = runtime.begin_open().unwrap();
-    let mut open_attempt = runtime.publish(open_attempt, 7_u32, (ReentrantLayer { on_exit },));
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    let open_attempt = runtime.publish(open_attempt, 7_u32, (ReentrantLayer { on_exit },));
+    runtime.finish_open(open_attempt, Vec::new()).unwrap();
     runtime
         .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
         .unwrap();
@@ -1028,8 +1028,8 @@ fn async_boundary_returns_completed_value_through_callback() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let open_attempt = runtime.begin_open().unwrap();
-    let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    let open_attempt = runtime.publish(open_attempt, 7_u32, ());
+    runtime.finish_open(open_attempt, Vec::new()).unwrap();
     runtime
         .start_async(builtin(2), AsyncTaskLimit::DEFAULT)
         .unwrap();
@@ -1086,8 +1086,8 @@ fn async_context_history_remains_readable_during_cancellation_and_close() {
         let runtime = macro_runtime.runtime();
         let _guard = test_lock_for_runtime(runtime);
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish(opening, 17_u32, ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let opening = runtime.publish(opening, 17_u32, ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
         runtime
             .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
             .unwrap();
@@ -1151,8 +1151,8 @@ fn async_launch_registers_and_cancels_only_at_its_admission_issuer() {
     let other = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let opening = runtime.begin_open().unwrap();
-    let mut opening = runtime.publish(opening, 17_u32, ());
-    runtime.finish_open(&mut opening, Vec::new()).unwrap();
+    let opening = runtime.publish(opening, 17_u32, ());
+    runtime.finish_open(opening, Vec::new()).unwrap();
     runtime
         .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
         .unwrap();
@@ -1264,8 +1264,8 @@ fn saturated_async_boundary_skips_owned_input_preparation_and_recovers() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let opening = runtime.begin_open().unwrap();
-    let mut opening = runtime.publish(opening, 7_u32, ());
-    runtime.finish_open(&mut opening, Vec::new()).unwrap();
+    let opening = runtime.publish(opening, 7_u32, ());
+    runtime.finish_open(opening, Vec::new()).unwrap();
     runtime
         .start_async(builtin(2), AsyncTaskLimit::DEFAULT)
         .unwrap();
@@ -1377,8 +1377,8 @@ fn async_preparation_can_reenter_generation_transition() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let opening = runtime.begin_open().unwrap();
-    let mut opening = runtime.publish(opening, 7_u32, ());
-    runtime.finish_open(&mut opening, Vec::new()).unwrap();
+    let opening = runtime.publish(opening, 7_u32, ());
+    runtime.finish_open(opening, Vec::new()).unwrap();
     runtime
         .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
         .unwrap();
@@ -1456,8 +1456,8 @@ fn async_boundary_future_destructor_panic_reports_error_and_preserves_worker() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let open_attempt = runtime.begin_open().unwrap();
-    let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    let open_attempt = runtime.publish(open_attempt, 7_u32, ());
+    runtime.finish_open(open_attempt, Vec::new()).unwrap();
     runtime
         .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
         .unwrap();
@@ -1562,8 +1562,8 @@ fn async_boundary_reports_handler_failures_to_layers() {
     let _guard = test_lock_for_runtime(runtime);
     let (event_sender, event_receiver) = std::sync::mpsc::channel();
     let open_attempt = runtime.begin_open().unwrap();
-    let mut open_attempt = runtime.publish(open_attempt, 7_u32, (Recorder(event_sender),));
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    let open_attempt = runtime.publish(open_attempt, 7_u32, (Recorder(event_sender),));
+    runtime.finish_open(open_attempt, Vec::new()).unwrap();
     runtime
         .start_async(builtin(2), AsyncTaskLimit::DEFAULT)
         .unwrap();
@@ -1674,8 +1674,8 @@ fn async_boundary_records_delivery_rejection_as_failure() {
     let _guard = test_lock_for_runtime(runtime);
     let (event_sender, event_receiver) = std::sync::mpsc::channel();
     let open_attempt = runtime.begin_open().unwrap();
-    let mut open_attempt = runtime.publish(open_attempt, 7_u32, (Recorder(event_sender),));
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    let open_attempt = runtime.publish(open_attempt, 7_u32, (Recorder(event_sender),));
+    runtime.finish_open(open_attempt, Vec::new()).unwrap();
     runtime
         .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
         .unwrap();
@@ -1795,8 +1795,8 @@ fn async_boundary_returns_error_on_cancellation() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let open_attempt = runtime.begin_open().unwrap();
-    let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    let open_attempt = runtime.publish(open_attempt, 7_u32, ());
+    runtime.finish_open(open_attempt, Vec::new()).unwrap();
     runtime
         .start_async(builtin(2), AsyncTaskLimit::DEFAULT)
         .unwrap();
@@ -1846,8 +1846,8 @@ fn pending_async_cancellation_is_not_suppressed_by_another_callback_status() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let open_attempt = runtime.begin_open().unwrap();
-    let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    let open_attempt = runtime.publish(open_attempt, 7_u32, ());
+    runtime.finish_open(open_attempt, Vec::new()).unwrap();
     runtime
         .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
         .unwrap();
@@ -1903,8 +1903,8 @@ fn cancellation_after_evaluation_does_not_leak_the_return_block() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let open_attempt = runtime.begin_open().unwrap();
-    let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    let open_attempt = runtime.publish(open_attempt, 7_u32, ());
+    runtime.finish_open(open_attempt, Vec::new()).unwrap();
     runtime
         .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
         .unwrap();
@@ -2697,12 +2697,12 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
     let _guard = test_lock_for_runtime(runtime);
     let open_attempt = runtime.begin_open().unwrap();
     let payload_dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let mut open_attempt = runtime.publish(
+    let open_attempt = runtime.publish(
         open_attempt,
         1_u32,
         (PanickingLayer(Arc::clone(&payload_dropped)),),
     );
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    runtime.finish_open(open_attempt, Vec::new()).unwrap();
     runtime
         .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
         .unwrap();
@@ -2751,8 +2751,8 @@ fn async_constructor_and_future_retain_panicking_payloads() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let open_attempt = runtime.begin_open().unwrap();
-    let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    let open_attempt = runtime.publish(open_attempt, 7_u32, ());
+    runtime.finish_open(open_attempt, Vec::new()).unwrap();
     runtime
         .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
         .unwrap();

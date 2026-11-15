@@ -1503,15 +1503,11 @@ pub mod v1 {
                 assert_inactive_events(runtime);
                 #[cfg(feature = "async-builtin")]
                 assert!(!cancellation.is_cancelled());
-                let mut opening = runtime.runtime().publish(opening, &*runtime, ());
+                let opening = runtime.runtime().publish(opening, &*runtime, ());
                 assert_inactive_events(runtime);
                 #[cfg(feature = "async-builtin")]
                 assert!(!cancellation.is_cancelled());
-                runtime
-                    .runtime()
-                    .finish_open(&mut opening, Vec::new())
-                    .unwrap();
-                drop(opening);
+                runtime.runtime().finish_open(opening, Vec::new()).unwrap();
 
                 #[cfg(feature = "async-builtin")]
                 {
@@ -1625,8 +1621,8 @@ pub mod v1 {
 
                 if previously_removed {
                     let opening = runtime.begin_open().unwrap();
-                    let mut opening = runtime.publish(opening, (), ());
-                    runtime.finish_open(&mut opening, Vec::new()).unwrap();
+                    let opening = runtime.publish(opening, (), ());
+                    runtime.finish_open(opening, Vec::new()).unwrap();
                     assert_eq!(host_auto_remove(runtime), 1);
                 }
 

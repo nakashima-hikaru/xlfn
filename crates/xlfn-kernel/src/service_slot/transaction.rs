@@ -1,49 +1,12 @@
 //! Consuming service transitions. Constructors stay in this module so a caller
 //! cannot pair a foreign owner or drain gate with a reclamation capability.
 use super::*;
+use crate::rollback::{Rollback, RollbackGuard};
 use crate::sync::MutexGuard;
 mod reclamation;
 pub(super) use reclamation::{
     DrainedReplacement, PublishedServiceOwner, QuarantinedServiceOwner, QuiescedTxn, SealingTxn,
 };
-
-trait Rollback {
-    fn rollback(self);
-}
-
-/// The Option only disarms RAII recovery when an operation completes. Protocol
-/// states and their non-optional owners live in distinct consuming wrappers.
-struct AbortGuard<S: Rollback> {
-    pending: Option<S>,
-}
-
-impl<S: Rollback> AbortGuard<S> {
-    fn new(state: S) -> Self {
-        Self {
-            pending: Some(state),
-        }
-    }
-
-    fn state(&self) -> &S {
-        self.pending
-            .as_ref()
-            .expect("a live transaction owns its recovery state")
-    }
-
-    fn complete(mut self) -> S {
-        self.pending
-            .take()
-            .expect("a transaction completes only once")
-    }
-}
-
-impl<S: Rollback> Drop for AbortGuard<S> {
-    fn drop(&mut self) {
-        if let Some(state) = self.pending.take() {
-            state.rollback();
-        }
-    }
-}
 
 struct Initialization<'slot, C, R, E: Clone> {
     slot: &'slot GenerationServiceSlot<C, R, E>,
@@ -69,7 +32,7 @@ impl<C, R, E: Clone> Rollback for Initialization<'_, C, R, E> {
 
 #[must_use = "initialization must commit or retain a fault"]
 pub(super) struct InitializingTxn<'slot, C, R, E: Clone> {
-    recovery: AbortGuard<Initialization<'slot, C, R, E>>,
+    recovery: RollbackGuard<Initialization<'slot, C, R, E>>,
 }
 
 impl<'slot, C, R, E: Clone> InitializingTxn<'slot, C, R, E> {
@@ -84,7 +47,7 @@ impl<'slot, C, R, E: Clone> InitializingTxn<'slot, C, R, E> {
         // and the guard retains InitFaulted, outside the lifecycle lock [SS-5].
         on_initialized(runtime.as_ref());
         let pointer = NonNull::from(runtime.as_ref());
-        let slot = self.recovery.state().slot;
+        let slot = self.recovery.get().slot;
         let mut state = slot.state.lock();
         // Consuming this transaction transfers its sole initialization claim.
         // Reacquiring the mutex synchronizes publication; it does not reacquire
@@ -351,7 +314,7 @@ impl<C, R, E: Clone> GenerationServiceSlot<C, R, E> {
                     drop(state);
 
                     let transaction = InitializingTxn {
-                        recovery: AbortGuard::new(Initialization { slot: self }),
+                        recovery: RollbackGuard::new(Initialization { slot: self }),
                     };
                     let candidate = initialize(config);
 

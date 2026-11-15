@@ -410,7 +410,7 @@ mod tests {
             .unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
         let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish_with_lifecycle(
+        let opening = runtime.publish_with_lifecycle(
             opening,
             (),
             CloseState {
@@ -419,7 +419,7 @@ mod tests {
             },
             (),
         );
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        runtime.finish_open(opening, Vec::new()).unwrap();
 
         assert_eq!(host_auto_close(runtime), 1);
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
