@@ -196,6 +196,25 @@ impl PartialEq for InitializationPtr {
 
 impl Eq for InitializationPtr {}
 
+pub(super) struct DetachedInitializations(FxHashMap<HandleTopicKey, InitializationPtr>);
+
+impl DetachedInitializations {
+    pub(super) fn notify_and_wait(self) {
+        // Wake every follower before waiting for any initializer to finish.
+        for initialization in self.0.values() {
+            initialization.notify_closed();
+        }
+        for initialization in self.0.into_values() {
+            initialization.wait_until_done();
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 pub(crate) struct TopicTableState {
     pub(crate) by_key: FxHashMap<HandleTopicKey, Topic>,
     pub(crate) by_lifetime_key: std::collections::HashMap<String, HandleTopicKey>,
@@ -228,6 +247,34 @@ pub(crate) struct Topic {
     observer: Option<FormulaObserverId>,
     #[cfg(any(target_os = "windows", test))]
     observer_committed: bool,
+}
+
+impl Topic {
+    fn removal(
+        &self,
+        key: HandleTopicKey,
+        initializing: &FxHashMap<HandleTopicKey, InitializationPtr>,
+    ) -> TopicRemoval {
+        TopicRemoval {
+            token: self.publication.token.clone(),
+            key,
+            was_provisional: self.publication.state() == PublishedTopicState::Provisional,
+            initialization_id: initializing
+                .get(&key)
+                .map(|initialization| initialization.refinement_id),
+        }
+    }
+
+    fn remove_indexes(
+        &self,
+        by_lifetime_key: &mut std::collections::HashMap<String, HandleTopicKey>,
+        by_observer_id: &mut FxHashMap<FormulaObserverId, HandleTopicKey>,
+    ) {
+        by_lifetime_key.remove(self.publication.lifetime_key.as_str());
+        if let Some(owner) = self.observer {
+            by_observer_id.remove(&owner);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -581,32 +628,19 @@ impl TopicTable {
         key: HandleTopicKey,
     ) -> Option<(TopicRemoval, PublishedTopicOwner)> {
         let topic = state.by_key.get(&key)?;
-        let was_provisional = topic.publication.state() == PublishedTopicState::Provisional;
-        let initialization_id = state
-            .initializing
-            .get(&key)
-            .map(|initialization| initialization.refinement_id);
+        let removal = topic.removal(key, &state.initializing);
+        self.withdraw_topic(key, topic);
+        let topic = state.by_key.remove(&key)?;
+        topic.remove_indexes(&mut state.by_lifetime_key, &mut state.by_observer_id);
+        Some((removal, topic.publication))
+    }
+
+    fn withdraw_topic(&self, key: HandleTopicKey, topic: &Topic) {
         topic
             .publication
             .state
             .store(PublishedTopicState::Stale as u8, Ordering::Release);
         self.published.remove(key);
-        let topic = state.by_key.remove(&key)?;
-        state
-            .by_lifetime_key
-            .remove(topic.publication.lifetime_key.as_str());
-        if let Some(owner) = topic.observer {
-            state.by_observer_id.remove(&owner);
-        }
-        Some((
-            TopicRemoval {
-                token: topic.publication.token.clone(),
-                key,
-                was_provisional,
-                initialization_id,
-            },
-            topic.publication,
-        ))
     }
 
     #[cfg(any(target_os = "windows", test))]
@@ -653,19 +687,19 @@ impl TopicTable {
         Some(removal)
     }
 
-    pub(crate) fn close(&self) -> Vec<InitializationPtr> {
+    pub(super) fn close(&self) -> DetachedInitializations {
         self.close_impl(|| {})
     }
 
     #[cfg(test)]
-    pub(crate) fn close_with_reclaim_hook(
+    pub(super) fn close_with_reclaim_hook(
         &self,
         after_enqueue: impl Fn(),
-    ) -> Vec<InitializationPtr> {
+    ) -> DetachedInitializations {
         self.close_impl(after_enqueue)
     }
 
-    fn close_impl(&self, after_enqueue: impl Fn()) -> Vec<InitializationPtr> {
+    fn close_impl(&self, after_enqueue: impl Fn()) -> DetachedInitializations {
         let mut state = self.state.write();
         state.closed = true;
         state.generation = state.generation.next().unwrap_or(state.generation);
@@ -682,11 +716,7 @@ impl TopicTable {
         }
         state.by_lifetime_key.clear();
         state.by_observer_id.clear();
-        state
-            .initializing
-            .drain()
-            .map(|(_, initialization)| initialization)
-            .collect()
+        DetachedInitializations(std::mem::take(&mut state.initializing))
     }
 
     pub(crate) fn remove_all(&self) -> Vec<TopicRemoval> {
@@ -703,19 +733,12 @@ impl TopicTable {
             ..
         } = &mut *state;
         for (key, topic) in by_key.drain() {
-            let was_provisional = topic.publication.state() == PublishedTopicState::Provisional;
+            let removal = topic.removal(key, initializing);
             topic
                 .publication
                 .state
                 .store(PublishedTopicState::Stale as u8, Ordering::Release);
-            removals.push(TopicRemoval {
-                token: topic.publication.token.clone(),
-                key,
-                was_provisional,
-                initialization_id: initializing
-                    .get(&key)
-                    .map(|initialization| initialization.refinement_id),
-            });
+            removals.push(removal);
             self.enqueue_reclaim(topic.publication);
         }
         by_lifetime_key.clear();
@@ -731,18 +754,25 @@ impl TopicTable {
         lifetime_generation: FormulaLifetimeGeneration,
     ) -> Vec<TopicRemoval> {
         let mut state = self.state.write();
-        let keys = state
-            .by_key
-            .iter()
-            .filter(|(_, topic)| topic.lifetime_generation == Some(lifetime_generation))
-            .map(|(key, _)| *key)
-            .collect::<Vec<_>>();
-        let mut removals = Vec::with_capacity(keys.len());
-        for key in keys {
-            if let Some((removal, retired)) = self.remove_topic_locked(&mut state, key) {
-                removals.push(removal);
-                self.enqueue_reclaim(retired);
+        let TopicTableState {
+            by_key,
+            by_lifetime_key,
+            by_observer_id,
+            initializing,
+            ..
+        } = &mut *state;
+        let mut removals = Vec::new();
+        for (_, topic) in by_key.extract_if(|&key, topic| {
+            if topic.lifetime_generation != Some(lifetime_generation) {
+                return false;
             }
+            removals.push(topic.removal(key, initializing));
+            // Withdraw the publication while the primary index still owns it.
+            self.withdraw_topic(key, topic);
+            true
+        }) {
+            topic.remove_indexes(by_lifetime_key, by_observer_id);
+            self.enqueue_reclaim(topic.publication);
         }
         drop(state);
         self.maintain();

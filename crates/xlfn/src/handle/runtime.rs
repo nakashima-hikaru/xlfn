@@ -495,19 +495,7 @@ impl FormulaHandleService {
         let initializations = self.topics.close();
         self.refinement.observe_seal_for_close();
 
-        //
-        // Wake cold-path waiters.
-        //
-        for initialization in &initializations {
-            initialization.notify_closed();
-        }
-
-        //
-        // Preserve the current cold-owner synchronization.
-        //
-        for initialization in initializations {
-            initialization.wait_until_done();
-        }
+        initializations.notify_and_wait();
 
         //
         // warm prepares are no longer represented in `initializing`.

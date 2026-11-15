@@ -274,9 +274,10 @@ impl Drop for NumericAllocation {
 
 /// A validated numeric array stored directly in an FP12-compatible allocation.
 ///
-/// Create it with [`NumericArrayBuilder::finish`] or [`Self::from_f64`]. Normal
-/// synchronous UDFs return it through `K%`; `return_abi = "xloper12"` and async
-/// UDFs use the ordinary XLOPER12 conversion.
+/// Create it with [`Self::from_iter`], [`Self::from_f64`], or
+/// [`NumericArrayBuilder::finish`]. Synchronous UDFs normally return it through
+/// `K%`. The ordinary XLOPER12 conversion applies to async UDFs and
+/// `return_abi = "xloper12"`.
 pub struct NumericArrayOutput {
     allocation: NumericAllocation,
     rows: usize,
@@ -297,6 +298,23 @@ impl NumericArrayOutput {
     /// Copies a finite, row-major slice directly into its final FP12 buffer.
     pub fn from_f64(rows: usize, columns: usize, values: &[f64]) -> XllResult<Self> {
         NumericArrayBuilder::from_f64(rows, columns, values)?.finish()
+    }
+
+    /// Writes finite row-major values directly into an FP12 buffer.
+    ///
+    /// The iterator must yield exactly `rows * columns` numbers. Dimensions
+    /// and the buffer limit are checked before consuming any values. For an
+    /// existing contiguous slice, [`Self::from_f64`] provides a bulk-copy path.
+    pub fn from_iter(
+        rows: usize,
+        columns: usize,
+        values: impl IntoIterator<Item = f64>,
+    ) -> XllResult<Self> {
+        let mut builder = NumericArrayBuilder::new(rows, columns)?;
+        for value in values {
+            builder.push_f64(value)?;
+        }
+        builder.finish()
     }
 
     /// Returns the validated dimensions.
@@ -614,6 +632,55 @@ unsafe fn release_block(pointer: NonNull<NumericBlock>, bytes: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn miri_numeric_array_iterator_writes_finite_bits_in_row_major_order() {
+        let values = [-0.0, 0.0, f64::from_bits(1), -2.5, f64::MAX, f64::MIN];
+        let output = NumericArrayOutput::from_iter(2, 3, values.iter().copied()).unwrap();
+        assert_eq!((output.rows(), output.columns()), (2, 3));
+        for (actual, expected) in output.as_slice().iter().zip(values) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+    }
+
+    #[test]
+    fn miri_numeric_array_iterator_releases_partial_output_on_error_or_unwind() {
+        let invalid_shape =
+            std::iter::from_fn(|| panic!("dimensions must be validated before reading values"));
+        assert!(NumericArrayOutput::from_iter(1, 0, invalid_shape).is_err());
+        assert!(matches!(
+            NumericArrayOutput::from_iter(1, 2, [1.0]),
+            Err(XllError::ElementCountMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            NumericArrayOutput::from_iter(1, 1, [1.0, 2.0]),
+            Err(XllError::Input {
+                reason: InputError::Malformed("too many array cells"),
+                ..
+            })
+        ));
+
+        let values = [1.0, f64::INFINITY]
+            .into_iter()
+            .chain(std::iter::from_fn(|| panic!("reads must stop on error")));
+        assert!(matches!(
+            NumericArrayOutput::from_iter(1, 3, values),
+            Err(XllError::Domain {
+                code: DomainErrorCode::InvalidInput,
+            })
+        ));
+
+        let unwound = crate::panic_boundary::catch_no_unwind(|| {
+            let values = std::iter::once(1.0)
+                .chain(std::iter::from_fn(|| panic!("injected iterator unwind")));
+            let _ = NumericArrayOutput::from_iter(1, 2, values);
+        });
+        assert!(unwound.is_err());
+    }
 
     struct PublishedTestPointer(*mut FP12);
 

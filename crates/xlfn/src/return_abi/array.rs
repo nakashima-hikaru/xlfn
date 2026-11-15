@@ -6,7 +6,8 @@ use xlfn_sys::{XLOPER12, XLOPER12Value, XLTYPE_STR};
 
 /// A completed Excel array return value.
 ///
-/// Values of this type are normally created by [`ExcelArrayBuilder::finish`].
+/// Create it with [`Self::from_iter`], [`Self::from_f64`], or
+/// [`ExcelArrayBuilder::finish`].
 pub struct ExcelArrayOutput {
     pub(crate) rows: usize,
     pub(crate) columns: usize,
@@ -19,6 +20,23 @@ impl ExcelArrayOutput {
     /// Encodes a complete row-major numeric slice as an XLOPER12 array.
     pub fn from_f64(rows: usize, columns: usize, values: &[f64]) -> XllResult<Self> {
         ExcelArrayBuilder::from_f64(rows, columns, values)?.finish()
+    }
+
+    /// Encodes row-major values directly into an XLOPER12 array.
+    ///
+    /// The iterator must yield exactly `rows * columns` cells. Dimensions and
+    /// the cell buffer limit are checked before consuming any values. Each
+    /// value is converted as it is read, and the first error stops iteration.
+    pub fn from_iter<T: IntoExcel>(
+        rows: usize,
+        columns: usize,
+        values: impl IntoIterator<Item = T>,
+    ) -> XllResult<Self> {
+        let mut builder = ExcelArrayBuilder::new(rows, columns)?;
+        for value in values {
+            builder.push(value)?;
+        }
+        builder.finish()
     }
 
     /// Returns the validated dimensions.
@@ -268,6 +286,80 @@ impl crate::value::output::ExcelCellSink for ExcelArrayBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn miri_excel_array_iterator_preserves_mixed_row_major_cells() {
+        let output = ExcelArrayOutput::from_iter(
+            2,
+            2,
+            (0..4).map(|index| match index {
+                0 => ExcelCellOutput::Number(-0.0),
+                1 => ExcelCellOutput::String("値🌱".to_owned()),
+                2 => ExcelCellOutput::Boolean(true),
+                _ => ExcelCellOutput::Error(crate::ExcelError::NotAvailable),
+            }),
+        )
+        .unwrap();
+        assert_eq!((output.shape().rows, output.shape().columns), (2, 2));
+        assert!(output.cells.iter().map(|cell| cell.xltype).eq([
+            xlfn_sys::XLTYPE_NUM,
+            XLTYPE_STR,
+            xlfn_sys::XLTYPE_BOOL,
+            xlfn_sys::XLTYPE_ERR,
+        ]));
+        // SAFETY: the verified tag selects the initialized number member.
+        let number = unsafe { output.cells[0].value.number };
+        assert_eq!(number.to_bits(), (-0.0_f64).to_bits());
+        // SAFETY: the verified string tag selects the initialized pointer.
+        let pointer = unsafe { output.cells[1].value.string };
+        // SAFETY: output owns the buffer from encoding a three-unit string
+        // and its count prefix.
+        let counted = unsafe { std::slice::from_raw_parts(pointer, 4) };
+        assert_eq!(counted[0], 3);
+        assert_eq!(String::from_utf16(&counted[1..]).unwrap(), "値🌱");
+    }
+
+    #[test]
+    fn miri_excel_array_iterator_releases_partial_output_on_error_or_unwind() {
+        let invalid_shape = std::iter::from_fn(|| -> Option<&str> {
+            panic!("dimensions must be validated before reading values")
+        });
+        assert!(ExcelArrayOutput::from_iter(0, 1, invalid_shape).is_err());
+        assert!(matches!(
+            ExcelArrayOutput::from_iter(1, 2, ["written"]),
+            Err(XllError::ElementCountMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            ExcelArrayOutput::from_iter(1, 1, ["written", "extra"]),
+            Err(XllError::Input {
+                reason: InputError::Malformed("too many array cells"),
+                ..
+            })
+        ));
+
+        let overlong = "x".repeat(crate::utf16::EXCEL_STRING_LIMIT + 1);
+        let values = ["written", overlong.as_str()]
+            .into_iter()
+            .chain(std::iter::from_fn(|| panic!("reads must stop on error")));
+        assert!(matches!(
+            ExcelArrayOutput::from_iter(1, 3, values),
+            Err(XllError::Input {
+                reason: InputError::TooLarge { .. },
+                ..
+            })
+        ));
+
+        let unwound = crate::panic_boundary::catch_no_unwind(|| {
+            let values = std::iter::once("written")
+                .chain(std::iter::from_fn(|| panic!("injected iterator unwind")));
+            let _ = ExcelArrayOutput::from_iter(1, 2, values);
+        });
+        assert!(unwound.is_err());
+    }
 
     #[test]
     fn numeric_slice_encoding_preserves_shape_and_values_without_string_storage() {

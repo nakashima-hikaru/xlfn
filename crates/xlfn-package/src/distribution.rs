@@ -571,19 +571,18 @@ fn require_directory_identity(
     Ok(())
 }
 
-/// Lists transaction payloads while excluding journal control files.
+/// Snapshots transaction payloads while excluding journal control files.
 fn transaction_payloads(transaction: &Path) -> PackageResult<Vec<PathBuf>> {
     Ok(fs::read_dir(transaction)?
         .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<io::Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|path| {
-            !matches!(
+        .filter(|entry| match entry {
+            Ok(path) => !matches!(
                 path.file_name().and_then(|name| name.to_str()),
                 Some(TRANSACTION_JOURNAL) | Some("journal.next")
-            )
+            ),
+            Err(_) => true,
         })
-        .collect())
+        .collect::<io::Result<_>>()?)
 }
 
 /// Extracts a transaction identifier from its canonical directory name.

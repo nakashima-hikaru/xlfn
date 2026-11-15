@@ -2629,6 +2629,79 @@ fn warm_observation_rejects_generation_terminated_topic() {
 }
 
 #[test]
+fn miri_terminating_one_generation_keeps_old_reads_safe_and_other_topics_live() {
+    let runtime = FormulaHandleService::new(8);
+    let retiring = lifetime_generation(1);
+    let active = lifetime_generation(2);
+    let retire_observed = test_topic_key("retire-observed");
+    let retire_claimed = test_topic_key("retire-claimed");
+    let keep_observed = test_topic_key("keep-observed");
+    let keep_unclaimed = test_topic_key("keep-unclaimed");
+    for key in [
+        retire_observed,
+        retire_claimed,
+        keep_observed,
+        keep_unclaimed,
+    ] {
+        runtime.prepare(key, || Ok(DataRecord(42))).unwrap();
+    }
+    let observed_token = runtime
+        .connect(retiring, 17, &retire_observed.format_lifetime_key())
+        .unwrap();
+    let active_token = runtime
+        .connect(active, 17, &keep_observed.format_lifetime_key())
+        .unwrap();
+    runtime
+        .claim_lifetime(&retire_claimed.format_lifetime_key(), retiring)
+        .unwrap();
+
+    {
+        let old_reader = runtime.topics.enter_read_lease().unwrap();
+        let old = old_reader.load(&retire_observed).unwrap();
+        assert_eq!(old.state(), PublishedTopicState::Live);
+        runtime.terminate_topics(retiring);
+        assert_eq!(old.state(), PublishedTopicState::Stale);
+        assert_eq!(old.token, observed_token);
+        assert_eq!(runtime.topics.try_quiesce_and_drain().len(), 0);
+
+        let current = runtime.topics.enter_read_lease().unwrap();
+        assert!(current.load(&retire_observed).is_none());
+        assert!(current.load(&retire_claimed).is_none());
+        for key in [keep_observed, keep_unclaimed] {
+            assert_eq!(
+                current.load(&key).unwrap().state(),
+                PublishedTopicState::Live
+            );
+        }
+    }
+    let state = runtime.topics.read();
+    assert_eq!(state.by_observer_id.len(), 1);
+    assert_eq!(state.by_observer_id.values().next(), Some(&keep_observed));
+    assert_eq!(state.by_lifetime_key.len(), 2);
+    assert!(
+        !state
+            .by_lifetime_key
+            .contains_key(&retire_observed.format_lifetime_key())
+    );
+    assert!(
+        !state
+            .by_lifetime_key
+            .contains_key(&retire_claimed.format_lifetime_key())
+    );
+    drop(state);
+
+    assert!(matches!(
+        with_handle::<DataRecord, _>(&runtime, &observed_token, |_| ()),
+        Err(XllError::StaleHandle)
+    ));
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &active_token, |value| value.0).unwrap(),
+        42
+    );
+    assert_eq!(runtime.len(), 2);
+}
+
+#[test]
 fn warm_observation_does_not_follow_recreated_same_key() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("warm-same-key-aba");

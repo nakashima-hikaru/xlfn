@@ -1278,6 +1278,7 @@ impl core::panic::unwind_safe::UnwindSafe for xlfn::output::ExcelArrayBuilder
 pub struct xlfn::output::ExcelArrayOutput
 impl xlfn::output::ExcelArrayOutput
 pub fn xlfn::output::ExcelArrayOutput::from_f64(usize, usize, &[f64]) -> xlfn::error::XllResult<Self>
+pub fn xlfn::output::ExcelArrayOutput::from_iter<T: xlfn::value::IntoExcel>(usize, usize, impl core::iter::traits::collect::IntoIterator<Item = T>) -> xlfn::error::XllResult<Self>
 pub const fn xlfn::output::ExcelArrayOutput::shape(&self) -> xlfn::value::Shape
 impl core::fmt::Debug for xlfn::output::ExcelArrayOutput
 pub fn xlfn::output::ExcelArrayOutput::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -1305,6 +1306,7 @@ impl xlfn::output::NumericArrayOutput
 pub fn xlfn::output::NumericArrayOutput::as_slice(&self) -> &[f64]
 pub const fn xlfn::output::NumericArrayOutput::columns(&self) -> usize
 pub fn xlfn::output::NumericArrayOutput::from_f64(usize, usize, &[f64]) -> xlfn::error::XllResult<Self>
+pub fn xlfn::output::NumericArrayOutput::from_iter(usize, usize, impl core::iter::traits::collect::IntoIterator<Item = f64>) -> xlfn::error::XllResult<Self>
 pub const fn xlfn::output::NumericArrayOutput::rows(&self) -> usize
 pub const fn xlfn::output::NumericArrayOutput::shape(&self) -> xlfn::value::Shape
 impl core::fmt::Debug for xlfn::output::NumericArrayOutput

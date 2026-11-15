@@ -230,23 +230,27 @@ Asynchronous functions keep the `xlAsyncReturn` completion path.
 
 ### Return numeric arrays directly
 
-`NumericArrayBuilder` writes finite doubles directly into FP12-compatible
-contiguous storage, without building an XLOPER12 for each cell:
+`NumericArrayOutput::from_iter` writes a row-major iterator of finite doubles
+directly into FP12-compatible contiguous storage.
 
 ```rust
 {{#include ../fixtures/addin.md}}
 use xlfn::prelude::*;
-use xlfn::output::{NumericArrayBuilder, NumericArrayOutput};
+use xlfn::output::NumericArrayOutput;
 
 #[excel_function(name = "ARRAY.PRICES", thread_safe)]
 fn prices(spot: f64, strikes: NumericMatrixRef<'_>) -> XllResult<NumericArrayOutput> {
-    let mut output = NumericArrayBuilder::new(strikes.rows(), strikes.columns())?;
-    for &strike in strikes.as_slice() {
-        output.push_f64((spot - strike).max(0.0))?;
-    }
-    output.finish()
+    NumericArrayOutput::from_iter(
+        strikes.rows(),
+        strikes.columns(),
+        strikes.iter().map(|&strike| (spot - strike).max(0.0)),
+    )
 }
 ```
+
+The iterator must yield exactly one value per cell. Use
+`NumericArrayOutput::from_f64` for the bulk-copy path from an existing slice or
+`NumericArrayBuilder` for individual fallible writes.
 
 This registers `K%BK%$`. Use `return_abi = "fp12"` on an ordinary numeric matrix or vector to select
 the FP12 publication path with a final copy into contiguous return storage.
@@ -354,6 +358,10 @@ fn doubled(values: XlArrayRef<'_>) -> XllResult<ExcelArrayOutput> {
 
 The builder rejects non-finite output as `#NUM!` and checks dimensions and
 return-storage limits.
+
+If the values already form a row-major iterator, pass it to
+`ExcelArrayOutput::from_iter(rows, columns, values)`. It converts each value
+directly into a cell and requires exactly one value per cell.
 
 For an existing row-major numeric slice,
 `ExcelArrayOutput::from_f64(rows, columns, values)` validates and
