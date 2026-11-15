@@ -5,6 +5,8 @@ use super::FormulaLifetimeGeneration;
 use super::HandleTopicKey;
 #[cfg(any(target_os = "windows", test))]
 use crate::XllResult;
+#[cfg(any(target_os = "windows", test))]
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct FormulaObserverId {
@@ -17,18 +19,28 @@ pub(crate) struct FormulaObserverId {
 /// created it. The borrow keeps commit and rollback on the same live runtime
 /// without a temporary `Weak` upgrade.
 pub(crate) struct HandleConnection<'runtime> {
-    runtime: &'runtime FormulaHandleService,
+    disposition: ConnectionDisposition<'runtime>,
     token: String,
-    disposition: Option<ConnectionDisposition>,
 }
 
 #[cfg(any(target_os = "windows", test))]
-enum ConnectionDisposition {
+enum ConnectionDisposition<'runtime> {
     Existing,
-    NewlyReserved {
-        owner: FormulaObserverId,
-        key: HandleTopicKey,
-    },
+    Reserved(RollbackGuard<ReservedConnection<'runtime>>),
+}
+
+#[cfg(any(target_os = "windows", test))]
+struct ReservedConnection<'runtime> {
+    runtime: &'runtime FormulaHandleService,
+    owner: FormulaObserverId,
+    key: HandleTopicKey,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl Rollback for ReservedConnection<'_> {
+    fn rollback(self) {
+        self.runtime.rollback_connection(self.owner, self.key);
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -37,32 +49,15 @@ impl HandleConnection<'_> {
         &self.token
     }
 
-    pub(crate) fn commit(mut self) -> XllResult<()> {
-        if let Some(ConnectionDisposition::NewlyReserved { owner, key }) = self.disposition
-            && let Err(error) = self.runtime.commit_connection(owner, key)
-        {
-            self.rollback();
-            return Err(error);
+    pub(crate) fn commit(self) -> XllResult<()> {
+        if let ConnectionDisposition::Reserved(reservation) = self.disposition {
+            let reserved = reservation.get();
+            reserved
+                .runtime
+                .commit_connection(reserved.owner, reserved.key)?;
+            reservation.complete();
         }
-        self.disposition = None;
         Ok(())
-    }
-
-    pub(crate) fn rollback(mut self) {
-        self.rollback_inner();
-    }
-
-    fn rollback_inner(&mut self) {
-        if let Some(ConnectionDisposition::NewlyReserved { owner, key }) = self.disposition.take() {
-            self.runtime.rollback_connection(owner, key);
-        }
-    }
-}
-
-#[cfg(any(target_os = "windows", test))]
-impl Drop for HandleConnection<'_> {
-    fn drop(&mut self) {
-        self.rollback_inner();
     }
 }
 
@@ -82,13 +77,16 @@ impl FormulaHandleService {
         let (key, token, created) =
             self.connect_inner(lifetime_generation, topic_id, lifetime_key)?;
         Ok(HandleConnection {
-            runtime: self,
-            token,
-            disposition: Some(if created {
-                ConnectionDisposition::NewlyReserved { owner, key }
+            disposition: if created {
+                ConnectionDisposition::Reserved(RollbackGuard::new(ReservedConnection {
+                    runtime: self,
+                    owner,
+                    key,
+                }))
             } else {
                 ConnectionDisposition::Existing
-            }),
+            },
+            token,
         })
     }
 }

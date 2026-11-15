@@ -3,42 +3,54 @@
 use super::certificate::{FinalRemoval, OpenRollback, TerminalCertificateKind};
 use crate::runtime::capabilities::{EmptyLifecycle, LifecycleFailure, ShutdownDeps};
 use crate::{Addin, XllError};
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 #[cfg(test)]
 std::thread_local! {
+    static PANIC_DURING_ARM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static QUARANTINE_AFTER_BINDING_RELEASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn check_arm_fault() {
+    assert!(
+        !PANIC_DURING_ARM.with(|fault| fault.replace(false)),
+        "injected panic while arming finalization"
+    );
 }
 
 #[must_use = "finish logical closure and release the retained binding"]
 pub(crate) struct CompletionPendingBinding<'runtime, A: Addin, K: TerminalCertificateKind> {
-    deps: ShutdownDeps<'runtime, A>,
-    // The Option only disarms Drop during a consuming move. A logically
-    // completed value cannot inhabit this receiver or call finish again.
-    certified: Option<CertifiedBinding<'runtime, A, K>>,
+    certified: RollbackGuard<CertifiedBinding<'runtime, A, K>>,
 }
 
 struct CertifiedBinding<'runtime, A: Addin, K: TerminalCertificateKind> {
+    deps: ShutdownDeps<'runtime, A>,
     certificate: K::Certificate<'runtime, A>,
     empty: EmptyLifecycle<'runtime, A>,
 }
 
-/// Logical completion already happened. The lifecycle value must never be
-/// retried, and the exact failed empty binding stays owned until quarantine.
-struct LogicalBindingFailure<'runtime, A: Addin, K: TerminalCertificateKind> {
-    completed: K::Completed<'runtime, A>,
-    _binding: TerminalBinding<'runtime, A>,
-}
-
-#[allow(dead_code, reason = "failed release retains its exact empty binding")]
-enum TerminalBinding<'runtime, A: Addin> {
-    ReleaseFailed(LifecycleFailure<'runtime, A>),
-    Released,
-}
-
-impl<A: Addin, K: TerminalCertificateKind> Drop for LogicalBindingFailure<'_, A, K> {
-    fn drop(&mut self) {
-        K::mark_finalization_failed(&mut self.completed);
+impl<A: Addin, K: TerminalCertificateKind> Rollback for CertifiedBinding<'_, A, K> {
+    fn rollback(self) {
+        // Publish quarantine while the exact certificate still retains the claim.
+        self.deps.quarantine_state();
     }
+}
+
+/// The certificate's removal claim is armed for quarantine before this issues.
+struct ArmedFinalization<'runtime, A: Addin, K: TerminalCertificateKind>(
+    CertifiedBinding<'runtime, A, K>,
+);
+
+struct LogicalCompleted<'runtime, A: Addin, K: TerminalCertificateKind> {
+    deps: ShutdownDeps<'runtime, A>,
+    completed: K::Completed<'runtime, A>,
+    empty: EmptyLifecycle<'runtime, A>,
+}
+
+struct BindingReleased<'runtime, A: Addin, K: TerminalCertificateKind> {
+    deps: ShutdownDeps<'runtime, A>,
+    completed: K::Completed<'runtime, A>,
 }
 
 #[allow(
@@ -46,9 +58,15 @@ impl<A: Addin, K: TerminalCertificateKind> Drop for LogicalBindingFailure<'_, A,
     reason = "failure variants retain their distinct affine recoveries"
 )]
 enum FailedFinalization<'runtime, A: Addin, K: TerminalCertificateKind> {
-    Certified(CompletionPendingBinding<'runtime, A, K>),
-    Logical(LogicalBindingFailure<'runtime, A, K>),
+    Armed(ArmedFinalization<'runtime, A, K>),
+    Release {
+        completed: K::Completed<'runtime, A>,
+        binding: LifecycleFailure<'runtime, A>,
+    },
+    Boundary(BindingReleased<'runtime, A, K>),
 }
+
+type FinalizationResult<'runtime, A, K, T> = Result<T, Box<FinalizationFailure<'runtime, A, K>>>;
 
 #[must_use = "the failure retains the progressed completion and binding responsibilities"]
 pub(crate) struct FinalizationFailure<'runtime, A: Addin, K: TerminalCertificateKind> {
@@ -77,75 +95,89 @@ impl<'runtime, A: Addin, K: TerminalCertificateKind> CompletionPendingBinding<'r
         empty: EmptyLifecycle<'runtime, A>,
     ) -> Self {
         Self {
-            deps,
-            certified: Some(CertifiedBinding { certificate, empty }),
+            certified: RollbackGuard::new(CertifiedBinding {
+                deps,
+                certificate,
+                empty,
+            }),
         }
     }
-    pub(crate) fn finish(
-        mut self,
-    ) -> Result<Finalized<'runtime, A, K>, Box<FinalizationFailure<'runtime, A, K>>> {
+
+    pub(crate) fn finish(self) -> FinalizationResult<'runtime, A, K, Finalized<'runtime, A, K>> {
+        self.arm_finalization()
+            .finish_logical()?
+            .release_binding()?
+            .finalize()
+    }
+
+    fn arm_finalization(mut self) -> ArmedFinalization<'runtime, A, K> {
+        K::arm_finalization(&mut self.certified.get_mut().certificate);
+        ArmedFinalization(self.certified.complete())
+    }
+}
+
+impl<'runtime, A: Addin, K: TerminalCertificateKind> ArmedFinalization<'runtime, A, K> {
+    fn finish_logical(
+        self,
+    ) -> FinalizationResult<'runtime, A, K, LogicalCompleted<'runtime, A, K>> {
         let CertifiedBinding {
-            mut certificate,
+            deps,
+            certificate,
             empty,
-        } = self
-            .certified
-            .take()
-            .expect("consuming completion retains its certified binding");
-        // The claim quarantines atomically on any error or unwind until the
-        // exact empty binding has been released successfully.
-        K::arm_finalization(&mut certificate);
-        let mut completed = match K::finish(certificate) {
-            Ok(completed) => completed,
-            Err((error, certificate)) => {
-                self.certified = Some(CertifiedBinding {
+        } = self.0;
+        match K::finish(certificate) {
+            Ok(completed) => Ok(LogicalCompleted {
+                deps,
+                completed,
+                empty,
+            }),
+            Err((error, certificate)) => Err(Box::new(FinalizationFailure {
+                error,
+                recovery: FailedFinalization::Armed(Self(CertifiedBinding {
+                    deps,
                     certificate: *certificate,
                     empty,
-                });
-                return Err(Box::new(FinalizationFailure {
-                    error,
-                    recovery: FailedFinalization::Certified(self),
-                }));
-            }
-        };
-        // The removal claim in completed remains live through this last step.
-        match empty.release() {
-            Ok(()) => {
-                #[cfg(test)]
-                if QUARANTINE_AFTER_BINDING_RELEASE.with(|request| request.replace(false)) {
-                    self.deps.quarantine_state();
-                }
-                match K::complete_finalization(&mut completed) {
-                    Ok(()) => Ok(Finalized {
-                        deps: self.deps,
-                        completed,
-                    }),
-                    Err(error) => Err(Box::new(FinalizationFailure {
-                        error,
-                        recovery: FailedFinalization::Logical(LogicalBindingFailure {
-                            completed,
-                            _binding: TerminalBinding::Released,
-                        }),
-                    })),
-                }
-            }
-            Err(failure) => {
-                let error = failure.error().clone();
-                Err(Box::new(FinalizationFailure {
-                    error,
-                    recovery: FailedFinalization::Logical(LogicalBindingFailure {
-                        completed,
-                        _binding: TerminalBinding::ReleaseFailed(failure),
-                    }),
-                }))
-            }
+                })),
+            })),
         }
     }
 }
-impl<A: Addin, K: TerminalCertificateKind> Drop for CompletionPendingBinding<'_, A, K> {
-    fn drop(&mut self) {
-        if self.certified.is_some() {
+
+impl<'runtime, A: Addin, K: TerminalCertificateKind> LogicalCompleted<'runtime, A, K> {
+    fn release_binding(
+        self,
+    ) -> FinalizationResult<'runtime, A, K, BindingReleased<'runtime, A, K>> {
+        let Self {
+            deps,
+            completed,
+            empty,
+        } = self;
+        match empty.release() {
+            Ok(()) => Ok(BindingReleased { deps, completed }),
+            Err(binding) => Err(Box::new(FinalizationFailure {
+                error: binding.error().clone(),
+                recovery: FailedFinalization::Release { completed, binding },
+            })),
+        }
+    }
+}
+
+impl<'runtime, A: Addin, K: TerminalCertificateKind> BindingReleased<'runtime, A, K> {
+    fn finalize(mut self) -> FinalizationResult<'runtime, A, K, Finalized<'runtime, A, K>> {
+        #[cfg(test)]
+        if QUARANTINE_AFTER_BINDING_RELEASE.with(|request| request.replace(false)) {
             self.deps.quarantine_state();
         }
+        if let Err(error) = K::complete_finalization(&mut self.completed) {
+            return Err(Box::new(FinalizationFailure {
+                error,
+                recovery: FailedFinalization::Boundary(self),
+            }));
+        }
+        Ok(Finalized {
+            deps: self.deps,
+            completed: self.completed,
+        })
     }
 }
 impl<'runtime, A: Addin> Finalized<'runtime, A, FinalRemoval> {
@@ -167,9 +199,10 @@ impl<A: Addin> std::fmt::Debug for Finalized<'_, A, OpenRollback> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::pipeline::{AddinQuiesced, TeardownTxn};
     use super::*;
     use crate::lifecycle::LifecyclePhase;
-    use crate::runtime::Runtime;
+    use crate::runtime::{AddinLifecycleAccess, Runtime};
 
     fn pending(runtime: &Runtime<()>) -> CompletionPendingBinding<'_, (), FinalRemoval> {
         let opening = runtime.begin_open().unwrap();
@@ -187,16 +220,49 @@ mod tests {
             .detach_host()
             .unwrap_or_else(|_| panic!("detach"))
             .quiesce_addin(runtime, &lifecycle)
-            .unwrap_or_else(|_| panic!("quiesce"))
+            .unwrap_or_else(|_| panic!("quiesce"));
+        certify_quiesced(teardown, &lifecycle)
+    }
+
+    fn pending_rollback(runtime: &Runtime<()>) -> CompletionPendingBinding<'_, (), OpenRollback> {
+        let opening = runtime.begin_open().unwrap();
+        let generation = opening.attempt_id().into_runtime_generation();
+        let opening = runtime.publish(opening, (), ());
+        assert!(opening.fail_for_test().requires_rollback());
+        let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+        let crate::runtime::orchestration::OpenRollbackAcquisition::Acquired(owner) =
+            runtime.acquire_open_rollback()
+        else {
+            panic!("rollback cleanup owner unavailable");
+        };
+        let teardown = owner
+            .drain()
+            .unwrap_or_else(|_| panic!("drain"))
+            .stop_producers(|_| {})
+            .unwrap_or_else(|_| panic!("stop"))
+            .close_module_callbacks()
+            .detach_host()
+            .unwrap_or_else(|_| panic!("detach"))
+            .quiesce_addin(runtime, &lifecycle, Some(generation))
+            .unwrap_or_else(|_| panic!("quiesce"));
+        certify_quiesced(teardown, &lifecycle)
+    }
+
+    fn certify_quiesced<'runtime, K: TerminalCertificateKind>(
+        teardown: TeardownTxn<'runtime, (), K, AddinQuiesced<'runtime, ()>>,
+        lifecycle: &AddinLifecycleAccess<'_, ()>,
+    ) -> CompletionPendingBinding<'runtime, (), K> {
+        teardown
             .seal_services()
             .unwrap_or_else(|_| panic!("seal"))
-            .cleanup_addin(&lifecycle, &mut crate::shutdown::CloseReport::default())
+            .cleanup_addin(lifecycle, &mut crate::shutdown::CloseReport::default())
             .unwrap_or_else(|_| panic!("cleanup"))
             .finish_services()
             .unwrap_or_else(|_| panic!("services"))
             .reclaim(|_| {})
-            .unwrap_or_else(|_| panic!("reclaim"));
-        teardown.certify().unwrap_or_else(|_| panic!("certify"))
+            .unwrap_or_else(|_| panic!("reclaim"))
+            .certify()
+            .unwrap_or_else(|_| panic!("certify"))
     }
 
     #[test]
@@ -236,7 +302,10 @@ mod tests {
             Err(failure) => failure,
             Ok(_) => panic!("release fault"),
         };
-        assert!(matches!(failure.recovery, FailedFinalization::Logical(_)));
+        assert!(matches!(
+            failure.recovery,
+            FailedFinalization::Release { .. }
+        ));
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
         assert!(runtime.lifecycle.access().removal_attempt().is_some());
         assert_eq!(
@@ -255,10 +324,10 @@ mod tests {
         assert!(runtime.lifecycle.access().removal_attempt().is_none());
     }
 
-    #[test]
-    fn release_unwind_quarantines_atomically_with_claim_return() {
-        let runtime = Runtime::new();
-        let pending = pending(&runtime);
+    fn assert_release_unwind<K: TerminalCertificateKind>(
+        runtime: &Runtime<()>,
+        pending: CompletionPendingBinding<'_, (), K>,
+    ) {
         crate::runtime::capabilities::PANIC_BINDING_RELEASE.with(|fail| fail.set(true));
         let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
             pending.finish()
@@ -266,6 +335,72 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
         assert!(runtime.lifecycle.access().removal_attempt().is_none());
+    }
+
+    #[test]
+    fn release_unwind_quarantines_atomically_for_both_purposes() {
+        {
+            let runtime = Runtime::new();
+            assert_release_unwind(&runtime, pending(&runtime));
+        }
+        let runtime = Runtime::new();
+        assert_release_unwind(&runtime, pending_rollback(&runtime));
+    }
+
+    fn assert_arm_unwind<K: TerminalCertificateKind>(
+        runtime: &Runtime<()>,
+        pending: CompletionPendingBinding<'_, (), K>,
+    ) {
+        PANIC_DURING_ARM.with(|fault| fault.set(true));
+        let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            pending.finish()
+        }));
+        assert!(result.is_err());
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert!(runtime.lifecycle.access().removal_attempt().is_none());
+    }
+
+    #[test]
+    fn arm_unwind_uses_the_certified_recovery_for_both_purposes() {
+        {
+            let runtime = Runtime::new();
+            assert_arm_unwind(&runtime, pending(&runtime));
+        }
+        let runtime = Runtime::new();
+        assert_arm_unwind(&runtime, pending_rollback(&runtime));
+    }
+
+    #[test]
+    fn open_rollback_keeps_the_claim_through_logical_close_and_binding_release() {
+        let runtime = Runtime::new();
+        let pending = pending_rollback(&runtime);
+        let access = runtime.bind_addin_lifecycle().unwrap();
+        let logical = pending
+            .arm_finalization()
+            .finish_logical()
+            .unwrap_or_else(|_| panic!("logical finish"));
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+        assert!(runtime.lifecycle.access().removal_attempt().is_some());
+        assert!(
+            runtime
+                .shutdown_deps()
+                .empty_addin_lifecycle(&access)
+                .is_err()
+        );
+        let released = logical
+            .release_binding()
+            .unwrap_or_else(|_| panic!("release"));
+        assert!(
+            runtime
+                .shutdown_deps()
+                .has_addin_lifecycle(&access)
+                .is_err()
+        );
+        assert!(runtime.begin_open().is_err());
+        let finalized = released.finalize().unwrap_or_else(|_| panic!("finalize"));
+        drop(finalized);
+        assert!(runtime.lifecycle.access().removal_attempt().is_none());
+        assert!(runtime.begin_open().is_ok());
     }
 
     #[test]
@@ -285,13 +420,7 @@ mod tests {
             Err(failure) => failure,
             Ok(_) => panic!("quarantine request must prevent boundary success"),
         };
-        assert!(matches!(
-            failure.recovery,
-            FailedFinalization::Logical(LogicalBindingFailure {
-                _binding: TerminalBinding::Released,
-                ..
-            })
-        ));
+        assert!(matches!(failure.recovery, FailedFinalization::Boundary(_)));
         // Logical close already committed, while the terminal failure still
         // owns its claim. No owner with a success operation has been issued.
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
@@ -302,20 +431,33 @@ mod tests {
         assert!(runtime.lifecycle.access().removal_attempt().is_none());
     }
 
-    #[test]
-    fn reopened_returns_invalidate_an_already_certified_completion() {
-        let runtime = Runtime::new();
-        let pending = pending(&runtime);
+    fn assert_stale_certificate<K: TerminalCertificateKind>(
+        runtime: &Runtime<()>,
+        pending: CompletionPendingBinding<'_, (), K>,
+    ) {
+        let phase = runtime.phase();
         runtime.return_protocol.reopen_admission().unwrap();
         runtime.return_protocol.close_admission();
         let failure = match pending.finish() {
             Err(failure) => failure,
             Ok(_) => panic!("stale return drain must not complete logical closure"),
         };
-        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+        assert!(matches!(failure.recovery, FailedFinalization::Armed(_)));
+        assert_eq!(runtime.phase(), phase);
+        assert!(runtime.lifecycle.access().removal_attempt().is_some());
         drop(failure);
         assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
         assert!(runtime.lifecycle.access().removal_attempt().is_none());
+    }
+
+    #[test]
+    fn stale_certificate_retains_the_armed_stage_for_both_purposes() {
+        {
+            let runtime = Runtime::new();
+            assert_stale_certificate(&runtime, pending(&runtime));
+        }
+        let runtime = Runtime::new();
+        assert_stale_certificate(&runtime, pending_rollback(&runtime));
     }
 
     #[cfg(not(miri))]

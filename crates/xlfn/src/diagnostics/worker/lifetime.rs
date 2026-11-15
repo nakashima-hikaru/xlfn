@@ -4,21 +4,26 @@ use super::{DiagnosticObserver, DiagnosticObserverPtr, QueuedDiagnosticEvent};
 use crate::diagnostics::{DiagnosticInitError, DiagnosticSink};
 use crate::panic_boundary::{catch_no_unwind, contain_panic};
 use std::io;
+use std::mem::ManuallyDrop;
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::sync::mpsc::{self, SyncSender};
-use std::thread::JoinHandle;
+use std::thread::{JoinHandle, ThreadId};
 use xlfn_kernel::published_owner::PublishedOwner;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 pub(super) struct DiagnosticWorker {
-    handle: Option<JoinHandle<()>>,
-    thread_id: std::thread::ThreadId,
+    running: RollbackGuard<RunningDiagnosticWorker>,
+}
+
+struct RunningDiagnosticWorker {
+    handle: JoinHandle<()>,
     observer: PublishedOwner<DiagnosticObserver>,
 }
 
 /// Joining is the only operation that issues access to a completed worker.
 pub(super) struct JoinedDiagnosticWorker {
-    owner: DiagnosticWorker,
+    observer: PublishedOwner<DiagnosticObserver>,
     panicked: bool,
 }
 
@@ -61,43 +66,24 @@ impl DiagnosticWorker {
     // The observer/worker pairing is private to the operation that spawned it.
     fn issued(observer: PublishedOwner<DiagnosticObserver>, handle: JoinHandle<()>) -> Self {
         Self {
-            thread_id: handle.thread().id(),
-            handle: Some(handle),
-            observer,
+            running: RollbackGuard::new(RunningDiagnosticWorker { handle, observer }),
         }
     }
 
     pub(super) fn observer(&self) -> &DiagnosticObserver {
-        &self.observer
+        &self.running.get().observer
     }
 
-    pub(super) fn thread_id(&self) -> std::thread::ThreadId {
-        self.thread_id
+    pub(super) fn thread_id(&self) -> ThreadId {
+        self.running.get().thread_id()
     }
 
     pub(super) fn is_current_thread(&self) -> bool {
-        std::thread::current().id() == self.thread_id
+        std::thread::current().id() == self.thread_id()
     }
 
-    pub(super) fn join(mut self) -> JoinedDiagnosticWorker {
-        self.reject_self_join();
-        let panicked = self.join_handle();
-        JoinedDiagnosticWorker {
-            owner: self,
-            panicked,
-        }
-    }
-
-    fn reject_self_join(&self) {
-        if self.is_current_thread() {
-            xlfn_kernel::invariant::fail_stop();
-        }
-    }
-
-    fn join_handle(&mut self) -> bool {
-        self.handle
-            .take()
-            .is_some_and(|handle| contain_panic(handle.join()).is_err())
+    pub(super) fn join(self) -> JoinedDiagnosticWorker {
+        self.running.complete().join()
     }
 
     #[cfg(test)]
@@ -107,17 +93,32 @@ impl DiagnosticWorker {
     ) -> Self {
         Self::issued(observer, handle)
     }
+}
 
-    #[cfg(test)]
-    pub(super) fn join_for_test(&mut self) -> bool {
-        self.reject_self_join();
-        self.join_handle()
+impl RunningDiagnosticWorker {
+    fn thread_id(&self) -> ThreadId {
+        self.handle.thread().id()
+    }
+
+    fn join(self) -> JoinedDiagnosticWorker {
+        let Self { handle, observer } = self;
+        // Retain the pointer target if the join operation itself unwinds. A
+        // returned result, including a worker panic, certifies thread exit.
+        let observer = ManuallyDrop::new(observer);
+        if std::thread::current().id() == handle.thread().id() {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        let panicked = contain_panic(handle.join()).is_err();
+        JoinedDiagnosticWorker {
+            observer: ManuallyDrop::into_inner(observer),
+            panicked,
+        }
     }
 }
 
 impl JoinedDiagnosticWorker {
     pub(super) fn observer(&self) -> &DiagnosticObserver {
-        self.owner.observer()
+        &self.observer
     }
 
     pub(super) fn panicked(&self) -> bool {
@@ -125,15 +126,13 @@ impl JoinedDiagnosticWorker {
     }
 }
 
-impl Drop for DiagnosticWorker {
-    fn drop(&mut self) {
-        self.reject_self_join();
-        if self.join_handle() {
+impl Rollback for RunningDiagnosticWorker {
+    fn rollback(self) {
+        let joined = self.join();
+        if joined.panicked() {
             let _ = catch_no_unwind(AssertUnwindSafe(|| {
                 tracing::error!("diagnostic logger worker panicked during drop");
             }));
         }
-        // Ordinary field destruction may now release the observer. Before
-        // join, forgetting this entire owner retains both worker and target.
     }
 }

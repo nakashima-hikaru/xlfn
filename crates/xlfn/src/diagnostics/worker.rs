@@ -582,10 +582,10 @@ mod budget_tests {
             std::hint::black_box(&queued);
             panic!("injected worker failure with queued payloads");
         });
-        let mut sink = Box::new(AsyncDiagnosticSink {
+        let sink = AsyncDiagnosticSink {
             sender,
             worker: DiagnosticWorker::from_parts_for_test(observer, worker),
-        });
+        };
         let error = crate::XllError::Native {
             code: 1,
             message: "owned".to_owned(),
@@ -595,9 +595,11 @@ mod budget_tests {
         }
         assert_eq!(sink.worker.observer().reserved_payload_bytes(), 15);
         release_tx.send(()).unwrap();
-        assert!(sink.worker.join_for_test());
-        assert_eq!(sink.worker.observer().reserved_payload_bytes(), 0);
-        assert_eq!(sink.worker.observer().reserved.load(Ordering::Relaxed), 0);
-        sink.shutdown().unwrap();
+        let AsyncDiagnosticSink { sender, worker } = sink;
+        drop(sender);
+        let joined = worker.join();
+        assert!(joined.panicked());
+        assert_eq!(joined.observer().reserved_payload_bytes(), 0);
+        assert_eq!(joined.observer().reserved.load(Ordering::Relaxed), 0);
     }
 }

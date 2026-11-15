@@ -8,6 +8,7 @@ use crate::win32::{COINIT_MULTITHREADED, RPC_E_CHANGED_MODE, S_FALSE, S_OK};
 use crate::{XllError, XllResult};
 use std::ffi::c_void;
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
 #[cfg(test)]
@@ -70,34 +71,26 @@ impl Drop for ComApartmentGuard {
 }
 
 pub(super) struct GitCookieLease {
-    cookie: Option<std::num::NonZeroU32>,
+    cookie: NonZeroU32,
 }
 
 impl GitCookieLease {
-    pub(super) fn from_registered(cookie: std::num::NonZeroU32) -> Self {
+    pub(super) fn from_registered(cookie: NonZeroU32) -> Self {
         module_lifetime().git_cookie_registered();
-        Self {
-            cookie: Some(cookie),
-        }
+        Self { cookie }
     }
 
     fn raw(&self) -> u32 {
-        self.cookie
-            .expect("live GIT cookie lease contains a cookie")
-            .get()
+        self.cookie.get()
     }
 }
 
 impl Drop for GitCookieLease {
     fn drop(&mut self) {
-        let Some(cookie) = self.cookie.take() else {
-            return;
-        };
-
-        match revoke_git_cookie(cookie.get()) {
+        match revoke_git_cookie(self.cookie) {
             Ok(()) => module_lifetime().git_cookie_revoked(),
             Err(error) => {
-                module_lifetime().git_cookie_revocation_deferred(cookie);
+                module_lifetime().git_cookie_revocation_deferred(self.cookie);
                 crate::diagnostics::report_no_unwind("RTD GIT callback revocation", &error);
             }
         }
@@ -111,11 +104,7 @@ pub(super) struct RetainedUpdateCallback {
     pub(super) drop_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
-fn revoke_git_cookie(cookie: u32) -> XllResult<()> {
-    if cookie == 0 {
-        return Ok(());
-    }
-
+fn revoke_git_cookie(cookie: NonZeroU32) -> XllResult<()> {
     let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::WindowsApi {
         function: "CoInitializeEx",
         code,
@@ -128,7 +117,7 @@ fn revoke_git_cookie(cookie: u32) -> XllResult<()> {
             function: "CoCreateInstance(IGlobalInterfaceTable)",
             code: status,
         })?;
-        let status = git.revoke(cookie);
+        let status = git.revoke(cookie.get());
         if status >= 0 {
             Ok(())
         } else {
@@ -144,10 +133,10 @@ pub(super) fn retry_git_revocation_debt() {
     retry_git_revocation_debt_with(revoke_git_cookie);
 }
 
-pub(super) fn retry_git_revocation_debt_with(mut revoke: impl FnMut(u32) -> XllResult<()>) {
+pub(super) fn retry_git_revocation_debt_with(mut revoke: impl FnMut(NonZeroU32) -> XllResult<()>) {
     let claims = module_lifetime().claim_git_revocation_debt_batch();
     for claim in claims {
-        match revoke(claim.raw()) {
+        match revoke(claim.cookie()) {
             Ok(()) => claim.resolve(),
             Err(error) => {
                 crate::diagnostics::report_no_unwind("RTD GIT callback revocation retry", &error);

@@ -1,5 +1,6 @@
 use crate::sync::{Condvar, Mutex};
 use std::num::NonZeroU32;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct ComModuleState {
@@ -52,33 +53,29 @@ pub(super) struct ComModuleQuiescenceError {
     pub(super) state: ComModuleState,
 }
 
-pub(super) struct GitRevocationDebtClaim {
-    cookie: Option<NonZeroU32>,
+pub(super) struct GitRevocationDebtClaim<'module> {
+    pending: RollbackGuard<PendingGitRevocation<'module>>,
 }
 
-impl GitRevocationDebtClaim {
-    pub(super) fn raw(&self) -> u32 {
-        self.cookie
-            .expect("unresolved GIT revocation debt contains a cookie")
-            .get()
-    }
+struct PendingGitRevocation<'module> {
+    module: &'module ComModuleLifetime,
+    cookie: NonZeroU32,
+}
 
-    pub(super) fn resolve(mut self) {
-        let _cookie = self
-            .cookie
-            .take()
-            .expect("GIT revocation debt is resolved once");
-        super::module_lifetime().git_revocation_debt_resolved();
+impl Rollback for PendingGitRevocation<'_> {
+    fn rollback(self) {
+        self.module.requeue_git_revocation_debt(self.cookie);
     }
 }
 
-impl Drop for GitRevocationDebtClaim {
-    fn drop(&mut self) {
-        let Some(cookie) = self.cookie.take() else {
-            return;
-        };
+impl GitRevocationDebtClaim<'_> {
+    pub(super) fn cookie(&self) -> NonZeroU32 {
+        self.pending.get().cookie
+    }
 
-        super::module_lifetime().requeue_git_revocation_debt(cookie);
+    pub(super) fn resolve(self) {
+        let PendingGitRevocation { module, .. } = self.pending.complete();
+        module.git_revocation_debt_resolved();
     }
 }
 
@@ -159,13 +156,13 @@ impl ComModuleLifetime {
         self.quiescent.notify_all();
     }
 
-    pub(super) fn git_revocation_debt_resolved(&self) {
+    fn git_revocation_debt_resolved(&self) {
         let mut inner = self.inner.lock();
         Self::decrement(&mut inner.state.revocation_debt);
         self.quiescent.notify_all();
     }
 
-    pub(super) fn claim_git_revocation_debt_batch(&self) -> Vec<GitRevocationDebtClaim> {
+    pub(super) fn claim_git_revocation_debt_batch(&self) -> Vec<GitRevocationDebtClaim<'_>> {
         let cookies = {
             let mut inner = self.inner.lock();
             std::mem::take(&mut inner.git_revocation_debt)
@@ -174,12 +171,15 @@ impl ComModuleLifetime {
         cookies
             .into_iter()
             .map(|cookie| GitRevocationDebtClaim {
-                cookie: Some(cookie),
+                pending: RollbackGuard::new(PendingGitRevocation {
+                    module: self,
+                    cookie,
+                }),
             })
             .collect()
     }
 
-    pub(super) fn requeue_git_revocation_debt(&self, cookie: NonZeroU32) {
+    fn requeue_git_revocation_debt(&self, cookie: NonZeroU32) {
         let mut inner = self.inner.lock();
         // The debt count already includes this claim, so only return its
         // ownership to the queue. Do not change the count here.
@@ -390,5 +390,44 @@ impl ComObjectLease {
 impl Drop for ComObjectLease {
     fn drop(&mut self) {
         super::module_lifetime().object_destroyed(self.kind);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_revocation_claim_returns_to_and_resolves_its_issuer() {
+        let issuer = ComModuleLifetime::new();
+        let other = ComModuleLifetime::new();
+        let cookie = NonZeroU32::new(41).unwrap();
+        for module in [&issuer, &other] {
+            module.git_cookie_registered();
+            module.git_cookie_revocation_deferred(cookie);
+        }
+
+        let claim = issuer.claim_git_revocation_debt_batch().pop().unwrap();
+        assert_eq!(claim.cookie(), cookie);
+        assert!(issuer.queued_git_revocation_debt().is_empty());
+        assert!(!issuer.can_unload_now());
+        drop(claim);
+        assert_eq!(issuer.queued_git_revocation_debt(), [cookie]);
+        assert_eq!(issuer.snapshot().revocation_debt, 1);
+
+        issuer
+            .claim_git_revocation_debt_batch()
+            .pop()
+            .unwrap()
+            .resolve();
+        assert!(issuer.can_unload_now());
+        assert_eq!(other.queued_git_revocation_debt(), [cookie]);
+        assert!(!other.can_unload_now());
+        other
+            .claim_git_revocation_debt_batch()
+            .pop()
+            .unwrap()
+            .resolve();
+        assert!(other.can_unload_now());
     }
 }

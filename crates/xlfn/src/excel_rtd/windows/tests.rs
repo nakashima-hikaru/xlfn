@@ -993,7 +993,10 @@ fn git_revocation_retry_in_flight_keeps_unload_blocked() {
         });
     });
 
-    assert_eq!(claimed_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 41);
+    assert_eq!(
+        claimed_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        cookie
+    );
     let retrying = module_lifetime().snapshot();
     assert_eq!(retrying.revocation_debt, 1);
     assert!(module_lifetime().queued_git_revocation_debt().is_empty());
@@ -1009,22 +1012,34 @@ fn panicking_git_revocation_retry_requeues_claim() {
     let _guard = TEST_LOCK.lock().unwrap();
     let baseline = module_lifetime().snapshot();
     assert!(baseline.is_quiescent());
-    let cookie = NonZeroU32::new(41).unwrap();
+    let cookies = [41, 42, 43].map(|cookie| NonZeroU32::new(cookie).unwrap());
+    for cookie in cookies {
+        module_lifetime().git_cookie_registered();
+        module_lifetime().git_cookie_revocation_deferred(cookie);
+    }
 
-    module_lifetime().git_cookie_registered();
-    module_lifetime().git_cookie_revocation_deferred(cookie);
-
+    let mut attempted = Vec::new();
     let result = catch_unwind(AssertUnwindSafe(|| {
-        retry_git_revocation_debt_with(|_| panic!("injected GIT revoke panic"));
+        retry_git_revocation_debt_with(|cookie| {
+            attempted.push(cookie);
+            assert_ne!(cookie, cookies[1], "injected GIT revoke panic");
+            Ok(())
+        });
     }));
     assert!(result.is_err());
-    assert_eq!(module_lifetime().snapshot().revocation_debt, 1);
-    assert_eq!(module_lifetime().queued_git_revocation_debt(), vec![cookie]);
+    assert_eq!(attempted, cookies[..2]);
+    assert_eq!(module_lifetime().snapshot().revocation_debt, 2);
+    let mut queued = module_lifetime().queued_git_revocation_debt();
+    queued.sort_unstable();
+    assert_eq!(queued, cookies[1..]);
 
+    let mut retried = Vec::new();
     retry_git_revocation_debt_with(|cookie| {
-        assert_eq!(cookie, 41);
+        retried.push(cookie);
         Ok(())
     });
+    retried.sort_unstable();
+    assert_eq!(retried, cookies[1..]);
     assert_eq!(module_lifetime().snapshot(), baseline);
 }
 
@@ -1048,7 +1063,7 @@ fn module_quiescence_refuses_debt_claim_in_flight() {
 
     drop(claims);
     retry_git_revocation_debt_with(|cookie| {
-        assert_eq!(cookie, 41);
+        assert_eq!(cookie.get(), 41);
         Ok(())
     });
     assert_eq!(module_lifetime().snapshot(), baseline);
@@ -1846,7 +1861,7 @@ fn failed_git_revocation_is_retained_and_retryable() {
     let mut attempts = 0;
     retry_git_revocation_debt_with(|cookie| {
         attempts += 1;
-        assert_eq!(cookie, 41);
+        assert_eq!(cookie.get(), 41);
         Err(error.clone())
     });
     assert_eq!(attempts, 1);
@@ -1858,7 +1873,7 @@ fn failed_git_revocation_is_retained_and_retryable() {
 
     retry_git_revocation_debt_with(|cookie| {
         attempts += 1;
-        assert_eq!(cookie, 41);
+        assert_eq!(cookie.get(), 41);
         Ok(())
     });
     assert_eq!(attempts, 2);

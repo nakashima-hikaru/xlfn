@@ -91,6 +91,8 @@ MODULES = {
     "lifecycle/state": Path("crates/xlfn/src/lifecycle/state.rs"),
     "runtime/open_txn": Path("crates/xlfn/src/runtime/open_txn.rs"),
     "runtime/shutdown/pipeline": Path("crates/xlfn/src/runtime/shutdown/pipeline.rs"),
+    "runtime/shutdown/finalization": Path("crates/xlfn/src/runtime/shutdown/finalization.rs"),
+    "runtime/transactions": Path("crates/xlfn/src/runtime/transactions.rs"),
     "excel_rtd/windows": Path("crates/xlfn/src/excel_rtd/windows.rs"),
 }
 WINDOWS_MODULES = {

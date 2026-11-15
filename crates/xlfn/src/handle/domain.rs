@@ -42,13 +42,14 @@ pub(crate) struct HandleReadDomain {
 }
 
 pub(crate) struct HandleDomainPermit {
-    domain: NonNull<HandleReadDomain>,
-    permit: Option<RotatingReadOwnedPermit<DEFAULT_STRIPE_COUNT>>,
+    // Release this generation's reader count before trying to reclaim it.
+    _permit: RotatingReadOwnedPermit<DEFAULT_STRIPE_COUNT>,
+    maintenance: OwnedReaderMaintenance,
 }
 
 impl HandleDomainPermit {
     pub(crate) fn domain(&self) -> NonNull<HandleReadDomain> {
-        self.domain
+        self.maintenance.0
     }
 
     #[cfg(test)]
@@ -58,26 +59,29 @@ impl HandleDomainPermit {
     }
 }
 
-impl Drop for HandleDomainPermit {
+struct OwnedReaderMaintenance(NonNull<HandleReadDomain>);
+
+impl Drop for OwnedReaderMaintenance {
     fn drop(&mut self) {
-        drop(self.permit.take());
         // SAFETY: enter_owned requires the domain owner to outlive the whole
         // capability, including this final maintenance notification.
-        unsafe { self.domain.as_ref() }.maintain_after_reader();
+        unsafe { self.0.as_ref() }.maintain_after_reader();
     }
 }
 
 #[cfg(test)]
 pub(crate) struct HandleBindingDomainPermit<'domain> {
-    domain: &'domain HandleReadDomain,
-    permit: Option<RotatingReadPermit<'domain, DEFAULT_STRIPE_COUNT>>,
+    _permit: RotatingReadPermit<'domain, DEFAULT_STRIPE_COUNT>,
+    _maintenance: BorrowedReaderMaintenance<'domain>,
 }
 
 #[cfg(test)]
-impl Drop for HandleBindingDomainPermit<'_> {
+struct BorrowedReaderMaintenance<'domain>(&'domain HandleReadDomain);
+
+#[cfg(test)]
+impl Drop for BorrowedReaderMaintenance<'_> {
     fn drop(&mut self) {
-        drop(self.permit.take());
-        self.domain.maintain_after_reader();
+        self.0.maintain_after_reader();
     }
 }
 
@@ -95,8 +99,8 @@ impl HandleReadDomain {
         self.retirement
             .enter_current_thread()
             .map(|permit| HandleBindingDomainPermit {
-                domain: self,
-                permit: Some(permit),
+                _permit: permit,
+                _maintenance: BorrowedReaderMaintenance(self),
             })
             .map_err(|_| XllError::Closing)
     }
@@ -106,7 +110,8 @@ impl HandleReadDomain {
     /// # Safety
     ///
     /// The caller must ensure that `self` outlives the returned [`HandleDomainPermit`].
-    /// All permits must be dropped before the domain is destroyed or moved.
+    /// The domain must remain at the same address until dropping the permit
+    /// has finished both reader release and its reclamation maintenance.
     ///
     /// Protocol obligation [HD-1]: Reader admission under domain isolation guarantees safe access.
     #[inline]
@@ -117,8 +122,8 @@ impl HandleReadDomain {
             self.retirement
                 .enter_owned_current_thread()
                 .map(|permit| HandleDomainPermit {
-                    domain: NonNull::from(self),
-                    permit: Some(permit),
+                    _permit: permit,
+                    maintenance: OwnedReaderMaintenance(NonNull::from(self)),
                 })
                 .map_err(|_| XllError::Closing)
         }

@@ -94,10 +94,6 @@ pub(crate) trait TerminalCertificateKind: Sized {
     fn complete_finalization<'runtime, A: crate::Addin>(
         completed: &mut Self::Completed<'runtime, A>,
     ) -> crate::XllResult<()>;
-    fn mark_finalization_failed<'runtime, A: crate::Addin>(
-        completed: &mut Self::Completed<'runtime, A>,
-    );
-
     fn finish<'runtime, A: crate::Addin>(
         certificate: Self::Certificate<'runtime, A>,
     ) -> LogicalCompletionResult<'runtime, A, Self>;
@@ -122,6 +118,8 @@ impl TerminalCertificateKind for FinalRemoval {
     fn arm_finalization<'runtime, A: crate::Addin>(
         certificate: &mut Self::Certificate<'runtime, A>,
     ) {
+        #[cfg(test)]
+        super::finalization::check_arm_fault();
         match certificate {
             FinalRemovalCertificate::Committed { owner, .. }
             | FinalRemovalCertificate::Uncommitted { owner, .. } => {
@@ -134,12 +132,6 @@ impl TerminalCertificateKind for FinalRemoval {
     ) -> crate::XllResult<()> {
         completed.1.complete_finalization()
     }
-    fn mark_finalization_failed<'runtime, A: crate::Addin>(
-        completed: &mut Self::Completed<'runtime, A>,
-    ) {
-        completed.1.mark_finalization_failed();
-    }
-
     fn finish<'runtime, A: crate::Addin>(
         certificate: Self::Certificate<'runtime, A>,
     ) -> LogicalCompletionResult<'runtime, A, Self> {
@@ -169,6 +161,8 @@ impl TerminalCertificateKind for OpenRollback {
     fn arm_finalization<'runtime, A: crate::Addin>(
         certificate: &mut Self::Certificate<'runtime, A>,
     ) {
+        #[cfg(test)]
+        super::finalization::check_arm_fault();
         certificate.owner.mark_finalization_failed();
     }
     fn complete_finalization<'runtime, A: crate::Addin>(
@@ -176,12 +170,6 @@ impl TerminalCertificateKind for OpenRollback {
     ) -> crate::XllResult<()> {
         completed.complete_finalization()
     }
-    fn mark_finalization_failed<'runtime, A: crate::Addin>(
-        completed: &mut Self::Completed<'runtime, A>,
-    ) {
-        completed.mark_finalization_failed();
-    }
-
     fn finish<'runtime, A: crate::Addin>(
         certificate: Self::Certificate<'runtime, A>,
     ) -> LogicalCompletionResult<'runtime, A, Self> {

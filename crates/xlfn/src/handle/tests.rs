@@ -1842,7 +1842,7 @@ fn uncalculated_rtd_connection_rolls_back_an_already_connected_topic() {
 }
 
 #[test]
-fn uncommitted_connect_transaction_rolls_back_only_the_excel_connection() {
+fn miri_uncommitted_connect_transaction_unwind_rolls_back_only_the_excel_connection() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("transactional");
     let lifetime_key = key.format_lifetime_key();
@@ -1851,11 +1851,14 @@ fn uncommitted_connect_transaction_rolls_back_only_the_excel_connection() {
         .unwrap()
         .into_token();
 
-    let connection = runtime
-        .connect_transaction(lifetime_generation(1), 10, &lifetime_key)
-        .unwrap();
-    assert_eq!(connection.token(), token);
-    drop(connection);
+    let unwound = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+        let connection = runtime
+            .connect_transaction(lifetime_generation(1), 10, &lifetime_key)
+            .unwrap();
+        assert_eq!(connection.token(), token);
+        panic!("exercise observer reservation rollback");
+    }));
+    assert!(unwound.is_err());
 
     assert_eq!(runtime.len(), 1);
     assert_eq!(
@@ -4211,13 +4214,14 @@ fn miri_ghostcell_scope_releases_permits_during_unwind() {
         });
     }));
     assert!(unwound.is_err());
-    registry.bindings.read_domain().flush_for_test();
+    assert_eq!(registry.bindings.read_domain().debt(), 0);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
 #[test]
 fn ghostcell_handle_authority_stays_thread_bound() {
     static_assertions::assert_not_impl_any!(Handle<'static, DataRecord>: Send, Sync);
+    static_assertions::assert_not_impl_any!(crate::handle::HandleDomainPermit: Send, Sync);
     static_assertions::assert_not_impl_any!(crate::call::CallStorage<'static, 'static>: Send, Sync);
     static_assertions::assert_not_impl_any!(crate::value::DecodeCallContext<'static, 'static>: Send, Sync);
 }

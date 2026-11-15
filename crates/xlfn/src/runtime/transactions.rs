@@ -9,9 +9,13 @@ use crate::runtime::capabilities::ShutdownDeps;
 #[cfg(test)]
 use crate::runtime::open_txn::RollbackState;
 use crate::runtime::open_txn::{GenerationStaged, HostAttached, OpeningState, OpeningTxn};
-use crate::runtime::shutdown::{FinalRemoval, FinalizedRemoval, RemovalOwner};
+use crate::runtime::shutdown::{
+    ExecutionDrainFailure, ExecutionDrained, FinalRemoval, FinalizedRemoval, RemovalOwner,
+    TeardownTxn,
+};
 use crate::runtime::{AddinLifecycleAccess, Runtime};
 use std::panic::AssertUnwindSafe;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 use crate::boundary::{report_boundary_error, report_cleanup_issue};
 use crate::lifecycle::lifecycle_access_error;
@@ -255,16 +259,36 @@ pub(crate) enum RemovalControl {
     },
 }
 
-/// Owns the terminal-removal attempt and borrows its Excel-entry session. Cleanup is
-/// explicit: the transaction is consumed only after a close certificate is
-/// produced, while an active drop can only preserve quarantine.
-struct RemovalTransaction<'runtime, 'call, A: Addin> {
-    deps: ShutdownDeps<'runtime, A>,
+/// Holds the removal claim while checking prerequisites for execution drain.
+struct RemovalClaimed<'runtime, 'call, A: Addin> {
+    pending: RollbackGuard<UndrainedRemoval<'runtime, A>>,
     callbacks: &'call mut HostCallbackSession,
-    attempt: Option<RemovalOwner<'runtime, A, FinalRemoval>>,
 }
 
-impl<'runtime, 'call, A: Addin> RemovalTransaction<'runtime, 'call, A> {
+struct UndrainedRemoval<'runtime, A: Addin> {
+    deps: ShutdownDeps<'runtime, A>,
+    attempt: RemovalOwner<'runtime, A, FinalRemoval>,
+}
+
+impl<A: Addin> Rollback for UndrainedRemoval<'_, A> {
+    fn rollback(self) {
+        // Quarantine before the attempt returns its authority. Host cleanup
+        // requires an explicit boundary with a successful drain.
+        self.deps.quarantine_state();
+    }
+}
+
+struct HostCleanupContext<'runtime, 'call, A: Addin> {
+    deps: ShutdownDeps<'runtime, A>,
+    callbacks: &'call mut HostCallbackSession,
+}
+
+type DrainedRemoval<'runtime, 'call, A> = (
+    TeardownTxn<'runtime, A, FinalRemoval, ExecutionDrained>,
+    HostCleanupContext<'runtime, 'call, A>,
+);
+
+impl<'runtime, 'call, A: Addin> RemovalClaimed<'runtime, 'call, A> {
     fn begin(
         runtime: &'runtime Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
         callbacks: &'call mut HostCallbackSession,
@@ -272,35 +296,27 @@ impl<'runtime, 'call, A: Addin> RemovalTransaction<'runtime, 'call, A> {
         let deps = runtime.shutdown_deps();
         let attempt = RemovalOwner::acquire_final(deps)?;
         Some(Self {
-            deps,
+            pending: RollbackGuard::new(UndrainedRemoval { deps, attempt }),
             callbacks,
-            attempt: Some(attempt),
         })
     }
 
     fn deps(&self) -> ShutdownDeps<'runtime, A> {
-        self.deps
+        self.pending.get().deps
     }
 
-    fn callbacks_mut(&mut self) -> &mut HostCallbackSession {
-        self.callbacks
-    }
-
-    fn take_attempt(&mut self) -> RemovalOwner<'runtime, A, FinalRemoval> {
-        self.attempt
-            .take()
-            .expect("a removal transaction always owns its attempt")
-    }
-}
-
-impl<A: Addin> Drop for RemovalTransaction<'_, '_, A> {
-    fn drop(&mut self) {
-        if self.attempt.is_some() {
-            // No callback or partial cleanup is legal from Drop. The runtime
-            // remains terminally quarantined until an explicit boundary can
-            // account for every outstanding resource.
-            self.deps.quarantine_state();
-        }
+    fn drain(
+        self,
+    ) -> Result<DrainedRemoval<'runtime, 'call, A>, ExecutionDrainFailure<'runtime, A>> {
+        let UndrainedRemoval { deps, attempt } = self.pending.complete();
+        let teardown = attempt.drain()?;
+        Ok((
+            teardown,
+            HostCleanupContext {
+                deps,
+                callbacks: self.callbacks,
+            },
+        ))
     }
 }
 
@@ -331,15 +347,14 @@ where
     // Even an apparently closed runtime must pass through begin_final_removal:
     // a concurrent xlAutoOpen may already have sampled the previous close
     // epoch without having acquired its open-attempt token yet.
-    let Some(mut transaction) = RemovalTransaction::begin(runtime, callbacks) else {
+    let Some(claim) = RemovalClaimed::begin(runtime, callbacks) else {
         return Ok(RemovalSuccess::AlreadyClosed);
     };
-    let shutdown_deps = transaction.deps();
     runtime.observer().begin_close();
 
     let mut report = crate::shutdown::CloseReport::default();
     let mut unload_failure: Option<(crate::shutdown::UnloadHazard, &'static str, XllError)> = None;
-    let _lifecycle_present = match shutdown_deps.has_addin_lifecycle(lifecycle) {
+    let _lifecycle_present = match claim.deps().has_addin_lifecycle(lifecycle) {
         Ok(present) => present,
         Err(error) => {
             let error = lifecycle_access_error(error);
@@ -352,7 +367,13 @@ where
         }
     };
 
-    let teardown = match transaction.take_attempt().drain() {
+    let (
+        teardown,
+        HostCleanupContext {
+            deps: shutdown_deps,
+            callbacks,
+        },
+    ) = match claim.drain() {
         Ok(stage) => stage,
         Err(failure) => {
             let hazard = failure.hazard();
@@ -384,7 +405,7 @@ where
     runtime.observer().subscriptions_drained();
 
     let cleanup = catch_no_unwind(AssertUnwindSafe(|| {
-        let host = RegistrationHost::new(transaction.callbacks_mut());
+        let host = RegistrationHost::new(callbacks);
         shutdown_deps.host().cleanup_registrations(&host)
     }))
     .map_err(|_| XllError::Panic)
@@ -595,4 +616,27 @@ where
         }
     };
     Ok(RemovalSuccess::Closed { finalized })
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+    use crate::lifecycle::LifecyclePhase;
+
+    #[test]
+    fn miri_undrained_removal_claim_quarantines_before_releasing_authority() {
+        let runtime = Runtime::<()>::new();
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
+        let mut callbacks = HostCallbackSession::new();
+        let claimed = RemovalClaimed::begin(&runtime, &mut callbacks).unwrap();
+        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+        assert!(runtime.lifecycle.access().removal_attempt().is_some());
+
+        drop(claimed);
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert!(runtime.lifecycle.access().removal_attempt().is_none());
+        assert!(runtime.begin_open().is_err());
+    }
 }

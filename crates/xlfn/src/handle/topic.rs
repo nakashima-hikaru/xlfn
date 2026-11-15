@@ -92,13 +92,14 @@ unsafe impl Sync for PublishedTopicPtr {}
 /// A scoped read capability that protects published topics from being reclaimed
 /// while they are being inspected.
 pub(crate) struct TopicReadLease<'a> {
-    table: &'a TopicTable,
-    permit: Option<RotatingReadPermit<'a, DEFAULT_STRIPE_COUNT>>,
+    // Field drop order releases admission before retrying reclamation.
+    _permit: RotatingReadPermit<'a, DEFAULT_STRIPE_COUNT>,
+    maintenance: TopicReaderMaintenance<'a>,
 }
 
 impl<'a> TopicReadLease<'a> {
     pub(crate) fn load(&self, key: &HandleTopicKey) -> Option<PublishedTopicRef<'_>> {
-        let ptr = self.table.published.load(key)?;
+        let ptr = self.maintenance.0.published.load(key)?;
         Some(PublishedTopicRef {
             ptr: ptr.0,
             _marker: PhantomData,
@@ -106,13 +107,14 @@ impl<'a> TopicReadLease<'a> {
     }
 }
 
-impl Drop for TopicReadLease<'_> {
+struct TopicReaderMaintenance<'a>(&'a TopicTable);
+
+impl Drop for TopicReaderMaintenance<'_> {
     fn drop(&mut self) {
-        drop(self.permit.take());
         // The table borrow protects this completion tail as well as the
         // permit. FormulaHandleService also retains prepare admission until
         // this drop returns, so close cannot recover the service mid-tail.
-        self.table.maintain_after_reader();
+        self.0.maintain_after_reader();
     }
 }
 
@@ -261,8 +263,8 @@ impl TopicTable {
             .enter_current_thread()
             .map_err(|_| XllError::Closing)?;
         Ok(TopicReadLease {
-            table: self,
-            permit: Some(permit),
+            _permit: permit,
+            maintenance: TopicReaderMaintenance(self),
         })
     }
 
