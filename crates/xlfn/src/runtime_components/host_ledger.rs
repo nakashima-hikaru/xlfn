@@ -124,7 +124,6 @@ impl HostLedger {
         Ok(RegistrationCleanupClaim {
             ledger: self,
             registrations: Some(registrations),
-            finished: false,
         })
     }
 
@@ -182,7 +181,6 @@ impl HostLedger {
         MetadataCleanupClaim {
             ledger: self,
             debts: Some(debts),
-            finished: false,
         }
         .execute(host)
     }
@@ -209,7 +207,6 @@ pub(crate) struct RegistrationCleanupReport {
 struct RegistrationCleanupClaim<'ledger> {
     ledger: &'ledger HostLedger,
     registrations: Option<Vec<PendingRegistration>>,
-    finished: bool,
 }
 impl RegistrationCleanupClaim<'_> {
     fn execute(
@@ -246,16 +243,12 @@ impl RegistrationCleanupClaim<'_> {
                 .or_default()
                 .push(debt);
         }
-        self.finished = true;
         state.cleanup_in_progress = false;
         Ok(report)
     }
 }
 impl Drop for RegistrationCleanupClaim<'_> {
     fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
         // Before host execution the original entries can be restored. After
         // execution started there may be partial effects: keep the gate sticky.
         if let Some(registrations) = self.registrations.take() {
@@ -269,7 +262,6 @@ impl Drop for RegistrationCleanupClaim<'_> {
 struct MetadataCleanupClaim<'ledger> {
     ledger: &'ledger HostLedger,
     debts: Option<BTreeMap<ExcelNameKey, Vec<MetadataDebt>>>,
-    finished: bool,
 }
 impl MetadataCleanupClaim<'_> {
     fn execute(
@@ -287,16 +279,14 @@ impl MetadataCleanupClaim<'_> {
                 .or_default()
                 .append(&mut debts);
         }
-        self.finished = true;
         state.metadata_cleanup_in_progress = false;
         outcome
     }
 }
 impl Drop for MetadataCleanupClaim<'_> {
     fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
+        // Once the entries cross the host boundary, partial effects leave the
+        // cleanup gate sticky until an explicit outcome is published.
         if let Some(debts) = self.debts.take() {
             let mut state = self.ledger.state.lock();
             for (key, mut debts) in debts {
@@ -462,7 +452,6 @@ mod cleanup_tests {
         let claim = MetadataCleanupClaim {
             ledger: &ledger,
             debts: Some(debts),
-            finished: false,
         };
         assert!(!ledger.is_quiescent());
         drop(claim);

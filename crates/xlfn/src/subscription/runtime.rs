@@ -33,6 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use termination::{RuntimeTermination, RuntimeTerminationAdmission, RuntimeTerminationControl};
 use xlfn_kernel::operation_gate::OperationGuard;
 use xlfn_kernel::published_owner::PublishedOwner;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 #[cfg(test)]
 pub(crate) type OperationEnterHook = Arc<dyn Fn() + Send + Sync + 'static>;
@@ -376,16 +377,16 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             };
             result?
         };
-        let transaction = ConnectionTransaction {
-            reservation: Some(ConnectionReservation {
+        let transaction = ConnectionTransaction::new(
+            ConnectionReservation {
                 runtime: NonNull::from(runtime),
                 operation,
                 topic_id,
                 id,
                 ticket,
-            }),
-            state: CatalogReserved,
-        }
+            },
+            CatalogReserved,
+        )
         .reserve_publication()?;
 
         // Prepare worker startup and terminal cleanup capacity before any
@@ -792,6 +793,33 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     }
 }
 
+struct ConnectionPending<
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+    S: ConnectionStage,
+> {
+    // Release the server operation before dropping the installed value.
+    reservation: ConnectionReservation<H, E, C>,
+    stage: S,
+}
+
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>, S: ConnectionStage>
+    ConnectionPending<H, E, C, S>
+{
+    fn rollback_with_result(self) -> XllResult<()> {
+        self.reservation.rollback(S::HAS_PUBLICATION)
+    }
+}
+
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>, S: ConnectionStage>
+    Rollback for ConnectionPending<H, E, C, S>
+{
+    fn rollback(self) {
+        let _ = self.rollback_with_result();
+    }
+}
+
 #[must_use = "dropping a connection transaction rolls it back"]
 pub(crate) struct ConnectionTransaction<
     H: SubscriptionHost,
@@ -799,10 +827,7 @@ pub(crate) struct ConnectionTransaction<
     C: crate::RtdSourceCatalog<E>,
     S: ConnectionStage,
 > {
-    // None exists only while a consuming transition or completion transfers
-    // the sole obligation; callers cannot construct a disarmed transaction.
-    reservation: Option<ConnectionReservation<H, E, C>>,
-    state: S,
+    pending: RollbackGuard<ConnectionPending<H, E, C, S>>,
 }
 
 // SAFETY: the owned operation retains runtime/server allocations across threads;
@@ -819,24 +844,22 @@ unsafe impl<
 impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>, S: ConnectionStage>
     ConnectionTransaction<H, E, C, S>
 {
-    fn transition<N: ConnectionStage>(mut self, state: N) -> ConnectionTransaction<H, E, C, N> {
-        ConnectionTransaction {
-            reservation: self.reservation.take(),
-            state,
+    fn new(reservation: ConnectionReservation<H, E, C>, stage: S) -> Self {
+        Self {
+            pending: RollbackGuard::new(ConnectionPending { reservation, stage }),
         }
     }
 
-    fn reservation(&self) -> &ConnectionReservation<H, E, C> {
-        self.reservation
-            .as_ref()
-            .expect("live connection transaction")
+    fn transition<N: ConnectionStage>(self, stage: N) -> ConnectionTransaction<H, E, C, N> {
+        ConnectionTransaction::new(self.pending.complete().reservation, stage)
     }
 
-    fn rollback_with_result(mut self) -> XllResult<()> {
-        self.reservation
-            .take()
-            .expect("live connection transaction")
-            .rollback(S::HAS_PUBLICATION)
+    fn reservation(&self) -> &ConnectionReservation<H, E, C> {
+        &self.pending.get().reservation
+    }
+
+    fn rollback_with_result(self) -> XllResult<()> {
+        self.pending.complete().rollback_with_result()
     }
 }
 
@@ -908,37 +931,27 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     ConnectionTransaction<H, E, C, InstalledConnection>
 {
     pub(crate) fn value(&self) -> &StoredRtdValue {
-        &self.state.value
+        &self.pending.get().stage.value
     }
 
-    pub(crate) fn commit(mut self) -> XllResult<()> {
+    pub(crate) fn commit(self) -> XllResult<()> {
         let reservation = self.reservation();
         if let Err(error) = reservation.runtime().commit_connection(
             reservation.operation.server(),
             reservation.topic_id,
             &reservation.ticket,
             reservation.id,
-            self.state.observed_sequence,
+            self.pending.get().stage.observed_sequence,
         ) {
             self.rollback();
             return Err(error);
         }
-        self.reservation.take();
+        drop(self.pending.complete());
         Ok(())
     }
 
     pub(crate) fn rollback(self) {
         let _ = self.rollback_with_result();
-    }
-}
-
-impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>, S: ConnectionStage>
-    Drop for ConnectionTransaction<H, E, C, S>
-{
-    fn drop(&mut self) {
-        if let Some(reservation) = self.reservation.take() {
-            let _ = reservation.rollback(S::HAS_PUBLICATION);
-        }
     }
 }
 
@@ -985,17 +998,17 @@ mod typestate_tests {
                 })
                 .unwrap()
                 .unwrap();
-            let transaction = ConnectionTransaction {
-                reservation: Some(ConnectionReservation {
+            let transaction = ConnectionTransaction::new(
+                ConnectionReservation {
                     runtime: NonNull::from(&runtime),
                     // SAFETY: runtime is local and retains this stage until drop.
                     operation: unsafe { server.test_server().enter_owned_operation().unwrap() },
                     topic_id: TopicId(1),
                     id,
                     ticket,
-                }),
-                state: CatalogReserved,
-            };
+                },
+                CatalogReserved,
+            );
             if reserve_publication {
                 let transaction = transaction.reserve_publication().unwrap();
                 assert_eq!(runtime.services.active_quota.used(), 1);

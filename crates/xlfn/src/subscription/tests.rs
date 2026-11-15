@@ -1803,6 +1803,76 @@ fn rollback_records_subscription_cleanup_error() {
     ));
 }
 
+#[test]
+fn miri_connection_unwind_allows_reentrant_cleanup_before_releasing_admission() {
+    type Cleanup = Mutex<Option<Box<dyn FnOnce() + Send>>>;
+    struct CleanupSource(Arc<Cleanup>);
+
+    // SAFETY: The fixture discards the sink; its subscription only invokes a
+    // synchronous observation callback and creates no background work.
+    unsafe impl RtdSource for CleanupSource {
+        type Value = i32;
+        type Subscription = TestSubscription;
+
+        fn subscribe(&self, _: &RtdTopic, _: RtdSink<i32>) -> XllResult<TestSubscription> {
+            Ok(TestSubscription {
+                canceled: Arc::new(AtomicBool::new(false)),
+                disconnected: Arc::new(AtomicBool::new(false)),
+                on_disconnect: self.0.lock().take(),
+            })
+        }
+    }
+
+    let cleanup = Arc::new(Cleanup::new(None));
+    let (arena, source) = SourceArena::with_source(
+        RuntimeGeneration::new(1).unwrap(),
+        CleanupSource(Arc::clone(&cleanup)),
+    )
+    .unwrap();
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let cleanup_checked = Arc::new(AtomicBool::new(false));
+    *cleanup.lock() = Some(Box::new({
+        let runtime = Arc::downgrade(&runtime);
+        let cleanup_checked = Arc::clone(&cleanup_checked);
+        move || {
+            let runtime = runtime.upgrade().unwrap();
+            assert!(runtime.catalog.try_lock().is_some());
+            assert!(server.test_server().subscriptions.try_lock().is_some());
+            assert_eq!(runtime.services.runtime_gate.active(), 1);
+            cleanup_checked.store(true, Ordering::Release);
+            panic!("injected connection cleanup panic");
+        }
+    }));
+
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("connection-unwind").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+
+    let result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+        let _connection = server.connect_transaction(TopicId(1), id).unwrap();
+        panic!("injected connection caller panic");
+    }));
+
+    assert!(result.is_err());
+    assert!(cleanup_checked.load(Ordering::Acquire));
+    assert_eq!(runtime.services.runtime_gate.active(), 0);
+    assert_eq!(runtime.services.active_quota.used(), 0);
+    assert!(server.test_server().subscriptions.lock().is_empty());
+    prepared.rollback();
+    assert!(runtime.catalog.lock().entries.is_empty());
+    assert!(matches!(
+        runtime.cleanup_result(),
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_DISCONNECT
+        })
+    ));
+}
+
 struct PanickingCancelSubscription {
     payload_drops: Arc<AtomicUsize>,
     phases: Arc<AtomicUsize>,

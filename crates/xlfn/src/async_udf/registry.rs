@@ -397,19 +397,18 @@ impl TaskRegistry {
     }
 
     pub(crate) fn request_close(&self) -> XllResult<RegistryClose<'_, CancellationPending>> {
-        // Declare the claim first so an unwind releases the control lock before
-        // abandoning the attempt. No lock is retained across cancellation callbacks.
-        let (claim, control) = CloseClaim::acquire(self)?;
-        self.closing.store(true, Ordering::Release);
-        drop(self.activity.control().seal());
-        for state in control.calculations.values() {
-            state.seal_admission();
-        }
-        let mut tasks = TaskControlBatch::new();
-        for state in control.calculations.values() {
-            tasks.extend(state.close_admission().wait().drain_tasks());
-        }
-        drop(control);
+        let (claim, tasks) = CloseClaim::acquire(self, |control| {
+            self.closing.store(true, Ordering::Release);
+            drop(self.activity.control().seal());
+            for state in control.calculations.values() {
+                state.seal_admission();
+            }
+            let mut tasks = TaskControlBatch::new();
+            for state in control.calculations.values() {
+                tasks.extend(state.close_admission().wait().drain_tasks());
+            }
+            tasks
+        })?;
         Ok(RegistryClose {
             state: CancellationPending { tasks },
             claim,

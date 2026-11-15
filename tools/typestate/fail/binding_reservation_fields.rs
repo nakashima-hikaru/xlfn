@@ -8,9 +8,9 @@ fn invalid<'table>(
     id: HandleId,
 ) {
     reservation.table = other; // error: E0609
-    let _ = reservation.state.take(); // error: E0616
-    reservation.index = 0; // error: E0616
-    reservation.id = id; // error: E0616
-    let _ = &reservation.origin; // error: E0616
-    reservation.active = false; // error: E0616
+    let _ = reservation.slot; // error: E0616
+    reservation.index = 0; // error: E0609
+    reservation.id = id; // error: E0615
+    let _ = &reservation.origin; // error: E0609
+    reservation.active = false; // error: E0609
 }

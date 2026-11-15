@@ -8,8 +8,8 @@ fn invalid<'table>(
     id: HandleId,
 ) {
     removal.table = other; // error: E0609
-    let _ = removal.state.take(); // error: E0616
+    let _ = removal.state; // error: E0616
     removal.id = id; // error: E0616
     let _ = &removal.record; // error: E0609
-    removal.active = false; // error: E0616
+    removal.active = false; // error: E0609
 }

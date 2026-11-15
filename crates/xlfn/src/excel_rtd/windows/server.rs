@@ -18,8 +18,8 @@ use super::subscription_backend::{
     BackendSubscriptionServer, BackendSubscriptions, finish_connect_data,
 };
 use super::update_event::{
-    CallbackPtr, GitCookieLease, RetainedUpdateCallback, RtdNotifier, RtdUpdateEvent,
-    ServerCallbacks, active_callback, drain_callbacks, install_callback, retry_git_revocation_debt,
+    CallbackPtr, GitCookieLease, PreparedCallbackInstallation, RetainedUpdateCallback, RtdNotifier,
+    RtdUpdateEvent, ServerCallbacks, active_callback, drain_callbacks, retry_git_revocation_debt,
 };
 use super::{com_boundary, guid_eq};
 use crate::error::InputError;
@@ -37,12 +37,14 @@ use crate::win32::{
 use crate::{RtdSubscription, XllError, XllResult};
 use std::any::TypeId;
 use std::ffi::c_void;
+use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::ptr::{self, NonNull};
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use triomphe::Arc;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 pub(super) const IID_IDISPATCH: GUID = crate::win32::IID_IDispatch;
 pub(super) const IID_IRTD_SERVER: GUID = GUID {
@@ -247,13 +249,50 @@ pub(super) struct RtdServer<
     pub(super) _module_lease: ComObjectLease,
 }
 
+struct StartReserved;
+struct CallbackInstalled;
+
+struct StartClaim<'a, E: RtdSubscription, C: crate::RtdSourceCatalog<E>, S> {
+    server: &'a RtdServer<E, C>,
+    _stage: PhantomData<S>,
+}
+
+impl<'a, E: RtdSubscription, C: crate::RtdSourceCatalog<E>, S> StartClaim<'a, E, C, S> {
+    fn new(server: &'a RtdServer<E, C>) -> Self {
+        Self {
+            server,
+            _stage: PhantomData,
+        }
+    }
+}
+
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Rollback
+    for StartClaim<'_, E, C, StartReserved>
+{
+    fn rollback(self) {
+        self.server
+            .start_state
+            .store(SERVER_NOT_STARTED, Ordering::Release);
+    }
+}
+
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Rollback
+    for StartClaim<'_, E, C, CallbackInstalled>
+{
+    fn rollback(self) {
+        self.server
+            .start_state
+            .store(SERVER_START_FAILED, Ordering::Release);
+    }
+}
+
 /// Exclusive ServerStart reservation bound to its server before publication.
 pub(super) struct ServerStartReservation<
     'a,
     E: RtdSubscription = (),
     C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
 > {
-    server: Option<&'a RtdServer<E, C>>,
+    server: RollbackGuard<StartClaim<'a, E, C, StartReserved>>,
 }
 
 /// A callback has been installed on the reserved server; failure is terminal.
@@ -262,7 +301,7 @@ pub(super) struct PublishedServerStart<
     E: RtdSubscription = (),
     C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
 > {
-    server: Option<&'a RtdServer<E, C>>,
+    server: RollbackGuard<StartClaim<'a, E, C, CallbackInstalled>>,
 }
 
 impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdServer<E, C> {
@@ -275,7 +314,9 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdServer<E, C> {
                 Ordering::Acquire,
             )
             .ok()
-            .map(|_| ServerStartReservation { server: Some(self) })
+            .map(|_| ServerStartReservation {
+                server: RollbackGuard::new(StartClaim::new(self)),
+            })
     }
 
     pub(super) fn start_state(&self) -> u8 {
@@ -285,49 +326,28 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdServer<E, C> {
 
 impl<'a, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> ServerStartReservation<'a, E, C> {
     pub(super) fn publish_callback(
-        mut self,
+        self,
         callback: Box<RetainedUpdateCallback>,
     ) -> (PublishedServerStart<'a, E, C>, CallbackPtr) {
-        let server = self.server.expect("ServerStart owns its target");
-        let callback = install_callback(&server.callbacks, callback);
-        let server = self.server.take().expect("ServerStart owns its target");
-        // Once the callback is server-owned, retry on this server is terminal.
-        (
-            PublishedServerStart {
-                server: Some(server),
-            },
-            callback,
-        )
+        let server = self.server.get().server;
+        let installation = PreparedCallbackInstallation::prepare(&server.callbacks, callback);
+        // Arm terminal recovery before the first mutation. Preparation holds
+        // the callback lock and has already secured capacity for installation.
+        let server = self.server.complete().server;
+        let published = PublishedServerStart {
+            server: RollbackGuard::new(StartClaim::new(server)),
+        };
+        (published, installation.install())
     }
 }
 
 impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> PublishedServerStart<'_, E, C> {
-    pub(super) fn commit(mut self) {
+    pub(super) fn commit(self) {
         self.server
-            .take()
-            .expect("published ServerStart owns its target")
+            .complete()
+            .server
             .start_state
             .store(SERVER_STARTED, Ordering::Release);
-    }
-}
-
-impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop for ServerStartReservation<'_, E, C> {
-    fn drop(&mut self) {
-        if let Some(server) = self.server.take() {
-            server
-                .start_state
-                .store(SERVER_NOT_STARTED, Ordering::Release);
-        }
-    }
-}
-
-impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop for PublishedServerStart<'_, E, C> {
-    fn drop(&mut self) {
-        if let Some(server) = self.server.take() {
-            server
-                .start_state
-                .store(SERVER_START_FAILED, Ordering::Release);
-        }
     }
 }
 

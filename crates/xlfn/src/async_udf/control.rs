@@ -4,6 +4,7 @@ use crate::sync::MutexGuard;
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
 use xlfn_kernel::published_owner::PublishedOwner;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,40 +93,69 @@ impl AdvancingControl<'_> {
 /// Canonical CloseClaimed storage cannot be acquired by start/advance or another
 /// close. Forgetting the claim therefore leaves the registry unavailable.
 pub(super) struct CloseClaim<'registry> {
-    registry: &'registry TaskRegistry,
-    pending: bool,
+    pending: RollbackGuard<PendingClose<'registry>>,
 }
+
+struct PendingClose<'registry> {
+    registry: &'registry TaskRegistry,
+}
+
+impl Rollback for PendingClose<'_> {
+    fn rollback(self) {
+        let mut control = self.registry.control.lock();
+        if matches!(control.state, State::CloseClaimed) {
+            control.state = State::CloseAvailable;
+        }
+    }
+}
+
 impl<'registry> CloseClaim<'registry> {
     pub(super) fn acquire(
         registry: &'registry TaskRegistry,
-    ) -> XllResult<(Self, MutexGuard<'registry, RegistryControl>)> {
+        prepare_locked: impl FnOnce(&RegistryControl) -> TaskControlBatch,
+    ) -> XllResult<(Self, TaskControlBatch)> {
+        // Release the mutex before rollback on unwind. The lock never travels
+        // with the issued claim.
+        let claim;
         let mut control = registry.control.lock();
         if matches!(control.state, State::CloseClaimed) {
             return Err(XllError::Closing);
         }
         control.state = State::CloseClaimed;
-        Ok((
-            Self {
-                registry,
-                pending: true,
-            },
-            control,
-        ))
+        claim = Self {
+            pending: RollbackGuard::new(PendingClose { registry }),
+        };
+        let tasks = prepare_locked(&control);
+        drop(control);
+        Ok((claim, tasks))
     }
     pub(super) fn registry(&self) -> &'registry TaskRegistry {
-        self.registry
+        self.pending.get().registry
     }
-    pub(super) fn finish(mut self) {
-        self.registry.control.lock().state = State::Stopped;
-        self.pending = false;
+    pub(super) fn finish(self) {
+        let mut control = self.registry().control.lock();
+        if !matches!(control.state, State::CloseClaimed) {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        self.pending.complete();
+        control.state = State::Stopped;
     }
 }
-impl Drop for CloseClaim<'_> {
-    fn drop(&mut self) {
-        if self.pending {
-            self.registry.control.lock().state = State::CloseAvailable;
-        }
-    }
+
+#[cfg(test)]
+#[test]
+fn miri_close_preparation_unwind_releases_the_lock_before_returning_the_claim() {
+    let registry = TaskRegistry::new();
+    let error = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = CloseClaim::acquire(&registry, |_| panic!("injected close preparation panic"));
+    }));
+    assert!(error.is_err());
+    assert!(matches!(
+        registry.control.lock().state,
+        State::CloseAvailable
+    ));
+    registry.request_close().unwrap().cancel().wait().finish();
+    assert!(matches!(registry.control.lock().state, State::Stopped));
 }
 
 /// Preparation retains the actual canonical/publication-management guards and

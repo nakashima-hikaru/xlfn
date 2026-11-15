@@ -10,43 +10,21 @@ use super::{
 };
 use crate::XllResult;
 use crate::generation::TopicGeneration;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 /// Owns the single-flight marker for one cold topic preparation.
 ///
 /// The marker is removed by `commit_publication` on success. If any earlier
 /// step fails, dropping this reservation removes the marker and wakes all
 /// waiters.
-pub(super) struct TopicReservation<'runtime> {
+struct TopicReservation<'runtime> {
     runtime: &'runtime FormulaHandleService,
     key: HandleTopicKey,
     initialization: InitializationPtr,
-    active: bool,
 }
 
-impl<'runtime> TopicReservation<'runtime> {
-    pub(super) fn new(
-        runtime: &'runtime FormulaHandleService,
-        key: HandleTopicKey,
-        initialization: InitializationPtr,
-    ) -> Self {
-        Self {
-            runtime,
-            key,
-            initialization,
-            active: true,
-        }
-    }
-
-    pub(super) fn commit(mut self) {
-        self.active = false;
-    }
-}
-
-impl Drop for TopicReservation<'_> {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
+impl Rollback for TopicReservation<'_> {
+    fn rollback(self) {
         if self
             .runtime
             .topics
@@ -66,36 +44,10 @@ struct ProvisionalPublication<'runtime> {
     key: HandleTopicKey,
     token: String,
     refinement_id: u64,
-    active: bool,
 }
 
-impl<'runtime> ProvisionalPublication<'runtime> {
-    fn new(
-        runtime: &'runtime FormulaHandleService,
-        key: HandleTopicKey,
-        token: String,
-        refinement_id: u64,
-    ) -> Self {
-        Self {
-            runtime,
-            key,
-            token,
-            refinement_id,
-            active: true,
-        }
-    }
-
-    fn commit(mut self) -> String {
-        self.active = false;
-        std::mem::take(&mut self.token)
-    }
-}
-
-impl Drop for ProvisionalPublication<'_> {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
+impl Rollback for ProvisionalPublication<'_> {
+    fn rollback(self) {
         let token_wire = self.runtime.refinement_token(&self.token);
         let refinement = &self.runtime.refinement;
         let key = self.key;
@@ -127,7 +79,7 @@ pub(crate) struct PublicationReservation<'runtime> {
     runtime: &'runtime FormulaHandleService,
     key: HandleTopicKey,
     generation: TopicGeneration,
-    reservation: TopicReservation<'runtime>,
+    reservation: RollbackGuard<TopicReservation<'runtime>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -148,8 +100,8 @@ pub(super) struct ProvisionalPublicationTxn<'runtime> {
     // Drop order is a synchronization invariant: withdraw the provisional
     // publication before releasing the single-flight reservation and waking
     // waiters.
-    provisional: ProvisionalPublication<'runtime>,
-    reservation: TopicReservation<'runtime>,
+    provisional: RollbackGuard<ProvisionalPublication<'runtime>>,
+    reservation: RollbackGuard<TopicReservation<'runtime>>,
 }
 
 pub(super) struct ObservedPublicationTxn<'runtime> {
@@ -157,8 +109,9 @@ pub(super) struct ObservedPublicationTxn<'runtime> {
     key: HandleTopicKey,
     generation: TopicGeneration,
     publication: PublishedTopicPtr,
-    provisional: ProvisionalPublication<'runtime>,
-    reservation: TopicReservation<'runtime>,
+    // Preserve the rollback order through the fallible call to commit.
+    provisional: RollbackGuard<ProvisionalPublication<'runtime>>,
+    reservation: RollbackGuard<TopicReservation<'runtime>>,
 }
 
 impl<'runtime> PublicationReservation<'runtime> {
@@ -172,7 +125,11 @@ impl<'runtime> PublicationReservation<'runtime> {
             runtime,
             key,
             generation,
-            reservation: TopicReservation::new(runtime, key, initialization),
+            reservation: RollbackGuard::new(TopicReservation {
+                runtime,
+                key,
+                initialization,
+            }),
         }
     }
 
@@ -189,12 +146,12 @@ impl<'runtime> PublicationReservation<'runtime> {
             }
         };
         let (token, _binding_id, _object_id, reused) = pending.publish()?;
-        let provisional = ProvisionalPublication::new(
-            self.runtime,
-            self.key,
+        let provisional = RollbackGuard::new(ProvisionalPublication {
+            runtime: self.runtime,
+            key: self.key,
             token,
-            self.reservation.initialization.refinement_id,
-        );
+            refinement_id: self.reservation.get().initialization.refinement_id,
+        });
         let Self {
             runtime,
             key,
@@ -220,7 +177,7 @@ impl<'runtime> PublicationReservation<'runtime> {
 
 impl<'runtime> InsertedPublication<'runtime> {
     pub(super) fn token(&self) -> &str {
-        &self.transaction.provisional.token
+        &self.transaction.provisional.get().token
     }
 
     pub(super) fn allocation(&self) -> &ObjectAllocation {
@@ -233,7 +190,7 @@ impl<'runtime> InsertedPublication<'runtime> {
         on_linearized: impl FnOnce(PublishedTopicPtr, &str),
     ) -> XllResult<ObservedPublicationTxn<'runtime>> {
         let transaction = self.transaction;
-        let token = &transaction.provisional.token;
+        let token = &transaction.provisional.get().token;
         let lifetime_key = transaction.key.format_lifetime_key();
         // Publication identity comes from this binding and topic reservation;
         // callers cannot inject a different token, key or allocation owner.
@@ -275,23 +232,83 @@ impl<'runtime> InsertedPublication<'runtime> {
 
 impl ObservedPublicationTxn<'_> {
     pub(super) fn commit(self) -> XllResult<String> {
-        let Self {
-            runtime,
-            key,
-            generation,
-            publication,
-            provisional,
-            reservation,
-        } = self;
-        runtime.commit_publication(
-            key,
-            generation,
-            &reservation.initialization,
-            publication,
-            &provisional.token,
+        self.runtime.commit_publication(
+            self.key,
+            self.generation,
+            &self.reservation.get().initialization,
+            self.publication,
+            &self.provisional.get().token,
         )?;
-        let token = provisional.commit();
-        reservation.commit();
+        let token = self.provisional.complete().token;
+        drop(self.reservation.complete());
         Ok(token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handle::formula::test_topic_key;
+    use crate::handle::topic::{Initialization, PrepareDecision};
+    use crate::sync::{Condvar, Mutex};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn miri_failed_publication_commit_rolls_back_before_waking_waiters() {
+        struct ObserveWithdrawal {
+            initialization: InitializationPtr,
+            observed_done: Arc<AtomicBool>,
+        }
+        impl ExcelHandleObject for ObserveWithdrawal {}
+        impl Drop for ObserveWithdrawal {
+            fn drop(&mut self) {
+                self.observed_done.store(
+                    self.initialization.owner_done.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+            }
+        }
+
+        let runtime = FormulaHandleService::new(1);
+        let key = test_topic_key("failed-publication-commit");
+        let owner = std::thread::current().id();
+        let PrepareDecision::Initialize {
+            initialization,
+            generation,
+        } = runtime
+            .topics
+            .prepare_decision(key, owner, || Initialization {
+                owner,
+                owner_done: AtomicBool::new(false),
+                wait: Mutex::new(()),
+                completed: Condvar::new(),
+                refinement_id: runtime.refinement.observe_allocate_initializer_id(),
+                waiters: AtomicUsize::new(0),
+            })
+            .unwrap()
+        else {
+            panic!("new topic must issue an initializer");
+        };
+        let observed_done = Arc::new(AtomicBool::new(true));
+        let reservation =
+            PublicationReservation::new(&runtime, key, generation, initialization.clone());
+        let inserted = reservation
+            .insert_object(PreparedHandleObject::New(ObserveWithdrawal {
+                initialization: initialization.clone(),
+                observed_done: Arc::clone(&observed_done),
+            }))
+            .unwrap();
+        let observed = inserted
+            .publish_and_observe(|_, _| Ok(()), |_, _| {})
+            .unwrap();
+        // Inject a stale generation after the last observation check.
+        runtime.topics.write().generation = generation.next().unwrap();
+        assert!(matches!(observed.commit(), Err(crate::XllError::Closing)));
+        assert!(!observed_done.load(Ordering::Acquire));
+        assert!(initialization.owner_done.load(Ordering::Acquire));
+        let state = runtime.topics.read();
+        assert!(!state.by_key.contains_key(&key));
+        assert!(!state.initializing.contains_key(&key));
     }
 }

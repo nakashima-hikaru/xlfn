@@ -1073,6 +1073,12 @@ fn server_start_reservation_is_single_use_and_rolls_back_failure() {
     assert!(server.reserve_start().is_none());
     drop(first);
     assert_eq!(server.start_state(), SERVER_NOT_STARTED);
+    let abandoned = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+        let _reserved = server.reserve_start().unwrap();
+        panic!("injected panic before callback installation");
+    }));
+    assert!(abandoned.is_err());
+    assert_eq!(server.start_state(), SERVER_NOT_STARTED);
 
     let (published, callback) = server
         .reserve_start()
@@ -1093,12 +1099,16 @@ fn server_start_reservation_is_single_use_and_rolls_back_failure() {
     // SAFETY: failed owns a reference to the replacement until cleanup completes.
     let failed_server = unsafe { &*failed.pointer() };
     assert_ne!(ensured.pointer(), failed.pointer());
-    let (published, _) = failed_server
-        .reserve_start()
-        .unwrap()
-        .publish_callback(inert_update_callback());
-    drop(published);
+    let abandoned = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+        let (_published, _) = failed_server
+            .reserve_start()
+            .unwrap()
+            .publish_callback(inert_update_callback());
+        panic!("injected panic after callback installation");
+    }));
+    assert!(abandoned.is_err());
     assert_eq!(failed_server.start_state(), SERVER_START_FAILED);
+    assert!(failed_server.callbacks.lock().active.is_some());
     assert_eq!(failed_server.callbacks.lock().records.len(), 1);
     assert!(failed_server.reserve_start().is_none());
     // Publishing on the replacement did not repopulate the former target.
@@ -1107,6 +1117,35 @@ fn server_start_reservation_is_single_use_and_rolls_back_failure() {
         failed.active.pointer,
         failed.newly_created,
     );
+}
+
+#[test]
+fn abandoned_callback_preparation_unlocks_before_destroying_callback() {
+    use super::update_event::{PreparedCallbackInstallation, ServerCallbacks};
+
+    let callbacks = Arc::new(crate::sync::Mutex::new(ServerCallbacks::default()));
+    let reentered = Arc::new(AtomicBool::new(false));
+    let callback = Box::new(RetainedUpdateCallback {
+        cookie: None,
+        pump: None,
+        drop_hook: Some(Arc::new({
+            let callbacks = Arc::clone(&callbacks);
+            let reentered = Arc::clone(&reentered);
+            move || {
+                let empty = callbacks
+                    .try_lock()
+                    .is_some_and(|state| state.records.is_empty() && state.active.is_none());
+                reentered.store(empty, Ordering::Release);
+            }
+        })),
+    });
+
+    let abandoned = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+        let _prepared = PreparedCallbackInstallation::prepare(&callbacks, callback);
+        panic!("injected panic while holding callback preparation");
+    }));
+    assert!(abandoned.is_err());
+    assert!(reentered.load(Ordering::Acquire));
 }
 
 #[test]

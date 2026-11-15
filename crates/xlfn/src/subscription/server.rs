@@ -5,7 +5,7 @@
 
 use super::catalog::SubscriptionCatalog;
 use super::data_plane::{
-    OwnedPublishOperation, PublishCore, PublishTerminationStart, RtdRefreshBatch,
+    DrainedPublish, OwnedPublishOperation, PublishCore, PublishTerminationStart, RtdRefreshBatch,
     ScopedPublishOperation,
 };
 use super::disconnect::OwnedSubscription;
@@ -24,6 +24,7 @@ use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 /// Generational, non-owning access to one server retained by a subscription
 /// runtime arena.
@@ -280,19 +281,14 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 let mut resources = ServerTerminationResources {
                     runtime,
                     server: self,
-                    wait: None,
                     notifier: None,
                     initial_subscriptions: FxHashMap::default(),
                     owner: Some(owner),
                 };
-                let mut termination = self.publish.begin_termination();
-                resources.notifier = termination.take_notifier();
-                resources.wait = Some(termination);
+                let mut wait = self.publish.begin_termination();
+                resources.notifier = wait.take_notifier();
                 resources.initial_subscriptions = std::mem::take(&mut *self.subscriptions.lock());
-                TerminationAdmission::Owner(ServerTermination {
-                    resources: Some(resources),
-                    state: CancelPending,
-                })
+                TerminationAdmission::Owner(ServerTermination::new(resources, wait, CancelPending))
             }
             TerminationClaim::Waiter(waiter) => TerminationAdmission::Waiter(waiter),
             TerminationClaim::Complete(completed) => TerminationAdmission::Complete(completed),
@@ -394,7 +390,6 @@ struct ServerTerminationResources<
 > {
     runtime: &'a SubscriptionRuntime<H, E, C>,
     server: &'a SubscriptionServer<H, E, C>,
-    wait: Option<PublishTerminationStart<'a, H>>,
     notifier: Option<H::Notifier>,
     initial_subscriptions: FxHashMap<TopicId, OwnedSubscription<H, E, C>>,
     owner: Option<TerminationOwner<'a>>,
@@ -437,6 +432,30 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Dro
     }
 }
 
+struct PendingServerTermination<
+    'a,
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+    S: TerminationStage,
+> {
+    wait: PublishTerminationStart<'a, H>,
+    resources: ServerTerminationResources<'a, H, E, C>,
+    state: S,
+}
+
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>, S: TerminationStage>
+    Rollback for PendingServerTermination<'_, H, E, C, S>
+{
+    fn rollback(mut self) {
+        if S::CANCEL_PENDING {
+            self.resources
+                .runtime
+                .record_cleanup_result(self.resources.request_cancel());
+        }
+    }
+}
+
 #[must_use = "request cancellation and finish termination; abandonment publishes failure"]
 pub(super) struct ServerTermination<
     'a,
@@ -445,67 +464,70 @@ pub(super) struct ServerTermination<
     C: crate::RtdSourceCatalog<E>,
     S: TerminationStage,
 > {
-    resources: Option<ServerTerminationResources<'a, H, E, C>>,
-    state: S,
+    pending: RollbackGuard<PendingServerTermination<'a, H, E, C, S>>,
+}
+
+impl<
+    'a,
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+    S: TerminationStage,
+> ServerTermination<'a, H, E, C, S>
+{
+    fn new(
+        resources: ServerTerminationResources<'a, H, E, C>,
+        wait: PublishTerminationStart<'a, H>,
+        state: S,
+    ) -> Self {
+        Self {
+            pending: RollbackGuard::new(PendingServerTermination {
+                wait,
+                resources,
+                state,
+            }),
+        }
+    }
 }
 
 impl<'a, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     ServerTermination<'a, H, E, C, CancelPending>
 {
     pub(super) fn request_cancel(mut self) -> ServerTermination<'a, H, E, C, CancelRequested> {
-        let result = self
-            .resources
-            .as_mut()
-            .expect("live termination")
-            .request_cancel();
-        ServerTermination {
-            resources: self.resources.take(),
-            state: CancelRequested {
-                error: result.err(),
-            },
-        }
+        let error = self.pending.get_mut().resources.request_cancel().err();
+        let PendingServerTermination {
+            resources, wait, ..
+        } = self.pending.complete();
+        ServerTermination::new(resources, wait, CancelRequested { error })
     }
 }
 
-impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>, S: TerminationStage>
-    Drop for ServerTermination<'_, H, E, C, S>
+impl<'a, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    ServerTermination<'a, H, E, C, CancelRequested>
 {
-    fn drop(&mut self) {
-        if let Some(mut resources) = self.resources.take() {
-            if S::CANCEL_PENDING {
-                resources
-                    .runtime
-                    .record_cleanup_result(resources.request_cancel());
-            }
-            drop(resources);
-        }
+    pub(super) fn finish(self) -> XllResult<()> {
+        self.drain_readers()?.finish()
     }
-}
 
-impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
-    ServerTermination<'_, H, E, C, CancelRequested>
-{
-    pub(super) fn finish(mut self) -> XllResult<()> {
-        let mut resources = self.resources.take().expect("live termination");
+    fn drain_readers(self) -> XllResult<ReadersDrained<'a, H, E, C>> {
+        let PendingServerTermination {
+            mut resources,
+            state,
+            wait,
+        } = self.pending.complete();
         #[cfg(test)]
         if PANIC_AFTER_TERMINATION_GUARD.replace(false) {
             panic!("injected termination owner panic");
         }
 
-        let mut first_error = self.state.error.take();
+        let mut first_error = state.error;
         if let Err(error) = drop_notifier_no_unwind(resources.notifier.take())
             && first_error.is_none()
         {
             first_error = Some(error);
         }
 
-        let drained = match catch_no_unwind(AssertUnwindSafe(|| {
-            resources
-                .wait
-                .take()
-                .expect("termination owns its admission wait")
-                .wait()
-        })) {
+        let drained = match catch_no_unwind(AssertUnwindSafe(|| wait.wait())) {
             Ok(drained) => drained,
             Err(_) => {
                 // An interrupted wait cannot certify quiescence. Keep the
@@ -518,7 +540,31 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 return Err(owner.fail(error));
             }
         };
+        Ok(ReadersDrained {
+            drained,
+            resources,
+            first_error,
+        })
+    }
+}
 
+/// Cleanup authority for a server whose admitted publish operations have drained.
+#[must_use = "finish cleanup for the drained server"]
+struct ReadersDrained<'a, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> {
+    drained: DrainedPublish<'a, H>,
+    resources: ServerTerminationResources<'a, H, E, C>,
+    first_error: Option<XllError>,
+}
+
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    ReadersDrained<'_, H, E, C>
+{
+    fn finish(self) -> XllResult<()> {
+        let Self {
+            drained,
+            mut resources,
+            mut first_error,
+        } = self;
         let (late_notifier, active_entries) = drained.finish().into_parts();
         if let Err(error) = drop_notifier_no_unwind(late_notifier)
             && first_error.is_none()

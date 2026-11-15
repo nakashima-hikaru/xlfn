@@ -99,16 +99,23 @@ impl DiagnosticObserver {
         self.sink.record(event);
     }
 
-    fn reserve(&self, error: &crate::XllError) -> Option<DiagnosticReservation<'_>> {
+    fn build_queued_event(
+        &self,
+        error: &crate::XllError,
+        build: impl FnOnce() -> OwnedDiagnosticEvent,
+    ) -> Option<QueuedDiagnosticEvent> {
         self.reserved
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |reserved| {
                 (reserved < super::DIAGNOSTIC_QUEUE_CAPACITY).then_some(reserved + 1)
             })
             .ok()?;
-        let mut reservation = DiagnosticReservation {
-            observer: self,
-            payload_bytes: 0,
-            committed: false,
+        let observer = DiagnosticObserverPtr(NonNull::from(self));
+        let mut credit = QueuedCredit {
+            payload: DeliveryCredit {
+                observer,
+                payload_bytes: 0,
+            },
+            slot: SlotCredit(observer),
         };
         let bytes = super::payload::clone_bytes(error)?;
         if bytes != 0 {
@@ -118,9 +125,14 @@ impl DiagnosticObserver {
                         .filter(|&next| next <= super::DIAGNOSTIC_PAYLOAD_MAX_BYTES)
                 })
                 .ok()?;
-            reservation.payload_bytes = bytes;
+            credit.payload.payload_bytes = bytes;
         }
-        Some(reservation)
+        // The observer is borrowed throughout admission and construction. The
+        // queue's joined worker owner retains it after the credit is handed off.
+        Some(QueuedDiagnosticEvent {
+            event: build(),
+            credit,
+        })
     }
 
     fn release_slot(&self) {
@@ -165,37 +177,6 @@ impl DiagnosticObserver {
     }
 }
 
-struct DiagnosticReservation<'a> {
-    observer: &'a DiagnosticObserver,
-    payload_bytes: usize,
-    committed: bool,
-}
-
-impl DiagnosticReservation<'_> {
-    fn commit(mut self, event: OwnedDiagnosticEvent) -> QueuedDiagnosticEvent {
-        self.committed = true;
-        QueuedDiagnosticEvent {
-            event,
-            credit: QueuedCredit {
-                slot: SlotCredit(DiagnosticObserverPtr(NonNull::from(self.observer))),
-                payload: DeliveryCredit {
-                    observer: DiagnosticObserverPtr(NonNull::from(self.observer)),
-                    payload_bytes: self.payload_bytes,
-                },
-            },
-        }
-    }
-}
-
-impl Drop for DiagnosticReservation<'_> {
-    fn drop(&mut self) {
-        if !self.committed {
-            self.observer.release_payload(self.payload_bytes);
-            self.observer.release_slot();
-        }
-    }
-}
-
 // Field order destroys the owned payload before returning its byte credit,
 // including channel discard, send failure and unwinding before delivery.
 pub(crate) struct QueuedDiagnosticEvent {
@@ -234,7 +215,8 @@ impl Drop for SlotCredit {
 
 impl Drop for DeliveryCredit {
     fn drop(&mut self) {
-        // SAFETY: both queue and delivery are bounded by the joined worker owner.
+        // SAFETY: construction borrows the observer and the joined worker
+        // owner retains it through queueing and delivery.
         unsafe { self.observer.0.as_ref() }.release_payload(self.payload_bytes);
     }
 }
@@ -288,21 +270,21 @@ impl AsyncDiagnosticSink {
         build: impl FnOnce() -> DiagnosticEventMetadata,
     ) {
         let sender = &self.sender;
-        let Some(reservation) = self.worker.observer().reserve(error) else {
+        // Expensive error cloning and timestamps happen only after admission,
+        // outside the channel and trace locks. Panic drops the credit.
+        let Some(queued) = self.worker.observer().build_queued_event(error, || {
+            let metadata = build();
+            OwnedDiagnosticEvent {
+                udf_id: metadata.udf_id,
+                argument: metadata.argument,
+                error: error.clone(),
+                diagnostic_id: metadata.diagnostic_id,
+                timestamp: metadata.timestamp,
+            }
+        }) else {
             DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
             return;
         };
-        // Expensive error cloning and timestamps happen only after admission,
-        // outside the channel and trace locks. Panic returns the reservation.
-        let metadata = build();
-        let event = OwnedDiagnosticEvent {
-            udf_id: metadata.udf_id,
-            argument: metadata.argument,
-            error: error.clone(),
-            diagnostic_id: metadata.diagnostic_id,
-            timestamp: metadata.timestamp,
-        };
-        let queued = reservation.commit(event);
         let result = crate::ingress::with_diagnostic_linearization(|| {
             self.worker.observer().increment_pending();
             let result = sender.try_send(queued);
@@ -419,8 +401,9 @@ mod budget_tests {
             code: 1,
             message: "payload".to_owned(),
         };
-        let QueuedDiagnosticEvent { event, credit } =
-            observer.reserve(&error).unwrap().commit(event(error));
+        let QueuedDiagnosticEvent { event, credit } = observer
+            .build_queued_event(&error, || event(error.clone()))
+            .unwrap();
         assert_eq!(observer.reserved.load(Ordering::Relaxed), 1);
         let delivery = credit.dequeue();
         assert_eq!(observer.reserved.load(Ordering::Relaxed), 0);
@@ -442,8 +425,9 @@ mod budget_tests {
             code: 1,
             message: "payload".to_owned(),
         };
-        let QueuedDiagnosticEvent { event, credit } =
-            observer.reserve(&error).unwrap().commit(event(error));
+        let QueuedDiagnosticEvent { event, credit } = observer
+            .build_queued_event(&error, || event(error.clone()))
+            .unwrap();
         let delivery = credit.dequeue();
         drop(event);
         std::mem::forget(delivery);
@@ -460,17 +444,15 @@ mod budget_tests {
         };
         let (sender, receiver) = mpsc::sync_channel(1);
         let first = observer
-            .reserve(&error)
-            .unwrap()
-            .commit(event(error.clone()));
+            .build_queued_event(&error, || event(error.clone()))
+            .unwrap();
         sender
             .try_send(first)
             .unwrap_or_else(|_| panic!("first send failed"));
         assert_eq!(observer.reserved_payload_bytes(), 7);
         let second = observer
-            .reserve(&error)
-            .unwrap()
-            .commit(event(error.clone()));
+            .build_queued_event(&error, || event(error.clone()))
+            .unwrap();
         let unused = sender.try_send(second).err().unwrap();
         assert_eq!(observer.reserved_payload_bytes(), 14);
         drop(unused);
@@ -478,7 +460,9 @@ mod budget_tests {
         drop(receiver);
         assert_eq!(observer.reserved_payload_bytes(), 0);
         assert_eq!(observer.reserved.load(Ordering::Relaxed), 0);
-        let third = observer.reserve(&error).unwrap().commit(event(error));
+        let third = observer
+            .build_queued_event(&error, || event(error.clone()))
+            .unwrap();
         drop(sender.try_send(third));
         assert_eq!(observer.reserved_payload_bytes(), 0);
         assert_eq!(observer.reserved.load(Ordering::Relaxed), 0);

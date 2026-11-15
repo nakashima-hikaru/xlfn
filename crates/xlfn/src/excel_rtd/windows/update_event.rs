@@ -3,7 +3,7 @@ use super::global_interface_table::get_git;
 use super::module_lifetime;
 use super::server_gate::ServerOperationBarrier;
 use crate::excel_rtd::notification::NotificationPump;
-use crate::sync::Mutex;
+use crate::sync::{Mutex, MutexGuard};
 use crate::win32::{COINIT_MULTITHREADED, RPC_E_CHANGED_MODE, S_FALSE, S_OK};
 use crate::{XllError, XllResult};
 use std::ffi::c_void;
@@ -242,16 +242,43 @@ impl Drop for RetainedUpdateCallback {
     }
 }
 
+/// Retains the callback lock and storage for one installation. Abandonment
+/// releases the lock before destroying the callback and its COM resources.
+pub(super) struct PreparedCallbackInstallation<'a> {
+    callbacks: MutexGuard<'a, ServerCallbacks>,
+    callback: PublishedOwner<RetainedUpdateCallback>,
+}
+
+impl<'a> PreparedCallbackInstallation<'a> {
+    pub(super) fn prepare(
+        callbacks: &'a Mutex<ServerCallbacks>,
+        callback: Box<RetainedUpdateCallback>,
+    ) -> Self {
+        let callback = PublishedOwner::from_box(callback);
+        let mut callbacks = callbacks.lock();
+        callbacks.records.reserve(1);
+        Self {
+            callbacks,
+            callback,
+        }
+    }
+
+    /// Publishes the already prepared callback without allocating or running
+    /// callback code. The same lock covers the record and its active pointer.
+    pub(super) fn install(mut self) -> CallbackPtr {
+        let ptr = CallbackPtr(NonNull::from(&*self.callback));
+        self.callbacks.records.push(self.callback);
+        self.callbacks.active = Some(ptr);
+        ptr
+    }
+}
+
+#[cfg(test)]
 pub(super) fn install_callback(
     callbacks: &Mutex<ServerCallbacks>,
     callback: Box<RetainedUpdateCallback>,
 ) -> CallbackPtr {
-    let callback = PublishedOwner::from_box(callback);
-    let mut callbacks = callbacks.lock();
-    let ptr = CallbackPtr(NonNull::from(&*callback));
-    callbacks.records.push(callback);
-    callbacks.active = Some(ptr);
-    ptr
+    PreparedCallbackInstallation::prepare(callbacks, callback).install()
 }
 
 pub(super) fn active_callback(callbacks: &Mutex<ServerCallbacks>) -> Option<CallbackPtr> {

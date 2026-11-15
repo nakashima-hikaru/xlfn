@@ -2,6 +2,8 @@
 use super::*;
 use crate::handle::domain::UnlinkedBindingOwner;
 use std::mem::ManuallyDrop;
+use xlfn_kernel::invariant::fail_stop;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 /// A slot retains this owner even on unwind or abandonment. Ordinary Drop
 /// must never recover an allocation that raw readers can still access.
@@ -26,11 +28,14 @@ enum ReservationOrigin {
 }
 
 pub(crate) struct BindingReservation<'table> {
-    state: Option<BindingWriter<'table>>,
+    slot: RollbackGuard<SlotReserved<'table>>,
+}
+
+struct SlotReserved<'table> {
+    state: BindingWriter<'table>,
     index: usize,
     id: HandleId,
     origin: ReservationOrigin,
-    active: bool,
 }
 
 impl<'table> BindingReservation<'table> {
@@ -74,62 +79,98 @@ impl<'table> BindingReservation<'table> {
             generation: state.slots[index].next_generation,
         };
         Ok(BindingReservation {
-            state: Some(state),
-            index,
-            id,
-            origin,
-            active: true,
+            slot: RollbackGuard::new(SlotReserved {
+                state,
+                index,
+                id,
+                origin,
+            }),
         })
     }
 
     pub(crate) fn id(&self) -> HandleId {
-        self.id
+        self.slot.get().id
     }
 
-    pub(crate) fn publish(mut self, object: ObjectBinding) -> (HandleId, bool) {
-        let state = self
-            .state
-            .as_mut()
-            .expect("binding reservation owns the table write lock");
+    fn install(self, object: ObjectBinding) -> RollbackGuard<RecordInstalled<'table>> {
         let record = PublishedBindingOwner {
-            owner: ManuallyDrop::new(PublishedOwner::new(BindingRecord::new(self.id, object))),
+            owner: ManuallyDrop::new(PublishedOwner::new(BindingRecord::new(self.id(), object))),
         };
-        let slot = &mut state.slots[self.index];
+        let mut reserved = self.slot.complete();
+        let slot = &mut reserved.state.slots[reserved.index];
         slot.record = Some(record);
-        self.active = false;
-        state.publish_slot(self.index);
-        state.live_bindings = state
+        RollbackGuard::new(RecordInstalled { reserved })
+    }
+
+    pub(crate) fn publish(self, object: ObjectBinding) -> (HandleId, bool) {
+        let mut installed = self.install(object);
+        let reserved = &mut installed.get_mut().reserved;
+        let live_bindings = reserved
+            .state
             .live_bindings
             .checked_add(1)
             .expect("binding capacity was checked before commit");
-        self.active = false;
-        drop(self.state.take());
-        (self.id(), matches!(self.origin, ReservationOrigin::Reused))
+        reserved.state.publish_slot(reserved.index);
+        // Publication exposes the raw pointer. Only non-unwinding bookkeeping
+        // and the consuming disarm follow while the writer stays exclusive.
+        reserved.state.live_bindings = live_bindings;
+        let SlotReserved {
+            state, id, origin, ..
+        } = installed.complete().reserved;
+        drop(state);
+        (id, matches!(origin, ReservationOrigin::Reused))
     }
 }
 
-impl Drop for BindingReservation<'_> {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        let state = self
-            .state
-            .as_mut()
-            .expect("binding reservation owns the table write lock");
-        if matches!(self.origin, ReservationOrigin::Appended) {
+impl Rollback for SlotReserved<'_> {
+    fn rollback(self) {
+        let Self {
+            mut state,
+            id,
+            origin,
+            ..
+        } = self;
+        if matches!(origin, ReservationOrigin::Appended) {
             let slot = state.slots.pop().expect("reservation owns the final slot");
             debug_assert!(slot.record.is_none());
         } else {
-            state.free.push(self.id.slot);
+            state.free.push(id.slot);
         }
+    }
+}
+
+/// The slot holds its owner before the Release store makes it visible.
+struct RecordInstalled<'table> {
+    reserved: SlotReserved<'table>,
+}
+
+impl Rollback for RecordInstalled<'_> {
+    fn rollback(mut self) {
+        let reserved = &mut self.reserved;
+        // The writer excludes publication and withdrawal during the entire
+        // install. The empty entry proves that no reader obtained this record.
+        if reserved
+            .state
+            .published
+            .load(reserved.id.slot)
+            .record
+            .is_some()
+        {
+            fail_stop();
+        }
+        let record = reserved.state.slots[reserved.index]
+            .record
+            .take()
+            .expect("installed binding owns the reserved slot");
+        // Return the now-empty slot and unlock before any object destructor.
+        self.reserved.rollback();
+        drop(ManuallyDrop::into_inner(record.owner));
     }
 }
 
 pub(crate) struct BindingRemoval<'table> {
-    state: Option<BindingWriter<'table>>,
+    state: BindingWriter<'table>,
     id: HandleId,
-    active: bool,
 }
 
 impl<'table> BindingRemoval<'table> {
@@ -141,32 +182,22 @@ impl<'table> BindingRemoval<'table> {
             .and_then(|slot| slot.record.as_deref())
             .filter(|record| record.id == id)
             .ok_or(XllError::StaleHandle)?;
-        Ok(BindingRemoval {
-            state: Some(state),
-            id,
-            active: true,
-        })
+        Ok(BindingRemoval { state, id })
     }
 
     #[cfg(test)]
     pub(crate) fn object(&self) -> &ObjectCell {
-        self.state
-            .as_ref()
-            .expect("removal retains its writer")
-            .slots[self.id.slot as usize]
+        self.state.slots[self.id.slot as usize]
             .record
             .as_ref()
             .expect("removal retains the live slot owner")
             .object()
     }
 
-    pub(crate) fn commit(mut self) -> bool {
-        let state = self
-            .state
-            .as_mut()
-            .expect("binding removal owns the table write lock");
-        let retired = state.withdraw_slot(self.id.slot as usize);
-        let slot = &mut state.slots[self.id.slot as usize];
+    pub(crate) fn commit(self) -> bool {
+        let Self { mut state, id } = self;
+        let retired = state.withdraw_slot(id.slot as usize);
+        let slot = &mut state.slots[id.slot as usize];
         let reusable = if let Some(next) = slot.next_generation.next() {
             slot.next_generation = next;
             true
@@ -178,7 +209,7 @@ impl<'table> BindingRemoval<'table> {
             .checked_sub(1)
             .expect("binding removal cannot underflow");
         if reusable {
-            state.free.push(self.id.slot);
+            state.free.push(id.slot);
         }
         // Enqueue before releasing the table lock: seal's retire_all must
         // not pass this removal and drain the domain before it is registered.
@@ -186,16 +217,9 @@ impl<'table> BindingRemoval<'table> {
             .domain
             .enqueue_reclaim(UnlinkedBindingOwner::retain(retired.owner));
         let domain = state.domain;
-        drop(self.state.take());
-        self.active = false;
+        drop(state);
         domain.maintain_after_removal();
         reusable
-    }
-}
-
-impl Drop for BindingRemoval<'_> {
-    fn drop(&mut self) {
-        debug_assert_eq!(self.state.is_some(), self.active);
     }
 }
 
@@ -215,7 +239,7 @@ impl Drop for BindingTable {
 
 /// Holds withdrawn owners while the exact table's grace period is pending.
 struct BulkRetirement<'table> {
-    state: Option<BindingWriter<'table>>,
+    state: BindingWriter<'table>,
     records: Vec<PublishedBindingOwner>,
     live_bindings: u32,
 }
@@ -234,14 +258,11 @@ impl<'table> BulkRetirement<'table> {
         let additional_free = state.slots.len().saturating_sub(state.free.len());
         state.free.reserve(additional_free);
         let mut transaction = Self {
-            state: Some(state),
+            state,
             records,
             live_bindings,
         };
-        let state = transaction
-            .state
-            .as_mut()
-            .expect("bulk retirement holds its writer guard");
+        let state = &mut transaction.state;
         state.free.clear();
         for index in 0..state.slots.len() {
             if state.slots[index].record.is_some() {
@@ -261,17 +282,16 @@ impl<'table> BulkRetirement<'table> {
         transaction
     }
 
-    fn wait(mut self) -> (u32, BulkBindingsDrained) {
-        let state = self.state.take().expect("bulk retirement owns its writer");
+    fn wait(self) -> (u32, BulkBindingsDrained) {
+        let Self {
+            state,
+            records,
+            live_bindings,
+        } = self;
         let domain = state.domain;
         drop(state);
         domain.quiesce();
-        (
-            self.live_bindings,
-            BulkBindingsDrained {
-                records: self.records,
-            },
-        )
+        (live_bindings, BulkBindingsDrained { records })
     }
 }
 
@@ -304,6 +324,85 @@ mod tests {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::Release);
         }
+    }
+
+    #[test]
+    fn miri_abandoned_installed_binding_restores_both_slot_origins() {
+        struct Reenter {
+            registry: std::sync::Weak<HandleRegistry>,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Drop for Reenter {
+            fn drop(&mut self) {
+                let registry = self.registry.upgrade().unwrap();
+                assert!(registry.bindings.try_read_state().is_some());
+                self.drops.fetch_add(1, Ordering::Release);
+            }
+        }
+
+        let registry = Arc::new(HandleRegistry::from_entropy(2, [7; 40]));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let token = registry
+            .insert_pending(&mut Some(Reenter {
+                registry: Arc::downgrade(&registry),
+                drops: Arc::clone(&drops),
+            }))
+            .unwrap();
+        let id = registry
+            .codec
+            .parse(
+                std::ptr::from_ref(registry.as_ref()).addr(),
+                crate::handle::token::HandleToken::new(&token),
+            )
+            .unwrap()
+            .id;
+        let duplicate = || {
+            registry
+                .bindings
+                .read_standalone(id)
+                .unwrap()
+                .duplicate_object_binding()
+                .unwrap()
+        };
+
+        let object = duplicate();
+        let appended = registry.bindings.reserve().unwrap();
+        let appended_id = appended.id();
+        let installed = appended.install(object);
+        assert!(
+            registry
+                .bindings
+                .published
+                .load(appended_id.slot)
+                .record
+                .is_none()
+        );
+        drop(installed);
+        assert_eq!(registry.bindings.read_state().slots.len(), 1);
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+
+        let object = duplicate();
+        registry.remove_and_drop(&token, "installed binding rollback test");
+        let reused = registry.bindings.reserve().unwrap();
+        let reused_id = reused.id();
+        assert_eq!(reused_id.slot, id.slot);
+        assert_ne!(reused_id.generation, id.generation);
+        let installed = reused.install(object);
+        assert!(
+            registry
+                .bindings
+                .published
+                .load(reused_id.slot)
+                .record
+                .is_none()
+        );
+        drop(installed);
+
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+        let state = registry.bindings.read_state();
+        assert_eq!(state.live_bindings, 0);
+        assert_eq!(state.free.as_slice(), &[reused_id.slot]);
+        assert!(state.slots[reused_id.slot as usize].record.is_none());
     }
 
     #[test]

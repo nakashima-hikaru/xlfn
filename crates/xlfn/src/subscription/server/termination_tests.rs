@@ -154,7 +154,17 @@ fn seed(
 
 #[test]
 fn miri_termination_abandonment_cancels_all_before_disconnect_and_waiter_return() {
-    for cancel_requested in [false, true] {
+    enum Stage {
+        CancelPending,
+        CancelRequested,
+        ReadersDrained,
+    }
+
+    for stage in [
+        Stage::CancelPending,
+        Stage::CancelRequested,
+        Stage::ReadersDrained,
+    ] {
         let observation = Observation::new(2);
         let (runtime, source) = observed_runtime(&observation);
         let server = runtime.register_test_server(1);
@@ -180,10 +190,10 @@ fn miri_termination_abandonment_cancels_all_before_disconnect_and_waiter_return(
                 result
             });
             entered_rx.recv().unwrap();
-            if cancel_requested {
-                drop(owner.request_cancel());
-            } else {
-                drop(owner);
+            match stage {
+                Stage::CancelPending => drop(owner),
+                Stage::CancelRequested => drop(owner.request_cancel()),
+                Stage::ReadersDrained => drop(owner.request_cancel().drain_readers().unwrap()),
             }
             assert!(matches!(waiting.join().unwrap(), Err(XllError::Panic)));
         });
