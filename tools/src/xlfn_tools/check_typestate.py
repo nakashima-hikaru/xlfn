@@ -49,6 +49,7 @@ MODULES = {
     "async_udf/runtime": Path("crates/xlfn/src/async_udf/runtime.rs"),
     "subscription": Path("crates/xlfn/src/subscription.rs"),
     "subscription/channel": Path("crates/xlfn/src/subscription/channel.rs"),
+    "subscription/disconnect": Path("crates/xlfn/src/subscription/disconnect.rs"),
     "subscription/multiplex": Path("crates/xlfn/src/subscription/multiplex.rs"),
     "subscription/source": Path("crates/xlfn/src/subscription/source.rs"),
     "subscription/runtime": Path("crates/xlfn/src/subscription/runtime.rs"),

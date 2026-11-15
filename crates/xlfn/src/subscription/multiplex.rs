@@ -619,10 +619,12 @@ where
             .register(topic, channel.sender(self.delivery))?;
         let (channel, subscription_permit) = channel.into_multiplexed_parts();
         Ok(RtdMultiplexedSubscription {
-            channel,
+            pending: Some(PendingMultiplexedSubscription {
+                channel,
+                id,
+                permit: subscription_permit,
+            }),
             shared: Arc::clone(&self.worker.shared),
-            id,
-            permit: Some(subscription_permit),
         })
     }
 
@@ -744,17 +746,37 @@ impl<T, P, D: RtdDeliveryPolicy> Drop for WorkerOwner<T, P, D> {
 /// closes the data queue, waits for in-flight publication, revokes the sink,
 /// and transfers a pre-reserved removal event to the shared producer.
 pub struct RtdMultiplexedSubscription<T, D: RtdDeliveryPolicy = RtdFifo> {
-    channel: RtdChannelSubscription,
+    pending: Option<PendingMultiplexedSubscription>,
     shared: Arc<Shared<T, D>>,
+}
+
+struct PendingMultiplexedSubscription {
+    channel: RtdChannelSubscription,
     id: RtdSubscriptionId,
-    permit: Option<SubscriptionPermit>,
+    permit: SubscriptionPermit,
 }
 
 impl<T, D: RtdDeliveryPolicy> RtdMultiplexedSubscription<T, D> {
-    fn finish(&mut self) -> XllResult<()> {
-        let result = self.channel.finish();
-        if let Some(permit) = self.permit.take() {
-            self.shared.unregister(self.id, permit);
+    fn finish(mut self) -> XllResult<()> {
+        self.finish_pending(false)
+    }
+
+    fn finish_pending(&mut self, fail_stop_on_unwind: bool) -> XllResult<()> {
+        let mut result = Ok(());
+        let revoked = self.pending.take_if(|pending| {
+            let require_barrier = std::mem::DropGuard::new(fail_stop_on_unwind, |required| {
+                if required {
+                    xlfn_kernel::invariant::fail_stop();
+                }
+            });
+            // A returned error also certifies revocation. If explicit finish
+            // unwinds, take_if leaves the whole owner available for Drop to retry.
+            result = pending.channel.finish();
+            std::mem::DropGuard::dismiss(require_barrier);
+            true
+        });
+        if let Some(revoked) = revoked {
+            self.shared.unregister(revoked.id, revoked.permit);
         }
         result
     }
@@ -762,7 +784,9 @@ impl<T, D: RtdDeliveryPolicy> RtdMultiplexedSubscription<T, D> {
 
 impl<T, D: RtdDeliveryPolicy> Drop for RtdMultiplexedSubscription<T, D> {
     fn drop(&mut self) {
-        let _ = self.finish();
+        // Drop cannot release the slot or let the sink's runtime be freed
+        // without a proven channel barrier.
+        let _ = self.finish_pending(true);
     }
 }
 
@@ -773,9 +797,11 @@ unsafe impl<T: Send + 'static, D: RtdDeliveryPolicy> RtdSubscription
     for RtdMultiplexedSubscription<T, D>
 {
     fn request_cancel(&self) {
-        self.channel.request_cancel();
+        if let Some(pending) = &self.pending {
+            pending.channel.request_cancel();
+        }
     }
-    fn disconnect_and_wait(mut self) -> XllResult<()> {
+    fn disconnect_and_wait(self) -> XllResult<()> {
         self.finish()
     }
 }

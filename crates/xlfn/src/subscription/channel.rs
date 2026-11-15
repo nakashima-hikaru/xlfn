@@ -207,6 +207,12 @@ impl<T, D: RtdDeliveryPolicy> RtdSender<T, D> {
             .wait_while_for(&mut state, |state| state.accepting, timeout);
         !state.accepting
     }
+
+    #[cfg(test)]
+    pub(super) fn with_publication_lock_for_test<R>(&self, inspect: impl FnOnce(bool) -> R) -> R {
+        let publication = self.channel.publication.lock();
+        inspect(publication.sink.is_some())
+    }
 }
 
 /// Validated value retained when channel admission fails. It can be retried
@@ -1162,6 +1168,8 @@ pub struct RtdChannelSubscription {
     channel: SharedChannel,
     producer: ProducerState,
     subscription_permit: Option<SubscriptionPermit>,
+    #[cfg(test)]
+    pub(super) before_revoke_for_test: Option<Box<dyn FnMut() + Send + Sync>>,
 }
 
 enum ProducerState {
@@ -1321,11 +1329,17 @@ impl RtdChannelSubscription {
             channel: D::erase_channel(channel),
             producer: ProducerState::Absent,
             subscription_permit: None,
+            #[cfg(test)]
+            before_revoke_for_test: None,
         })
     }
 
     pub(super) fn finish(&mut self) -> XllResult<()> {
         self.channel.close();
+        #[cfg(test)]
+        if let Some(before_revoke) = &mut self.before_revoke_for_test {
+            before_revoke();
+        }
         // Complete both barriers before reporting errors. Consume producer
         // panic payloads without running arbitrary destructors in Drop.
         // Locking publication waits for the current batch, then revokes the

@@ -253,9 +253,10 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             let existing_key = SubscriptionKey::from_internal(self.runtime_id, existing_id);
             if entry.is_connected() {
                 return Ok(PreparedSubscription {
+                    #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
                     id: existing_id,
                     key: existing_key,
-                    reservation: None,
+                    obligation: PreparationObligation::Existing,
                 });
             }
 
@@ -265,23 +266,19 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN,
                 })??;
 
-            return Ok(PreparedSubscription {
-                id: existing_id,
-                key: existing_key,
-                reservation: Some(PreparationReservation { runtime: self }),
-            });
+            return Ok(PreparedSubscription::reserved(
+                self,
+                existing_id,
+                existing_key,
+            ));
         }
 
         let (id, key) = catalog.insert_pending(self.runtime_id, source.id, topic, self.limits)?;
 
-        Ok(PreparedSubscription {
-            id,
-            key,
-            reservation: Some(PreparationReservation { runtime: self }),
-        })
+        Ok(PreparedSubscription::reserved(self, id, key))
     }
 
-    pub(crate) fn finish_preparation(&self, id: SubscriptionId, committed: bool) {
+    fn finish_preparation(&self, id: SubscriptionId, committed: bool) {
         {
             let mut catalog = self.catalog.lock();
             let Some(finish) = catalog.with_entry(id, |entry| entry.finish_preparation(committed))
@@ -666,13 +663,32 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     }
 }
 
-struct PreparationReservation<
+enum PreparationObligation<
+    'runtime,
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+> {
+    Existing,
+    Reserved(RollbackGuard<PendingPreparation<'runtime, H, E, C>>),
+}
+
+struct PendingPreparation<
     'runtime,
     H: SubscriptionHost,
     E: RtdSubscription,
     C: crate::RtdSourceCatalog<E>,
 > {
     runtime: &'runtime SubscriptionRuntime<H, E, C>,
+    id: SubscriptionId,
+}
+
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Rollback
+    for PendingPreparation<'_, H, E, C>
+{
+    fn rollback(self) {
+        self.runtime.finish_preparation(self.id, false);
+    }
 }
 
 pub(crate) struct PreparedSubscription<
@@ -681,14 +697,31 @@ pub(crate) struct PreparedSubscription<
     E: RtdSubscription,
     C: crate::RtdSourceCatalog<E>,
 > {
+    #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
     id: SubscriptionId,
     key: SubscriptionKey,
-    reservation: Option<PreparationReservation<'runtime, H, E, C>>,
+    obligation: PreparationObligation<'runtime, H, E, C>,
 }
 
-impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
-    PreparedSubscription<'_, H, E, C>
+impl<'runtime, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    PreparedSubscription<'runtime, H, E, C>
 {
+    fn reserved(
+        runtime: &'runtime SubscriptionRuntime<H, E, C>,
+        id: SubscriptionId,
+        key: SubscriptionKey,
+    ) -> Self {
+        Self {
+            #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
+            id,
+            key,
+            obligation: PreparationObligation::Reserved(RollbackGuard::new(PendingPreparation {
+                runtime,
+                id,
+            })),
+        }
+    }
+
     #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
     #[inline]
     pub(crate) fn id(&self) -> SubscriptionId {
@@ -700,32 +733,20 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         &self.key
     }
 
-    pub(crate) fn commit(mut self) {
-        self.finish(true);
+    pub(crate) fn commit(self) {
+        if let PreparationObligation::Reserved(reservation) = self.obligation {
+            let PendingPreparation { runtime, id } = reservation.complete();
+            runtime.finish_preparation(id, true);
+        }
     }
 
-    pub(crate) fn rollback(mut self) {
-        self.finish(false);
-    }
-
-    fn finish(&mut self, committed: bool) {
-        let Some(reservation) = self.reservation.take() else {
-            return;
-        };
-        reservation.runtime.finish_preparation(self.id, committed);
+    pub(crate) fn rollback(self) {
+        drop(self);
     }
 
     #[cfg(test)]
     pub(crate) fn has_reservation(&self) -> bool {
-        self.reservation.is_some()
-    }
-}
-
-impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop
-    for PreparedSubscription<'_, H, E, C>
-{
-    fn drop(&mut self) {
-        self.finish(false);
+        matches!(self.obligation, PreparationObligation::Reserved(_))
     }
 }
 

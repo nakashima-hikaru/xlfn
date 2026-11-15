@@ -1,6 +1,7 @@
 //! Refresh authority keeps its issuer, admission and rollback buffer private.
 use super::*;
 use std::panic::AssertUnwindSafe;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 #[cfg(any(
     all(target_os = "windows", any(feature = "rtd", feature = "handles")),
@@ -223,15 +224,21 @@ impl<H: SubscriptionHost> PublishCore<H> {
             )
         };
         Ok(PlannedRtdRefresh {
-            publish: self,
-            operation: Some(operation),
-            plan,
-            updates,
-            finished: false,
+            pending: RollbackGuard::new(PendingRefreshCollection {
+                publish: self,
+                operation,
+                plan,
+                updates,
+            }),
         })
     }
 
-    fn collect_refresh(&self, plan: &RefreshPlan, updates: &mut Vec<RtdUpdate>) {
+    fn collect_refresh(
+        &self,
+        plan: &RefreshPlan,
+        updates: &mut Vec<RtdUpdate>,
+        mut after_shard: impl FnMut(usize),
+    ) {
         debug_assert_eq!(self.publish_epoch.load(Ordering::Acquire), plan.epoch);
         debug_assert!(updates.is_empty());
         updates.reserve(plan.estimated_updates);
@@ -240,41 +247,60 @@ impl<H: SubscriptionHost> PublishCore<H> {
             let index = shards.trailing_zeros() as usize;
             shards &= shards - 1;
             self.collect_shard_into(index, updates);
+            after_shard(index);
         }
     }
 }
 
 #[must_use]
 pub(crate) struct PlannedRtdRefresh<'a, H: SubscriptionHost> {
+    pending: RollbackGuard<PendingRefreshCollection<'a, H>>,
+}
+
+struct PendingRefreshCollection<'a, H: SubscriptionHost> {
     publish: &'a PublishCore<H>,
-    operation: Option<ScopedPublishOperation<'a, H>>,
+    operation: ScopedPublishOperation<'a, H>,
     plan: RefreshPlan,
     updates: Vec<RtdUpdate>,
-    finished: bool,
 }
 
 impl<'a, H: SubscriptionHost> PlannedRtdRefresh<'a, H> {
-    pub(crate) fn collect(mut self) -> RtdRefreshBatch<'a, H> {
-        self.publish.collect_refresh(&self.plan, &mut self.updates);
-        self.finished = true;
+    pub(crate) fn collect(self) -> RtdRefreshBatch<'a, H> {
+        self.collect_with(|_| {})
+    }
+
+    fn collect_with(mut self, after_shard: impl FnMut(usize)) -> RtdRefreshBatch<'a, H> {
+        let pending = self.pending.get_mut();
+        pending
+            .publish
+            .collect_refresh(&pending.plan, &mut pending.updates, after_shard);
+        let PendingRefreshCollection {
+            publish,
+            operation,
+            plan,
+            updates,
+        } = self.pending.complete();
         RtdRefreshBatch {
-            publish: self.publish,
-            _operation: self.operation.take(),
-            plan: self.plan,
-            updates: std::mem::take(&mut self.updates),
+            publish,
+            _operation: Some(operation),
+            plan,
+            updates,
             finished: false,
         }
     }
 }
 
-impl<H: SubscriptionHost> Drop for PlannedRtdRefresh<'_, H> {
-    fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
+impl<H: SubscriptionHost> Rollback for PendingRefreshCollection<'_, H> {
+    fn rollback(self) {
+        // Retain publish admission through InFlight restoration and re-notification.
+        let Self {
+            publish,
+            operation: _operation,
+            plan,
+            updates,
+        } = self;
         let _ = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
-            self.publish
-                .abort_refresh_no_unwind(self.plan.refresh_id, std::mem::take(&mut self.updates));
+            publish.abort_refresh_no_unwind(plan.refresh_id, updates);
         }));
     }
 }
@@ -416,6 +442,9 @@ mod tests {
 
     #[test]
     fn partial_collection_unwind_restores_in_flight_values() {
+        use crate::excel_rtd::RtdNotifier;
+        use crate::rtd::test_support::TestNotifierState;
+        use crate::shutdown_trace::{ActivityEvent, ShutdownResources, ShutdownTraceRecorder};
         use crate::subscription::tests::SourceFixture;
         use crate::subscription::{RefreshOutcome, RtdTopic, StoredRtdValue, TopicId};
         let fixture = SourceFixture::new();
@@ -443,15 +472,36 @@ mod tests {
                 .unwrap();
             sink.lock().as_ref().unwrap().publish(index as i32).unwrap();
         }
+        let notifier = std::sync::Arc::new(TestNotifierState::new());
+        server
+            .attach_update_notifier(RtdNotifier::for_test(notifier))
+            .unwrap();
+        let trace = triomphe::Arc::new(ShutdownTraceRecorder::new());
+        trace
+            .begin(1, ShutdownResources::opened(0, 0, false))
+            .unwrap();
+        runtime.set_trace_sink(triomphe::Arc::clone(&trace));
         let publish = &server.test_server().publish;
+        let mut collected_shard = None;
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut planned = publish.plan_refresh().unwrap();
-                publish.collect_shard_into(1, &mut planned.updates);
-                assert_eq!(planned.updates.len(), 1);
-                panic!("injected unwind between shard collections");
+                let planned = publish.plan_refresh().unwrap();
+                let _batch = planned.collect_with(|index| {
+                    collected_shard = Some(index);
+                    panic!("injected unwind between shard collections");
+                });
             }))
             .is_err()
+        );
+        assert_eq!(collected_shard, Some(super::shard_index(TopicId(1))));
+        assert_eq!(
+            trace.activities(),
+            [
+                ActivityEvent::BeginRtdOperation,
+                ActivityEvent::BeginCallback,
+                ActivityEvent::EndCallback,
+                ActivityEvent::EndRtdOperation,
+            ],
         );
         let retry = server.begin_refresh().unwrap();
         let mut values = retry

@@ -16,6 +16,7 @@ use crate::runtime::capabilities::{
 };
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 // Only this implementation can issue the certificates for the operations below.
 // Re-exporting the types does not expose their constructors to orchestration.
@@ -1040,9 +1041,23 @@ impl ModuleAuthorityRecovery for ResourcesReclaimed {
 /// current stage. Dropping an incomplete transaction quarantines the runtime;
 /// successful transitions consume the old stage and return the next one.
 pub(crate) struct TeardownTxn<'runtime, A: Addin, K, S: ModuleAuthorityRecovery> {
-    owner: Option<TeardownOwner<'runtime, A, S::Binding<'runtime, A>>>,
-    stage: Option<S>,
+    pending: RollbackGuard<PendingTeardown<'runtime, A, S>>,
     _kind: PhantomData<K>,
+}
+
+struct PendingTeardown<'runtime, A: Addin, S: ModuleAuthorityRecovery> {
+    owner: TeardownOwner<'runtime, A, S::Binding<'runtime, A>>,
+    stage: S,
+}
+
+impl<A: Addin, S: ModuleAuthorityRecovery> Rollback for PendingTeardown<'_, A, S> {
+    fn rollback(self) {
+        let Self { owner, stage } = self;
+        // If recovery unwinds, the owner still quarantines before releasing
+        // the removal claim or its lifecycle binding.
+        let authority = stage.recover_module_authority();
+        drop(owner.return_module_authority(authority));
+    }
 }
 
 /// Quarantine and claim ownership is independent of the binding phase. Field
@@ -1112,43 +1127,20 @@ impl<A: Addin, C> Drop for TeardownCore<'_, A, C> {
 impl<'runtime, A: Addin, K, S: ModuleAuthorityRecovery> TeardownTxn<'runtime, A, K, S> {
     fn from_parts(owner: TeardownOwner<'runtime, A, S::Binding<'runtime, A>>, stage: S) -> Self {
         Self {
-            owner: Some(owner),
-            stage: Some(stage),
+            pending: RollbackGuard::new(PendingTeardown { owner, stage }),
             _kind: PhantomData,
         }
     }
 
     fn owner(&self) -> &TeardownOwner<'runtime, A, S::Binding<'runtime, A>> {
-        self.owner
-            .as_ref()
-            .expect("teardown transaction retains its owner")
+        &self.pending.get().owner
     }
 
-    fn split(mut self) -> (TeardownOwner<'runtime, A, S::Binding<'runtime, A>>, S) {
-        let owner = self
-            .owner
-            .take()
-            .expect("teardown transaction owns one owner");
-        let stage = self
-            .stage
-            .take()
-            .expect("teardown transaction owns one current stage");
+    fn split(self) -> (TeardownOwner<'runtime, A, S::Binding<'runtime, A>>, S) {
+        let PendingTeardown { owner, stage } = self.pending.complete();
+        #[cfg(test)]
+        tests::check_teardown_split_fault();
         (owner, stage)
-    }
-}
-
-impl<A: Addin, K, S: ModuleAuthorityRecovery> Drop for TeardownTxn<'_, A, K, S> {
-    fn drop(&mut self) {
-        let Some(stage) = self.stage.take() else {
-            return;
-        };
-        let authority = stage.recover_module_authority();
-        drop(
-            self.owner
-                .take()
-                .expect("an armed stage retains its owner")
-                .return_module_authority(authority),
-        );
     }
 }
 
@@ -1527,7 +1519,9 @@ impl<'runtime, A: Addin> RemovalOwner<'runtime, A, super::certificate::OpenRollb
 mod tests {
     use super::*;
     use crate::addin_impl::{Addin, OpenContext, OpenResult};
+    use crate::lifecycle::LifecyclePhase;
     use crate::runtime::{Runtime, transactions::RemovalSuccess};
+    use std::cell::Cell;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1541,6 +1535,241 @@ mod tests {
 
     std::thread_local! {
         static RECLAIM_FAULT: std::cell::Cell<Option<ReclaimFault>> = const { std::cell::Cell::new(None) };
+        static PANIC_TEARDOWN_SPLIT: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn check_teardown_split_fault() {
+        PANIC_TEARDOWN_SPLIT.with(|fault| {
+            assert!(!fault.replace(false), "injected teardown transition unwind");
+        });
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TeardownStage {
+        ExecutionDrained,
+        ProducersStopped,
+        CallbacksClosed,
+        HostDetached,
+        AddinQuiesced,
+        ServicesSealed,
+        ServicesCleaned,
+        ServicesQuiescent,
+        ResourcesReclaimed,
+    }
+
+    struct TeardownFault {
+        stage: TeardownStage,
+        during_split: bool,
+        reached: Cell<bool>,
+    }
+
+    impl TeardownFault {
+        fn advance<'runtime, K, S: ModuleAuthorityRecovery, Next>(
+            &self,
+            stage: TeardownStage,
+            teardown: TeardownTxn<'runtime, (), K, S>,
+            advance: impl FnOnce(TeardownTxn<'runtime, (), K, S>) -> Next,
+        ) -> Next {
+            if self.stage == stage {
+                self.reached.set(true);
+                assert!(self.during_split, "injected pending teardown unwind");
+                PANIC_TEARDOWN_SPLIT.with(|fault| assert!(!fault.replace(true)));
+            }
+            advance(teardown)
+        }
+
+        fn drive<'runtime, K: TerminalCertificateKind>(
+            &self,
+            teardown: TeardownTxn<'runtime, (), K, ExecutionDrained>,
+            lifecycle: &crate::runtime::AddinLifecycleAccess<'_, ()>,
+            quiesce: impl FnOnce(
+                TeardownTxn<'runtime, (), K, HostDetached>,
+            ) -> Result<
+                TeardownTxn<'runtime, (), K, AddinQuiesced<'runtime, ()>>,
+                AddinQuiesceFailure,
+            >,
+        ) {
+            let teardown = self.advance(TeardownStage::ExecutionDrained, teardown, |teardown| {
+                teardown
+                    .stop_producers(|_| {})
+                    .unwrap_or_else(|_| panic!("stop producers"))
+            });
+            let teardown = self.advance(
+                TeardownStage::ProducersStopped,
+                teardown,
+                TeardownTxn::close_module_callbacks,
+            );
+            let teardown = self.advance(TeardownStage::CallbacksClosed, teardown, |teardown| {
+                teardown
+                    .detach_host()
+                    .unwrap_or_else(|_| panic!("detach host"))
+            });
+            let teardown = self.advance(TeardownStage::HostDetached, teardown, |teardown| {
+                quiesce(teardown).unwrap_or_else(|_| panic!("quiesce add-in"))
+            });
+            let teardown = self.advance(TeardownStage::AddinQuiesced, teardown, |teardown| {
+                teardown
+                    .seal_services()
+                    .unwrap_or_else(|_| panic!("seal services"))
+            });
+            let teardown = self.advance(TeardownStage::ServicesSealed, teardown, |teardown| {
+                teardown
+                    .cleanup_addin(lifecycle, &mut crate::shutdown::CloseReport::default())
+                    .unwrap_or_else(|_| panic!("clean up add-in"))
+            });
+            let teardown = self.advance(TeardownStage::ServicesCleaned, teardown, |teardown| {
+                teardown
+                    .finish_services()
+                    .unwrap_or_else(|_| panic!("finish services"))
+            });
+            let teardown = self.advance(TeardownStage::ServicesQuiescent, teardown, |teardown| {
+                teardown
+                    .reclaim(|_| {})
+                    .unwrap_or_else(|_| panic!("reclaim"))
+            });
+            let _completion =
+                self.advance(TeardownStage::ResourcesReclaimed, teardown, |teardown| {
+                    teardown.certify().unwrap_or_else(|_| panic!("certify"))
+                });
+        }
+    }
+
+    #[test]
+    fn miri_every_teardown_stage_quarantines_on_unwind() {
+        for stage in [
+            TeardownStage::ExecutionDrained,
+            TeardownStage::ProducersStopped,
+            TeardownStage::CallbacksClosed,
+            TeardownStage::HostDetached,
+            TeardownStage::AddinQuiesced,
+            TeardownStage::ServicesSealed,
+            TeardownStage::ServicesCleaned,
+            TeardownStage::ServicesQuiescent,
+            TeardownStage::ResourcesReclaimed,
+        ] {
+            for during_split in [false, true] {
+                for final_removal in [false, true] {
+                    assert_teardown_unwind(stage, during_split, final_removal);
+                }
+            }
+        }
+    }
+
+    fn assert_teardown_unwind(stage: TeardownStage, during_split: bool, final_removal: bool) {
+        let fault = TeardownFault {
+            stage,
+            during_split,
+            reached: Cell::new(false),
+        };
+        let runtime = Runtime::<()>::new();
+        let opening = runtime.begin_open().unwrap();
+        let generation = opening.attempt_id().into_runtime_generation();
+        let opening = runtime.publish(opening, (), ());
+        if final_removal {
+            runtime.finish_open(opening, Vec::new()).unwrap();
+        } else {
+            assert!(opening.fail_for_test().requires_rollback());
+        }
+        let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+        let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
+
+        let failed = catch_no_unwind(AssertUnwindSafe(|| {
+            if final_removal {
+                let owner = runtime.begin_final_removal().unwrap();
+                fault.drive(
+                    owner.drain().unwrap_or_else(|_| panic!("drain")),
+                    &lifecycle,
+                    |teardown| teardown.quiesce_addin(&runtime, &lifecycle),
+                );
+            } else {
+                let crate::runtime::orchestration::OpenRollbackAcquisition::Acquired(owner) =
+                    runtime.acquire_open_rollback()
+                else {
+                    panic!("rollback owner unavailable");
+                };
+                fault.drive(
+                    owner.drain().unwrap_or_else(|_| panic!("drain")),
+                    &lifecycle,
+                    |teardown| teardown.quiesce_addin(&runtime, &lifecycle, Some(generation)),
+                );
+            }
+        }));
+        assert!(
+            failed.is_err() && fault.reached.get(),
+            "missing injected unwind at {stage:?}"
+        );
+        PANIC_TEARDOWN_SPLIT.with(|fault| assert!(!fault.replace(false)));
+
+        let state = runtime.lifecycle.access();
+        assert_eq!(state.phase(), LifecyclePhase::Quarantined);
+        assert!(state.removal_attempt().is_none());
+        if !during_split {
+            // Intact stage rollback returned the exact authority before
+            // releasing the claim. An interrupted handoff can only quarantine.
+            assert_eq!(state.module_epoch_id(), Some(epoch));
+        }
+        drop(state);
+        assert!(epoch.is_current());
+        assert!(runtime.begin_open().is_err());
+    }
+
+    struct RecoverPanics;
+
+    struct BindingReleaseProbe<'runtime, A: Addin> {
+        deps: ShutdownDeps<'runtime, A>,
+        phase_on_drop: &'runtime Cell<Option<LifecyclePhase>>,
+    }
+
+    impl<A: Addin> Drop for BindingReleaseProbe<'_, A> {
+        fn drop(&mut self) {
+            self.phase_on_drop
+                .set(Some(self.deps.lifecycle().access().phase()));
+        }
+    }
+
+    impl ModuleAuthorityRecovery for RecoverPanics {
+        type Binding<'runtime, A: Addin> = BindingReleaseProbe<'runtime, A>;
+
+        fn recover_module_authority(self) -> crate::module_runtime::ModuleCleanupAuthority {
+            panic!("injected teardown recovery unwind");
+        }
+    }
+
+    #[test]
+    fn miri_teardown_recovery_panic_quarantines_before_binding_drop() {
+        let phase_on_drop = Cell::new(None);
+        let runtime = Runtime::<()>::new();
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
+        let teardown = runtime
+            .begin_final_removal()
+            .unwrap()
+            .drain()
+            .unwrap_or_else(|_| panic!("drain"));
+        let (owner, execution) = teardown.split();
+        let (core, _) = owner.into_parts();
+        let probing: TeardownTxn<'_, _, super::super::certificate::FinalRemoval, _> =
+            TeardownTxn::from_parts(
+                TeardownOwner {
+                    core,
+                    binding: BindingReleaseProbe {
+                        deps: runtime.shutdown_deps(),
+                        phase_on_drop: &phase_on_drop,
+                    },
+                },
+                RecoverPanics,
+            );
+
+        let failed = catch_no_unwind(AssertUnwindSafe(|| drop(probing)));
+        assert!(failed.is_err());
+        assert_eq!(phase_on_drop.get(), Some(LifecyclePhase::Quarantined));
+        assert!(runtime.lifecycle.access().removal_attempt().is_none());
+        let authority = execution.recover_module_authority();
+        runtime
+            .lifecycle_control()
+            .retain_failed_module_cleanup(authority)
+            .unwrap_or_else(|_| panic!("canonical authority return refused"));
     }
 
     pub(super) fn check_reclaim_fault(rtd: bool) -> Result<(), ReclaimFailure> {
@@ -1624,9 +1853,9 @@ mod tests {
         } else {
             let other = crate::generation::RuntimeGeneration::new(generation.get() + 1).unwrap();
             teardown
+                .pending
+                .get_mut()
                 .stage
-                .as_mut()
-                .unwrap()
                 .services
                 .subscriptions_stopped =
                 crate::excel_rtd_protocol::stopped_subscriptions(Some(other));

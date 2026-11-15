@@ -154,6 +154,81 @@ fn miri_running_multiplex_worker_registers_without_relocking_worker_state() {
     source.shutdown_and_wait().unwrap();
 }
 
+#[test]
+fn miri_disconnect_unwind_retries_the_sink_barrier_before_unsubscribing() {
+    let (_runtime, _server, sink) =
+        crate::subscription::tests::connected_sink::<i32>(None, "multiplex-disconnect");
+    let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, |_| Ok(()))
+        .with_limits(
+            RtdSourceLimits::standard().with_max_subscriptions(RtdCapacity::disabled_if_zero(1)),
+        );
+    let channel = super::super::channel::AttachedChannel::attach(
+        RtdLatest,
+        Arc::clone(&source.budget),
+        sink.channel_budget(),
+        sink,
+    )
+    .unwrap();
+    let topic = RtdTopic::single("multiplex-disconnect").unwrap();
+    let mut subscription = source.register_channel(&topic, channel).unwrap();
+    let pending = subscription.pending.as_mut().unwrap();
+    let id = pending.id;
+    let sender = pending.channel.latest_sender::<i32>();
+    let (retrying, retry_started) = mpsc::sync_channel(1);
+    let mut attempts = 0;
+    pending.channel.before_revoke_for_test = Some(Box::new(move || {
+        attempts += 1;
+        match attempts {
+            1 => panic!("injected unwind before revoking the sink"),
+            2 => retrying.send(()).unwrap(),
+            _ => {}
+        }
+    }));
+
+    let (waiting, result) = std::thread::scope(|scope| {
+        let (waiting, disconnect) = sender.with_publication_lock_for_test(|sink_present| {
+            let disconnect = scope.spawn(move || {
+                crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(move || {
+                    subscription.disconnect_and_wait()
+                }))
+            });
+            let retry_started = retry_started.recv_timeout(DEADLINE).is_ok();
+            let state = source.worker.shared.state.lock();
+            let still_subscribed =
+                state.active.contains_key(&id) && state.events.len() == 1 && state.removals == 0;
+            let slot_retained = matches!(
+                ChannelBudget::try_subscription(&source.budget),
+                Err(XllError::Overloaded)
+            );
+            (
+                (retry_started, sink_present, still_subscribed, slot_retained),
+                disconnect,
+            )
+        });
+        (waiting, disconnect.join().unwrap())
+    });
+    assert_eq!(waiting, (true, true, true, true));
+    assert!(result.is_err());
+    assert!(sender.is_closed());
+    sender.with_publication_lock_for_test(|sink_present| assert!(!sink_present));
+
+    let context = RtdSourceContext {
+        shared: Arc::clone(&source.worker.shared),
+    };
+    assert!(context.shared.state.lock().active.is_empty());
+    assert!(matches!(
+        context.recv_timeout(Duration::ZERO).unwrap(),
+        Some(RtdSourceEvent::Subscribe { id: registered, .. }) if registered == id
+    ));
+    assert!(ChannelBudget::try_subscription(&source.budget).is_err());
+    assert!(matches!(
+        context.recv_timeout(Duration::ZERO).unwrap(),
+        Some(RtdSourceEvent::Unsubscribe { id: removed }) if removed == id
+    ));
+    assert!(context.recv_timeout(Duration::ZERO).unwrap().is_none());
+    assert!(ChannelBudget::try_subscription(&source.budget).is_ok());
+}
+
 fn runtime_with_source<S: RtdSource>(
     source: S,
     limits: RtdLimits,
@@ -833,7 +908,12 @@ fn first_registration_exists_before_an_immediately_completing_producer_runs() {
         let subscription = source
             .subscribe(&RtdTopic::single("immediate").unwrap(), sink)
             .expect("a completed first producer must not race away its registration");
-        let sender = subscription.channel.latest_sender::<i32>();
+        let sender = subscription
+            .pending
+            .as_ref()
+            .unwrap()
+            .channel
+            .latest_sender::<i32>();
         assert!(observed_rx.recv_timeout(DEADLINE).unwrap());
         assert!(sender.wait_closed(DEADLINE));
         assert!(matches!(sender.try_send(3), Err(RtdSendError::Closed(_))));

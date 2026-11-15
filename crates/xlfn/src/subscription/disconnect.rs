@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{Builder, JoinHandle};
 use triomphe::Arc;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 pub(super) struct DeferredDisconnect<
     H: SubscriptionHost,
@@ -386,12 +387,8 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         operation: OwnedServerOperation<H, E, C>,
     ) {
         let queue = Arc::clone(&self.queue);
-        queue.ready.lock().jobs.push_back(DeferredDisconnect::new(
-            subscription,
-            completion,
-            self,
-            operation,
-        ));
+        let job = DeferredDisconnect::new(subscription, completion, self, operation);
+        queue.ready.lock().jobs.push_back(job);
         queue.changed.notify_one();
     }
 }
@@ -414,8 +411,16 @@ pub(super) struct OwnedSubscription<
     E: RtdSubscription,
     C: crate::RtdSourceCatalog<E>,
 > {
-    subscription: Option<SourceSubscription<E>>,
-    reservation: Option<DisconnectReservation<H, E, C>>,
+    pending: RollbackGuard<PendingOwnedSubscription<H, E, C>>,
+}
+
+struct PendingOwnedSubscription<
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+> {
+    subscription: SourceSubscription<E>,
+    reservation: DisconnectReservation<H, E, C>,
 }
 
 impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
@@ -426,51 +431,47 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         reservation: DisconnectReservation<H, E, C>,
     ) -> Self {
         Self {
-            subscription: Some(subscription),
-            reservation: Some(reservation),
+            pending: RollbackGuard::new(PendingOwnedSubscription {
+                subscription,
+                reservation,
+            }),
         }
     }
 
     pub(super) fn request_cancel(&mut self) {
-        self.subscription
-            .as_mut()
-            .expect("owner retains its subscription")
-            .request_cancel();
+        self.pending.get_mut().subscription.request_cancel();
     }
 
-    pub(super) fn disconnect_and_wait(mut self) -> XllResult<()> {
-        disconnect_one_no_unwind(
-            self.subscription
-                .take()
-                .expect("owner retains its subscription"),
-        )
+    pub(super) fn disconnect_and_wait(self) -> XllResult<()> {
+        let PendingOwnedSubscription {
+            subscription,
+            reservation: _reservation,
+        } = self.pending.complete();
+        disconnect_one_no_unwind(subscription)
     }
 
     pub(super) fn defer(
-        mut self,
+        self,
         completion: H::DisconnectCompletion,
         operation: OwnedServerOperation<H, E, C>,
     ) {
-        self.reservation
-            .take()
-            .expect("owner retains its cleanup capacity")
-            .commit(
-                self.subscription
-                    .take()
-                    .expect("owner retains its subscription"),
-                completion,
-                operation,
-            );
+        let PendingOwnedSubscription {
+            subscription,
+            reservation,
+        } = self.pending.complete();
+        reservation.commit(subscription, completion, operation);
     }
 }
 
-impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop
-    for OwnedSubscription<H, E, C>
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Rollback
+    for PendingOwnedSubscription<H, E, C>
 {
-    fn drop(&mut self) {
-        if let Some(subscription) = self.subscription.take()
-            && let Err(error) = disconnect_one_no_unwind(subscription)
-        {
+    fn rollback(self) {
+        let Self {
+            subscription,
+            reservation: _reservation,
+        } = self;
+        if let Err(error) = disconnect_one_no_unwind(subscription) {
             crate::diagnostics::report_no_unwind("RTD owned subscription drop", &error);
         }
     }
@@ -884,7 +885,7 @@ mod tests {
 
     #[test]
     fn synchronous_cleanup_paths_retain_capacity_through_the_source_barrier() {
-        for path in ["rollback", "disconnect", "server", "runtime"] {
+        for path in ["owner-drop", "rollback", "disconnect", "server", "runtime"] {
             let (sender_tx, sender_rx) = mpsc::sync_channel(1);
             let (joining_tx, joining_rx) = mpsc::sync_channel(1);
             let (release_tx, release_rx) = mpsc::sync_channel(1);
@@ -941,6 +942,20 @@ mod tests {
             let (finished_tx, finished_rx) = mpsc::sync_channel(1);
             let closing = std::thread::spawn(move || {
                 let result = match path {
+                    "owner-drop" => {
+                        let owner = server
+                            .test_server()
+                            .subscriptions
+                            .lock()
+                            .remove(&TopicId(1))
+                            .unwrap();
+                        let unwind = catch_no_unwind(AssertUnwindSafe(move || {
+                            let _owner = owner;
+                            panic!("injected unwind with owned subscription");
+                        }));
+                        assert!(unwind.is_err());
+                        server.disconnect(TopicId(1))
+                    }
                     "rollback" => {
                         drop(connection);
                         Ok(())
@@ -958,12 +973,16 @@ mod tests {
                 finished_rx.try_recv().is_err(),
                 "barrier must still wait: {path}"
             );
-            if matches!(path, "rollback" | "disconnect") {
+            if matches!(path, "owner-drop" | "rollback" | "disconnect") {
                 assert!(matches!(
                     runtime.disconnects.reserve(),
                     Err(XllError::Overloaded)
                 ));
-                assert_eq!(runtime.services.active_quota.used(), 0);
+                // The owner-drop path still has a published topic to retire.
+                assert_eq!(
+                    runtime.services.active_quota.used(),
+                    usize::from(path == "owner-drop")
+                );
             }
             release_tx.send(()).unwrap();
             finished_rx.recv_timeout(DEADLINE).unwrap().unwrap();

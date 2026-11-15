@@ -144,11 +144,14 @@ pub(super) enum ServerTerminationRequest<'a> {
 }
 
 pub(super) struct DeferredTerminationReservation<'a> {
+    pending: RollbackGuard<PendingDeferredTermination<'a>>,
+}
+
+struct PendingDeferredTermination<'a> {
     barrier: &'a triomphe::Arc<ServerOperationBarrier>,
     owner: ThreadId,
     attempt: u64,
     state: MutexGuard<'a, ServerOperationState>,
-    committed: bool,
 }
 
 /// Holds the reservation lock until the worker handle has been installed.
@@ -333,11 +336,12 @@ impl ServerOperationBarrier {
         if deferred {
             Ok(ServerTerminationRequest::Deferred(
                 DeferredTerminationReservation {
-                    barrier,
-                    owner,
-                    attempt,
-                    state,
-                    committed: false,
+                    pending: RollbackGuard::new(PendingDeferredTermination {
+                        barrier,
+                        owner,
+                        attempt,
+                        state,
+                    }),
                 },
             ))
         } else {
@@ -596,7 +600,7 @@ impl<'a> DeferredTerminationReservation<'a> {
         self,
         server: &'server super::server::RtdServer<E, C>,
     ) -> Result<DeferredTerminationStart<'a, 'server, E, C>, ServerCloseError> {
-        if !triomphe::Arc::ptr_eq(self.barrier, &server.operations) {
+        if !triomphe::Arc::ptr_eq(self.pending.get().barrier, &server.operations) {
             return Err(ServerCloseError::Reentrant);
         }
         let worker_start = server.termination_worker.reserve_start()?;
@@ -611,12 +615,12 @@ impl<'a> DeferredTerminationReservation<'a> {
     }
 
     fn prepare(self) -> (PreparedDeferredTermination<'a>, DeferredTerminationTicket) {
-        let barrier = triomphe::Arc::clone(self.barrier);
+        let pending = self.pending.get();
         let committed = triomphe::Arc::new(AtomicBool::new(false));
         let ticket = DeferredTerminationTicket {
-            barrier,
-            owner: self.owner,
-            attempt: self.attempt,
+            barrier: triomphe::Arc::clone(pending.barrier),
+            owner: pending.owner,
+            attempt: pending.attempt,
             committed: triomphe::Arc::clone(&committed),
         };
         (
@@ -628,17 +632,13 @@ impl<'a> DeferredTerminationReservation<'a> {
         )
     }
 
-    fn commit(mut self) {
-        self.committed = true;
+    fn commit(self) {
+        drop(self.pending.complete().state);
     }
 }
 
-impl Drop for DeferredTerminationReservation<'_> {
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-
+impl Rollback for PendingDeferredTermination<'_> {
+    fn rollback(mut self) {
         debug_assert_eq!(
             self.state.phase,
             ServerPhase::Terminating {
@@ -999,7 +999,17 @@ mod deferred_ticket_tests {
         let (prepared, ticket) = reservation.prepare();
         let owner = std::thread::current().id();
         let attempt = ticket.attempt;
+        assert!(barrier.try_phase().is_none());
+        assert!(!ticket.committed.load(Ordering::Acquire));
         prepared.commit();
+        assert_eq!(
+            barrier.try_phase(),
+            Some(ServerPhase::Terminating {
+                owner,
+                deferred: true,
+            })
+        );
+        assert!(ticket.committed.load(Ordering::Acquire));
         drop(operation);
         ticket
             .with_completion(|termination| {
@@ -1138,5 +1148,29 @@ mod deferred_ticket_tests {
             Err(ServerCloseError::Reentrant)
         ));
         assert!(barrier.enter().is_some());
+    }
+
+    #[test]
+    fn deferred_reservation_unwind_reopens_the_gate_and_signals_waiters() {
+        let barrier = Arc::new(ServerOperationBarrier::default());
+        let _operation = barrier.enter().unwrap();
+        let ServerTerminationRequest::Deferred(reservation) =
+            ServerOperationBarrier::request_termination(&barrier).unwrap()
+        else {
+            panic!("active operation must defer termination");
+        };
+        assert!(barrier.try_phase().is_none());
+        let abandoned =
+            crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+                let _reservation = reservation;
+                panic!("injected unwind before preparing the worker");
+            }));
+        assert!(abandoned.is_err());
+        assert_eq!(barrier.try_phase(), Some(ServerPhase::Open));
+
+        // SAFETY: the barrier retains the live event during this zero-timeout wait.
+        let status =
+            unsafe { crate::win32::WaitForSingleObject(barrier.termination_finished.raw(), 0) };
+        assert_eq!(status, crate::win32::WAIT_OBJECT_0 as u32);
     }
 }
