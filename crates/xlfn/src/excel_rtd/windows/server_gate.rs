@@ -6,6 +6,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::ThreadId;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum ServerPhase {
@@ -567,17 +568,21 @@ impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
             prepared,
             work,
         } = self;
-        // Failure drops the prepared reservation without committing the phase.
-        // The only entrypoint available to work executes its owned ticket.
+        // An OS error proves the worker never started. If spawn unwinds without
+        // a result, stop before either startup reservation can reopen admission.
+        let require_spawn_result =
+            std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
         match work.spawn() {
             Ok(handle) => {
                 worker_start.commit(handle);
                 prepared.commit();
+                std::mem::DropGuard::dismiss(require_spawn_result);
                 Ok(())
             }
             Err(error) => {
                 // Restore the worker before reopening COM admission, just as
                 // an unspawned owner's field destruction does.
+                std::mem::DropGuard::dismiss(require_spawn_result);
                 drop(worker_start);
                 drop(prepared);
                 Err(error)
@@ -839,9 +844,12 @@ pub(super) struct TerminationWorker {
 }
 
 pub(super) struct TerminationWorkerStart<'a> {
-    worker: &'a TerminationWorker,
-    committed: bool,
+    pending: RollbackGuard<PendingWorkerStart<'a>>,
     _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+struct PendingWorkerStart<'a> {
+    worker: &'a TerminationWorker,
 }
 
 impl TerminationWorker {
@@ -854,8 +862,7 @@ impl TerminationWorker {
             owner: std::thread::current().id(),
         };
         Ok(TerminationWorkerStart {
-            worker: self,
-            committed: false,
+            pending: RollbackGuard::new(PendingWorkerStart { worker: self }),
             _not_send_or_sync: PhantomData,
         })
     }
@@ -947,28 +954,29 @@ impl TerminationWorker {
 }
 
 impl TerminationWorkerStart<'_> {
-    pub(super) fn commit(mut self, handle: std::thread::JoinHandle<()>) {
-        let mut state = self.worker.state.lock();
-        debug_assert!(matches!(
-            state.phase,
-            TerminationWorkerPhase::Starting { .. }
-        ));
+    pub(super) fn commit(self, handle: std::thread::JoinHandle<()>) {
+        let worker = self.pending.get().worker;
+        let require_install =
+            std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
+        let mut state = worker.state.lock();
+        if !matches!(state.phase, TerminationWorkerPhase::Starting { .. }) {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        // Keep the mutex through disarm and publication. An already-started
+        // worker keeps this slot until a joiner takes the installed handle.
+        let _owner = self.pending.complete();
         state.phase = TerminationWorkerPhase::Running(handle);
-        self.committed = true;
-        self.worker.changed.notify_all();
+        worker.changed.notify_all();
+        std::mem::DropGuard::dismiss(require_install);
     }
 }
 
-impl Drop for TerminationWorkerStart<'_> {
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
+impl Rollback for PendingWorkerStart<'_> {
+    fn rollback(self) {
         let mut state = self.worker.state.lock();
-        debug_assert!(matches!(
-            state.phase,
-            TerminationWorkerPhase::Starting { .. }
-        ));
+        if !matches!(state.phase, TerminationWorkerPhase::Starting { .. }) {
+            xlfn_kernel::invariant::fail_stop();
+        }
         state.phase = TerminationWorkerPhase::Idle;
         self.worker.changed.notify_all();
     }

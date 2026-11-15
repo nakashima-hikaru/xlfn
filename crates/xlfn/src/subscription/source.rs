@@ -13,6 +13,7 @@ use crate::{XllError, XllResult};
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 pub use crate::subscription_owner::{IntoRtdSubscription, RtdSubscription};
 
@@ -498,10 +499,22 @@ where
 
 /// Affine by-value connection owner, transferred between server and cleanup.
 pub(crate) struct SourceSubscription<E: RtdSubscription = ()> {
-    subscription: Option<E>,
+    pending: RollbackGuard<SourceTicket<E>>,
     // The underlying subscription is Send but need not be Sync. Cancellation
     // requires mutable access to this unique ticket, not shared access to T.
     _not_sync: PhantomData<std::cell::Cell<()>>,
+}
+
+struct SourceTicket<E: RtdSubscription>(E);
+
+impl<E: RtdSubscription> Rollback for SourceTicket<E> {
+    fn rollback(self) {
+        let result = catch_no_unwind(AssertUnwindSafe(|| self.0.disconnect_and_wait()))
+            .unwrap_or(Err(XllError::Panic));
+        if let Err(error) = result {
+            crate::diagnostics::report_no_unwind("RTD source ticket drop", &error);
+        }
+    }
 }
 
 impl<E: RtdSubscription> SourceSubscription<E> {
@@ -516,34 +529,16 @@ impl<E: RtdSubscription> SourceSubscription<E> {
     ) -> XllResult<Self> {
         let subscription = source.subscribe(topic, sink)?;
         Ok(Self {
-            subscription: Some(subscription),
+            pending: RollbackGuard::new(SourceTicket(subscription)),
             _not_sync: PhantomData,
         })
     }
 
     pub(crate) fn request_cancel(&mut self) {
-        self.subscription
-            .as_ref()
-            .expect("live source subscription")
-            .request_cancel();
+        self.pending.get().0.request_cancel();
     }
 
-    pub(crate) fn disconnect_and_wait(mut self) -> XllResult<()> {
-        self.subscription
-            .take()
-            .expect("live source subscription")
-            .disconnect_and_wait()
-    }
-}
-
-impl<E: RtdSubscription> Drop for SourceSubscription<E> {
-    fn drop(&mut self) {
-        if let Some(subscription) = self.subscription.take() {
-            let result = catch_no_unwind(AssertUnwindSafe(|| subscription.disconnect_and_wait()))
-                .unwrap_or(Err(XllError::Panic));
-            if let Err(error) = result {
-                crate::diagnostics::report_no_unwind("RTD source ticket drop", &error);
-            }
-        }
+    pub(crate) fn disconnect_and_wait(self) -> XllResult<()> {
+        self.pending.complete().0.disconnect_and_wait()
     }
 }

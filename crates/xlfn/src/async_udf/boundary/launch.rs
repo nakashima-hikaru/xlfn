@@ -310,7 +310,7 @@ mod tests {
         expected: Failure,
     }
     impl CompletionObserver for Observation<'_> {
-        fn finish(&mut self, completion: &AsyncCompletion) {
+        fn finish(self, completion: &AsyncCompletion) {
             assert_eq!(self.drops.get(), 1, "captures precede observation");
             assert_eq!(
                 crate::test_callback::async_return_calls(),

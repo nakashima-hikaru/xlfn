@@ -15,11 +15,13 @@ use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
+use std::mem::ManuallyDrop;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{Builder, JoinHandle};
 use std::time::Duration;
 use triomphe::Arc;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 /// Identifies one connection to a multiplexed source.
 ///
@@ -161,105 +163,161 @@ pub struct RtdMultiplexedSource<T, P, V = NoTopicValidator, D: RtdDeliveryPolicy
 
 enum Worker<P> {
     Unstarted(P),
-    Running {
-        handle: JoinHandle<()>,
-        permit: WorkerPermit,
-    },
+    Running(StartedWorker),
     Joining,
     Joined(XllResult<()>),
 }
 
-struct WorkerStart<'a, P> {
-    worker: Option<&'a mut Worker<P>>,
-    producer: Option<Arc<Mutex<Option<P>>>>,
-}
-
 /// A source producer removed from its canonical slot under one lock. Budget
 /// and registration failures return it before any user captures are destroyed.
-struct UnstartedWorker<'a, P> {
-    worker: Option<&'a mut Worker<P>>,
-    producer: Option<P>,
+struct UnstartedWorker<'a, P>(RollbackGuard<UnstartedSlot<'a, P>>);
+
+struct UnstartedSlot<'a, P> {
+    worker: &'a mut Worker<P>,
+    producer: P,
 }
+
 impl<'a, P> UnstartedWorker<'a, P> {
-    fn capture(mut self) -> WorkerStart<'a, P> {
-        let producer = self
-            .producer
-            .take()
-            .expect("unstarted owner retains producer");
-        WorkerStart {
-            worker: self.worker.take(),
-            producer: Some(Arc::new(Mutex::new(Some(producer)))),
-        }
+    fn new(worker: &'a mut Worker<P>, producer: P) -> Self {
+        Self(RollbackGuard::new(UnstartedSlot { worker, producer }))
+    }
+
+    fn capture(self) -> WorkerStart<'a, P> {
+        let UnstartedSlot { worker, producer } = self.0.complete();
+        WorkerStart(RollbackGuard::new(PreparedCapture {
+            worker,
+            producer: Arc::new(Mutex::new(Some(producer))),
+        }))
     }
 }
-impl<P> Drop for UnstartedWorker<'_, P> {
-    fn drop(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            let producer = self
-                .producer
-                .take()
-                .expect("rollback retains unstarted producer");
-            *worker = Worker::Unstarted(producer);
+
+impl<P> Rollback for UnstartedSlot<'_, P> {
+    fn rollback(self) {
+        *self.worker = Worker::Unstarted(self.producer);
+    }
+}
+
+struct WorkerStart<'a, P>(RollbackGuard<PreparedCapture<'a, P>>);
+
+struct PreparedCapture<'a, P> {
+    worker: &'a mut Worker<P>,
+    producer: Arc<Mutex<Option<P>>>,
+}
+
+impl<'a, P> PreparedCapture<'a, P> {
+    fn restore(self) -> UnstartedWorker<'a, P> {
+        let producer = self.producer.lock().take().expect("unstarted capture");
+        UnstartedWorker::new(self.worker, producer)
+    }
+}
+
+impl<P> Rollback for PreparedCapture<'_, P> {
+    fn rollback(self) {
+        drop(self.restore());
+    }
+}
+
+/// Without an OS result, neither destroying the producer nor returning the
+/// worker quota is safe. Unwinding retains both and leaves the slot Joining.
+struct SpawningWorker<'a, P>(ManuallyDrop<SpawnResources<'a, P>>);
+
+struct SpawnResources<'a, P> {
+    capture: PreparedCapture<'a, P>,
+    permit: WorkerPermit,
+}
+
+impl<'a, P> SpawningWorker<'a, P> {
+    fn finish(
+        self,
+        result: std::io::Result<JoinHandle<()>>,
+    ) -> Result<RunningWorker<'a, P>, FailedWorker<'a, P>> {
+        let SpawnResources { capture, permit } = ManuallyDrop::into_inner(self.0);
+        match result {
+            Ok(handle) => {
+                let PreparedCapture { worker, producer } = capture;
+                let running = RunningWorker(RollbackGuard::new(RunningSlot {
+                    worker,
+                    started: StartedWorker { handle, permit },
+                }));
+                // The spawned closure retains its own Arc through producer acquisition.
+                drop(producer);
+                Ok(running)
+            }
+            Err(error) => {
+                // A returned OS error guarantees the closure never ran.
+                let restore = capture.restore();
+                drop(permit);
+                Err(FailedWorker { restore, error })
+            }
         }
     }
 }
 
-/// During the OS call its outcome is not yet known. Unwind must retain the
-/// captures and keep the canonical slot unavailable, rather than guessing that
-/// no worker started and destroying captures before a join barrier exists.
-struct SpawningWorker<'a, P> {
-    worker: Option<&'a mut Worker<P>>,
-    producer: Option<Arc<Mutex<Option<P>>>>,
+struct RunningWorker<'a, P>(RollbackGuard<RunningSlot<'a, P>>);
+
+struct RunningSlot<'a, P> {
+    worker: &'a mut Worker<P>,
+    started: StartedWorker,
 }
-impl<P> Drop for SpawningWorker<'_, P> {
-    fn drop(&mut self) {
-        if let Some(producer) = self.producer.take() {
-            // An unknown OS startup outcome cannot authorize destruction.
-            let _retained = std::mem::ManuallyDrop::new(producer);
-        }
-    }
-}
-struct RunningWorker<'a, P> {
-    worker: Option<&'a mut Worker<P>>,
-    running: Option<StartedWorker>,
-}
+
 struct StartedWorker {
     handle: JoinHandle<()>,
     permit: WorkerPermit,
 }
+
+impl StartedWorker {
+    fn join(self) -> XllResult<()> {
+        let Self { handle, permit } = self;
+        // A native wait panic cannot certify thread exit. Source shutdown's
+        // caller treats any returned error or unwind as a completed barrier.
+        let joined = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| handle.join()))
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        let result = crate::panic_boundary::contain_panic(joined).map_err(|_| XllError::Panic);
+        drop(permit);
+        result
+    }
+}
+
 impl<P> RunningWorker<'_, P> {
-    fn install(mut self) {
-        let StartedWorker { handle, permit } = self
-            .running
-            .take()
-            .expect("running owner retains join barrier");
-        *self.worker.take().expect("running owner retains slot") =
-            Worker::Running { handle, permit };
+    fn install(self) {
+        self.0.complete().install();
     }
 }
-impl<P> Drop for RunningWorker<'_, P> {
-    fn drop(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            let StartedWorker { handle, permit } = self
-                .running
-                .take()
-                .expect("running owner retains join barrier");
-            *worker = Worker::Running { handle, permit };
-        }
+
+impl<P> RunningSlot<'_, P> {
+    fn install(self) {
+        *self.worker = Worker::Running(self.started);
     }
 }
+
+impl<P> Rollback for RunningSlot<'_, P> {
+    fn rollback(self) {
+        self.install();
+    }
+}
+
 struct FailedWorker<'a, P> {
-    _restore: UnstartedWorker<'a, P>,
+    restore: UnstartedWorker<'a, P>,
     error: std::io::Error,
 }
+
+impl<'a, P> WorkerStart<'a, P> {
+    fn begin_spawn(self, permit: WorkerPermit) -> SpawningWorker<'a, P> {
+        SpawningWorker(ManuallyDrop::new(SpawnResources {
+            capture: self.0.complete(),
+            permit,
+        }))
+    }
+}
+
 impl<'a, P: Send + 'static> WorkerStart<'a, P> {
     fn spawn(
-        mut self,
+        self,
         permit: WorkerPermit,
         job: impl FnOnce(P) + Send + 'static,
         fail_spawn: bool,
     ) -> Result<RunningWorker<'a, P>, FailedWorker<'a, P>> {
-        let thread_pending = Arc::clone(self.producer.as_ref().expect("unspawned capture"));
+        let thread_pending = Arc::clone(&self.0.get().producer);
         let run = move || {
             // This closure is FnOnce and the recovery owner is issued only if
             // std::thread::spawn reports that the closure was never started.
@@ -267,58 +325,15 @@ impl<'a, P: Send + 'static> WorkerStart<'a, P> {
             job(producer);
         };
         let builder = Builder::new().name("xlfn-rtd-source".into());
-        let mut spawning = SpawningWorker {
-            worker: self.worker.take(),
-            producer: self.producer.take(),
-        };
-        let result = if fail_spawn {
+        if fail_spawn {
             drop(run);
-            Err(std::io::Error::other("injected RTD source spawn failure"))
-        } else {
-            builder.spawn(run)
-        };
-        match result {
-            Ok(handle) => {
-                let running = RunningWorker {
-                    worker: spawning.worker.take(),
-                    running: Some(StartedWorker { handle, permit }),
-                };
-                // The thread owns the other Arc, including when not yet run.
-                drop(spawning.producer.take());
-                Ok(running)
-            }
-            Err(error) => {
-                // The standard-library Err contract guarantees the closure
-                // never ran; only this failure-specific owner may recover P.
-                let producer = spawning.producer.take().expect("spawning retains capture");
-                let producer = producer
-                    .lock()
-                    .take()
-                    .expect("failed spawn retains producer");
-                Err(FailedWorker {
-                    _restore: UnstartedWorker {
-                        worker: spawning.worker.take(),
-                        producer: Some(producer),
-                    },
-                    error,
-                })
-            }
+            return Err(FailedWorker {
+                restore: self.0.complete().restore(),
+                error: std::io::Error::other("injected RTD source spawn failure"),
+            });
         }
-    }
-}
-impl<P> Drop for WorkerStart<'_, P> {
-    fn drop(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            // No OS spawn has begun while this preparation owner remains armed.
-            let producer = self
-                .producer
-                .as_ref()
-                .expect("unspawned capture")
-                .lock()
-                .take()
-                .expect("unspawned capture");
-            *worker = Worker::Unstarted(producer);
-        }
+        let spawning = self.begin_spawn(permit);
+        spawning.finish(builder.spawn(run))
     }
 }
 
@@ -627,11 +642,8 @@ where
             return Err(XllError::Closing);
         }
         let starting = match std::mem::replace(&mut *worker, Worker::Joining) {
-            Worker::Unstarted(producer) => UnstartedWorker {
-                worker: Some(&mut *worker),
-                producer: Some(producer),
-            },
-            running @ Worker::Running { .. } => {
+            Worker::Unstarted(producer) => UnstartedWorker::new(&mut worker, producer),
+            running @ Worker::Running(_) => {
                 *worker = running;
                 return self.register_channel(topic, channel);
             }
@@ -670,8 +682,8 @@ where
                 Ok(subscription)
             }
             Err(failed) => {
-                let FailedWorker { _restore, error } = failed;
-                drop(_restore);
+                let FailedWorker { restore, error } = failed;
+                drop(restore);
                 self.worker.shared.stop();
                 Err(XllError::Native {
                     code: error.raw_os_error().unwrap_or(0),
@@ -684,10 +696,7 @@ where
 
 enum RetiringWorker<P> {
     Unstarted(P),
-    Running {
-        handle: JoinHandle<()>,
-        permit: WorkerPermit,
-    },
+    Running(StartedWorker),
 }
 
 impl<T, P, D: RtdDeliveryPolicy> WorkerOwner<T, P, D> {
@@ -703,9 +712,7 @@ impl<T, P, D: RtdDeliveryPolicy> WorkerOwner<T, P, D> {
                         return result;
                     }
                     Worker::Unstarted(producer) => break RetiringWorker::Unstarted(producer),
-                    Worker::Running { handle, permit } => {
-                        break RetiringWorker::Running { handle, permit };
-                    }
+                    Worker::Running(started) => break RetiringWorker::Running(started),
                 }
             }
         };
@@ -716,12 +723,7 @@ impl<T, P, D: RtdDeliveryPolicy> WorkerOwner<T, P, D> {
                 crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| drop(producer)))
                     .map_err(|_| XllError::Panic)
             }
-            RetiringWorker::Running { handle, permit } => {
-                let result = crate::panic_boundary::contain_panic(handle.join())
-                    .map_err(|_| XllError::Panic);
-                drop(permit);
-                result
-            }
+            RetiringWorker::Running(started) => started.join(),
         };
         let mut worker = self.state.lock();
         *worker = Worker::Joined(result.clone());

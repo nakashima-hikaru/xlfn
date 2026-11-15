@@ -40,59 +40,62 @@ impl NotificationPump {
     ) -> XllResult<Self> {
         let shared = Arc::new(Shared::default());
         let worker_shared = Arc::clone(&shared);
-        let worker = Builder::new()
-            .name("xlfn-rtd-notify".into())
-            .spawn(move || {
-                let mut reported_failure = false;
-                let mut state = worker_shared.state.lock();
-                loop {
-                    if state.stopping {
-                        return;
-                    }
-                    if state.pending.is_none() {
-                        worker_shared.changed.wait(&mut state);
+        let builder = Builder::new().name("xlfn-rtd-notify".into());
+        // Even an idle worker can keep executing module code. Require a
+        // definite spawn result before letting its owners unwind.
+        let require_spawn_result =
+            std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
+        let spawn_result = builder.spawn(move || {
+            let mut reported_failure = false;
+            let mut state = worker_shared.state.lock();
+            loop {
+                if state.stopping {
+                    return;
+                }
+                if state.pending.is_none() {
+                    worker_shared.changed.wait(&mut state);
+                    continue;
+                }
+                if let Some(deadline) = state.next_attempt {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if !remaining.is_zero() {
+                        worker_shared.changed.wait_for(&mut state, remaining);
                         continue;
                     }
-                    if let Some(deadline) = state.next_attempt {
-                        let remaining = deadline.saturating_duration_since(Instant::now());
-                        if !remaining.is_zero() {
-                            worker_shared.changed.wait_for(&mut state, remaining);
-                            continue;
-                        }
-                    }
-                    let sequence = state.pending;
-                    drop(state);
-                    // The host call can block or synchronously cause RefreshData.
-                    // Never hold the queue lock while running foreign code.
-                    let result =
-                        crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(&mut notify))
-                            .unwrap_or(Err(XllError::Panic));
-                    if let Err(error) = &result {
-                        if !matches!(error, XllError::Closing) && !reported_failure {
-                            crate::diagnostics::report_no_unwind(
-                                "RTD asynchronous UpdateNotify",
-                                error,
-                            );
-                            reported_failure = true;
-                        }
-                    } else {
-                        reported_failure = false;
-                    }
-                    state = worker_shared.state.lock();
-                    if matches!(result, Err(XllError::Closing | XllError::Panic)) {
-                        state.stopping = true;
-                        state.pending = None;
-                    } else if state.pending == sequence {
-                        // Delay from completion, not call entry: a slow COM
-                        // call must not trigger an immediate burst of retries.
-                        state.next_attempt = Some(Instant::now() + interval);
-                    }
                 }
-            })
-            .map_err(|error| XllError::Native {
-                code: error.raw_os_error().unwrap_or(0),
-                message: format!("failed to start RTD notification worker: {error}"),
-            })?;
+                let sequence = state.pending;
+                drop(state);
+                // The host call can block or synchronously cause RefreshData.
+                // Never hold the queue lock while running foreign code.
+                let result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(&mut notify))
+                    .unwrap_or(Err(XllError::Panic));
+                if let Err(error) = &result {
+                    if !matches!(error, XllError::Closing) && !reported_failure {
+                        crate::diagnostics::report_no_unwind(
+                            "RTD asynchronous UpdateNotify",
+                            error,
+                        );
+                        reported_failure = true;
+                    }
+                } else {
+                    reported_failure = false;
+                }
+                state = worker_shared.state.lock();
+                if matches!(result, Err(XllError::Closing | XllError::Panic)) {
+                    state.stopping = true;
+                    state.pending = None;
+                } else if state.pending == sequence {
+                    // Delay from completion, not call entry: a slow COM
+                    // call must not trigger an immediate burst of retries.
+                    state.next_attempt = Some(Instant::now() + interval);
+                }
+            }
+        });
+        std::mem::DropGuard::dismiss(require_spawn_result);
+        let worker = spawn_result.map_err(|error| XllError::Native {
+            code: error.raw_os_error().unwrap_or(0),
+            message: format!("failed to start RTD notification worker: {error}"),
+        })?;
         Ok(Self {
             shared,
             worker: Some(worker),
@@ -124,19 +127,21 @@ impl NotificationPump {
     }
 
     pub(super) fn stop(&mut self) {
+        // The transport owner drains admitted callbacks before dropping the
+        // pump. Preserve its cookie if stopping or joining the worker unwinds.
+        let require_join = std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
         {
             let mut state = self.shared.state.lock();
             state.stopping = true;
             state.pending = None;
             self.shared.changed.notify_one();
         }
-        if let Some(worker) = self.worker.take() {
-            // The transport owner closes and drains its notification barrier
-            // before dropping this pump; join also covers the worker's tail.
-            if crate::panic_boundary::contain_panic(worker.join()).is_err() {
-                xlfn_kernel::invariant::fail_stop();
-            }
+        if let Some(worker) = self.worker.take()
+            && crate::panic_boundary::contain_panic(worker.join()).is_err()
+        {
+            xlfn_kernel::invariant::fail_stop();
         }
+        std::mem::DropGuard::dismiss(require_join);
     }
 }
 

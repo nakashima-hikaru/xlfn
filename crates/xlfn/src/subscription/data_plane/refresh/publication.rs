@@ -3,6 +3,7 @@
 //! The backend traits and constructors are private. Ordinary callers can only
 //! marshal their consumed batch with the concrete Windows Automation backend.
 use super::*;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 trait ArrayApi {
     type Array: Copy;
@@ -187,17 +188,23 @@ impl<T, A: ArrayApi<Array = std::ptr::NonNull<T>>> OutputSlots<A> for RawOutputS
     }
 }
 
-struct StagedOutputs<A: ArrayApi, O: OutputSlots<A>> {
+struct PendingOutputs<A: ArrayApi, O: OutputSlots<A>> {
     output: O,
-    armed: bool,
     _array: std::marker::PhantomData<fn(A) -> A>,
 }
 
-impl<A: ArrayApi, O: OutputSlots<A>> Drop for StagedOutputs<A, O> {
-    fn drop(&mut self) {
-        if self.armed {
-            self.output.reset();
-        }
+impl<A: ArrayApi, O: OutputSlots<A>> PendingOutputs<A, O> {
+    fn stage(output: O) -> RollbackGuard<Self> {
+        RollbackGuard::new(Self {
+            output,
+            _array: std::marker::PhantomData,
+        })
+    }
+}
+
+impl<A: ArrayApi, O: OutputSlots<A>> Rollback for PendingOutputs<A, O> {
+    fn rollback(mut self) {
+        self.output.reset();
     }
 }
 
@@ -246,21 +253,16 @@ impl<'a, H: SubscriptionHost, A: ArrayApi> RefreshPublication<'a, H, A> {
         // Local drop order is output reset, array destruction, batch rollback.
         // Thus even a reentrant rollback notifier sees empty failed outputs.
         let Self { batch, array } = self;
-        let mut staged = StagedOutputs::<A, O> {
-            output,
-            armed: true,
-            _array: std::marker::PhantomData,
-        };
-        staged.output.write_count(array.count)?;
+        let mut staged = PendingOutputs::<A, O>::stage(output);
+        staged.get_mut().output.write_count(array.count)?;
         after(HandoffStage::CountWritten);
-        staged.output.write_array(array.array)?;
+        staged.get_mut().output.write_array(array.array)?;
         after(HandoffStage::PointerWritten);
         array.relinquish();
-        staged.armed = false;
         let committed = CommittedRefresh { batch: Some(batch) };
         // End the output borrow before completion can call a notifier/reenter.
         // The committed guard already owns recovery if an output Drop unwinds.
-        drop(staged);
+        drop(staged.complete().output);
         after(HandoffStage::Committed);
         Ok(RefreshHandoff {
             completion: committed.finish(),
@@ -412,25 +414,21 @@ mod windows {
             Ok(ready) => ready,
             Err(error) => return marshal_status(error),
         };
-        let mut staged = StagedOutputs::<WindowsApi, _> {
-            output,
-            armed: true,
-            _array: std::marker::PhantomData,
-        };
+        let mut staged = PendingOutputs::<WindowsApi, _>::stage(output);
         if let Err(status) = <RefreshOutputSlots<'_> as OutputSlots<WindowsApi>>::write_count(
-            &mut staged.output,
+            &mut staged.get_mut().output,
             ready.count,
         )
         .and_then(|()| {
             <RefreshOutputSlots<'_> as OutputSlots<WindowsApi>>::write_array(
-                &mut staged.output,
+                &mut staged.get_mut().output,
                 ready.array,
             )
         }) {
             return status;
         }
         ready.relinquish();
-        staged.armed = false;
+        let _ = staged.complete();
         S_OK
     }
 }

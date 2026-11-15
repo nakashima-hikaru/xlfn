@@ -165,7 +165,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
     // calculation scoping even though event-driven generations are linearized.
     let launch = captured.into_launch();
     let token = launch.token();
-    let mut observation = AsyncObservation::new(
+    let observation = AsyncObservation::new(
         &metadata,
         timer,
         layers,
@@ -373,7 +373,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
     // the stronger lifetime guarantee for raw object pins.
     let launch = captured.into_launch();
     let token = launch.token();
-    let mut observation = AsyncObservation::new(
+    let observation = AsyncObservation::new(
         &metadata,
         timer,
         layers,

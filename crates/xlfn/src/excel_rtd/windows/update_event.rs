@@ -98,10 +98,32 @@ impl Drop for GitCookieLease {
 }
 
 pub(super) struct RetainedUpdateCallback {
-    pub(super) cookie: Option<GitCookieLease>,
-    pub(super) pump: Option<NotificationPump>,
+    resources: CallbackResources,
+    // Test hooks run after the worker join and cookie cleanup.
     #[cfg(test)]
-    pub(super) drop_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    _drop_hook: Option<CallbackDropHook>,
+}
+
+struct ActiveCallback {
+    // Join the notification worker before revocation can reenter COM.
+    pump: NotificationPump,
+    _cookie: GitCookieLease,
+}
+
+enum CallbackResources {
+    Active(ActiveCallback),
+    #[cfg(test)]
+    Inert,
+}
+
+#[cfg(test)]
+struct CallbackDropHook(Arc<dyn Fn() + Send + Sync>);
+
+#[cfg(test)]
+impl Drop for CallbackDropHook {
+    fn drop(&mut self) {
+        (self.0)();
+    }
 }
 
 fn revoke_git_cookie(cookie: NonZeroU32) -> XllResult<()> {
@@ -157,23 +179,56 @@ impl RetainedUpdateCallback {
             notify_cookie(raw_cookie)
         })?;
         Ok(Self {
-            cookie: Some(cookie),
-            pump: Some(pump),
+            resources: CallbackResources::Active(ActiveCallback {
+                pump,
+                _cookie: cookie,
+            }),
             #[cfg(test)]
-            drop_hook: None,
+            _drop_hook: None,
         })
     }
 
+    #[cfg(test)]
+    pub(super) fn inert_for_test(hook: Option<Arc<dyn Fn() + Send + Sync>>) -> Box<Self> {
+        Box::new(Self {
+            resources: CallbackResources::Inert,
+            _drop_hook: hook.map(CallbackDropHook),
+        })
+    }
+
+    #[cfg(all(test, feature = "handles"))]
+    pub(super) fn active_for_test(
+        pump: NotificationPump,
+        cookie: GitCookieLease,
+        hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Box<Self> {
+        Box::new(Self {
+            resources: CallbackResources::Active(ActiveCallback {
+                pump,
+                _cookie: cookie,
+            }),
+            _drop_hook: hook.map(CallbackDropHook),
+        })
+    }
+
+    fn pump(&self) -> Option<&NotificationPump> {
+        match &self.resources {
+            CallbackResources::Active(active) => Some(&active.pump),
+            #[cfg(test)]
+            CallbackResources::Inert => None,
+        }
+    }
+
     fn notify(&self) -> XllResult<()> {
-        self.pump.as_ref().map_or(Ok(()), NotificationPump::request)
+        self.pump().map_or(Ok(()), NotificationPump::request)
     }
 
     pub(super) fn pending_notice(&self) -> Option<u64> {
-        self.pump.as_ref().and_then(NotificationPump::pending)
+        self.pump().and_then(NotificationPump::pending)
     }
 
     pub(super) fn acknowledge(&self, notice: Option<u64>) {
-        if let Some(pump) = &self.pump {
+        if let Some(pump) = self.pump() {
             pump.acknowledge(notice);
         }
     }
@@ -210,25 +265,6 @@ fn notify_cookie(cookie: u32) -> XllResult<()> {
     }
 
     Ok(())
-}
-
-impl Drop for RetainedUpdateCallback {
-    fn drop(&mut self) {
-        // Server retirement seals/drains the notification barrier before
-        // reclaiming callbacks. Join the dormant worker before revoking the
-        // cookie or allowing the server's module lease to be released.
-        if let Some(mut pump) = self.pump.take() {
-            pump.stop();
-        }
-        // RevokeInterfaceFromGlobal must run before the test hook, matching
-        // the historical callback-drop ordering explicitly.
-        drop(self.cookie.take());
-
-        #[cfg(test)]
-        if let Some(drop_hook) = self.drop_hook.as_ref() {
-            drop_hook();
-        }
-    }
 }
 
 /// Retains the callback lock and storage for one installation. Abandonment
@@ -281,7 +317,7 @@ pub(super) fn drain_callbacks(callbacks: &Mutex<ServerCallbacks>) {
         std::mem::take(&mut callbacks.records)
     };
 
-    // RetainedUpdateCallback::drop revokes a GIT cookie and can therefore run
+    // Dropping a callback revokes a GIT cookie and can therefore run
     // external, reentrant COM code. The callback mutex must not be held here.
     drop(records);
     retry_git_revocation_debt();

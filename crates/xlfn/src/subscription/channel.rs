@@ -1160,10 +1160,38 @@ impl<D: RtdDeliveryPolicy> Drop for Channel<D> {
 /// disconnect failures. Disconnect reports publication and worker-join errors.
 pub struct RtdChannelSubscription {
     channel: SharedChannel,
-    producer: Option<JoinHandle<()>>,
-    producer_permit: Option<WorkerPermit>,
-    worker_permit: Option<WorkerPermit>,
+    producer: ProducerState,
     subscription_permit: Option<SubscriptionPermit>,
+}
+
+enum ProducerState {
+    Absent,
+    Running(RunningProducer),
+}
+
+struct LocalWorkerPermits {
+    _source: WorkerPermit,
+    _runtime: WorkerPermit,
+}
+
+struct RunningProducer {
+    handle: JoinHandle<()>,
+    permits: LocalWorkerPermits,
+}
+
+impl RunningProducer {
+    fn join(self) -> XllResult<()> {
+        let Self {
+            handle,
+            permits: _permits,
+        } = self;
+        // A returned result proves exit even when the producer panicked. An
+        // unwind from the join itself cannot certify the teardown barrier.
+        let require_join = std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
+        let result = handle.join();
+        std::mem::DropGuard::dismiss(require_join);
+        crate::panic_boundary::contain_panic(result).map_err(|_| XllError::Panic)
+    }
 }
 
 /// A newly attached publication barrier with its mandatory source reservation.
@@ -1203,11 +1231,72 @@ impl<D: RtdDeliveryPolicy> AttachedChannel<D> {
     pub(super) fn into_multiplexed_parts(self) -> (RtdChannelSubscription, SubscriptionPermit) {
         (self.subscription, self.permit)
     }
+}
 
-    fn into_subscription(self) -> RtdChannelSubscription {
-        let mut subscription = self.subscription;
-        subscription.subscription_permit = Some(self.permit);
-        subscription
+struct PreparingLocalChannel<D: RtdDeliveryPolicy> {
+    // Abandonment revokes the sink before either worker permit is returned.
+    subscription: RtdChannelSubscription,
+    worker_permits: LocalWorkerPermits,
+    subscription_permit: SubscriptionPermit,
+    channel: Arc<Channel<D>>,
+}
+
+impl<D: RtdDeliveryPolicy> PreparingLocalChannel<D> {
+    fn attach<T: IntoRtdValue + Send + 'static>(
+        delivery: D,
+        source_budget: &Arc<ChannelBudget>,
+        sink: RtdSink<T>,
+    ) -> XllResult<Self> {
+        let source_permit = ChannelBudget::try_worker(source_budget)?;
+        let runtime_budget = sink.channel_budget();
+        let runtime_permit = ChannelBudget::try_worker(&runtime_budget)?;
+        let AttachedChannel {
+            subscription,
+            channel,
+            permit: subscription_permit,
+        } = AttachedChannel::attach(delivery, Arc::clone(source_budget), runtime_budget, sink)?;
+        Ok(Self {
+            subscription,
+            worker_permits: LocalWorkerPermits {
+                _source: source_permit,
+                _runtime: runtime_permit,
+            },
+            subscription_permit,
+            channel,
+        })
+    }
+
+    fn spawn<T: IntoRtdValue + Send + 'static>(
+        self,
+        delivery: D,
+        topic: RtdTopic,
+        producer: impl FnOnce(RtdSender<T, D>) -> XllResult<()> + Send + 'static,
+        error_policy: RtdProducerErrorPolicy,
+    ) -> XllResult<RtdChannelSubscription> {
+        let sender = Channel::sender_with_policy(&self.channel, delivery);
+        let worker = Builder::new().name("xlfn-rtd-producer".into());
+        // Quotas limit admission. They cannot certify module quiescence if
+        // the native spawn unwinds before reporting whether a worker started.
+        let require_outcome =
+            std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
+        let spawn_result = worker.spawn(move || {
+            let result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+                producer(sender.clone())
+            }))
+            .unwrap_or(Err(XllError::Panic));
+            sender.complete(&topic, result, error_policy);
+        });
+        std::mem::DropGuard::dismiss(require_outcome);
+        let handle = spawn_result.map_err(spawn_error)?;
+        let Self {
+            mut subscription,
+            worker_permits: permits,
+            subscription_permit,
+            ..
+        } = self;
+        subscription.producer = ProducerState::Running(RunningProducer { handle, permits });
+        subscription.subscription_permit = Some(subscription_permit);
+        Ok(subscription)
     }
 }
 
@@ -1230,9 +1319,7 @@ impl RtdChannelSubscription {
         Channel::schedule(&channel);
         Ok(Self {
             channel: D::erase_channel(channel),
-            producer: None,
-            producer_permit: None,
-            worker_permit: None,
+            producer: ProducerState::Absent,
             subscription_permit: None,
         })
     }
@@ -1246,23 +1333,20 @@ impl RtdChannelSubscription {
         let publisher = {
             let mut publication = self.channel.publication().lock();
             publication.sink.take();
-            Some(Ok(std::mem::replace(&mut publication.result, Ok(()))))
+            std::mem::replace(&mut publication.result, Ok(()))
         };
         // The immutable scheduler may outlive the subscription through sender
         // clones. Its queue is inert after generation shutdown; close() above
         // prevents this channel from reserving any new publication turn.
-        let producer = self
-            .producer
-            .take()
-            .map(|worker| crate::panic_boundary::contain_panic(worker.join()).map(|()| Ok(())));
-        self.producer_permit.take();
-        self.worker_permit.take();
+        let producer = match std::mem::replace(&mut self.producer, ProducerState::Absent) {
+            ProducerState::Absent => Ok(()),
+            ProducerState::Running(producer) => producer.join(),
+        };
         self.subscription_permit.take();
-        for result in [publisher, producer].into_iter().flatten() {
+        for result in [publisher, producer] {
             match result {
-                Ok(Ok(()) | Err(XllError::Closing)) => {}
-                Ok(Err(error)) => return Err(error),
-                Err(_) => return Err(XllError::Panic),
+                Ok(()) | Err(XllError::Closing) => {}
+                Err(error) => return Err(error),
             }
         }
         Ok(())
@@ -1303,35 +1387,9 @@ where
     type Subscription = RtdChannelSubscription;
 
     fn subscribe(&self, topic: &RtdTopic, sink: RtdSink<T>) -> XllResult<Self::Subscription> {
-        let permit = ChannelBudget::try_worker(&self.budget)?;
-        let runtime_budget = sink.channel_budget();
-        let worker_permit = ChannelBudget::try_worker(&runtime_budget)?;
-        let attached = AttachedChannel::attach(
-            self.delivery,
-            Arc::clone(&self.budget),
-            runtime_budget,
-            sink,
-        )?;
-        let sender = attached.sender(self.delivery);
-        let mut subscription = attached.into_subscription();
-        subscription.producer_permit = Some(permit);
-        subscription.worker_permit = Some(worker_permit);
+        let prepared = PreparingLocalChannel::attach(self.delivery, &self.budget, sink)?;
         let producer = (self.factory)(topic.clone())?;
-        let topic = topic.clone();
-        let error_policy = self.error_policy;
-        subscription.producer = Some(
-            Builder::new()
-                .name("xlfn-rtd-producer".into())
-                .spawn(move || {
-                    let result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
-                        producer(sender.clone())
-                    }))
-                    .unwrap_or(Err(XllError::Panic));
-                    sender.complete(&topic, result, error_policy);
-                })
-                .map_err(spawn_error)?,
-        );
-        Ok(subscription)
+        prepared.spawn(self.delivery, topic.clone(), producer, self.error_policy)
     }
 }
 
@@ -1572,6 +1630,50 @@ mod tests {
         let mut subscription = source.subscribe(&topic, sink).unwrap();
         subscription.finish().unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn miri_local_preparation_unwind_revokes_the_sink_before_releasing_workers() {
+        let (_runtime, _server, sink) = sink_with_limits(
+            super::super::topic::RtdLimits::standard()
+                .with_max_workers(super::super::topic::RtdCapacity::disabled_if_zero(1)),
+        );
+        let runtime_budget = sink.channel_budget();
+        let source_budget = Arc::new(ChannelBudget::source(RtdSourceLimits::standard()));
+        source_budget.configure_worker_limit(NonZeroUsize::MIN);
+        let prepared =
+            PreparingLocalChannel::attach(RtdFifo::new(capacity()), &source_budget, sink).unwrap();
+        let channel = Arc::clone(&prepared.channel);
+
+        let before_revoke = std::thread::scope(|scope| {
+            let publication = channel.publication.lock();
+            let attempt = scope.spawn(move || {
+                crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(move || {
+                    let _prepared = prepared;
+                    panic!("injected local producer factory unwind");
+                }))
+            });
+            while !channel.stopping.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            let source_reserved = matches!(
+                ChannelBudget::try_worker(&source_budget),
+                Err(XllError::Overloaded)
+            );
+            let runtime_reserved = matches!(
+                ChannelBudget::try_worker(&runtime_budget),
+                Err(XllError::Overloaded)
+            );
+            let sink_retained = publication.sink.is_some();
+            drop(publication);
+            assert!(attempt.join().unwrap().is_err());
+            (sink_retained, source_reserved, runtime_reserved)
+        });
+
+        assert_eq!(before_revoke, (true, true, true));
+        assert!(channel.publication.lock().sink.is_none());
+        assert!(ChannelBudget::try_worker(&source_budget).is_ok());
+        assert!(ChannelBudget::try_worker(&runtime_budget).is_ok());
     }
 
     fn wait_drained_shared(channel: &SharedChannel) {
@@ -1815,7 +1917,10 @@ mod tests {
                 .wait_closed(DEADLINE)
         );
         let deadline = std::time::Instant::now() + DEADLINE;
-        while !first.producer.as_ref().unwrap().is_finished() {
+        let ProducerState::Running(producer) = &first.producer else {
+            panic!("subscription owns the producer until join");
+        };
+        while !producer.handle.is_finished() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "producer did not exit"

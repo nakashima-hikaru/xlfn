@@ -5,17 +5,18 @@ use crate::execution::{
     CallMetadata, CallOutcome, CallTimer, UdfCompletionOutcome, UdfDeliveryOutcome, UdfLayerGuard,
     UdfTraceMetadata, safe_exit, trace,
 };
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 /// Completion observation is selected when an invocation chooses its path.
 /// Uninstrumented tasks carry a zero-sized policy instead of optional metadata.
 pub(crate) trait CompletionObserver {
-    fn finish(&mut self, completion: &AsyncCompletion);
+    fn finish(self, completion: &AsyncCompletion);
 }
 
 pub(crate) struct NoObservation;
 
 impl CompletionObserver for NoObservation {
-    fn finish(&mut self, _: &AsyncCompletion) {}
+    fn finish(self, _: &AsyncCompletion) {}
 }
 
 /// Observation state for one async UDF invocation uniquely owned by the running task.
@@ -24,10 +25,10 @@ impl CompletionObserver for NoObservation {
 /// cancellation token needed to classify a forced task drop. It has no Excel
 /// handle or executor ownership.
 pub(crate) struct AsyncObservation<G: UdfLayerGuard> {
-    active: Option<ActiveUdfInstrumentation<G>>,
+    active: RollbackGuard<ActiveUdfInstrumentation<G>>,
 }
 
-pub(crate) struct ActiveUdfInstrumentation<G: UdfLayerGuard> {
+struct ActiveUdfInstrumentation<G: UdfLayerGuard> {
     udf_id: &'static str,
     excel_name: &'static str,
     call_id: crate::execution::CallId,
@@ -48,7 +49,7 @@ impl<G: UdfLayerGuard> AsyncObservation<G> {
         cancellation: CancellationToken,
     ) -> Self {
         Self {
-            active: Some(ActiveUdfInstrumentation {
+            active: RollbackGuard::new(ActiveUdfInstrumentation {
                 udf_id: metadata.udf_id,
                 excel_name: metadata.excel_name,
                 call_id: metadata.call_id,
@@ -64,31 +65,27 @@ impl<G: UdfLayerGuard> AsyncObservation<G> {
 }
 
 impl<G: UdfLayerGuard> CompletionObserver for AsyncObservation<G> {
-    fn finish(&mut self, completion: &AsyncCompletion) {
-        if let Some(active) = self.active.take() {
-            finish_active(active, completion);
-        }
+    fn finish(self, completion: &AsyncCompletion) {
+        finish_active(self.active.complete(), completion);
     }
 }
 
-impl<G: UdfLayerGuard> Drop for AsyncObservation<G> {
-    fn drop(&mut self) {
-        if let Some(active) = self.active.take() {
-            let completion = if active.cancellation.is_cancelled() {
-                AsyncCompletion {
-                    completion: OwnedCompletionOutcome::Cancelled,
-                    delivery: OwnedDeliveryOutcome::Unobserved,
-                }
-            } else {
-                AsyncCompletion {
-                    completion: OwnedCompletionOutcome::Error(XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_COMPLETION,
-                    }),
-                    delivery: OwnedDeliveryOutcome::Unobserved,
-                }
-            };
-            finish_active(active, &completion);
-        }
+impl<G: UdfLayerGuard> Rollback for ActiveUdfInstrumentation<G> {
+    fn rollback(self) {
+        let completion = if self.cancellation.is_cancelled() {
+            OwnedCompletionOutcome::Cancelled
+        } else {
+            OwnedCompletionOutcome::Error(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_COMPLETION,
+            })
+        };
+        finish_active(
+            self,
+            &AsyncCompletion {
+                completion,
+                delivery: OwnedDeliveryOutcome::Unobserved,
+            },
+        );
     }
 }
 
@@ -290,7 +287,7 @@ mod tests {
     fn completion_and_delivery_failures_remain_independent() {
         let (_source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
         let (sender, receiver) = std::sync::mpsc::channel();
-        let mut observation = observation(sender, token);
+        let observation = observation(sender, token);
         let computation_error = XllError::Native {
             code: 73,
             message: "computation".to_owned(),
@@ -301,8 +298,6 @@ mod tests {
             delivery: OwnedDeliveryOutcome::Failed(delivery_error),
         };
         observation.finish(&completion);
-        observation.finish(&completion);
-        drop(observation);
 
         assert_eq!(
             receiver.recv().unwrap(),

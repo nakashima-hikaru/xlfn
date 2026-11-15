@@ -1070,11 +1070,7 @@ fn module_quiescence_refuses_debt_claim_in_flight() {
 }
 
 fn inert_update_callback() -> Box<RetainedUpdateCallback> {
-    Box::new(RetainedUpdateCallback {
-        cookie: None,
-        pump: None,
-        drop_hook: None,
-    })
+    RetainedUpdateCallback::inert_for_test(None)
 }
 
 #[test]
@@ -1140,20 +1136,16 @@ fn abandoned_callback_preparation_unlocks_before_destroying_callback() {
 
     let callbacks = Arc::new(crate::sync::Mutex::new(ServerCallbacks::default()));
     let reentered = Arc::new(AtomicBool::new(false));
-    let callback = Box::new(RetainedUpdateCallback {
-        cookie: None,
-        pump: None,
-        drop_hook: Some(Arc::new({
-            let callbacks = Arc::clone(&callbacks);
-            let reentered = Arc::clone(&reentered);
-            move || {
-                let empty = callbacks
-                    .try_lock()
-                    .is_some_and(|state| state.records.is_empty() && state.active.is_none());
-                reentered.store(empty, Ordering::Release);
-            }
-        })),
-    });
+    let callback = RetainedUpdateCallback::inert_for_test(Some(Arc::new({
+        let callbacks = Arc::clone(&callbacks);
+        let reentered = Arc::clone(&reentered);
+        move || {
+            let empty = callbacks
+                .try_lock()
+                .is_some_and(|state| state.records.is_empty() && state.active.is_none());
+            reentered.store(empty, Ordering::Release);
+        }
+    })));
 
     let abandoned = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
         let _prepared = PreparedCallbackInstallation::prepare(&callbacks, callback);
@@ -1179,13 +1171,11 @@ fn failed_server_start_is_retired_without_server_terminate_before_retry() {
     let operation = server_ref.operations.enter().unwrap();
     let start = server_ref.reserve_start().unwrap();
     let drops = Arc::clone(&callback_drops);
-    let (start, callback) = start.publish_callback(Box::new(RetainedUpdateCallback {
-        cookie: None,
-        pump: None,
-        drop_hook: Some(Arc::new(move || {
+    let (start, callback) = start.publish_callback(RetainedUpdateCallback::inert_for_test(Some(
+        Arc::new(move || {
             drops.fetch_add(1, Ordering::AcqRel);
-        })),
-    }));
+        }),
+    )));
     failed.subscription_server.unwrap().terminate().unwrap();
     // SAFETY: `failed` retains the server and the callback is server-owned.
     let attach_result =
@@ -1325,13 +1315,9 @@ fn shared_server_subscription_shutdown_preserves_handle_roots_until_handle_shutd
         let drops = Arc::clone(&callback_drops);
         let callback = install_callback(
             &server_ref.callbacks,
-            Box::new(RetainedUpdateCallback {
-                cookie: None,
-                pump: None,
-                drop_hook: Some(Arc::new(move || {
-                    drops.fetch_add(1, Ordering::AcqRel);
-                })),
-            }),
+            RetainedUpdateCallback::inert_for_test(Some(Arc::new(move || {
+                drops.fetch_add(1, Ordering::AcqRel);
+            }))),
         );
         // SAFETY: `ensured` keeps the server, callback and barrier alive.
         unsafe { synchronize_callback_notification(server_ref, callback) }.unwrap();
@@ -1519,11 +1505,7 @@ fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
             worker_self_close_rejected.store(rejected, Ordering::Release);
         })
     };
-    let callback = Box::new(RetainedUpdateCallback {
-        cookie: None,
-        pump: None,
-        drop_hook: Some(drop_hook),
-    });
+    let callback = RetainedUpdateCallback::inert_for_test(Some(drop_hook));
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server.
     unsafe { install_callback(&(*server).callbacks, callback) };
 
@@ -1563,25 +1545,35 @@ fn deferred_start_abandonment_restores_gate_worker_and_reference() {
     let server = unsafe { &*ensured.pointer() };
     let operation = server.operations.enter().unwrap();
     let references = server.references.load(Ordering::Acquire);
-    let ServerTerminationRequest::Deferred(reservation) =
-        ServerOperationBarrier::request_termination(&server.operations).unwrap()
-    else {
-        panic!("admitted operation must defer termination");
-    };
-    let start = reservation.start(server).unwrap();
-    assert!(server.operations.try_phase().is_none());
-    assert_eq!(
-        server.termination_worker.phase(),
-        TerminationWorkerStatus::Starting
-    );
-    assert_eq!(server.references.load(Ordering::Acquire), references + 1);
-    drop(start);
-    assert_eq!(server.operations.phase(), ServerPhase::Open);
-    assert_eq!(
-        server.termination_worker.phase(),
-        TerminationWorkerStatus::Idle
-    );
-    assert_eq!(server.references.load(Ordering::Acquire), references);
+    for unwind in [false, true] {
+        let ServerTerminationRequest::Deferred(reservation) =
+            ServerOperationBarrier::request_termination(&server.operations).unwrap()
+        else {
+            panic!("admitted operation must defer termination");
+        };
+        let start = reservation.start(server).unwrap();
+        assert!(server.operations.try_phase().is_none());
+        assert_eq!(
+            server.termination_worker.phase(),
+            TerminationWorkerStatus::Starting
+        );
+        assert_eq!(server.references.load(Ordering::Acquire), references + 1);
+        if unwind {
+            let abandoned = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(move || {
+                let _start = start;
+                panic!("deferred termination abandoned before spawn");
+            }));
+            assert!(abandoned.is_err());
+        } else {
+            drop(start);
+        }
+        assert_eq!(server.operations.phase(), ServerPhase::Open);
+        assert_eq!(
+            server.termination_worker.phase(),
+            TerminationWorkerStatus::Idle
+        );
+        assert_eq!(server.references.load(Ordering::Acquire), references);
+    }
     drop(operation);
     super::server::discard_unpublished_server::<(), crate::DynamicRtdSources<()>>(
         ensured.active.pointer,
@@ -1926,11 +1918,7 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
         })
     };
 
-    let previous = Box::new(RetainedUpdateCallback {
-        cookie: None,
-        pump: None,
-        drop_hook: Some(drop_hook),
-    });
+    let previous = RetainedUpdateCallback::inert_for_test(Some(drop_hook));
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server.
     unsafe { install_callback(&(*server).callbacks, previous) };
 
@@ -1938,11 +1926,7 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
     // retained rather than released while this operation is in flight.
     // SAFETY: the retained server remains live.
     let operation = unsafe { (*server).operations.enter() }.unwrap();
-    let replacement = Box::new(RetainedUpdateCallback {
-        cookie: None,
-        pump: None,
-        drop_hook: None,
-    });
+    let replacement = inert_update_callback();
     // SAFETY: the retained server remains live.
     unsafe { install_callback(&(*server).callbacks, replacement) };
     assert!(!dropped_while_active.load(Ordering::Acquire));
@@ -1999,11 +1983,7 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
             .expect("subscription attachment must publish its server handle");
         assert!(subscription_server.detach_update_notifier().is_none());
 
-        let callback = Box::new(RetainedUpdateCallback {
-            cookie: None,
-            pump: None,
-            drop_hook: None,
-        });
+        let callback = inert_update_callback();
         // SAFETY: the retained server remains live.
         let callback_ptr = unsafe { install_callback(&(*server).callbacks, callback) };
         // SAFETY: the same retained server remains live. This post-install
@@ -2270,20 +2250,56 @@ fn termination_worker_join_retains_panicking_payload_and_completes() {
 }
 
 #[cfg(feature = "handles")]
+fn test_server_git_cookie(server: &RtdServer) -> super::update_event::GitCookieLease {
+    // SAFETY: both callers enter a COM apartment before registering.
+    let git = unsafe { super::global_interface_table::get_git() }.unwrap();
+    let mut cookie = 0;
+    // SAFETY: the caller retains this COM server, whose canonical interface
+    // implements IUnknown, and `cookie` points to a writable local output.
+    let status = unsafe {
+        git.register(
+            std::ptr::from_ref(server).cast_mut().cast(),
+            &IID_IUNKNOWN,
+            &mut cookie,
+        )
+    };
+    assert_eq!(status, S_OK);
+    super::update_event::GitCookieLease::from_registered(NonZeroU32::new(cookie).unwrap())
+}
+
+#[cfg(feature = "handles")]
 #[test]
 fn notification_worker_is_drained_before_callback_retirement() {
     use crate::excel_rtd::notification::NotificationPump;
 
+    fn pending_git_revocations() -> usize {
+        let state = module_lifetime().snapshot();
+        state.outstanding_git_cookies + state.revocation_debt
+    }
+
+    struct RecordCookiesAtWorkerExit(Arc<AtomicUsize>);
+    impl Drop for RecordCookiesAtWorkerExit {
+        fn drop(&mut self) {
+            self.0.store(pending_git_revocations(), Ordering::Release);
+        }
+    }
+
     let _guard = TEST_LOCK.lock().unwrap();
+    let _apartment = TestComApartment::enter();
     let handles = FormulaHandleService::new(4);
     let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
     let server = ensured.pointer();
     // SAFETY: ACTIVE_SERVER and ensured retain the allocation through cleanup.
     let server_ref = unsafe { &*server };
+    let baseline = pending_git_revocations();
+    let cookie = test_server_git_cookie(server_ref);
+    let cookies_at_worker_exit = Arc::new(AtomicUsize::new(usize::MAX));
+    let worker_tail = RecordCookiesAtWorkerExit(Arc::clone(&cookies_at_worker_exit));
     let operations = triomphe::Arc::clone(&server_ref.operations);
     let (entered, observed) = mpsc::channel();
     let (release, wait) = mpsc::channel();
     let pump = NotificationPump::start(move || {
+        let _retain_until_worker_exit = &worker_tail;
         let _operation = operations
             .enter_notification()
             .ok_or(crate::XllError::Closing)?;
@@ -2294,25 +2310,26 @@ fn notification_worker_is_drained_before_callback_retirement() {
     .unwrap();
     pump.request().unwrap();
     observed.recv_timeout(Duration::from_secs(2)).unwrap();
-    let dropped = Arc::new(AtomicBool::new(false));
-    let dropped_hook = Arc::clone(&dropped);
+    let cookies_at_hook = Arc::new(AtomicUsize::new(usize::MAX));
+    let hook_result = Arc::clone(&cookies_at_hook);
     install_callback(
         &server_ref.callbacks,
-        Box::new(RetainedUpdateCallback {
-            cookie: None,
-            pump: Some(pump),
-            drop_hook: Some(Arc::new(move || {
-                dropped_hook.store(true, Ordering::Release)
+        RetainedUpdateCallback::active_for_test(
+            pump,
+            cookie,
+            Some(Arc::new(move || {
+                hook_result.store(pending_git_revocations(), Ordering::Release);
             })),
-        }),
+        ),
     );
     // SAFETY: the retained server remains live during the admitted notification.
     assert_eq!(unsafe { server_terminate(server) }, S_OK);
-    assert!(!dropped.load(Ordering::Acquire));
+    assert_eq!(cookies_at_hook.load(Ordering::Acquire), usize::MAX);
     release.send(()).unwrap();
     server_ref.operations.close_and_wait().unwrap();
     server_ref.termination_worker.join().unwrap();
-    assert!(dropped.load(Ordering::Acquire));
+    assert_eq!(cookies_at_worker_exit.load(Ordering::Acquire), baseline + 1);
+    assert_eq!(cookies_at_hook.load(Ordering::Acquire), baseline);
     assert_eq!(observed.try_recv(), Err(mpsc::TryRecvError::Disconnected));
     shutdown(&handles).unwrap();
     drop(ensured);
@@ -2332,13 +2349,10 @@ fn successful_refresh_acknowledges_the_notification_worker() {
     let server_ref = unsafe { &*server };
     let pump = NotificationPump::start(|| Ok(())).unwrap();
     pump.request().unwrap();
+    let cookie = test_server_git_cookie(server_ref);
     let callback = install_callback(
         &server_ref.callbacks,
-        Box::new(RetainedUpdateCallback {
-            cookie: None,
-            pump: Some(pump),
-            drop_hook: None,
-        }),
+        RetainedUpdateCallback::active_for_test(pump, cookie, None),
     );
     // SAFETY: callback records remain live until shutdown below.
     let callback = unsafe { callback.0.as_ref() };
@@ -4176,11 +4190,7 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
         ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
     let server = ensured.pointer();
 
-    let callback = Box::new(RetainedUpdateCallback {
-        cookie: None,
-        pump: None,
-        drop_hook: None,
-    });
+    let callback = inert_update_callback();
     // SAFETY: EnsuredServer keeps server reference alive
     unsafe {
         install_callback(&(*server).callbacks, callback);
@@ -4672,13 +4682,11 @@ fn failed_observation_after_failed_start_disposes_callback_exactly_once() {
     let drops = Arc::new(AtomicUsize::new(0));
     let tracked = Arc::clone(&drops);
     let start = server.reserve_start().unwrap();
-    let (start, _) = start.publish_callback(Box::new(RetainedUpdateCallback {
-        cookie: None,
-        pump: None,
-        drop_hook: Some(Arc::new(move || {
+    let (start, _) = start.publish_callback(RetainedUpdateCallback::inert_for_test(Some(
+        Arc::new(move || {
             tracked.fetch_add(1, Ordering::AcqRel);
-        })),
-    }));
+        }),
+    )));
     drop(start);
     drop(observation);
     assert!(ACTIVE_SERVER.lock().is_none());

@@ -91,7 +91,7 @@ impl<O: CompletionObserver> PendingDelivery<O> {
 }
 
 impl<O: CompletionObserver> DeliveryParts<O> {
-    fn finish(mut observation: O, udf_id: &'static str, completion: AsyncCompletion) {
+    fn finish(observation: O, udf_id: &'static str, completion: AsyncCompletion) {
         super::boundary::report_completion(udf_id, &completion);
         observation.finish(&completion);
     }

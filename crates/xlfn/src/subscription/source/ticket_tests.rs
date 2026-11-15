@@ -176,27 +176,11 @@ fn miri_source_ticket_cancel_panic_preserves_owner_and_next_owner_is_independent
     let mut ticket =
         unsafe { SourceSubscription::subscribe(&adapter, &topic, sink(&server)) }.unwrap();
     assert!(catch_no_unwind(AssertUnwindSafe(|| ticket.request_cancel())).is_err());
-    assert_eq!(
-        ticket
-            .subscription
-            .as_ref()
-            .unwrap()
-            .local_cancellations
-            .get(),
-        1
-    );
+    assert_eq!(ticket.pending.get().0.local_cancellations.get(), 1);
     ticket.disconnect_and_wait().unwrap();
     // SAFETY: same fixed source/publish allocations as the previous ticket.
     let reused = unsafe { SourceSubscription::subscribe(&adapter, &topic, sink(&server)) }.unwrap();
-    assert_eq!(
-        reused
-            .subscription
-            .as_ref()
-            .unwrap()
-            .local_cancellations
-            .get(),
-        0
-    );
+    assert_eq!(reused.pending.get().0.local_cancellations.get(), 0);
     drop(reused);
     assert_eq!(counts.canceled.load(Ordering::Acquire), 1);
     assert_eq!(counts.disconnected.load(Ordering::Acquire), 2);
@@ -310,10 +294,10 @@ fn failing_owner(
     failure: DisconnectFailure,
 ) -> SourceSubscription<FailingSubscription> {
     SourceSubscription {
-        subscription: Some(FailingSubscription {
+        pending: RollbackGuard::new(SourceTicket(FailingSubscription {
             counts: Arc::clone(counts),
             failure,
-        }),
+        })),
         _not_sync: PhantomData,
     }
 }

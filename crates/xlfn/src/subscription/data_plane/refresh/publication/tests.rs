@@ -131,6 +131,7 @@ enum WriteFault {
     None,
     Count,
     Pointer,
+    DropPanic,
 }
 #[derive(Default)]
 struct OutputState {
@@ -140,6 +141,16 @@ struct OutputState {
     fault: WriteFault,
 }
 struct MockOutput(Rc<RefCell<OutputState>>);
+
+impl Drop for MockOutput {
+    fn drop(&mut self) {
+        assert!(
+            self.0.borrow().fault != WriteFault::DropPanic,
+            "injected output storage drop panic"
+        );
+    }
+}
+
 impl OutputSlots<MockApi> for MockOutput {
     fn write_count(&mut self, count: i32) -> Result<(), i32> {
         let mut output = self.0.borrow_mut();
@@ -378,29 +389,35 @@ fn miri_after_handoff_completion_failure_keeps_the_transferred_array() {
 
 #[test]
 fn miri_panic_after_commit_does_not_reset_outputs_or_restore_delivered_batch() {
-    reset_api(Fault::None);
-    let output = outputs(WriteFault::None);
-    let (_runtime, server, sink) = connected_sink::<i32>(None, "committed-panic");
-    sink.publish(42).unwrap();
-    let publication = RefreshPublication::<_, MockApi>::prepare(server.begin_refresh().unwrap())
-        .unwrap_or_else(|_| panic!("marshal succeeds"));
-    let failure = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
-        publication.handoff_with(MockOutput(Rc::clone(&output)), |stage| {
-            assert!(stage != HandoffStage::Committed, "after local handoff");
-        })
-    }));
-    assert!(failure.is_err());
-    assert_eq!(
-        (
-            output.borrow().count,
-            output.borrow().array,
-            output.borrow().resets
-        ),
-        (1, Some(1), 0)
-    );
-    API.with(|state| assert_eq!(state.borrow().destroyed, 0));
-    assert_eq!(server.pending_update_count(), 0);
-    MockApi::destroy(1);
+    for fault in [WriteFault::None, WriteFault::DropPanic] {
+        reset_api(Fault::None);
+        let output = outputs(fault);
+        let (_runtime, server, sink) = connected_sink::<i32>(None, "committed-panic");
+        sink.publish(42).unwrap();
+        let publication =
+            RefreshPublication::<_, MockApi>::prepare(server.begin_refresh().unwrap())
+                .unwrap_or_else(|_| panic!("marshal succeeds"));
+        let failure = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+            publication.handoff_with(MockOutput(Rc::clone(&output)), |stage| {
+                assert!(
+                    stage != HandoffStage::Committed || fault == WriteFault::DropPanic,
+                    "after local handoff"
+                );
+            })
+        }));
+        assert!(failure.is_err());
+        assert_eq!(
+            (
+                output.borrow().count,
+                output.borrow().array,
+                output.borrow().resets
+            ),
+            (1, Some(1), 0)
+        );
+        API.with(|state| assert_eq!(state.borrow().destroyed, 0));
+        assert_eq!(server.pending_update_count(), 0);
+        MockApi::destroy(1);
+    }
 }
 
 #[test]

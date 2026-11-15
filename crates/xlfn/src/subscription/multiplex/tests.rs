@@ -16,29 +16,100 @@ use std::time::Instant;
 
 const DEADLINE: Duration = Duration::from_secs(10);
 
+struct CountedProducer(StdArc<AtomicUsize>);
+
+impl Drop for CountedProducer {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn miri_prepared_and_failed_spawn_restore_the_original_producer() {
+    let budget = Arc::new(ChannelBudget::runtime(
+        RtdLimits::standard().with_max_workers(RtdCapacity::disabled_if_zero(1)),
+    ));
+    for reported_error in [false, true] {
+        let drops = StdArc::new(AtomicUsize::new(0));
+        let mut worker = Worker::Joining;
+        let prepared =
+            UnstartedWorker::new(&mut worker, CountedProducer(StdArc::clone(&drops))).capture();
+        if reported_error {
+            let permit = ChannelBudget::try_worker(&budget).unwrap();
+            let spawning = prepared.begin_spawn(permit);
+            assert!(ChannelBudget::try_worker(&budget).is_err());
+            let failed = match spawning.finish(Err(std::io::Error::other("spawn rejected"))) {
+                Ok(_) => panic!("spawn was rejected"),
+                Err(failed) => failed,
+            };
+            drop(ChannelBudget::try_worker(&budget).unwrap());
+            drop(failed);
+        } else {
+            drop(prepared);
+        }
+        assert!(matches!(worker, Worker::Unstarted(_)));
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        drop(worker);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "unknown OS result deliberately retains producer and quota"
+)]
+fn unknown_spawn_outcome_preserves_the_capture_and_quota_on_unwind() {
+    let budget = Arc::new(ChannelBudget::runtime(
+        RtdLimits::standard().with_max_workers(RtdCapacity::disabled_if_zero(1)),
+    ));
+    let drops = StdArc::new(AtomicUsize::new(0));
+    let mut worker = Worker::Joining;
+    let permit = ChannelBudget::try_worker(&budget).unwrap();
+    let outcome = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+        let _spawning = UnstartedWorker::new(&mut worker, CountedProducer(StdArc::clone(&drops)))
+            .capture()
+            .begin_spawn(permit);
+        panic!("injected unknown OS startup result");
+    }));
+    assert!(outcome.is_err());
+    assert!(matches!(worker, Worker::Joining));
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    assert!(ChannelBudget::try_worker(&budget).is_err());
+}
+
 #[test]
 fn miri_dropping_successful_spawn_owner_installs_its_join_barrier() {
     let budget = Arc::new(ChannelBudget::runtime(RtdLimits::default()));
     let permit = ChannelBudget::try_worker(&budget).unwrap();
     let (sent, received) = mpsc::sync_channel(1);
     let mut worker = Worker::Joining;
-    let starting = UnstartedWorker {
-        worker: Some(&mut worker),
-        producer: Some(move || sent.send(()).unwrap()),
-    }
-    .capture();
+    let starting = UnstartedWorker::new(&mut worker, move || sent.send(()).unwrap()).capture();
     let running = match starting.spawn(permit, |job| job(), false) {
         Ok(running) => running,
         Err(_) => panic!("source thread must start"),
     };
     // Abandoning success cannot restore or destroy the producer as unstarted.
     drop(running);
-    let Worker::Running { handle, permit } = worker else {
+    let Worker::Running(started) = worker else {
         panic!("successful owner must retain a join barrier");
     };
-    handle.join().unwrap();
+    started.join().unwrap();
     received.recv().unwrap();
-    drop(permit);
+    drop(ChannelBudget::try_worker(&budget).unwrap());
+}
+
+#[test]
+fn miri_joined_worker_panic_returns_its_quota() {
+    let budget = Arc::new(ChannelBudget::runtime(
+        RtdLimits::standard().with_max_workers(RtdCapacity::disabled_if_zero(1)),
+    ));
+    let started = StartedWorker {
+        permit: ChannelBudget::try_worker(&budget).unwrap(),
+        handle: std::thread::spawn(|| panic!("worker panicked")),
+    };
+    assert!(ChannelBudget::try_worker(&budget).is_err());
+    assert!(matches!(started.join(), Err(XllError::Panic)));
     drop(ChannelBudget::try_worker(&budget).unwrap());
 }
 
