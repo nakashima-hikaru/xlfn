@@ -1,172 +1,145 @@
-//! Pure registration validation and host-independent preparation.
+//! Registration validation before the first Excel callback.
 
-use super::schema::{MAX_REGISTER_ARGUMENT_HELP_ENTRIES, ValidatedSignature};
+use super::schema::{ExecutionKind, MAX_REGISTER_ARGUMENT_HELP_ENTRIES, ValidatedSignature};
 use super::{ExcelNameKey, RegistrationDescriptor};
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashSet;
-use smallvec::SmallVec;
-use std::borrow::Cow;
 
-fn validate_descriptors(
-    descriptors: &[RegistrationDescriptor],
-) -> XllResult<SmallVec<[ValidatedSignature; 16]>> {
-    let mut signatures = SmallVec::with_capacity(descriptors.len());
-    let mut exports = FxHashSet::with_capacity_and_hasher(descriptors.len(), Default::default());
-    let mut excel_names =
-        FxHashSet::with_capacity_and_hasher(descriptors.len(), Default::default());
-    for descriptor in descriptors {
-        let max_arguments =
-            xlfn_common::max_excel_function_arguments(descriptor.signature.execution);
-        let argument_names = descriptor
+/// Checked metadata and the layout of its generated Excel strings. Each
+/// registration call encodes its own arguments immediately before invocation.
+#[derive(Clone)]
+pub(crate) struct ValidatedRegistration {
+    descriptor: RegistrationDescriptor,
+    signature: ValidatedSignature,
+    signature_units: usize,
+    argument_name_units: usize,
+    argument_help_count: usize,
+}
+
+impl ValidatedRegistration {
+    pub(super) fn descriptor(&self) -> &RegistrationDescriptor {
+        &self.descriptor
+    }
+
+    pub(crate) fn execution(&self) -> ExecutionKind {
+        self.signature.execution()
+    }
+
+    pub(super) fn signature_text(&self) -> (usize, impl Iterator<Item = u16> + use<>) {
+        (
+            self.signature_units,
+            self.signature.codes().flat_map(str::encode_utf16),
+        )
+    }
+
+    pub(super) fn argument_names(&self) -> (usize, impl Iterator<Item = u16> + use<>) {
+        let units = self
+            .descriptor
             .arguments
             .iter()
-            .map(|argument| argument.name)
-            .collect::<SmallVec<[&str; 16]>>();
-        if descriptor.export_name.is_empty()
-            || xlfn_common::validate_function_name(descriptor.excel_name).is_err()
-            || descriptor.arguments.len() > max_arguments
-            || xlfn_common::validate_argument_names(&argument_names).is_err()
-            || !exports.insert(ExcelNameKey::new(descriptor.export_name))
-            || !excel_names.insert(ExcelNameKey::new(descriptor.excel_name))
-            || descriptor.signature.arguments.len() != descriptor.arguments.len()
-        {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRY,
+            .enumerate()
+            .flat_map(|(index, argument)| {
+                (index != 0)
+                    .then_some(u16::from(b','))
+                    .into_iter()
+                    .chain(argument.name.encode_utf16())
             });
-        }
-        let signature =
-            ValidatedSignature::try_from(descriptor.signature).map_err(|_| XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRY,
-            })?;
-        signatures.push(signature);
-    }
-    Ok(signatures)
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PreparedExcelString(Cow<'static, str>);
-
-impl PreparedExcelString {
-    fn new(value: String) -> Self {
-        Self(Cow::Owned(value))
+        (self.argument_name_units, units)
     }
 
-    fn borrowed(value: &'static str) -> Self {
-        Self(Cow::Borrowed(value))
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
+    pub(super) fn argument_help(&self) -> &[super::ArgumentDescriptor] {
+        &self.descriptor.arguments[..self.argument_help_count]
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PreparedRegistration {
-    pub descriptor_index: usize,
-    pub export_name: &'static str,
-    pub excel_name: &'static str,
-    pub signature: ValidatedSignature,
-    pub visibility: super::schema::FunctionVisibility,
-    pub export_name_text: PreparedExcelString,
-    pub excel_name_text: PreparedExcelString,
-    pub category_text: PreparedExcelString,
-    pub help_topic_text: PreparedExcelString,
-    pub description_text: PreparedExcelString,
-    pub argument_names: PreparedExcelString,
-    pub type_text: PreparedExcelString,
-    pub argument_help: Vec<PreparedExcelString>,
+#[derive(Clone)]
+pub(crate) struct ValidatedRegistrationSet {
+    entries: Vec<ValidatedRegistration>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PreparedRegistrationSet {
-    prepared: Vec<PreparedRegistration>,
-}
-
-impl PreparedRegistrationSet {
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &PreparedRegistration> {
-        self.prepared.iter()
+impl ValidatedRegistrationSet {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &ValidatedRegistration> {
+        self.entries.iter()
     }
 
-    pub(crate) fn as_slice(&self) -> &[PreparedRegistration] {
-        &self.prepared
+    pub(crate) fn as_slice(&self) -> &[ValidatedRegistration] {
+        &self.entries
     }
 }
 
 pub(crate) fn preflight_registration(
     descriptors: &[RegistrationDescriptor],
-) -> XllResult<PreparedRegistrationSet> {
-    let signatures = validate_descriptors(descriptors)?;
-
-    let mut prepared = Vec::with_capacity(descriptors.len());
-    for (index, (descriptor, signature)) in descriptors.iter().zip(signatures).enumerate() {
-        validate_excel_string(descriptor.export_name)?;
-        validate_excel_string(descriptor.excel_name)?;
-        validate_excel_string(descriptor.category)?;
-        validate_excel_string(descriptor.help_topic)?;
-        validate_excel_string(descriptor.description)?;
-
-        for arg in descriptor.arguments {
-            validate_excel_string(arg.name)?;
-            validate_excel_string(arg.description)?;
-        }
-
-        let argument_names = match descriptor.arguments {
-            [] => PreparedExcelString::borrowed(""),
-            [argument] => PreparedExcelString::borrowed(argument.name),
-            arguments => {
-                let capacity = arguments
-                    .iter()
-                    .map(|argument| argument.name.len())
-                    .sum::<usize>()
-                    + arguments.len()
-                    - 1;
-                let mut names = String::with_capacity(capacity);
-                for (index, argument) in arguments.iter().enumerate() {
-                    if index != 0 {
-                        names.push(',');
-                    }
-                    names.push_str(argument.name);
-                }
-                PreparedExcelString::new(names)
+) -> XllResult<ValidatedRegistrationSet> {
+    let mut entries = Vec::with_capacity(descriptors.len());
+    // Preserve the priority of structural errors across the entire descriptor
+    // set before checking its string metadata.
+    {
+        let mut exports =
+            FxHashSet::with_capacity_and_hasher(descriptors.len(), Default::default());
+        let mut excel_names =
+            FxHashSet::with_capacity_and_hasher(descriptors.len(), Default::default());
+        for &descriptor in descriptors {
+            let max_arguments =
+                xlfn_common::max_excel_function_arguments(descriptor.signature.execution);
+            if descriptor.export_name.is_empty()
+                || xlfn_common::validate_function_name(descriptor.excel_name).is_err()
+                || descriptor.arguments.len() > max_arguments
+            {
+                return Err(registry_error());
             }
-        };
-        validate_excel_string(argument_names.as_str())?;
-
-        let encoded_sig = signature.encode();
-        validate_excel_string(&encoded_sig)?;
-
-        let help_count = descriptor
-            .arguments
-            .len()
-            .min(MAX_REGISTER_ARGUMENT_HELP_ENTRIES);
-        let mut argument_help = Vec::with_capacity(help_count + usize::from(help_count != 0));
-        argument_help.extend(
-            descriptor.arguments[..help_count]
-                .iter()
-                .map(|argument| PreparedExcelString::borrowed(argument.description)),
-        );
-        if !argument_help.is_empty() {
-            argument_help.push(PreparedExcelString::borrowed(""));
+            let argument_name_units = xlfn_common::argument_names_utf16_len(
+                descriptor.arguments.iter().map(|argument| argument.name),
+            )
+            .map_err(|_| registry_error())?;
+            if !exports.insert(ExcelNameKey::new(descriptor.export_name))
+                || !excel_names.insert(ExcelNameKey::new(descriptor.excel_name))
+                || descriptor.signature.arguments.len() != descriptor.arguments.len()
+            {
+                return Err(registry_error());
+            }
+            let signature =
+                ValidatedSignature::try_from(descriptor.signature).map_err(|_| registry_error())?;
+            // Registration codes and modifiers are ASCII and each code is at
+            // most two UTF-16 units. The checked argument count keeps the
+            // complete signature well below the counted string limit.
+            let signature_units = signature.codes().map(str::len).sum();
+            entries.push(ValidatedRegistration {
+                descriptor,
+                signature,
+                signature_units,
+                argument_name_units,
+                argument_help_count: descriptor
+                    .arguments
+                    .len()
+                    .min(MAX_REGISTER_ARGUMENT_HELP_ENTRIES),
+            });
         }
-
-        prepared.push(PreparedRegistration {
-            descriptor_index: index,
-            export_name: descriptor.export_name,
-            excel_name: descriptor.excel_name,
-            signature,
-            visibility: descriptor.visibility,
-            export_name_text: PreparedExcelString::borrowed(descriptor.export_name),
-            excel_name_text: PreparedExcelString::borrowed(descriptor.excel_name),
-            category_text: PreparedExcelString::borrowed(descriptor.category),
-            help_topic_text: PreparedExcelString::borrowed(descriptor.help_topic),
-            description_text: PreparedExcelString::borrowed(descriptor.description),
-            argument_names,
-            type_text: PreparedExcelString::new(encoded_sig),
-            argument_help,
-        });
     }
 
-    Ok(PreparedRegistrationSet { prepared })
+    for entry in &entries {
+        let descriptor = &entry.descriptor;
+        for value in [
+            descriptor.export_name,
+            descriptor.excel_name,
+            descriptor.category,
+            descriptor.help_topic,
+            descriptor.description,
+        ] {
+            validate_excel_string(value)?;
+        }
+        // Also validate descriptions outside Excel's argument help limit.
+        for arg in descriptor.arguments {
+            validate_excel_string(arg.description)?;
+        }
+    }
+
+    Ok(ValidatedRegistrationSet { entries })
+}
+
+const fn registry_error() -> XllError {
+    XllError::Internal {
+        diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRY,
+    }
 }
 
 fn validate_excel_string(s: &str) -> XllResult<()> {
@@ -287,22 +260,34 @@ mod tests {
         let cloned = prepared.clone();
         drop(prepared);
         let entry = &cloned.as_slice()[0];
-        assert_eq!(entry.argument_names.as_str(), ["値"; 255].join(","));
-        assert_eq!(entry.type_text.as_str(), format!("{}$", "Q".repeat(256)));
-        assert_eq!(entry.argument_help.len(), 245);
-        assert!(
-            entry.argument_help[..244]
-                .iter()
-                .all(|help| help.as_str() == "説明")
+        let (names_length, names) = entry.argument_names();
+        let names: Vec<_> = names.collect();
+        assert_eq!(names_length, names.len());
+        assert_eq!(String::from_utf16(&names).unwrap(), ["値"; 255].join(","));
+        let (signature_length, signature) = entry.signature_text();
+        let signature: Vec<_> = signature.collect();
+        assert_eq!(signature_length, signature.len());
+        assert_eq!(
+            String::from_utf16(&signature).unwrap(),
+            format!("{}$", "Q".repeat(256))
         );
-        assert_eq!(entry.argument_help[244].as_str(), "");
+        assert_eq!(entry.argument_help().len(), 244);
+        assert!(
+            entry
+                .argument_help()
+                .iter()
+                .all(|argument| argument.description == "説明")
+        );
 
         // Help omitted from Excel's argument count is still validated before
         // host mutation; truncating the prepared list must not hide bad input.
-        let mut invalid = ARGUMENTS;
-        invalid[254].description = "invalid\0help";
+        const INVALID_ARGUMENTS: [ArgumentDescriptor; 255] = {
+            let mut invalid = ARGUMENTS;
+            invalid[254].description = "invalid\0help";
+            invalid
+        };
         let invalid = RegistrationDescriptor {
-            arguments: Box::leak(Box::new(invalid)),
+            arguments: &INVALID_ARGUMENTS,
             ..descriptor
         };
         assert!(matches!(

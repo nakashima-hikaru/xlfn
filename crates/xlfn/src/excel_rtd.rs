@@ -15,9 +15,12 @@ use std::sync::Arc;
 
 #[cfg(any(
     test,
+    all(feature = "bench-internals", feature = "handles", feature = "rtd"),
     all(target_os = "windows", any(feature = "rtd", feature = "handles"))
 ))]
 mod counted_string;
+#[cfg(all(feature = "bench-internals", feature = "handles", feature = "rtd"))]
+pub use counted_string::RtdObservationArgumentsBenchmark;
 
 pub(crate) mod drain_wait;
 

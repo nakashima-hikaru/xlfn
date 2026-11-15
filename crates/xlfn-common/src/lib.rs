@@ -344,32 +344,44 @@ impl std::error::Error for ArgumentNameError {}
 
 /// Validates one Excel argument name.
 pub fn validate_argument_name(name: &str) -> Result<(), ArgumentNameError> {
+    argument_name_utf16_len(name).map(|_| ())
+}
+
+fn argument_name_utf16_len(name: &str) -> Result<usize, ArgumentNameError> {
     if name.is_empty() {
         return Err(ArgumentNameError::Empty);
     }
     if name.contains([',', '\0', '\r', '\n']) {
         return Err(ArgumentNameError::ReservedCharacter);
     }
-    if name.encode_utf16().count() > EXCEL_STRING_LIMIT {
+    let length = name.encode_utf16().count();
+    if length > EXCEL_STRING_LIMIT {
         return Err(ArgumentNameError::TooLong);
     }
-    Ok(())
+    Ok(length)
 }
 
 /// Validates argument names individually and as Excel's comma-joined list.
 pub fn validate_argument_names(names: &[&str]) -> Result<(), ArgumentNameError> {
-    for name in names {
-        validate_argument_name(name)?;
+    argument_names_utf16_len(names.iter().copied()).map(|_| ())
+}
+
+/// Validates an iterator of Excel argument names and returns the UTF-16
+/// length of their comma-separated list.
+pub fn argument_names_utf16_len<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<usize, ArgumentNameError> {
+    let mut joined_utf16_len = 0usize;
+    for (index, name) in names.into_iter().enumerate() {
+        let length = argument_name_utf16_len(name)?;
+        joined_utf16_len = joined_utf16_len
+            .saturating_add(length)
+            .saturating_add(usize::from(index != 0));
     }
-    let joined_utf16_len = names
-        .iter()
-        .map(|name| name.encode_utf16().count())
-        .fold(0usize, usize::saturating_add)
-        .saturating_add(names.len().saturating_sub(1));
     if joined_utf16_len > EXCEL_STRING_LIMIT {
         return Err(ArgumentNameError::CombinedTooLong);
     }
-    Ok(())
+    Ok(joined_utf16_len)
 }
 
 /// The reason a string is not a portable Windows basename.

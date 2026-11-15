@@ -1,7 +1,7 @@
 //! Rust-side registration preparation and deterministic host-call overhead.
 
 use crate::host_callback::HostCallbackSession;
-use crate::registration::preflight::{PreparedRegistrationSet, preflight_registration};
+use crate::registration::preflight::{ValidatedRegistrationSet, preflight_registration};
 use crate::registration::{
     ArgumentDescriptor, HostRegistrar, RegistrationDescriptor, RegistrationHost,
     RegistrationSignature,
@@ -118,7 +118,7 @@ fn descriptors() -> &'static [RegistrationDescriptor] {
 /// user startup work are excluded. Fixtures keep one argument per function.
 pub struct RegistrationBenchmark {
     descriptors: &'static [RegistrationDescriptor],
-    prepared: PreparedRegistrationSet,
+    prepared: ValidatedRegistrationSet,
 }
 
 impl RegistrationBenchmark {
@@ -171,7 +171,7 @@ impl RegistrationBenchmark {
         Self::register(&prepared);
     }
 
-    fn register(prepared: &PreparedRegistrationSet) {
+    fn register(prepared: &ValidatedRegistrationSet) {
         CALLS.set(Calls::default());
         let callbacks = HostCallbackSession::new();
         let host = RegistrationHost::new(&callbacks);

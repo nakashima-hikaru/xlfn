@@ -5,7 +5,7 @@
 //! host observations affect the registration journal and rollback policy.
 
 use super::host::{RegistrationHost, RegistrationMutation};
-use super::preflight::{PreparedRegistration, PreparedRegistrationSet};
+use super::preflight::{ValidatedRegistration, ValidatedRegistrationSet};
 use super::{
     PendingRegistration, RegistrationId, RegistrationTransactionError, UnknownRegistrationState,
     UnregisterResult,
@@ -47,7 +47,7 @@ impl HostRegistrar {
     pub(crate) fn register_all(
         &self,
         host: &RegistrationHost<'_>,
-        prepared: &PreparedRegistrationSet,
+        prepared: &ValidatedRegistrationSet,
     ) -> Result<super::SuccessfulRegistrations, RegistrationTransactionError> {
         let result = register_all_transaction(
             host,
@@ -61,15 +61,16 @@ impl HostRegistrar {
     fn register_one(
         &self,
         host: &RegistrationHost<'_>,
-        descriptor: &PreparedRegistration,
+        descriptor: &ValidatedRegistration,
     ) -> Result<RegistrationId, RegistrationTransactionError> {
+        let names = descriptor.descriptor();
         if host
-            .is_registered_name(descriptor.excel_name)
+            .is_registered_name(names.excel_name)
             .map_err(RegistrationTransactionError::new)?
         {
             return Err(RegistrationTransactionError::new(
                 XllError::RegistrationConflict {
-                    name: descriptor.excel_name,
+                    name: names.excel_name,
                 },
             ));
         }
@@ -93,8 +94,8 @@ impl HostRegistrar {
                 transaction_error
                     .journal
                     .mark_unknown(UnknownRegistrationState {
-                        export_name: descriptor.export_name,
-                        excel_name: descriptor.excel_name,
+                        export_name: names.export_name,
+                        excel_name: names.excel_name,
                         recovery_error: error,
                     });
                 Err(transaction_error)
@@ -108,7 +109,7 @@ impl HostRegistrar {
     fn reconcile_malformed_registration_result(
         &self,
         host: &RegistrationHost<'_>,
-        descriptor: &PreparedRegistration,
+        descriptor: &ValidatedRegistration,
         source: XllError,
     ) -> RegistrationTransactionError {
         reconcile_malformed_registration_result_with(
@@ -126,7 +127,7 @@ impl HostRegistrar {
 
 fn reconcile_malformed_registration_result_with(
     host: &RegistrationHost<'_>,
-    descriptor: &PreparedRegistration,
+    descriptor: &ValidatedRegistration,
     source: XllError,
     recover: impl FnOnce(
         &RegistrationHost<'_>,
@@ -137,6 +138,7 @@ fn reconcile_malformed_registration_result_with(
         Vec<PendingRegistration>,
     ) -> UnregisterResult<PendingRegistration>,
 ) -> RegistrationTransactionError {
+    let descriptor = descriptor.descriptor();
     match recover(host, descriptor.excel_name) {
         Ok(Some(registration)) => {
             registration_release_failure(host, registration, source, unregister)
@@ -245,7 +247,7 @@ mod tests {
         }
     }
 
-    fn prepared_set() -> PreparedRegistrationSet {
+    fn prepared_set() -> ValidatedRegistrationSet {
         preflight_registration(&[test_descriptor()]).unwrap()
     }
 
@@ -263,16 +265,6 @@ mod tests {
                 })
             ));
         }
-    }
-
-    #[test]
-    fn preflight_plan_contains_the_encoded_host_arguments() {
-        let prepared = prepared_set();
-        let registration = &prepared.as_slice()[0];
-        assert_eq!(registration.export_name_text.as_str(), "test_export");
-        assert_eq!(registration.excel_name_text.as_str(), "TEST.EXPORT");
-        assert_eq!(registration.argument_names.as_str(), "");
-        assert_eq!(registration.type_text.as_str(), "Q");
     }
 
     #[test]

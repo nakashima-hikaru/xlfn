@@ -8,7 +8,7 @@ use super::com_abi::IID_IUNKNOWN;
 use super::com_abi::com_lifetime_boundary;
 use super::global_interface_table::get_git;
 use super::module_state::{ComObjectKind, ComObjectLease};
-use super::registration::guid_compact;
+use super::registration::{RTD_PROG_ID_PREFIX, guid_compact};
 use super::server_gate::{
     DeferredTerminationTicket, DrainedServerOperations, OwnedServerCall,
     OwnedServerObservationCall, ServerCloseError, ServerOperationBarrier, ServerPhase,
@@ -23,6 +23,7 @@ use super::update_event::{
 };
 use super::{com_boundary, guid_eq};
 use crate::error::InputError;
+use crate::excel_rtd::counted_string::CountedString;
 use crate::formula_lifetime::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
 use crate::subscription::ServerGeneration;
 #[cfg(any(test, feature = "rtd"))]
@@ -64,10 +65,39 @@ pub(super) const SERVER_NOT_STARTED: u8 = 0;
 pub(super) const SERVER_STARTING: u8 = 1;
 pub(super) const SERVER_STARTED: u8 = 2;
 pub(super) const SERVER_START_FAILED: u8 = 3;
+pub(super) struct ServerIdentity {
+    class_id: GUID,
+    prog_id: Box<str>,
+    prog_id_utf16: CountedString,
+}
+
+impl ServerIdentity {
+    fn new(class_id: GUID) -> XllResult<Self> {
+        let prog_id = format!("{RTD_PROG_ID_PREFIX}{}", guid_compact(class_id)).into_boxed_str();
+        let prog_id_utf16 = CountedString::new(&prog_id)?;
+        Ok(Self {
+            class_id,
+            prog_id,
+            prog_id_utf16,
+        })
+    }
+
+    pub(super) fn class_id(&self) -> &GUID {
+        &self.class_id
+    }
+
+    pub(super) fn prog_id(&self) -> &str {
+        &self.prog_id
+    }
+
+    pub(super) fn prog_id_utf16(&self) -> &CountedString {
+        &self.prog_id_utf16
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ActiveServer {
-    pub(super) class_id: GUID,
-    pub(super) prog_id: String,
+    pub(super) identity: Arc<ServerIdentity>,
     pub(super) pointer: usize,
     pub(super) generation: ServerGeneration,
     pub(super) subscription_type: TypeId,
@@ -1020,6 +1050,7 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
             function: error.operation,
             code: error.code as i32,
         })?;
+        let identity = Arc::new(ServerIdentity::new(class_id)?);
 
         let attached_subscriptions = if let Some(subscriptions) = subscriptions {
             // SAFETY: `subscriptions` is the active generation's subscription runtime which
@@ -1050,8 +1081,7 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
 
         let pointer = Box::into_non_null(server).as_ptr() as usize;
         let entry = ActiveServer {
-            class_id,
-            prog_id: format!("XlFnRtd_{}", guid_compact(class_id)),
+            identity,
             pointer,
             generation,
             subscription_type: TypeId::of::<(E, C)>(),

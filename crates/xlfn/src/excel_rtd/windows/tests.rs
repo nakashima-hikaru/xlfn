@@ -796,7 +796,7 @@ fn final_remove_retains_com_shells_without_blocking_close_or_reviving_on_reopen(
         // SAFETY: the active server owns the class identity; output is writable.
         unsafe {
             dll_get_class_object(
-                (&raw const ensured.active.class_id).cast(),
+                std::ptr::from_ref(ensured.active.identity.class_id()).cast(),
                 (&IID_ICLASS_FACTORY as *const GUID).cast(),
                 &mut factory_pointer,
             )
@@ -2090,7 +2090,7 @@ fn get_test_class_factory<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<
     // implementation constant.
     let status = unsafe {
         dll_get_class_object(
-            (&raw const active.class_id).cast(),
+            std::ptr::from_ref(active.identity.class_id()).cast(),
             (&raw const iid).cast(),
             &mut output,
         )
@@ -3093,7 +3093,7 @@ fn com_query_failures_clear_stale_output_pointers() {
         // intentionally exercises validation.
         unsafe {
             dll_get_class_object(
-                (&raw const ensured.active.class_id).cast(),
+                std::ptr::from_ref(ensured.active.identity.class_id()).cast(),
                 ptr::null(),
                 &mut output,
             )
@@ -3108,7 +3108,7 @@ fn com_query_failures_clear_stale_output_pointers() {
         // unsupported IID intentionally forces factory QI failure.
         unsafe {
             dll_get_class_object(
-                (&raw const ensured.active.class_id).cast(),
+                std::ptr::from_ref(ensured.active.identity.class_id()).cast(),
                 (&raw const unsupported_iid).cast(),
                 &mut output,
             )
@@ -5003,16 +5003,22 @@ fn observations_on_different_threads_retire_only_after_last_failure() {
         ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
     )
     .unwrap();
+    let retired_identity = triomphe::Arc::clone(&first.server().active.identity);
     thread::scope(|scope| {
         let (admitted_tx, admitted_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let subscriptions = &subscriptions;
+        let identity = &retired_identity;
         let worker = scope.spawn(move || {
             let second = super::server::ServerObservation::begin(
                 ensure_server_without_handles(Some(BackendSubscriptions::new(subscriptions)))
                     .unwrap(),
             )
             .unwrap();
+            assert!(triomphe::Arc::ptr_eq(
+                identity,
+                &second.server().active.identity
+            ));
             admitted_tx.send(()).unwrap();
             release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
             drop(second);
@@ -5024,6 +5030,20 @@ fn observations_on_different_threads_retire_only_after_last_failure() {
         worker.join().unwrap();
     });
     assert!(ACTIVE_SERVER.lock().is_none());
+    let replacement = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
+    )
+    .unwrap();
+    let replacement_identity = &replacement.server().active.identity;
+    assert!(!triomphe::Arc::ptr_eq(
+        &retired_identity,
+        replacement_identity
+    ));
+    assert!(!guid_eq(
+        *retired_identity.class_id(),
+        *replacement_identity.class_id()
+    ));
+    drop(replacement);
     shutdown_subscriptions(&subscriptions).unwrap();
 }
 

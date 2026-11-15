@@ -127,6 +127,32 @@ fn replacement_replies() -> [Reply; 4] {
     ]
 }
 
+#[test]
+fn invalid_later_descriptor_prevents_all_open_callbacks() {
+    OPENS.set(0);
+    let runtime = Runtime::<ReloadAddin>::new_with_physical_unload();
+    let [first] = descriptors();
+    let second = RegistrationDescriptor {
+        export_name: "test_later_export",
+        excel_name: "TEST.LATER.UDF",
+        description: "invalid\0help",
+        ..first
+    };
+    let script = CallbackScript::install([]);
+    assert_eq!(
+        host_auto_open(
+            &runtime,
+            &AddinId::parse("terminal-reload").unwrap(),
+            "0",
+            "test",
+            &[first, second],
+        ),
+        0
+    );
+    assert_eq!(OPENS.get(), 0);
+    script.assert_calls(&[]);
+}
+
 fn close_replacement(runtime: &Runtime<ReloadAddin, PhysicalUnload>) {
     let previous_quiesces = QUIESCES.get();
     let script = CallbackScript::install([

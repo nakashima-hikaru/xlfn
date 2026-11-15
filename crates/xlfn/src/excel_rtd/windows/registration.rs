@@ -34,15 +34,16 @@ pub(super) struct TemporaryRegistration {
 
 impl TemporaryRegistration {
     pub(super) fn new(active: &ActiveServer, module_path: &str) -> XllResult<Self> {
+        let identity = &active.identity;
         let maintenance = REGISTRATION_MAINTENANCE.lock();
         let cross_process = CrossProcessRegistrationGuard::acquire()?;
 
-        if let Err(error) = scavenge_owned_registrations(module_path, Some(&active.prog_id)) {
+        if let Err(error) = scavenge_owned_registrations(module_path, Some(identity.prog_id())) {
             crate::diagnostics::report_no_unwind("RTD registration scavenging", &error);
         }
 
-        let class = guid_braced(active.class_id);
-        let prog_key = format!("Software\\Classes\\{}", active.prog_id);
+        let class = guid_braced(*identity.class_id());
+        let prog_key = format!("Software\\Classes\\{}", identity.prog_id());
         let class_key = format!("Software\\Classes\\CLSID\\{class}");
         let registration = Self {
             prog_key: wide_nul(&prog_key),
@@ -67,7 +68,7 @@ impl TemporaryRegistration {
                 Some("ThreadingModel"),
                 "Both",
             )?;
-            set_registry_value(&format!("{class_key}\\ProgID"), None, &active.prog_id)?;
+            set_registry_value(&format!("{class_key}\\ProgID"), None, identity.prog_id())?;
             Ok(())
         })();
 

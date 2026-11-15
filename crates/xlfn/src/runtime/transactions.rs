@@ -88,7 +88,7 @@ where
     }
     let has_async_functions = prepared_set
         .iter()
-        .any(|descriptor| descriptor.signature.execution().is_async());
+        .any(|descriptor| descriptor.execution().is_async());
     if !prepared_set.as_slice().is_empty() {
         let event_result = {
             let host = RegistrationHost::new(transaction.callbacks_mut());
@@ -441,11 +441,12 @@ where
             for _ in &outcome.succeeded {
                 runtime.observer().unregister_function();
             }
-            if shutdown_deps.host().has_metadata_debt() {
-                let debt_count = shutdown_deps.host().metadata_debt_snapshot().len();
+            let metadata = shutdown_deps.host().metadata_debt_status();
+            if metadata.has_pending_work() {
                 let _ = catch_no_unwind(AssertUnwindSafe(|| {
                     tracing::warn!(
-                        count = debt_count,
+                        count = metadata.pending_buckets,
+                        cleanup_in_progress = metadata.cleanup_in_progress,
                         "xlAutoRemove completed with host metadata debt"
                     );
                 }));

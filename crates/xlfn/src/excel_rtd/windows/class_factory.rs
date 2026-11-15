@@ -107,7 +107,7 @@ unsafe fn dll_get_class_object_inner<E: RtdSubscription, C: crate::RtdSourceCata
 
     let active = ACTIVE_SERVER.lock();
     let Some(entry) = active.as_ref().filter(|entry| {
-        guid_eq(entry.class_id, requested_class)
+        guid_eq(*entry.identity.class_id(), requested_class)
             && entry.subscription_type == TypeId::of::<(E, C)>()
     }) else {
         return CLASS_E_CLASSNOTAVAILABLE;

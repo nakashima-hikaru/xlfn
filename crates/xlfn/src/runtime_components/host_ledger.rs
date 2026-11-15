@@ -1,12 +1,27 @@
 //! Host registration and metadata-debt recovery ledger.
 
 use crate::sync::Mutex;
-use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
-use crate::registration::{ExcelNameKey, HostMutationJournal, MetadataDebt, PendingRegistration};
+#[cfg(test)]
+use crate::registration::ExcelNameKey;
+use crate::registration::{
+    HostMutationJournal, MetadataDebt, MetadataDebtRetryResult, MetadataDebts, PendingRegistration,
+};
 
-type MetadataDebts = BTreeMap<ExcelNameKey, Vec<MetadataDebt>>;
+/// A cleanup owns its detached buckets until its outcome is published.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MetadataDebtStatus {
+    pub(crate) pending_buckets: usize,
+    pub(crate) cleanup_in_progress: bool,
+}
+
+impl MetadataDebtStatus {
+    pub(crate) const fn has_pending_work(self) -> bool {
+        self.cleanup_in_progress || self.pending_buckets != 0
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RegistrationState {
@@ -26,7 +41,7 @@ impl HostLedgerState {
     const fn new() -> Self {
         Self {
             registrations: Vec::new(),
-            metadata_debt: BTreeMap::new(),
+            metadata_debt: MetadataDebts::new(),
             registration_state: RegistrationState::Known,
             cleanup_in_progress: false,
             metadata_cleanup_in_progress: false,
@@ -34,11 +49,17 @@ impl HostLedgerState {
     }
 
     fn append_metadata_debts(&mut self, debts: MetadataDebts) {
+        if self.metadata_debt.is_empty() {
+            self.metadata_debt = debts;
+            return;
+        }
         for (key, mut debts) in debts {
-            self.metadata_debt
-                .entry(key)
-                .or_default()
-                .append(&mut debts);
+            match self.metadata_debt.entry(key) {
+                Entry::Occupied(mut entry) => entry.get_mut().append(&mut debts),
+                Entry::Vacant(entry) => {
+                    entry.insert(debts);
+                }
+            }
         }
     }
 }
@@ -155,8 +176,17 @@ impl HostLedger {
         }
     }
 
-    pub(crate) fn metadata_debt_snapshot(&self) -> BTreeMap<ExcelNameKey, Vec<MetadataDebt>> {
+    #[cfg(test)]
+    pub(crate) fn metadata_debt_snapshot(&self) -> MetadataDebts {
         self.state.lock().metadata_debt.clone()
+    }
+
+    pub(crate) fn metadata_debt_status(&self) -> MetadataDebtStatus {
+        let state = self.state.lock();
+        MetadataDebtStatus {
+            pending_buckets: state.metadata_debt.len(),
+            cleanup_in_progress: state.metadata_cleanup_in_progress,
+        }
     }
 
     #[cfg(test)]
@@ -175,11 +205,10 @@ impl HostLedger {
     pub(crate) fn retry_metadata_cleanup(
         &self,
         host: &crate::registration::RegistrationHost<'_>,
-    ) -> crate::registration::MetadataDebtRetryResult {
+    ) -> MetadataCleanupReport {
         match self.claim_metadata_cleanup() {
             Ok(claim) => claim.execute(host),
-            Err(error) => crate::registration::MetadataDebtRetryResult {
-                remaining: BTreeMap::new(),
+            Err(error) => MetadataCleanupReport {
                 cleanup_issues: Vec::new(),
                 terminal: Some(error),
             },
@@ -195,11 +224,6 @@ impl HostLedger {
         let debts = std::mem::take(&mut state.metadata_debt);
         Ok(PreparedCleanup::new(self, debts))
     }
-
-    pub(crate) fn has_metadata_debt(&self) -> bool {
-        let state = self.state.lock();
-        state.metadata_cleanup_in_progress || !state.metadata_debt.is_empty()
-    }
 }
 
 /// Cloneable observations, never executable registration cleanup authority.
@@ -211,6 +235,11 @@ pub(crate) struct RegistrationCleanupReport {
     )>,
     pub(crate) metadata_debt: Vec<MetadataDebt>,
     pub(crate) cleanup_issues: Vec<crate::XllError>,
+}
+
+pub(crate) struct MetadataCleanupReport {
+    pub(crate) cleanup_issues: Vec<crate::XllError>,
+    pub(crate) terminal: Option<crate::XllError>,
 }
 
 /// Holds the moved batch and the right to restore it before any host operation.
@@ -306,26 +335,26 @@ impl Rollback for PendingCleanup<'_, MetadataDebts> {
 }
 
 impl PreparedCleanup<'_, MetadataDebts> {
-    fn execute(
-        self,
-        host: &crate::registration::RegistrationHost<'_>,
-    ) -> crate::registration::MetadataDebtRetryResult {
+    fn execute(self, host: &crate::registration::RegistrationHost<'_>) -> MetadataCleanupReport {
         self.begin().execute(host)
     }
 }
 
 impl ExecutingCleanup<'_, MetadataDebts> {
-    fn execute(
-        self,
-        host: &crate::registration::RegistrationHost<'_>,
-    ) -> crate::registration::MetadataDebtRetryResult {
+    fn execute(self, host: &crate::registration::RegistrationHost<'_>) -> MetadataCleanupReport {
         let Self { ledger, entries } = self;
-        let mut outcome =
-            crate::registration::recovery::retry_metadata_debt_with_host(host, &entries);
+        let MetadataDebtRetryResult {
+            remaining,
+            cleanup_issues,
+            terminal,
+        } = crate::registration::recovery::retry_metadata_debt_with_host(host, entries);
         let mut state = ledger.state.lock();
-        state.append_metadata_debts(std::mem::take(&mut outcome.remaining));
+        state.append_metadata_debts(remaining);
         state.metadata_cleanup_in_progress = false;
-        outcome
+        MetadataCleanupReport {
+            cleanup_issues,
+            terminal,
+        }
     }
 }
 
@@ -450,14 +479,34 @@ mod cleanup_tests {
         let reenter = std::sync::Arc::clone(&ledger);
         script.on_call(XLF_EVALUATE, move || {
             assert!(!reenter.is_quiescent());
-            assert!(reenter.has_metadata_debt());
-            reenter.retain_metadata_debt(vec![MetadataDebt::new(
-                RegistrationId {
-                    id: 9.0,
-                    excel_name: "NEW.DEBT",
-                },
-                crate::XllError::Closing,
-            )]);
+            assert_eq!(
+                reenter.metadata_debt_status(),
+                MetadataDebtStatus {
+                    pending_buckets: 0,
+                    cleanup_in_progress: true,
+                }
+            );
+            let nested = HostCallbackSession::new();
+            assert!(matches!(
+                crate::registration::retry_metadata_debt(&reenter, &nested),
+                Err(crate::XllError::Closing)
+            ));
+            reenter.retain_metadata_debt(vec![
+                MetadataDebt::new(
+                    RegistrationId {
+                        id: 9.0,
+                        excel_name: "NEW.DEBT",
+                    },
+                    crate::XllError::Closing,
+                ),
+                MetadataDebt::new(
+                    RegistrationId {
+                        id: 11.0,
+                        excel_name: "old.debt",
+                    },
+                    crate::XllError::Closing,
+                ),
+            ]);
         });
         let callbacks = HostCallbackSession::new();
         let outcome =
@@ -465,7 +514,19 @@ mod cleanup_tests {
         assert!(outcome.terminal.is_none());
         let remaining = ledger.metadata_debt_snapshot();
         assert_eq!(remaining.len(), 2);
-        assert!(remaining.contains_key(&ExcelNameKey::new("OLD.DEBT")));
+        assert_eq!(
+            ledger.metadata_debt_status(),
+            MetadataDebtStatus {
+                pending_buckets: 2,
+                cleanup_in_progress: false,
+            }
+        );
+        let old_bucket = &remaining[&ExcelNameKey::new("OLD.DEBT")];
+        assert_eq!(old_bucket.len(), 2);
+        assert_eq!(old_bucket[0].expected_registration_id(), 11.0);
+        assert_eq!(old_bucket[0].attempts(), 1);
+        assert_eq!(old_bucket[1].expected_registration_id(), 7.0);
+        assert_eq!(old_bucket[1].attempts(), 2);
         assert!(remaining.contains_key(&ExcelNameKey::new("NEW.DEBT")));
         script.assert_calls(&[XLF_EVALUATE]);
     }
@@ -521,7 +582,13 @@ mod cleanup_tests {
         let remaining = ledger.metadata_debt_snapshot();
         assert_eq!(remaining.len(), 1);
         assert!(remaining.contains_key(&ExcelNameKey::new("NEW.DEBT")));
-        assert!(ledger.has_metadata_debt());
+        assert_eq!(
+            ledger.metadata_debt_status(),
+            MetadataDebtStatus {
+                pending_buckets: 1,
+                cleanup_in_progress: true,
+            }
+        );
         assert!(!ledger.generation_callbacks_detached());
         assert!(!ledger.is_quiescent());
         assert!(ledger.registration_state_unknown());

@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::ptr::NonNull;
 
 use super::RegistrationId;
-use super::preflight::PreparedRegistration;
+use super::preflight::ValidatedRegistration;
 use super::schema::FunctionVisibility;
 use xlfn_sys::{
     XL_EVENT_REGISTER, XL_GET_NAME, XLERR_NAME, XLF_EVALUATE, XLF_REGISTER, XLF_SET_NAME,
@@ -83,72 +83,12 @@ impl<'call> RegistrationHost<'call> {
     pub(crate) fn register(
         &self,
         module_units: &[u16],
-        descriptor: &PreparedRegistration,
+        registration: &ValidatedRegistration,
     ) -> RegistrationMutation<RegistrationId> {
-        let mut module = match TemporaryString::from_units(module_units) {
-            Ok(value) => value,
-            Err(error) => return RegistrationMutation::Rejected { error },
-        };
-        let mut procedure = match TemporaryString::new(descriptor.export_name_text.as_str()) {
-            Ok(value) => value,
-            Err(error) => return RegistrationMutation::Rejected { error },
-        };
-        let mut type_text = match TemporaryString::new(descriptor.type_text.as_str()) {
-            Ok(value) => value,
-            Err(error) => return RegistrationMutation::Rejected { error },
-        };
-        let mut function_text = match TemporaryString::new(descriptor.excel_name_text.as_str()) {
-            Ok(value) => value,
-            Err(error) => return RegistrationMutation::Rejected { error },
-        };
-        let mut arguments = match TemporaryString::new(descriptor.argument_names.as_str()) {
-            Ok(value) => value,
-            Err(error) => return RegistrationMutation::Rejected { error },
-        };
-        let mut macro_type = XLOPER12::number(macro_type(descriptor.visibility));
-        let mut category = match TemporaryString::new(descriptor.category_text.as_str()) {
-            Ok(value) => value,
-            Err(error) => return RegistrationMutation::Rejected { error },
-        };
-        let mut shortcut = match TemporaryString::new("") {
-            Ok(value) => value,
-            Err(error) => return RegistrationMutation::Rejected { error },
-        };
-        let mut help_topic = match TemporaryString::new(descriptor.help_topic_text.as_str()) {
-            Ok(value) => value,
-            Err(error) => return RegistrationMutation::Rejected { error },
-        };
-        let mut function_help = match TemporaryString::new(descriptor.description_text.as_str()) {
-            Ok(value) => value,
-            Err(error) => return RegistrationMutation::Rejected { error },
-        };
-        let mut argument_help = match prepared_argument_help_strings(&descriptor.argument_help) {
-            Ok(value) => value,
-            Err(error) => return RegistrationMutation::Rejected { error },
-        };
-
-        let mut pointers: SmallVec<[NonNull<XLOPER12>; 16]> = smallvec::smallvec![
-            module.pointer(),
-            procedure.pointer(),
-            type_text.pointer(),
-            function_text.pointer(),
-            arguments.pointer(),
-            NonNull::from_mut(&mut macro_type),
-            category.pointer(),
-            shortcut.pointer(),
-            help_topic.pointer(),
-            function_help.pointer(),
-        ];
-        pointers.extend(argument_help.iter_mut().map(TemporaryString::pointer));
-
-        let invocation = invoke_operation(
-            self.excel,
-            Register {
-                excel_name: descriptor.excel_name,
-            },
-            &pointers,
-        );
-        mutation_from_invocation(invocation)
+        match RegistrationCall::new(module_units, registration) {
+            Ok(call) => call.invoke(self.excel),
+            Err(error) => RegistrationMutation::Rejected { error },
+        }
     }
 
     pub(crate) fn register_event(
@@ -478,13 +418,82 @@ pub(crate) fn valid_registration_id(id: f64) -> bool {
     id.is_finite() && id != 0.0
 }
 
-fn prepared_argument_help_strings(
-    arguments: &[super::preflight::PreparedExcelString],
-) -> XllResult<SmallVec<[TemporaryString; 4]>> {
-    arguments
-        .iter()
-        .map(|argument| TemporaryString::new(argument.as_str()))
-        .collect()
+/// Owns the operands for one synchronous `xlfRegister` call. Pointers are
+/// formed only after all inline and heap storage is in its invocation scope.
+struct RegistrationCall {
+    excel_name: &'static str,
+    module: TemporaryString,
+    procedure: TemporaryString,
+    type_text: TemporaryString,
+    function_text: TemporaryString,
+    arguments: TemporaryString,
+    macro_type: XLOPER12,
+    category: TemporaryString,
+    shortcut: TemporaryString,
+    help_topic: TemporaryString,
+    function_help: TemporaryString,
+    argument_help: SmallVec<[TemporaryString; 4]>,
+}
+
+impl RegistrationCall {
+    fn new(module_units: &[u16], registration: &ValidatedRegistration) -> XllResult<Self> {
+        let descriptor = registration.descriptor();
+        let (signature_length, signature) = registration.signature_text();
+        let (argument_length, argument_names) = registration.argument_names();
+        Ok(Self {
+            excel_name: descriptor.excel_name,
+            module: TemporaryString::from_units(module_units)?,
+            procedure: TemporaryString::new(descriptor.export_name)?,
+            type_text: TemporaryString::from_validated_units(signature_length, signature),
+            function_text: TemporaryString::new(descriptor.excel_name)?,
+            arguments: TemporaryString::from_validated_units(argument_length, argument_names),
+            macro_type: XLOPER12::number(macro_type(descriptor.visibility)),
+            category: TemporaryString::new(descriptor.category)?,
+            shortcut: TemporaryString::new("")?,
+            help_topic: TemporaryString::new(descriptor.help_topic)?,
+            function_help: TemporaryString::new(descriptor.description)?,
+            argument_help: Self::argument_help_strings(registration.argument_help())?,
+        })
+    }
+
+    fn argument_help_strings(
+        help: &[super::ArgumentDescriptor],
+    ) -> XllResult<SmallVec<[TemporaryString; 4]>> {
+        let mut arguments = SmallVec::new();
+        if !help.is_empty() {
+            arguments.reserve_exact(help.len() + 1);
+            for argument in help {
+                arguments.push(TemporaryString::new(argument.description)?);
+            }
+            arguments.push(TemporaryString::new("")?);
+        }
+        Ok(arguments)
+    }
+
+    fn invoke(mut self, excel: ExcelHost<'_>) -> RegistrationMutation<RegistrationId> {
+        let mut pointers: SmallVec<[NonNull<XLOPER12>; 16]> = smallvec::smallvec![
+            self.module.pointer(),
+            self.procedure.pointer(),
+            self.type_text.pointer(),
+            self.function_text.pointer(),
+            self.arguments.pointer(),
+            NonNull::from_mut(&mut self.macro_type),
+            self.category.pointer(),
+            self.shortcut.pointer(),
+            self.help_topic.pointer(),
+            self.function_help.pointer(),
+        ];
+        pointers.extend(self.argument_help.iter_mut().map(TemporaryString::pointer));
+
+        let invocation = invoke_operation(
+            excel,
+            Register {
+                excel_name: self.excel_name,
+            },
+            &pointers,
+        );
+        mutation_from_invocation(invocation)
+    }
 }
 
 const fn macro_type(visibility: FunctionVisibility) -> f64 {
@@ -526,6 +535,22 @@ impl TemporaryString {
             storage,
             oper: XLOPER12::nil(),
         })
+    }
+
+    fn from_validated_units(length: usize, units: impl Iterator<Item = u16>) -> Self {
+        if length > crate::utf16::EXCEL_STRING_LIMIT {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        let mut storage = SmallVec::with_capacity(length + 1);
+        storage.push(length as u16);
+        storage.extend(units);
+        if storage.len() != length + 1 {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        Self {
+            storage,
+            oper: XLOPER12::nil(),
+        }
     }
 
     pub(crate) fn pointer(&mut self) -> NonNull<XLOPER12> {

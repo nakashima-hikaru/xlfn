@@ -11,9 +11,9 @@ pub(crate) mod schema;
 
 pub(crate) use host::{RegistrationHost, RegistrationMutation};
 pub(crate) use ledger::{
-    ExcelNameKey, HostMutationJournal, MetadataDebt, MetadataDebtRetryResult, PendingRegistration,
-    RegistrationCleanupState, RegistrationTransactionError, SuccessfulRegistrations,
-    UnknownRegistrationState, UnregisterResult,
+    ExcelNameKey, HostMutationJournal, MetadataDebt, MetadataDebtRetryResult, MetadataDebts,
+    PendingRegistration, RegistrationCleanupState, RegistrationTransactionError,
+    SuccessfulRegistrations, UnknownRegistrationState, UnregisterResult,
 };
 pub(crate) use preflight::preflight_registration;
 pub(crate) use recovery::retry_metadata_debt;

@@ -1,12 +1,11 @@
 //! Recovery of host registration metadata left by an uncertain Excel call.
 
 use super::host::{RegistrationHost, RegistrationMutation};
-use super::{ExcelNameKey, MetadataDebt, MetadataDebtRetryResult};
+use super::{MetadataDebtRetryResult, MetadataDebts};
 use crate::XllResult;
 use crate::host_callback::HostCallbackSession;
 use crate::panic_boundary::catch_no_unwind;
 use crate::runtime_components::HostLedger;
-use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 
 /// Retries metadata cleanup without making the lifecycle domain aware of
@@ -15,9 +14,8 @@ pub(crate) fn retry_metadata_debt(
     ledger: &HostLedger,
     callbacks: &HostCallbackSession,
 ) -> XllResult<()> {
-    let debts = ledger.metadata_debt_snapshot();
     let host = RegistrationHost::new(callbacks);
-    if debts.is_empty() {
+    if !ledger.metadata_debt_status().has_pending_work() {
         return terminal_retry_error(&host).map_or(Ok(()), Err);
     }
 
@@ -33,10 +31,14 @@ pub(crate) fn retry_metadata_debt(
         crate::boundary::report_boundary_error("xlAutoOpen metadata debt retry", &error);
         return Err(error);
     }
-    if ledger.has_metadata_debt() {
-        let count = ledger.metadata_debt_snapshot().len();
+    let status = ledger.metadata_debt_status();
+    if status.has_pending_work() {
         let _ = catch_no_unwind(AssertUnwindSafe(|| {
-            tracing::warn!(count, "Excel metadata debt remains after retry");
+            tracing::warn!(
+                count = status.pending_buckets,
+                cleanup_in_progress = status.cleanup_in_progress,
+                "Excel metadata debt remains after retry"
+            );
         }));
     }
     Ok(())
@@ -44,29 +46,21 @@ pub(crate) fn retry_metadata_debt(
 
 pub(crate) fn retry_metadata_debt_with_host(
     host: &RegistrationHost<'_>,
-    debts: &BTreeMap<ExcelNameKey, Vec<MetadataDebt>>,
+    debts: MetadataDebts,
 ) -> MetadataDebtRetryResult {
-    let mut remaining = BTreeMap::new();
+    let mut debts = debts.into_iter();
+    let mut remaining = MetadataDebts::new();
     let mut cleanup_issues = Vec::new();
     let mut terminal = None;
 
-    for (key, debt_bucket) in debts {
+    while let Some((key, debt_bucket)) = debts.next() {
         if debt_bucket.is_empty() {
             continue;
         }
         if !host.permits_callbacks() {
-            if let Some(status) = host.terminal_status() {
-                terminal = Some(crate::XllError::ExcelApi {
-                    function: crate::error::ExcelApiFunction::Evaluate,
-                    failure: crate::error::ExcelApiFailure::Suppressed(status),
-                });
-            }
-            remaining.insert(key.clone(), debt_bucket.clone());
-            remaining.extend(
-                debts
-                    .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
-                    .map(|(later_key, later_debt)| (later_key.clone(), later_debt.clone())),
-            );
+            terminal = terminal_retry_error(host);
+            remaining.insert(key, debt_bucket);
+            remaining.extend(debts);
             break;
         }
 
@@ -83,18 +77,14 @@ pub(crate) fn retry_metadata_debt_with_host(
             RegistrationMutation::Rejected { error }
             | RegistrationMutation::Indeterminate { error, .. } => {
                 remaining.insert(
-                    key.clone(),
+                    key,
                     debt_bucket
-                        .iter()
-                        .map(|debt| debt.retry_failed(error.clone()))
+                        .into_iter()
+                        .map(|debt| debt.with_retry_failure(error.clone()))
                         .collect(),
                 );
                 if !host.permits_callbacks() {
-                    remaining.extend(
-                        debts
-                            .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
-                            .map(|(later_key, later_debt)| (later_key.clone(), later_debt.clone())),
-                    );
+                    remaining.extend(debts);
                     terminal = Some(error);
                     break;
                 }
@@ -128,8 +118,8 @@ fn terminal_retry_error(host: &RegistrationHost<'_>) -> Option<crate::XllError> 
 mod tests {
     use super::*;
     use crate::XllError;
-    use crate::registration::RegistrationId;
     use crate::registration::host::test_support::{CallbackScript, Reply};
+    use crate::registration::{ExcelNameKey, MetadataDebt, RegistrationId};
     use crate::return_abi::ExcelCallbackStatus;
     use xlfn_sys::{
         XLF_EVALUATE, XLF_SET_NAME, XLOPER12, XLRET_ABORT, XLRET_FAILED, XLRET_UNCALCED,
@@ -145,10 +135,8 @@ mod tests {
         )
     }
 
-    fn debts(
-        entries: impl IntoIterator<Item = MetadataDebt>,
-    ) -> BTreeMap<ExcelNameKey, Vec<MetadataDebt>> {
-        let mut debts = BTreeMap::<_, Vec<_>>::new();
+    fn debts(entries: impl IntoIterator<Item = MetadataDebt>) -> MetadataDebts {
+        let mut debts = MetadataDebts::new();
         for debt in entries {
             debts.entry(debt.key()).or_default().push(debt);
         }
@@ -165,7 +153,7 @@ mod tests {
         let host = RegistrationHost::new(&callbacks);
         let debts = debts([debt("TEST.OWNED", 7.0), debt("TEST.OWNED", -9.0)]);
 
-        let outcome = retry_metadata_debt_with_host(&host, &debts);
+        let outcome = retry_metadata_debt_with_host(&host, debts);
 
         assert!(outcome.remaining.is_empty());
         assert!(outcome.cleanup_issues.is_empty());
@@ -183,7 +171,7 @@ mod tests {
         let host = RegistrationHost::new(&callbacks);
         let debts = debts([debt("TEST.ABSENT", 7.0)]);
 
-        let outcome = retry_metadata_debt_with_host(&host, &debts);
+        let outcome = retry_metadata_debt_with_host(&host, debts);
 
         assert!(outcome.remaining.is_empty());
         assert!(outcome.terminal.is_none());
@@ -198,11 +186,12 @@ mod tests {
         let host = RegistrationHost::new(&callbacks);
         let debts = debts([debt("TEST.REBOUND", 7.0), debt("TEST.REBOUND", 9.0)]);
 
-        let outcome = retry_metadata_debt_with_host(&host, &debts);
+        let outcome = retry_metadata_debt_with_host(&host, debts);
 
         let remaining = &outcome.remaining[&ExcelNameKey::new("TEST.REBOUND")];
         assert_eq!(remaining.len(), 2);
         for debt in remaining {
+            assert_eq!(debt.attempts(), 2);
             assert!(matches!(
                 debt.last_error(),
                 XllError::MetadataDebtBindingChanged {
@@ -229,14 +218,25 @@ mod tests {
             let callbacks = HostCallbackSession::new();
             let host = RegistrationHost::new(&callbacks);
             let debts = debts([debt("A.OWNED", 7.0), debt("B.OWNED", 9.0)]);
+            let later = ExcelNameKey::new("B.OWNED");
+            let later_bucket = debts[&later].as_ptr();
 
-            let outcome = retry_metadata_debt_with_host(&host, &debts);
+            let outcome = retry_metadata_debt_with_host(&host, debts);
 
             assert_eq!(outcome.remaining.len(), 2);
             assert!(outcome.terminal.is_some());
             assert!(!host.permits_callbacks());
+            assert_eq!(
+                outcome.remaining[&ExcelNameKey::new("A.OWNED")][0].attempts(),
+                2
+            );
+            assert!(std::ptr::eq(
+                outcome.remaining[&later].as_ptr(),
+                later_bucket
+            ));
+            assert_eq!(outcome.remaining[&later][0].attempts(), 1);
             assert!(matches!(
-                outcome.remaining[&ExcelNameKey::new("B.OWNED")][0].last_error(),
+                outcome.remaining[&later][0].last_error(),
                 XllError::Closing
             ));
             script.assert_calls(if deletion_started {
@@ -255,7 +255,7 @@ mod tests {
         let host = RegistrationHost::new(&callbacks);
         let debts = debts([debt("A.OWNED", 7.0), debt("B.OWNED", 9.0)]);
 
-        let outcome = retry_metadata_debt_with_host(&host, &debts);
+        let outcome = retry_metadata_debt_with_host(&host, debts);
 
         assert_eq!(outcome.remaining.len(), 2);
         assert!(outcome.terminal.is_some());
@@ -272,7 +272,7 @@ mod tests {
         let host = RegistrationHost::new(&callbacks);
         let debts = debts([debt("A.OWNED", 7.0), debt("B.OWNED", 9.0)]);
 
-        let outcome = retry_metadata_debt_with_host(&host, &debts);
+        let outcome = retry_metadata_debt_with_host(&host, debts);
 
         assert_eq!(outcome.remaining.len(), 1);
         assert!(
@@ -294,7 +294,7 @@ mod tests {
         let host = RegistrationHost::new(&callbacks);
         let debts = debts([debt("TEST.OWNED", 7.0)]);
 
-        let outcome = retry_metadata_debt_with_host(&host, &debts);
+        let outcome = retry_metadata_debt_with_host(&host, debts);
 
         assert!(outcome.remaining.is_empty());
         assert_eq!(outcome.cleanup_issues.len(), 1);
@@ -313,7 +313,7 @@ mod tests {
             let host = RegistrationHost::new(&callbacks);
             let debts = debts([debt("TEST.OWNED", 7.0)]);
 
-            let outcome = retry_metadata_debt_with_host(&host, &debts);
+            let outcome = retry_metadata_debt_with_host(&host, debts);
 
             assert!(outcome.remaining.is_empty());
             assert_eq!(outcome.cleanup_issues.len(), 1);
@@ -347,7 +347,7 @@ mod tests {
                     ..
                 }) if terminal == ExcelCallbackStatus::from_raw(status),
             ));
-            assert!(!ledger.has_metadata_debt());
+            assert!(!ledger.metadata_debt_status().has_pending_work());
             assert_eq!(
                 callbacks.terminal_status(),
                 Some(ExcelCallbackStatus::from_raw(status))
@@ -371,11 +371,13 @@ mod tests {
                     ..
                 }) if terminal == status,
             ));
-            let outcome =
-                retry_metadata_debt_with_host(&RegistrationHost::new(&callbacks), &BTreeMap::new());
+            let outcome = retry_metadata_debt_with_host(
+                &RegistrationHost::new(&callbacks),
+                MetadataDebts::new(),
+            );
             assert!(outcome.terminal.is_some());
             assert!(outcome.remaining.is_empty());
-            assert!(!ledger.has_metadata_debt());
+            assert!(!ledger.metadata_debt_status().has_pending_work());
             script.assert_calls(&[]);
         }
     }

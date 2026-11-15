@@ -529,7 +529,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         any(not(target_os = "windows"), feature = "async", feature = "handles")
     ))]
     pub(crate) fn metadata_debt_count_for_test(&self) -> usize {
-        self.host.metadata_debt_snapshot().len()
+        self.host.metadata_debt_status().pending_buckets
     }
 
     pub(crate) fn enter<'call>(

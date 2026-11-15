@@ -69,30 +69,33 @@ impl ValidatedSignature {
         self.0.execution
     }
 
-    pub(crate) fn encode(self) -> String {
+    pub(super) fn codes(self) -> impl Iterator<Item = &'static str> {
         let Self(signature) = self;
-        let mut text = String::with_capacity(signature.arguments.len() + 4);
-        if signature.execution.is_async() {
-            text.push('>');
+        let execution = signature.execution;
+        let head = if execution.is_async() {
+            ">"
         } else {
-            text.push_str(signature.return_abi.registration_code());
-        }
-        for argument in signature.arguments {
-            text.push_str(argument.registration_code());
-        }
-        if signature.execution.is_async() {
-            text.push('X');
-        }
-        if matches!(signature.execution, ExecutionKind::MacroSheet) {
-            text.push('#');
-        }
-        if signature.execution.is_thread_safe() {
-            text.push('$');
-        }
-        if signature.volatile {
-            text.push('!');
-        }
-        text
+            signature.return_abi.registration_code()
+        };
+        let suffix = [
+            execution.is_async().then_some("X"),
+            matches!(execution, ExecutionKind::MacroSheet).then_some("#"),
+            execution.is_thread_safe().then_some("$"),
+            signature.volatile.then_some("!"),
+        ];
+        std::iter::once(head)
+            .chain(
+                signature
+                    .arguments
+                    .iter()
+                    .map(|argument| argument.registration_code()),
+            )
+            .chain(suffix.into_iter().flatten())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn encode(self) -> String {
+        self.codes().collect()
     }
 }
 

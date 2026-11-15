@@ -56,6 +56,8 @@ mod output;
 mod registration;
 #[cfg(feature = "rtd")]
 mod rtd;
+#[cfg(all(feature = "handles", feature = "rtd"))]
+pub use crate::excel_rtd::RtdObservationArgumentsBenchmark;
 mod sync_boundary;
 
 #[cfg(feature = "async")]

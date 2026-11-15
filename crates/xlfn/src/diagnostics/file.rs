@@ -119,11 +119,15 @@ pub(crate) fn bounded_diagnostic_error(error: &crate::XllError) -> String {
         &mut output,
         format_args!("{}", super::payload::TracedError(error)),
     );
-    output
-        .finish()
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
+    let formatted = output.finish();
+    if formatted.chars().any(char::is_control) {
+        formatted
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect()
+    } else {
+        formatted
+    }
 }
 
 pub(crate) struct FileDiagnosticSink {
@@ -536,6 +540,15 @@ mod bounded_text_tests {
             bounded_diagnostic_text("udf"),
             Cow::Borrowed("udf")
         ));
+        let error = crate::XllError::Native {
+            code: 17,
+            message: "a\n\u{0085}日本🦀".repeat(DIAGNOSTIC_TEXT_MAX_BYTES),
+        };
+        let expected: String = bounded_diagnostic_text(&error.to_string())
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        assert_eq!(bounded_diagnostic_error(&error), expected);
     }
 
     #[test]

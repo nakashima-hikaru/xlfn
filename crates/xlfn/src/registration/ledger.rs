@@ -55,12 +55,15 @@ impl MetadataDebt {
         }
     }
 
-    pub(crate) fn retry_failed(&self, error: XllError) -> Self {
-        Self {
-            registration: self.registration,
-            attempts: self.attempts.saturating_add(1),
-            last_error: error,
-        }
+    pub(crate) fn with_retry_failure(mut self, error: XllError) -> Self {
+        self.attempts = self.attempts.saturating_add(1);
+        self.last_error = error;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attempts(&self) -> u32 {
+        self.attempts
     }
 
     #[cfg(test)]
@@ -220,8 +223,10 @@ impl<T> UnregisterResult<T> {
     }
 }
 
+pub(crate) type MetadataDebts = BTreeMap<ExcelNameKey, Vec<MetadataDebt>>;
+
 pub(crate) struct MetadataDebtRetryResult {
-    pub(crate) remaining: BTreeMap<ExcelNameKey, Vec<MetadataDebt>>,
+    pub(crate) remaining: MetadataDebts,
     pub(crate) cleanup_issues: Vec<XllError>,
     pub(crate) terminal: Option<XllError>,
 }
@@ -392,14 +397,14 @@ mod phase_tests {
         observed_only.retain_metadata_debt(vec![debt()]);
         observed_only.merge(HostMutationJournal::from_registrations([id]));
         assert!(
-            observed_only.has_metadata_debt(),
+            observed_only.metadata_debt_status().has_pending_work(),
             "scalar IDs carry no success receipt"
         );
 
         let applied = HostLedger::new();
         applied.retain_metadata_debt(vec![debt()]);
         applied.merge(SuccessfulRegistrations::from_applied(vec![id]).into_journal());
-        assert!(!applied.has_metadata_debt());
+        assert!(!applied.metadata_debt_status().has_pending_work());
         assert_eq!(applied.registrations_snapshot().len(), 1);
     }
 }

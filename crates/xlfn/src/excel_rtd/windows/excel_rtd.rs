@@ -9,7 +9,9 @@ use super::subscription_backend::BackendSubscriptions;
 #[cfg(feature = "handles")]
 use crate::XllError;
 use crate::XllResult;
-use crate::excel_rtd::counted_string::CountedString;
+#[cfg(feature = "handles")]
+use crate::excel_rtd::counted_string::handle_matches;
+use crate::excel_rtd::counted_string::{CountedString, invoke_rtd};
 #[cfg(feature = "handles")]
 use crate::formula_lifetime::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
 use crate::host_api::ExcelHost;
@@ -17,10 +19,6 @@ use crate::host_api::ExcelHost;
 use crate::ingress::ExportIngress;
 #[cfg(any(test, feature = "rtd"))]
 use crate::subscription::{RtdValue, SubscriptionRuntime};
-#[cfg(any(test, feature = "rtd"))]
-use crate::value::ExcelValue;
-use std::ptr::NonNull;
-use xlfn_sys::{XLF_RTD, XLOPER12};
 
 #[cfg(feature = "handles")]
 pub(crate) fn observe<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
@@ -45,30 +43,19 @@ pub(crate) fn observe<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
         Some(TemporaryRegistration::new(active, &module_path)?)
     };
 
-    let mut prog_id = CountedString::new(&active.prog_id)?;
-    let mut topic = CountedString::new(&format!("handle:{rtd_key}"))?;
+    let topic = CountedString::concat(["handle:", rtd_key])?;
 
     let lifetime_generation = FormulaLifetimeGeneration::new(active.generation.get())
         .expect("an active Excel RTD server has a non-zero lifetime generation");
     handles.claim_lifetime(rtd_key, lifetime_generation)?;
 
-    let mut server_name = XLOPER12::missing();
-    let arguments = [
-        prog_id.pointer(),
-        NonNull::from_mut(&mut server_name),
-        topic.pointer(),
-    ];
-
-    let returned = host.invoke(
-        XLF_RTD,
-        crate::error::ExcelApiFunction::Rtd,
-        &arguments,
-        |result| <String as crate::value::FromExcel>::from_excel(result.borrow()?, "RTD handle"),
-    )?;
+    let matched = invoke_rtd(host, active.identity.prog_id_utf16(), &topic, |result| {
+        handle_matches(result.borrow()?, token)
+    })?;
 
     drop(registration);
 
-    if returned != token {
+    if !matched {
         return Err(XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_HANDLE,
         });
@@ -103,30 +90,20 @@ pub(crate) fn observe_subscription<E: crate::RtdSubscription, C: crate::RtdSourc
         Some(TemporaryRegistration::new(active, &module_path)?)
     };
 
-    let mut prog_id = CountedString::new(&active.prog_id)?;
     let key_transport = key.to_transport();
-    let mut topic = CountedString::new(key_transport.as_str())?;
+    let topic = CountedString::new(key_transport.as_str())?;
     if let Some(subscription_server) = &ensured.subscription_server {
         subscription_server.claim(*key)?;
     }
 
-    let mut server_name = XLOPER12::missing();
-    let arguments = [
-        prog_id.pointer(),
-        NonNull::from_mut(&mut server_name),
-        topic.pointer(),
-    ];
-
-    let value = host.invoke(
-        XLF_RTD,
-        crate::error::ExcelApiFunction::Rtd,
-        &arguments,
-        |result| <ExcelValue as crate::value::FromExcel>::from_excel(result.borrow()?, "RTD value"),
-    )?;
+    let value = invoke_rtd(host, active.identity.prog_id_utf16(), &topic, |result| {
+        RtdValue::decode_excel_observation(result.borrow()?)
+    })?;
 
     drop(registration);
 
-    let value = RtdValue::try_from(value)?;
+    // Keep a semantic non-scalar result subordinate to callback cleanup.
+    let value = value.ok_or_else(RtdValue::scalar_required_error)?;
     observation.commit();
     Ok(value)
 }
