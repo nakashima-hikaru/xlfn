@@ -13,9 +13,10 @@ pub(crate) trait SubscriptionHost: Clone + Send + Sync + 'static {
     // Kept inline in deferred cleanup until its sink-user barrier completes.
     type DisconnectCompletion: Send + 'static;
 
-    fn enter_with<F>(&self, operation: F) -> XllResult<Self::AdmissionGuard>
-    where
-        F: FnOnce() -> XllResult<()>;
+    /// Run the operation inside the accepting scope and return its result
+    /// with host admission. The operation can retain partially acquired gates
+    /// in its result until the caller releases host admission.
+    fn enter_with<T>(&self, operation: impl FnOnce() -> T) -> XllResult<(Self::AdmissionGuard, T)>;
 
     fn notify(&self, notifier: &Self::Notifier) -> XllResult<()>;
 

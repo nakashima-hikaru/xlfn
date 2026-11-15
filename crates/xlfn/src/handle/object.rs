@@ -708,8 +708,7 @@ impl<'registry, T: Send + Sync + 'static> PendingObjectBinding<'registry, T> {
     pub(super) fn publish(self) -> XllResult<(String, super::token::HandleId, ObjectId, bool)> {
         // Erase only at the final binding-table insertion. The registry borrow
         // remains live for the entire call; no bare binding escapes this method.
-        let mut binding = Some(self.binding);
-        self.registry.insert_pending_object(&mut binding)
+        self.registry.publish_object_binding(self.binding)
     }
 
     #[cfg(test)]

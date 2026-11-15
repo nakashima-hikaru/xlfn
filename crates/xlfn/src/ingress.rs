@@ -197,6 +197,30 @@ pub(crate) struct ExportIngress {
 #[derive(Debug)]
 pub(crate) struct OpeningPublicationLost;
 
+/// Keeps rejected opening entries out between the quiescence check and OPEN.
+pub(crate) struct OpeningPublication<'a> {
+    ingress: &'a ExportIngress,
+    _guard: std::sync::MutexGuard<'a, ()>,
+}
+
+impl OpeningPublication<'_> {
+    pub(crate) fn publish(self, expected: &ExportIngress) -> Result<(), OpeningPublicationLost> {
+        if !std::ptr::eq(self.ingress, expected) {
+            return Err(OpeningPublicationLost);
+        }
+        self.ingress
+            .phase
+            .compare_exchange(
+                PHASE_OPENING,
+                PHASE_OPEN,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| OpeningPublicationLost)
+    }
+}
+
 /// The result of reserving one external export entry.
 ///
 /// Both variants own the counted ingress reservation.  Only `AdmittedExport`
@@ -313,20 +337,15 @@ impl ExportIngress {
         self.phase.store(PHASE_OPENING, Ordering::Release);
     }
 
-    /// Completes opening as one publication transaction.
+    /// Takes the opening lock and waits out all earlier rejected entries.
     ///
-    /// The callback runs while external entry is still rejected. Once it
-    /// succeeds, the ingress is atomically published as OPEN. A rejected
-    /// Opening entry cannot race the zero-active observation because it must
-    /// acquire the same opening lock first.
-    pub(crate) fn complete_open<F, E>(
+    /// The returned owner keeps external entry rejected until publication.
+    /// An opening entry cannot race the zero-active observation because it
+    /// must acquire the same opening lock first.
+    pub(crate) fn opening_publication(
         &self,
-        operation: F,
-    ) -> Result<Result<(), E>, OpeningPublicationLost>
-    where
-        F: FnOnce() -> Result<(), E>,
-    {
-        let _opening_guard = self
+    ) -> Result<OpeningPublication<'_>, OpeningPublicationLost> {
+        let guard = self
             .opening_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -337,19 +356,26 @@ impl ExportIngress {
             return Err(OpeningPublicationLost);
         }
 
+        Ok(OpeningPublication {
+            ingress: self,
+            _guard: guard,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_open<F, E>(
+        &self,
+        operation: F,
+    ) -> Result<Result<(), E>, OpeningPublicationLost>
+    where
+        F: FnOnce() -> Result<(), E>,
+    {
+        let publication = self.opening_publication()?;
         let result = operation();
-        if result.is_err() {
-            return Ok(result);
+        if result.is_ok() {
+            publication.publish(self)?;
         }
-        match self.phase.compare_exchange(
-            PHASE_OPENING,
-            PHASE_OPEN,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => Ok(result),
-            Err(_) => Err(OpeningPublicationLost),
-        }
+        Ok(result)
     }
 
     /// Attempts to enter an export entry and runs `on_accepted` after the
@@ -358,6 +384,19 @@ impl ExportIngress {
     where
         F: FnOnce(),
     {
+        match self.enter_with_result(on_accepted) {
+            Ok((entry, ())) => ExportEntry::Admitted(entry),
+            Err(entry) => ExportEntry::Rejected(entry),
+        }
+    }
+
+    /// Returns the callback's result with the admitted export. The callback
+    /// runs in the accepting scope, before releasing any opening lock taken
+    /// when entry first observed an opening epoch.
+    pub(crate) fn enter_with_result<T>(
+        &self,
+        on_accepted: impl FnOnce() -> T,
+    ) -> Result<(AdmittedExport<'_>, T), RejectedExport<'_>> {
         let observed_phase = self.phase.load(Ordering::Acquire);
         let _opening_guard = (observed_phase == PHASE_OPENING).then(|| {
             self.opening_lock
@@ -365,17 +404,17 @@ impl ExportIngress {
                 .unwrap_or_else(|error| error.into_inner())
         });
         if self.phase.load(Ordering::Acquire) == PHASE_CLOSED {
-            return ExportEntry::Rejected(self.rejected_guard());
+            return Err(self.rejected_guard());
         }
         let stripe_index = current_ingress_stripe();
         let permit = match self.exports.try_enter(stripe_index) {
             Ok(permit) => permit,
-            Err(_) => return ExportEntry::Rejected(self.rejected_guard()),
+            Err(_) => return Err(self.rejected_guard()),
         };
         let phase = self.phase.load(Ordering::Acquire);
         if phase == PHASE_CLOSED {
             drop(permit);
-            return ExportEntry::Rejected(self.rejected_guard());
+            return Err(self.rejected_guard());
         }
         let accepted = phase == PHASE_OPEN;
         let entry = ExportCallGuard {
@@ -386,10 +425,10 @@ impl ExportIngress {
             udf: false,
         };
         if accepted {
-            on_accepted();
-            ExportEntry::Admitted(AdmittedExport { guard: entry })
+            let result = on_accepted();
+            Ok((AdmittedExport { guard: entry }, result))
         } else {
-            ExportEntry::Rejected(RejectedExport { _guard: entry })
+            Err(RejectedExport { _guard: entry })
         }
     }
 
@@ -692,11 +731,15 @@ mod tests {
         let (release_hook_tx, release_hook_rx) = mpsc::sync_channel(1);
         let entering = Arc::clone(&ingress);
         let entry = std::thread::spawn(move || {
-            let entry = entering.enter_with(|| {
-                hook_started_tx.send(()).unwrap();
-                release_hook_rx.recv().unwrap();
-            });
-            assert!(matches!(&entry, ExportEntry::Admitted(_)));
+            let (entry, result) = entering
+                .enter_with_result(|| {
+                    hook_started_tx.send(()).unwrap();
+                    release_hook_rx.recv().unwrap();
+                    17
+                })
+                .unwrap();
+            assert_eq!(result, 17);
+            assert_eq!(entering.active_calls(), 1);
             drop(entry);
         });
 
@@ -720,6 +763,30 @@ mod tests {
         entry.join().unwrap();
         close.join().unwrap();
         assert_eq!(ingress.phase(), PHASE_CLOSING);
+    }
+
+    #[test]
+    fn miri_result_admission_does_not_run_a_rejected_operation_and_releases_on_unwind() {
+        let ingress = ExportIngress::new();
+        ingress.begin_opening();
+        let rejected = ingress
+            .enter_with_result(|| panic!("opening must reject admission"))
+            .unwrap_err();
+        assert_eq!(ingress.active_calls(), 1);
+        drop(rejected);
+        ingress.complete_open(|| Ok::<_, ()>(())).unwrap().unwrap();
+
+        let interrupted =
+            crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = ingress.enter_with_result(|| {
+                    assert_eq!(ingress.active_calls(), 1);
+                    panic!("injected unwind inside admission callback");
+                });
+            }));
+        assert!(interrupted.is_err());
+        assert_eq!(ingress.active_calls(), 0);
+        ingress.begin_close_with(|| {});
+        ingress.seal_and_drain().unwrap();
     }
 
     #[test]

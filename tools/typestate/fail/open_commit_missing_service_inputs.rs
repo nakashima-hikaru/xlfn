@@ -1,10 +1,12 @@
 // module: runtime/open_txn
-use super::{OpenCore, commit_inner};
+use super::{HostOpeningState, OpenCore, commit_inner};
+use crate::runtime::capabilities::{InstalledLifecycle, OpenDeps};
 
-fn missing_inputs<A: crate::Addin>(
-    deps: crate::runtime::capabilities::OpenDeps<'_, A>,
+fn missing_inputs<'runtime, A: crate::Addin>(
+    deps: OpenDeps<'runtime, A>,
     core: OpenCore<A>,
-    journal: &mut crate::registration::HostMutationJournal,
+    host: HostOpeningState,
+    binding: InstalledLifecycle<'runtime, A>,
 ) {
-    let _ = commit_inner(deps, core, journal); // error: E0308
+    let _ = commit_inner(deps, core, host, binding); // error: E0308
 }

@@ -386,6 +386,7 @@ pub(crate) enum ClosePayload<A: crate::Addin> {
 }
 
 impl<A: crate::Addin> ClosePayload<A> {
+    #[cfg(any(test, feature = "refinement"))]
     fn is_published(&self) -> bool {
         matches!(self, Self::Published(_))
     }
@@ -698,6 +699,7 @@ impl<A: crate::Addin> CloseResources<A> {
         }
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     fn is_published(&self) -> bool {
         self.payload().is_some_and(ClosePayload::is_published)
     }
@@ -989,6 +991,7 @@ impl<A: crate::Addin> ClosingState<A> {
         }
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     fn has_current_generation(&self) -> bool {
         match self {
             Self::OpeningActive {
@@ -1243,6 +1246,7 @@ impl<A: crate::Addin> LifecycleState<A> {
         }
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     fn has_current_generation(&self) -> bool {
         match self {
             Self::Open { .. } => true,
@@ -1459,6 +1463,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
         self.state.opening().map(|opening| opening.init_config)
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     fn has_current_generation(&self) -> bool {
         self.state.has_current_generation()
     }
@@ -1501,10 +1506,10 @@ impl<A: crate::Addin> CompletedRemovalIntent<'_, A> {
     }
 }
 
-/// Successful canonical open commit while the exact mutation guard remains
-/// borrowed. Only the commit operation can issue this observation authority.
+/// Canonical generation is ready for observation and external admission.
+/// Only this owner can advance committed history after ingress publication.
 pub(crate) struct CommittedOpen<'access, 'coordinator, A: crate::Addin> {
-    _access: &'access LifecycleAccess<'coordinator, A>,
+    _access: &'access mut LifecycleAccess<'coordinator, A>,
     attempt: OpenAttemptId,
 }
 
@@ -1516,6 +1521,24 @@ impl<A: crate::Addin> CommittedOpen<'_, '_, A> {
     pub(crate) fn access(&self) -> &LifecycleAccess<'_, A> {
         self._access
     }
+
+    pub(crate) fn publish(
+        self,
+        ingress: crate::ingress::OpeningPublication<'static>,
+    ) -> Result<(), crate::ingress::OpeningPublicationLost> {
+        ingress.publish(crate::module_runtime::ingress())?;
+        self._access.transition(|core| {
+            core.last_committed_generation = Some(self.attempt.into_runtime_generation());
+            ((), TransitionEffect::Keep)
+        });
+        Ok(())
+    }
+}
+
+/// The canonical receiver issued this once, after installing the generation.
+pub(crate) struct CanonicalGenerationPublished<'coordinator, A: crate::Addin> {
+    coordinator: &'coordinator LifecycleCoordinator<A>,
+    attempt: OpenAttemptId,
 }
 
 impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
@@ -1676,9 +1699,7 @@ pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
     pub(crate) test_module_lease: Mutex<Option<crate::ingress::TestModuleLease>>,
 }
 
-pub(crate) struct PublishOpeningError<A: crate::Addin> {
-    pub(crate) error: crate::XllError,
-    pub(crate) opening: Option<OpeningGeneration<A>>,
+pub(crate) struct UnpublishedGeneration<A: crate::Addin> {
     pub(crate) services: Box<
         GenerationServices<
             crate::addin_impl::AddinSubscription<A>,
@@ -1686,6 +1707,11 @@ pub(crate) struct PublishOpeningError<A: crate::Addin> {
         >,
     >,
     pub(crate) module_epoch: ModuleEpochLease,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PANIC_PUBLICATION_TRANSFER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The read-side effect produced by one canonical lifecycle transition.
@@ -2025,8 +2051,12 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(in crate::lifecycle) fn commit_open<'access, 'coordinator>(
         &self,
         core: &'access mut LifecycleAccess<'coordinator, A>,
-        generation: RuntimeGeneration,
+        published: CanonicalGenerationPublished<'_, A>,
     ) -> crate::XllResult<CommittedOpen<'access, 'coordinator, A>> {
+        if !std::ptr::eq(published.coordinator, self) || !std::ptr::eq(core.coordinator, self) {
+            return Err(crate::XllError::Closing);
+        }
+        let generation = published.attempt.into_runtime_generation();
         let attempt = core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
             match state {
@@ -2034,9 +2064,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     attempt,
                     payload: OpeningPayload::Published(bundle),
                 } => {
-                    if attempt.into_runtime_generation() != generation
-                        || bundle.generation.id() != generation
-                    {
+                    if attempt != published.attempt || bundle.generation.id() != generation {
                         core.state = LifecycleState::Opening {
                             attempt,
                             payload: OpeningPayload::Published(bundle),
@@ -2048,7 +2076,6 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                             TransitionEffect::Keep,
                         );
                     }
-                    core.last_committed_generation = Some(generation);
                     let effect = Self::publish_effect(&bundle);
                     core.state = LifecycleState::Open { bundle };
                     (Ok(attempt), effect)
@@ -2505,65 +2532,55 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         })
     }
 
-    pub(in crate::lifecycle) fn publish_opening_generation_locked(
-        &self,
+    pub(in crate::lifecycle) fn publish_opening_generation_locked<'coordinator>(
+        &'coordinator self,
         core: &mut LifecycleAccess<'_, A>,
-        generation: RuntimeGeneration,
-        services: Box<
-            GenerationServices<
-                crate::addin_impl::AddinSubscription<A>,
-                crate::addin_impl::AddinSources<A>,
-            >,
-        >,
-        module_epoch: ModuleEpochLease,
-    ) -> Result<(), Box<PublishOpeningError<A>>> {
+        attempt: OpenAttemptId,
+        unpublished: UnpublishedGeneration<A>,
+    ) -> Result<CanonicalGenerationPublished<'coordinator, A>, Box<UnpublishedGeneration<A>>> {
+        if !std::ptr::eq(core.coordinator, self)
+            || !matches!(
+                core.canonical_state(),
+                LifecycleState::Opening {
+                    attempt: active,
+                    payload: OpeningPayload::Staged(_),
+                } if *active == attempt
+            )
+        {
+            return Err(Box::new(unpublished));
+        }
+
+        // The staged root and the supplied service/epoch owners move together.
+        // Their receiver is temporarily empty, so any unforeseen unwind must
+        // stop before dropping a partially transferred publication.
+        let transfer = std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
         core.transition(|core| {
-            let open_state_error = || crate::XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-            };
-            if core.has_current_generation() {
-                return (
-                    Err(Box::new(PublishOpeningError {
-                        error: open_state_error(),
-                        opening: core.state.take_opening(),
-                        services,
-                        module_epoch,
-                    })),
-                    TransitionEffect::Keep,
-                );
-            }
-            let Some(attempt) = (match core.canonical_state() {
-                LifecycleState::Opening { attempt, .. } => Some(*attempt),
-                _ => None,
-            }) else {
-                return (
-                    Err(Box::new(PublishOpeningError {
-                        error: open_state_error(),
-                        opening: core.state.take_opening(),
-                        services,
-                        module_epoch,
-                    })),
-                    TransitionEffect::Keep,
-                );
-            };
-            let Some(opening) = core.state.take_opening() else {
-                return (
-                    Err(Box::new(PublishOpeningError {
-                        error: open_state_error(),
-                        opening: None,
-                        services,
-                        module_epoch,
-                    })),
-                    TransitionEffect::Keep,
-                );
-            };
+            let opening = core.state.take_opening().unwrap_or_else(|| {
+                lifecycle_invariant_violation("validated opening publication lost its root")
+            });
+            let transfer = std::mem::DropGuard::new((opening, unpublished), |_| {
+                xlfn_kernel::invariant::fail_stop()
+            });
+            #[cfg(test)]
+            PANIC_PUBLICATION_TRANSFER.with(|fault| {
+                assert!(!fault.replace(false), "injected receiver transfer panic");
+            });
+            // After extraction only infallible owner construction and the
+            // locked enum replacement remain. No user operations run here.
+            let (
+                opening,
+                UnpublishedGeneration {
+                    services,
+                    module_epoch,
+                },
+            ) = std::mem::DropGuard::dismiss(transfer);
             let OpeningGeneration {
                 shared_state,
                 layers,
                 init_config: _,
             } = opening;
             let generation = PublishedOwner::new(ExecutionGeneration {
-                id: generation,
+                id: attempt.into_runtime_generation(),
                 shared_state,
                 layers,
             });
@@ -2582,8 +2599,18 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 attempt,
                 payload: OpeningPayload::Published(bundle),
             };
-            (Ok(()), TransitionEffect::Keep)
+            ((), TransitionEffect::Keep)
+        });
+        std::mem::DropGuard::dismiss(transfer);
+        Ok(CanonicalGenerationPublished {
+            coordinator: self,
+            attempt,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_publication_transfer_panic() {
+        PANIC_PUBLICATION_TRANSFER.with(|fault| fault.set(true));
     }
 
     #[cfg(test)]

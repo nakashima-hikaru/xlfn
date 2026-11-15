@@ -7,8 +7,8 @@
 use crate::addin_impl::Addin;
 use crate::generation::{OpenAttemptId, OpeningGeneration, RemovalAttemptId, RemovalEpoch};
 use crate::lifecycle::{
-    FinalRemovalReady, HostLifecycleIntent, LifecycleAccess, LifecycleCoordinator,
-    OpenFailureDisposition, OpenRollbackReady,
+    CanonicalGenerationPublished, FinalRemovalReady, HostLifecycleIntent, LifecycleAccess,
+    LifecycleCoordinator, OpenFailureDisposition, OpenRollbackReady, UnpublishedGeneration,
 };
 use crate::module_runtime::{ModuleCleanupAuthority, ModuleCleanupClaim, ModuleClosing};
 use crate::{XllError, XllResult};
@@ -17,18 +17,6 @@ use crate::{XllError, XllResult};
 pub(crate) struct LifecycleControl<'coordinator, A: Addin> {
     coordinator: &'coordinator LifecycleCoordinator<A>,
 }
-
-pub(crate) type PublishGenerationFailure<A> = Box<(
-    XllError,
-    Option<OpeningGeneration<A>>,
-    Box<
-        crate::runtime_components::GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    >,
-    crate::module_runtime::ModuleEpochLease,
-)>;
 
 impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
     pub(crate) const fn new(coordinator: &'coordinator LifecycleCoordinator<A>) -> Self {
@@ -163,33 +151,19 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
     pub(crate) fn publish_generation_state(
         &self,
         control: &mut LifecycleAccess<'_, A>,
-        generation: crate::generation::RuntimeGeneration,
-        services: Box<
-            crate::runtime_components::GenerationServices<
-                crate::addin_impl::AddinSubscription<A>,
-                crate::addin_impl::AddinSources<A>,
-            >,
-        >,
-        module_epoch: crate::module_runtime::ModuleEpochLease,
-    ) -> Result<(), PublishGenerationFailure<A>> {
+        attempt: OpenAttemptId,
+        unpublished: UnpublishedGeneration<A>,
+    ) -> Result<CanonicalGenerationPublished<'coordinator, A>, Box<UnpublishedGeneration<A>>> {
         self.coordinator
-            .publish_opening_generation_locked(control, generation, services, module_epoch)
-            .map_err(|failure| {
-                Box::new((
-                    failure.error,
-                    failure.opening,
-                    failure.services,
-                    failure.module_epoch,
-                ))
-            })
+            .publish_opening_generation_locked(control, attempt, unpublished)
     }
 
     pub(crate) fn finish_open_state<'access, 'issuer>(
         &self,
         control: &'access mut LifecycleAccess<'issuer, A>,
-        generation: crate::generation::RuntimeGeneration,
+        published: CanonicalGenerationPublished<'_, A>,
     ) -> XllResult<super::CommittedOpen<'access, 'issuer, A>> {
-        self.coordinator.commit_open(control, generation)
+        self.coordinator.commit_open(control, published)
     }
 
     pub(crate) fn complete_open_abort_locked(

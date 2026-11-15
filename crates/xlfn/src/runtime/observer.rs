@@ -212,7 +212,7 @@ impl RuntimeObserver {
     pub(crate) fn commit_open<A: crate::Addin>(
         &self,
         deps: &OpenDeps<'_, A>,
-        committed: crate::lifecycle::CommittedOpen<'_, '_, A>,
+        committed: &crate::lifecycle::CommittedOpen<'_, '_, A>,
     ) {
         let attempt = committed.attempt();
         let _control = committed.access();

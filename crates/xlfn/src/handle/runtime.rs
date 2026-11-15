@@ -45,6 +45,11 @@ impl HandlePreparation {
     }
 }
 
+enum WarmOutcome<F> {
+    Hit(HandlePreparation),
+    Miss(F),
+}
+
 thread_local! {
     static ACTIVE_HANDLE_INITIALIZATION_KEYS: RefCell<Vec<HandleTopicKey>> = const { RefCell::new(Vec::new()) };
 }
@@ -232,13 +237,13 @@ impl FormulaHandleService {
         let _active_initialization = HandleInitializationGuard::enter(key)?;
         let _prepare = self.prepares.try_enter().ok_or(XllError::Closing)?;
         let _refinement_prepare = self.refinement.observe_prepare();
-        let mut observe = Some(observe);
-        if let Some(preparation) = self.prepare_warm(key, &mut observe)? {
-            return Ok(preparation);
-        }
+        let observe = match self.prepare_warm(key, observe)? {
+            WarmOutcome::Hit(preparation) => return Ok(preparation),
+            WarmOutcome::Miss(observe) => observe,
+        };
 
         let owner = std::thread::current().id();
-        let decision = loop {
+        let (initialization, generation) = loop {
             let decision = self.topics.prepare_decision(key, owner, || {
                 let refinement_id = self.refinement.observe_allocate_initializer_id();
                 Initialization {
@@ -261,38 +266,14 @@ impl FormulaHandleService {
                 } => {
                     self.refinement
                         .observe_begin_initializer(&key, initialization.refinement_id);
-                    break PrepareDecision::Initialize {
-                        initialization,
-                        generation,
-                    };
+                    break (initialization, generation);
                 }
-                existing => break existing,
-            }
-        };
-
-        let (initialization, generation) = match decision {
-            PrepareDecision::Existing {
-                token,
-                lifetime_key,
-                generation,
-            } => {
-                return self.observe_existing(
-                    key,
-                    lifetime_key,
+                PrepareDecision::Existing {
                     token,
+                    lifetime_key,
                     generation,
-                    observe
-                        .take()
-                        .expect("the observation closure is still owned"),
-                );
+                } => return self.observe_existing(key, lifetime_key, token, generation, observe),
             }
-
-            PrepareDecision::Initialize {
-                initialization,
-                generation,
-            } => (initialization, generation),
-
-            PrepareDecision::Wait { .. } => unreachable!("wait decisions never leave the loop"),
         };
 
         //
@@ -316,49 +297,34 @@ impl FormulaHandleService {
                 .observe_insert_pending_fresh(&key, initialization_id);
         }
         let publication_token = parsed;
-        let publication_txn = publication_txn.publish_and_observe(
-            observe
-                .take()
-                .expect("the cold path owns the observation closure"),
-            |_publication, lifetime_key| {
+        let publication_txn =
+            publication_txn.publish_and_observe(observe, |_publication, lifetime_key| {
                 self.refinement.observe_publish_and_install(
                     &key,
                     initialization_id,
                     publication_token,
                     lifetime_key,
                 );
-            },
-        )?;
+            })?;
         let token = publication_txn.commit()?;
         Ok(HandlePreparation::Published { token })
     }
 
-    /// Attempts the warm publication path and leaves the observation closure
-    /// untouched when the topic is not live. The cold path then owns the same
-    /// closure and the same call-scoped preparation admission.
-    fn prepare_warm<F>(
-        &self,
-        key: HandleTopicKey,
-        observe: &mut Option<F>,
-    ) -> XllResult<Option<HandlePreparation>>
+    /// A miss returns the uncalled observer to the caller for cold preparation.
+    fn prepare_warm<F>(&self, key: HandleTopicKey, observe: F) -> XllResult<WarmOutcome<F>>
     where
         F: FnOnce(&str, &str) -> XllResult<()>,
     {
         let lease = self.topics.enter_read_lease()?;
         let Some(publication) = lease.load(&key) else {
-            return Ok(None);
+            return Ok(WarmOutcome::Miss(observe));
         };
         if publication.state() != PublishedTopicState::Live {
-            return Ok(None);
+            return Ok(WarmOutcome::Miss(observe));
         }
 
         let reader_id = self.refinement.observe_begin_warm_read(&key);
-        let observed = observe
-            .take()
-            .expect("a live warm publication consumes the observation closure")(
-            &publication.lifetime_key,
-            &publication.token,
-        );
+        let observed = observe(&publication.lifetime_key, &publication.token);
         if let Err(error) = observed {
             match publication.state() {
                 PublishedTopicState::Live => self.refinement.observe_fail_warm_read(reader_id),
@@ -374,7 +340,7 @@ impl FormulaHandleService {
         let result = match publication.state() {
             PublishedTopicState::Live => {
                 self.refinement.observe_finish_warm_read(reader_id);
-                Ok(Some(HandlePreparation::Reused {
+                Ok(WarmOutcome::Hit(HandlePreparation::Reused {
                     token: publication.token.clone(),
                 }))
             }

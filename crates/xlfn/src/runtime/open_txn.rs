@@ -1,8 +1,13 @@
 use crate::generation::{OpenAttemptId, OpeningGeneration, RemovalEpoch};
 use crate::host_callback::HostCallbackSession;
-use crate::lifecycle::LifecycleAccess;
+use crate::ingress::OpeningPublication;
 #[cfg(test)]
 use crate::lifecycle::OpenFailureDisposition;
+use crate::lifecycle::{
+    CanonicalGenerationPublished, LifecycleAccess, LifecycleControl, LifecyclePhase, OpenStart,
+    UnpublishedGeneration,
+};
+use crate::module_runtime::{ModuleEpochLease, ModuleOpening};
 use crate::registration::HostMutationJournal;
 #[cfg(any(test, feature = "bench-internals"))]
 use crate::registration::RegistrationId;
@@ -435,27 +440,93 @@ impl<A: crate::Addin> HasHost for HostMutated<A> {
     }
 }
 
-/// Owns the canonical lock until acquisition has either issued a transaction or
-/// restored terminal quarantine. No independent attempt/module pair escapes.
-struct OpenAcquisition<'runtime, A: crate::Addin> {
+/// Owns the canonical attempt and its original lock before module acquisition.
+struct StartClaimed<'runtime, A: crate::Addin>(RollbackGuard<PendingStart<'runtime, A>>);
+
+struct PendingStart<'runtime, A: crate::Addin> {
     deps: OpenDeps<'runtime, A>,
-    start: Option<crate::lifecycle::OpenStart<'runtime, A>>,
-    module: Option<crate::module_runtime::ModuleOpening>,
+    start: OpenStart<'runtime, A>,
 }
 
-impl<A: crate::Addin> Drop for OpenAcquisition<'_, A> {
-    fn drop(&mut self) {
-        let Some(start) = self.start.as_mut() else {
-            return;
-        };
+impl<A: crate::Addin> Rollback for PendingStart<'_, A> {
+    fn rollback(self) {
         self.deps.returns().close_admission();
-        if let Some(module) = self.module.take()
-            && let Err(authority) = start.return_module(module.rollback(|| {}))
-        {
-            self.deps.quarantine().retain_module_authority(authority);
+        drop(self.start);
+    }
+}
+
+impl<'runtime, A: crate::Addin> StartClaimed<'runtime, A> {
+    fn open_module(self) -> XllResult<ModuleOpened<'runtime, A>> {
+        self.0.get().deps.returns().reopen_admission()?;
+        // Until begin_open returns there is no authority to recover a partly
+        // changed module epoch.
+        let transfer = std::mem::DropGuard::new((), |()| opening_publication_lost());
+        let module = crate::module_runtime::begin_open();
+        let PendingStart { deps, start } = self.0.complete();
+        let opened = ModuleOpened(RollbackGuard::new(PendingModule {
+            deps,
+            start,
+            module,
+        }));
+        std::mem::DropGuard::dismiss(transfer);
+        Ok(opened)
+    }
+}
+
+struct ModuleOpened<'runtime, A: crate::Addin>(RollbackGuard<PendingModule<'runtime, A>>);
+
+struct PendingModule<'runtime, A: crate::Addin> {
+    deps: OpenDeps<'runtime, A>,
+    start: OpenStart<'runtime, A>,
+    module: ModuleOpening,
+}
+
+impl<A: crate::Addin> Rollback for PendingModule<'_, A> {
+    fn rollback(self) {
+        let Self {
+            deps,
+            mut start,
+            module,
+        } = self;
+        deps.returns().close_admission();
+        if let Err(authority) = start.return_module(module.rollback(|| {})) {
+            deps.quarantine().retain_module_authority(authority);
         }
-        // OpenStart retains the original lock and performs the canonical
-        // quarantine after this return/module recovery has completed.
+        drop(start);
+    }
+}
+
+impl<'runtime, A: crate::Addin> ModuleOpened<'runtime, A> {
+    fn issue(
+        self,
+        expected_removal_epoch: RemovalEpoch,
+    ) -> XllResult<OpeningTxn<'runtime, A, Begun<A>>> {
+        let pending = self.0.get();
+        let attempt = pending.start.attempt();
+        pending.deps.observer().begin_open(
+            pending.start.access(),
+            pending.deps.returns(),
+            expected_removal_epoch.get(),
+            attempt,
+        );
+        let PendingModule {
+            deps,
+            start,
+            module,
+        } = self.0.complete();
+        let successor = OpeningTxn::new_state(
+            deps,
+            Begun {
+                core: OpenCore::new(attempt, module),
+            },
+            (),
+        );
+        // A failed handoff still owns both recoveries. It unlocks the start
+        // before dropping the successor, which can reenter the coordinator.
+        start.transfer_to_opening(successor).map_err(|failure| {
+            drop(failure);
+            open_state_error()
+        })
     }
 }
 
@@ -589,6 +660,7 @@ impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
 #[cfg(test)]
 std::thread_local! {
     static FAIL_OPEN_ACQUIRE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static FAIL_OPEN_COMMIT: std::cell::Cell<(u8, bool)> = const { std::cell::Cell::new((0, false)) };
     static PANIC_ROLLBACK_TRANSFER: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 #[cfg(test)]
@@ -596,6 +668,19 @@ fn check_open_acquire_fault(point: u8) -> XllResult<()> {
     FAIL_OPEN_ACQUIRE.with(|fault| {
         if fault.get() == point {
             fault.set(0);
+            Err(XllError::Closing)
+        } else {
+            Ok(())
+        }
+    })
+}
+#[cfg(test)]
+fn check_open_commit_fault(point: u8) -> XllResult<()> {
+    FAIL_OPEN_COMMIT.with(|fault| {
+        let (stage, unwinding) = fault.get();
+        if stage == point {
+            fault.set((0, false));
+            assert!(!unwinding, "injected open commit panic at stage {point}");
             Err(XllError::Closing)
         } else {
             Ok(())
@@ -707,55 +792,19 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
         let test_module_lease = crate::ingress::acquire_test_module_lease();
         let lifecycle = crate::lifecycle::LifecycleControl::new(deps.lifecycle());
         let start = lifecycle.begin_open(expected_removal_epoch)?;
-        let attempt = start.attempt();
         // From the first successful canonical mutation, this guard owns both
         // the original lock and the responsibility for an incomplete start.
-        let mut acquisition = OpenAcquisition {
-            deps,
-            start: Some(start),
-            module: None,
-        };
+        let claimed = StartClaimed(RollbackGuard::new(PendingStart { deps, start }));
         #[cfg(test)]
         check_open_acquire_fault(1)?;
-        deps.returns().reopen_admission()?;
-        acquisition.module = Some(crate::module_runtime::begin_open());
+        let opened = claimed.open_module()?;
         #[cfg(test)]
         {
             *deps.lifecycle().test_module_lease.lock() = Some(test_module_lease);
         }
         #[cfg(test)]
         check_open_acquire_fault(2)?;
-        deps.observer().begin_open(
-            acquisition.start.as_ref().unwrap().access(),
-            deps.returns(),
-            expected_removal_epoch.get(),
-            attempt,
-        );
-        let module = acquisition
-            .module
-            .take()
-            .expect("acquisition owns its module");
-        let transaction = Self::new_state(
-            deps,
-            Begun {
-                core: OpenCore::new(attempt, module),
-            },
-            (),
-        );
-        // No fallible operation separates responsibility transfer from unlock.
-        let transaction = acquisition
-            .start
-            .take()
-            .unwrap()
-            .transfer_to_opening(transaction)
-            .map_err(|failure| {
-                // The failed handoff owns both recoveries, and unlocks the
-                // canonical start before the successor performs rollback.
-                drop(failure);
-                XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                }
-            })?;
+        let transaction = opened.issue(expected_removal_epoch)?;
         #[cfg(test)]
         check_open_acquire_fault(3)?;
         Ok(transaction)
@@ -929,9 +978,8 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
 impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostMutated<A>> {
     pub(crate) fn commit(self) -> XllResult<()> {
         validate_commit_preconditions(&self)?;
-        let (deps, HostMutated { core, host }, _binding) = self.into_parts();
-        let (_callbacks, mut journal) = host.into_parts();
-        commit_inner(deps, core, &mut journal)
+        let (deps, HostMutated { core, host }, binding) = self.into_parts();
+        commit_inner(deps, core, host, binding)
     }
 }
 
@@ -962,135 +1010,304 @@ fn validate_commit_preconditions<A: crate::Addin, S: OpeningState<A>>(
         .validate_open_attempt(&control, transaction.attempt_id())
 }
 
-fn commit_inner<A: crate::Addin>(
-    deps: OpenDeps<'_, A>,
-    core: InitializedOpenCore<A>,
-    journal: &mut HostMutationJournal,
-) -> XllResult<()> {
-    let (attempt_id, module_opening, service_inputs) = core.into_parts();
-    let mut control = deps.lifecycle_access();
-    deps.merge_host(std::mem::take(journal));
+type PreparedServices<A> = Box<
+    GenerationServices<crate::addin_impl::AddinSubscription<A>, crate::addin_impl::AddinSources<A>>,
+>;
 
-    if control.phase() == crate::lifecycle::LifecyclePhase::Opening {
-        let mut module_opening = Some(module_opening);
-        let ingress = crate::module_runtime::ingress();
-        let generation = attempt_id.into_runtime_generation();
-        let result = ingress
-            .complete_open(|| {
-                publish_generation(
-                    deps,
-                    attempt_id,
-                    &mut control,
-                    &mut module_opening,
-                    service_inputs,
-                )?;
-                let committed = deps
-                    .lifecycle_control()
-                    .finish_open_state(&mut control, generation)?;
-                deps.observer().commit_open(&deps, committed);
-                Ok::<(), XllError>(())
-            })
-            .unwrap_or_else(|_| opening_publication_lost());
+struct OpenCommitContext<'runtime, A: crate::Addin> {
+    deps: OpenDeps<'runtime, A>,
+    attempt: OpenAttemptId,
+    binding: InstalledLifecycle<'runtime, A>,
+}
 
-        match result {
-            Ok(()) => {
-                deps.lifecycle().notify_all();
-                Ok(())
+impl<A: crate::Addin> OpenCommitContext<'_, A> {
+    fn reject(self, close: impl FnOnce() -> crate::module_runtime::ModuleClosing) {
+        let mut control = self.deps.lifecycle_access();
+        return_open_module_locked(self.deps, &mut control, close());
+        // Publish rejection before the close waiter can claim the attempt.
+        self.deps
+            .observer()
+            .reject_open_locked(&control, self.attempt);
+        self.deps.lifecycle().notify_all();
+    }
+
+    fn abandon(self, close: impl FnOnce() -> crate::module_runtime::ModuleClosing) {
+        self.deps.returns().close_admission();
+        let lifecycle = self.deps.lifecycle_control();
+        let mut control = lifecycle.access();
+        return_open_module_locked(self.deps, &mut control, close());
+        lifecycle.record_open_failure(&mut control);
+        lifecycle.quarantine_state(&mut control);
+        lifecycle.notify_all();
+    }
+}
+
+struct UncommittedModule<'runtime, A: crate::Addin> {
+    context: OpenCommitContext<'runtime, A>,
+    module: ModuleOpening,
+}
+
+impl<A: crate::Addin> Rollback for UncommittedModule<'_, A> {
+    fn rollback(self) {
+        let Self { context, module } = self;
+        context.abandon(|| module.rollback(|| {}));
+    }
+}
+
+struct PreparingServices<'runtime, A: crate::Addin>(RollbackGuard<UncommittedModule<'runtime, A>>);
+
+impl<'runtime, A: crate::Addin> PreparingServices<'runtime, A> {
+    fn prepare(
+        self,
+        host: HostOpeningState,
+        service_inputs: ServiceInputs<A>,
+    ) -> XllResult<ServicesPrepared<'runtime, A>> {
+        let deps = self.0.get().context.deps;
+        let (_callbacks, journal) = host.into_parts();
+        let control = deps.lifecycle_access();
+        deps.merge_host(journal);
+
+        if control.phase() != LifecyclePhase::Opening {
+            drop(control);
+            // Keep this opening attempt responsible until destruction has
+            // completed. The close waiter cannot advance to module teardown.
+            {
+                let _discarded = service_inputs;
             }
-            Err(error) => {
-                recover_uncommitted_module(deps, &mut module_opening, &mut control);
-                drop(control);
-                let lifecycle = deps.lifecycle_control();
-                let mut control = lifecycle.access();
-                lifecycle.quarantine_state(&mut control);
-                drop(control);
-                lifecycle.notify_all();
-                Err(error)
-            }
+            let UncommittedModule { context, module } = self.0.complete();
+            context.reject(|| module.rollback(|| {}));
+            return Err(XllError::Closing);
         }
-    } else {
-        let closing = module_opening.rollback(|| {});
-        return_open_module_locked(deps, &mut control, closing);
-        // Clearing the open attempt makes final close claimable. Record that
-        // transition before a close waiter can acquire the lifecycle lock.
-        deps.observer().reject_open_locked(&control, attempt_id);
-        deps.lifecycle().notify_all();
+        let config = control.opening_config().ok_or_else(open_state_error)?;
+        // These private slots admit no users yet. Prepare and, on failure,
+        // destroy them outside canonical and ingress locks, since an RTD
+        // source destructor can reenter runtime code.
         drop(control);
-        Err(XllError::Closing)
-    }
-}
-
-fn publish_generation<A: crate::Addin>(
-    deps: OpenDeps<'_, A>,
-    attempt_id: OpenAttemptId,
-    control: &mut LifecycleAccess<'_, A>,
-    module_opening: &mut Option<crate::module_runtime::ModuleOpening>,
-    service_inputs: crate::runtime_components::GenerationServiceInputs<
-        crate::addin_impl::AddinSubscription<A>,
-        crate::addin_impl::AddinSources<A>,
-    >,
-) -> XllResult<()> {
-    let generation = attempt_id.into_runtime_generation();
-    let config = control.opening_config().ok_or(XllError::Internal {
-        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-    })?;
-    #[cfg(feature = "rtd")]
-    let subscription_host =
-        crate::excel_rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress());
-    let services = GenerationServices::arm_generation(
-        generation,
-        config,
-        #[cfg(feature = "rtd")]
-        subscription_host,
-        service_inputs,
-    )?
-    .commit();
-    let module_epoch = module_opening
-        .take()
-        .expect("open transaction owns its module opening authority")
+        #[cfg(test)]
+        check_open_commit_fault(1)?;
+        let services = GenerationServices::arm_generation(
+            self.0.get().context.attempt.into_runtime_generation(),
+            config,
+            #[cfg(feature = "rtd")]
+            crate::excel_rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
+            service_inputs,
+        )?
         .commit();
-    match deps.lifecycle_control().publish_generation_state(
-        control,
-        generation,
-        services,
-        module_epoch,
-    ) {
-        Ok(()) => Ok(()),
-        Err(failure) => {
-            let (error, opening, services, module_epoch) = *failure;
-            // Publication returned the exclusive, still-unpublished bundle.
-            // Its slot owners drain and destroy even already-Ready services.
-            drop(services);
-            if let Some(opening) = opening {
-                let crate::generation::OpeningGeneration {
-                    shared_state,
-                    layers,
-                    init_config: _,
-                } = opening;
-                deps.quarantine().retain_generation(
-                    Some(generation),
-                    crate::generation::ExecutionGeneration {
-                        id: generation,
-                        shared_state,
-                        layers,
-                    },
-                    crate::runtime_components::QuarantineReason::OpenStateInvariant,
-                );
-            }
-            let closing = module_epoch.begin_close(|| {});
-            return_open_module_locked(deps, control, closing);
-            Err(error)
-        }
+        Ok(ServicesPrepared {
+            services,
+            module: self.0,
+        })
     }
 }
 
-fn recover_uncommitted_module<A: crate::Addin>(
-    deps: OpenDeps<'_, A>,
-    module_opening: &mut Option<crate::module_runtime::ModuleOpening>,
-    control: &mut LifecycleAccess<'_, A>,
-) {
-    if let Some(module_opening) = module_opening.take() {
-        return_open_module_locked(deps, control, module_opening.rollback(|| {}));
+struct ServicesPrepared<'runtime, A: crate::Addin> {
+    // Dispose of the private slots while close still waits on this attempt.
+    services: PreparedServices<A>,
+    module: RollbackGuard<UncommittedModule<'runtime, A>>,
+}
+
+impl<'runtime, A: crate::Addin> ServicesPrepared<'runtime, A> {
+    fn ready(self) -> PublicationReady<'runtime, A> {
+        let Self { services, module } = self;
+        let UncommittedModule { context, module } = module.complete();
+        // ModuleOpening::commit only repacks the epoch owner. No external
+        // effect or callback separates disarming this guard from arming the next.
+        let bundle = UnpublishedGeneration {
+            services,
+            module_epoch: module.commit(),
+        };
+        PublicationReady(RollbackGuard::new(ReadyForPublication { context, bundle }))
+    }
+}
+
+struct ReadyForPublication<'runtime, A: crate::Addin> {
+    context: OpenCommitContext<'runtime, A>,
+    bundle: UnpublishedGeneration<A>,
+}
+
+struct UnpublishedEpoch<'runtime, A: crate::Addin> {
+    context: OpenCommitContext<'runtime, A>,
+    module_epoch: ModuleEpochLease,
+}
+
+impl<A: crate::Addin> Rollback for UnpublishedEpoch<'_, A> {
+    fn rollback(self) {
+        let Self {
+            context,
+            module_epoch,
+        } = self;
+        context.abandon(|| module_epoch.begin_close(|| {}));
+    }
+}
+
+impl<'runtime, A: crate::Addin> ReadyForPublication<'runtime, A> {
+    fn dispose_services(self) -> RollbackGuard<UnpublishedEpoch<'runtime, A>> {
+        let Self { context, bundle } = self;
+        let UnpublishedGeneration {
+            services,
+            module_epoch,
+        } = bundle;
+        let epoch = RollbackGuard::new(UnpublishedEpoch {
+            context,
+            module_epoch,
+        });
+        // Keep the epoch recoverable as service destructors run outside the
+        // locks. No close waiter may claim or unload this opening yet.
+        drop(services);
+        epoch
+    }
+}
+
+impl<A: crate::Addin> Rollback for ReadyForPublication<'_, A> {
+    fn rollback(self) {
+        drop(self.dispose_services());
+    }
+}
+
+struct PublicationReady<'runtime, A: crate::Addin>(RollbackGuard<ReadyForPublication<'runtime, A>>);
+
+impl<'runtime, A: crate::Addin> PublicationReady<'runtime, A> {
+    fn publish(self) -> XllResult<GenerationPublished<'runtime, A>> {
+        let deps = self.0.get().context.deps;
+        let attempt = self.0.get().context.attempt;
+        let mut control = deps.lifecycle().access();
+        if control.phase() != LifecyclePhase::Opening {
+            drop(control);
+            let UnpublishedEpoch {
+                context,
+                module_epoch,
+            } = self.0.complete().dispose_services().complete();
+            context.reject(|| module_epoch.begin_close(|| {}));
+            return Err(XllError::Closing);
+        }
+        let lifecycle = LifecycleControl::new(deps.lifecycle());
+        lifecycle.validate_open_attempt(&control, attempt)?;
+        let ingress = crate::module_runtime::ingress()
+            .opening_publication()
+            .unwrap_or_else(|_| opening_publication_lost());
+        let ReadyForPublication { context, bundle } = self.0.complete();
+        let receipt = match lifecycle.publish_generation_state(&mut control, attempt, bundle) {
+            Ok(receipt) => receipt,
+            Err(bundle) => {
+                let refused = PublicationReady(RollbackGuard::new(ReadyForPublication {
+                    context,
+                    bundle: *bundle,
+                }));
+                drop(ingress);
+                drop(control);
+                drop(refused);
+                return Err(open_state_error());
+            }
+        };
+        Ok(GenerationPublished {
+            receipt,
+            ingress,
+            pending: RollbackGuard::new(PublishedOpen { context, control }),
+        })
+    }
+}
+
+struct GenerationPublished<'runtime, A: crate::Addin> {
+    receipt: CanonicalGenerationPublished<'runtime, A>,
+    // Unlock ingress before the pending owner begins close on unwind.
+    ingress: OpeningPublication<'static>,
+    pending: RollbackGuard<PublishedOpen<'runtime, A>>,
+}
+
+struct PublishedOpen<'runtime, A: crate::Addin> {
+    context: OpenCommitContext<'runtime, A>,
+    control: LifecycleAccess<'runtime, A>,
+}
+
+impl<A: crate::Addin> Rollback for PublishedOpen<'_, A> {
+    fn rollback(self) {
+        let Self {
+            context,
+            mut control,
+        } = self;
+        context.deps.returns().close_admission();
+        crate::module_runtime::ingress().begin_close_with(|| {});
+        let lifecycle = context.deps.lifecycle_control();
+        // If still Opening, resolve the abandoned attempt with its canonical
+        // bundle intact. The epoch must never return through the opening owner.
+        lifecycle.record_open_failure(&mut control);
+        lifecycle.quarantine_state(&mut control);
+        lifecycle.notify_all();
+    }
+}
+
+struct OpenCommitted;
+
+impl<A: crate::Addin> GenerationPublished<'_, A> {
+    fn commit(self) -> XllResult<OpenCommitted> {
+        let Self {
+            mut pending,
+            receipt,
+            ingress,
+        } = self;
+        let PublishedOpen {
+            context, control, ..
+        } = pending.get_mut();
+        let committed = context
+            .deps
+            .lifecycle_control()
+            .finish_open_state(control, receipt)?;
+        #[cfg(test)]
+        check_open_commit_fault(5)?;
+        context
+            .deps
+            .observer()
+            .commit_open(&context.deps, &committed);
+        committed
+            .publish(ingress)
+            .unwrap_or_else(|_| opening_publication_lost());
+        let PublishedOpen { context, control } = pending.complete();
+        drop(control);
+        drop(context.binding);
+        Ok(OpenCommitted)
+    }
+}
+
+fn commit_inner<'runtime, A: crate::Addin>(
+    deps: OpenDeps<'runtime, A>,
+    core: InitializedOpenCore<A>,
+    host: HostOpeningState,
+    binding: InstalledLifecycle<'runtime, A>,
+) -> XllResult<()> {
+    let prepared = prepare_commit(deps, core, host, binding)?;
+    #[cfg(test)]
+    check_open_commit_fault(2)?;
+    let ready = prepared.ready();
+    #[cfg(test)]
+    check_open_commit_fault(3)?;
+    let published = ready.publish()?;
+    #[cfg(test)]
+    check_open_commit_fault(4)?;
+    let OpenCommitted = published.commit()?;
+    Ok(())
+}
+
+fn prepare_commit<'runtime, A: crate::Addin>(
+    deps: OpenDeps<'runtime, A>,
+    core: InitializedOpenCore<A>,
+    host: HostOpeningState,
+    binding: InstalledLifecycle<'runtime, A>,
+) -> XllResult<ServicesPrepared<'runtime, A>> {
+    let (attempt, module, service_inputs) = core.into_parts();
+    let preparing = PreparingServices(RollbackGuard::new(UncommittedModule {
+        context: OpenCommitContext {
+            deps,
+            attempt,
+            binding,
+        },
+        module,
+    }));
+    preparing.prepare(host, service_inputs)
+}
+
+fn open_state_error() -> XllError {
+    XllError::Internal {
+        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
     }
 }
 
@@ -1265,6 +1482,248 @@ mod owner_tests {
             .lifecycle_control()
             .retain_failed_module_cleanup(ModuleCleanupAuthority::Closing(closing))
             .unwrap_or_else(|_| panic!("canonical authority return refused"));
+    }
+
+    #[test]
+    fn miri_commit_stage_failure_keeps_the_single_module_owner() {
+        for point in 1..=5 {
+            for unwind in [false, true] {
+                let runtime = Runtime::<()>::new();
+                let opening = runtime.begin_open().unwrap();
+                let opening = runtime
+                    .publish(opening, (), ())
+                    .stage_host_journal(HostMutationJournal::default());
+                FAIL_OPEN_COMMIT.with(|fault| fault.set((point, unwind)));
+                let failed =
+                    crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+                        opening.commit()
+                    }));
+                if unwind {
+                    assert!(failed.is_err());
+                } else {
+                    assert!(matches!(failed, Ok(Err(XllError::Closing))));
+                }
+                FAIL_OPEN_COMMIT.with(|fault| assert_eq!(fault.get(), (0, false)));
+                let control = runtime.lifecycle.access();
+                assert_eq!(control.phase(), LifecyclePhase::Quarantined);
+                assert_eq!(control.open_attempt(), None);
+                assert_eq!(control.has_current_generation(), point >= 4);
+                assert_eq!(control.last_committed_generation(), None);
+                let epoch = control
+                    .module_epoch_id()
+                    .expect("quarantine owns the module");
+                assert!(epoch.is_current());
+                drop(control);
+                assert!(runtime.begin_open().is_err());
+                assert!(runtime.return_protocol.returns_closed_and_quiescent());
+                assert_eq!(
+                    crate::module_runtime::ingress().phase(),
+                    crate::ingress::PHASE_CLOSING
+                );
+                let ModuleCleanupClaim::Ready(ModuleCleanupReady::Closing(closing)) =
+                    runtime.lifecycle_control().take_module_cleanup_authority()
+                else {
+                    panic!("failed publication lost its cleanup owner");
+                };
+                assert_eq!(closing.id(), epoch);
+                runtime
+                    .lifecycle_control()
+                    .retain_failed_module_cleanup(ModuleCleanupAuthority::Closing(closing))
+                    .unwrap_or_else(|_| panic!("canonical authority return refused"));
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_publication_preserves_the_last_successful_generation() {
+        let runtime = Runtime::<()>::new();
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
+        let first = runtime.last_committed_generation().unwrap();
+        let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+        assert_eq!(
+            crate::runtime::test_support::remove_addin(
+                &runtime,
+                &lifecycle,
+                &mut HostCallbackSession::new(),
+            ),
+            1,
+        );
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+        runtime.clear_host_intent();
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime
+            .publish(opening, (), ())
+            .stage_host_journal(HostMutationJournal::default());
+        FAIL_OPEN_COMMIT.with(|fault| fault.set((5, false)));
+        assert!(matches!(opening.commit(), Err(XllError::Closing)));
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert_eq!(runtime.last_committed_generation(), Some(first));
+    }
+
+    #[test]
+    fn miri_publication_rejection_preserves_the_unpublished_epoch() {
+        let runtime = Runtime::<()>::new();
+        let other = Runtime::<()>::new();
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime
+            .publish(opening, (), ())
+            .stage_host_journal(HostMutationJournal::default());
+        let (deps, HostMutated { core, host }, binding) = opening.into_parts();
+        let attempt = core.attempt_id();
+        let ready = prepare_commit(deps, core, host, binding).unwrap().ready();
+        let ReadyForPublication { context, bundle } = ready.0.complete();
+        let other_lifecycle = other.lifecycle_control();
+        let mut access = other_lifecycle.access();
+        let bundle = deps
+            .lifecycle_control()
+            .publish_generation_state(&mut access, attempt, bundle)
+            .err()
+            .expect("foreign lifecycle access cannot receive this bundle");
+        let epoch = bundle.module_epoch.id();
+        assert_eq!(access.phase(), LifecyclePhase::Closed);
+        assert!(access.module_epoch_id().is_none());
+        drop(access);
+        drop(PublicationReady(RollbackGuard::new(ReadyForPublication {
+            context,
+            bundle: *bundle,
+        })));
+        let control = runtime.lifecycle.access();
+        assert_eq!(control.phase(), LifecyclePhase::Quarantined);
+        assert_eq!(control.module_epoch_id(), Some(epoch));
+        assert!(!control.has_current_generation());
+        assert!(control.has_opening_generation());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "requires a child process to observe fail-stop")]
+    fn receiver_transfer_panic_cannot_return_to_the_open_boundary() {
+        const CHILD: &str = "XLFN_TEST_OPEN_RECEIVER_TRANSFER";
+        if std::env::var_os(CHILD).is_some() {
+            let runtime = Runtime::<()>::new();
+            let opening = runtime.begin_open().unwrap();
+            let opening = runtime
+                .publish(opening, (), ())
+                .stage_host_journal(HostMutationJournal::default());
+            crate::lifecycle::LifecycleCoordinator::<()>::inject_publication_transfer_panic();
+            let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+                opening.commit()
+            }));
+            panic!("receiver fault returned to outer open fallback");
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "runtime::open_txn::owner_tests::receiver_transfer_panic_cannot_return_to_the_open_boundary"])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(status.signal(), Some(6), "expected fail-stop SIGABRT");
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(!status.success());
+            assert_ne!(
+                status.code(),
+                Some(101),
+                "expected fail-stop before fallback"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "rtd", any(feature = "handles", not(target_os = "windows"))))]
+    fn miri_close_cannot_claim_opening_during_unpublished_service_destruction() {
+        use crate::subscription::{RtdSink, RtdSource, RtdTopic, SourceRegistration};
+
+        struct ReenterOnDrop {
+            runtime: std::sync::Weak<Runtime<()>>,
+            attempt: OpenAttemptId,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Drop for ReenterOnDrop {
+            fn drop(&mut self) {
+                let runtime = self.runtime.upgrade().unwrap();
+                let mut control = runtime.lifecycle.access();
+                assert_eq!(control.phase(), LifecyclePhase::Closing);
+                assert_eq!(control.open_attempt(), Some(self.attempt));
+                let crate::lifecycle::FinalCloseDecision::Closing(closing) =
+                    control.final_close_decision()
+                else {
+                    panic!("close waiter lost its pending state");
+                };
+                assert!(closing.try_claim().is_none());
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        // SAFETY: this source starts no work and never stores a sink.
+        #[allow(unsafe_code, reason = "test source never retains a subscription sink")]
+        unsafe impl RtdSource for ReenterOnDrop {
+            type Value = i32;
+            type Subscription = ();
+            fn subscribe(&self, _: &RtdTopic, _: RtdSink<i32>) -> XllResult<()> {
+                Err(XllError::Closing)
+            }
+        }
+
+        let runtime = Arc::new(Runtime::<()>::new());
+        let opening = runtime.begin_open().unwrap();
+        let attempt = opening.attempt_id();
+        let registration = SourceRegistration::new(attempt.into_runtime_generation());
+        let drops = Arc::new(AtomicUsize::new(0));
+        let _source = registration
+            .register(ReenterOnDrop {
+                runtime: Arc::downgrade(&runtime),
+                attempt,
+                drops: Arc::clone(&drops),
+            })
+            .unwrap();
+        let opening = runtime
+            .publish_with_sources(opening, (), (), registration.finish())
+            .stage_host_journal(HostMutationJournal::default());
+        let (deps, HostMutated { core, host }, binding) = opening.into_parts();
+        let ready = prepare_commit(deps, core, host, binding).unwrap().ready();
+        runtime.lifecycle.access().request_closing_for_test();
+        assert!(matches!(ready.publish(), Err(XllError::Closing)));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        let control = runtime.lifecycle.access();
+        assert_eq!(control.phase(), LifecyclePhase::Closing);
+        assert_eq!(control.open_attempt(), None);
+        assert!(control.module_epoch_id().is_some());
+    }
+
+    #[test]
+    #[allow(
+        clippy::mem_forget,
+        reason = "a forgotten publication cannot certify success"
+    )]
+    fn forgotten_ready_publication_cannot_certify_open() {
+        let fixture = crate::runtime::StaticTestRuntime::<()>::new();
+        let runtime = fixture.runtime();
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime
+            .publish(opening, (), ())
+            .stage_host_journal(HostMutationJournal::default());
+        let (deps, HostMutated { core, host }, binding) = opening.into_parts();
+        let attempt = core.attempt_id();
+        let ready = prepare_commit(deps, core, host, binding).unwrap().ready();
+        std::mem::forget(ready);
+        let control = runtime.lifecycle.access();
+        assert_eq!(control.phase(), LifecyclePhase::Opening);
+        assert_eq!(control.open_attempt(), Some(attempt));
+        assert_eq!(control.last_committed_generation(), None);
+        assert!(!control.has_current_generation());
+        assert_eq!(
+            crate::module_runtime::ingress().phase(),
+            crate::ingress::PHASE_OPENING
+        );
+        drop(control);
+        assert!(runtime.begin_open().is_err());
+        drop(fixture);
     }
 
     #[test]

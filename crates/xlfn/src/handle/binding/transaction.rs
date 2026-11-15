@@ -92,14 +92,24 @@ impl<'table> BindingReservation<'table> {
         self.slot.get().id
     }
 
-    fn install(self, object: ObjectBinding) -> RollbackGuard<RecordInstalled<'table>> {
-        let record = PublishedBindingOwner {
-            owner: ManuallyDrop::new(PublishedOwner::new(BindingRecord::new(self.id(), object))),
+    fn install(mut self, object: ObjectBinding) -> RollbackGuard<RecordInstalled<'table>> {
+        let id = self.id();
+        let reserved = self.slot.get_mut();
+        let Some(slot) = reserved.state.slots.get_mut(reserved.index) else {
+            fail_stop();
         };
-        let mut reserved = self.slot.complete();
-        let slot = &mut reserved.state.slots[reserved.index];
+        if slot.record.is_some() {
+            fail_stop();
+        }
+        // There is no unwinding operation between owner construction and the
+        // handoff to RecordInstalled, which unlocks before dropping the object.
+        let record = PublishedBindingOwner {
+            owner: ManuallyDrop::new(PublishedOwner::new(BindingRecord::new(id, object))),
+        };
         slot.record = Some(record);
-        RollbackGuard::new(RecordInstalled { reserved })
+        RollbackGuard::new(RecordInstalled {
+            reserved: self.slot.complete(),
+        })
     }
 
     pub(crate) fn publish(self, object: ObjectBinding) -> (HandleId, bool) {

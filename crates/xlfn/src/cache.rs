@@ -1081,30 +1081,51 @@ thread_local! {
 }
 
 struct CacheDomainPermit<'domain, V> {
-    domain: &'domain CacheLookupDomain<V>,
-    permit: Option<RotatingReadPermit<'domain, DEFAULT_STRIPE_COUNT>>,
-    // TLS ownership bookkeeping must be discharged on the acquiring thread.
-    _thread: PhantomData<std::rc::Rc<()>>,
+    // End TLS registration, release the reader, then drive maintenance.
+    _registration: TlsReaderRegistration,
+    _permit: RotatingReadPermit<'domain, DEFAULT_STRIPE_COUNT>,
+    _maintenance: ReaderMaintenance<'domain, V>,
 }
 
-impl<V> Drop for CacheDomainPermit<'_, V> {
+struct TlsReaderRegistration {
+    address: usize,
+    // TLS ownership bookkeeping must be discharged on the acquiring thread.
+    _thread: PhantomData<Rc<()>>,
+}
+
+impl TlsReaderRegistration {
+    fn enter(address: usize) -> Self {
+        CACHE_READERS.with(|readers| readers.borrow_mut().push(address));
+        Self {
+            address,
+            _thread: PhantomData,
+        }
+    }
+}
+
+impl Drop for TlsReaderRegistration {
     fn drop(&mut self) {
-        let address = std::ptr::from_ref(self.domain).addr();
         CACHE_READERS.with(|readers| {
             let mut readers = readers.borrow_mut();
             let index = readers
                 .iter()
-                .rposition(|reader| *reader == address)
+                .rposition(|reader| *reader == self.address)
                 .expect("cache reader owns a TLS entry");
             readers.remove(index);
             if readers.is_empty() {
                 *readers = SmallVec::new();
             }
         });
-        drop(self.permit.take());
+    }
+}
+
+struct ReaderMaintenance<'domain, V>(&'domain CacheLookupDomain<V>);
+
+impl<V> Drop for ReaderMaintenance<'_, V> {
+    fn drop(&mut self) {
         // Pair the release with a writer's seal/enqueue before testing debt.
         std::sync::atomic::fence(Ordering::Acquire);
-        self.domain.maintain_after_reader();
+        self.0.maintain_after_reader();
     }
 }
 
@@ -1153,11 +1174,10 @@ impl<V> CacheLookupDomain<V> {
             .domain
             .enter_current_thread()
             .map_err(|_| XllError::Closing)?;
-        CACHE_READERS.with(|readers| readers.borrow_mut().push(std::ptr::from_ref(self).addr()));
         Ok(CacheDomainPermit {
-            domain: self,
-            permit: Some(permit),
-            _thread: PhantomData,
+            _registration: TlsReaderRegistration::enter(std::ptr::from_ref(self).addr()),
+            _permit: permit,
+            _maintenance: ReaderMaintenance(self),
         })
     }
 
@@ -3420,6 +3440,52 @@ mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         assert!(cache.get(&2).is_none());
         assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(cache.reclamation_stats().pending_nodes, 0);
+    }
+
+    #[test]
+    fn miri_reader_maintenance_reclaims_after_both_admissions_end() {
+        struct Probe {
+            cache: std::sync::Weak<CalculationCache<u32, Self>>,
+            reclaimed_without_tls_reader: Arc<AtomicBool>,
+        }
+
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let reader_gone = self
+                    .cache
+                    .upgrade()
+                    .is_some_and(|cache| !cache.domain.current_thread_is_reading());
+                self.reclaimed_without_tls_reader
+                    .store(reader_gone, Ordering::Relaxed);
+            }
+        }
+
+        let cache = std::sync::Arc::new(CalculationCache::new(
+            crate::cache::CacheBudget::weight_units(4),
+        ));
+        let reclaimed = Arc::new(AtomicBool::new(false));
+        drop(
+            cache
+                .get_or_try_insert_weighted(
+                    1,
+                    |_| 1,
+                    || {
+                        Ok(Probe {
+                            cache: std::sync::Arc::downgrade(&cache),
+                            reclaimed_without_tls_reader: Arc::clone(&reclaimed),
+                        })
+                    },
+                )
+                .unwrap(),
+        );
+        let reader = cache.domain.enter().unwrap();
+        cache.index.invalidate_before(cache.generation.advance());
+        assert!(cache.domain.current_thread_is_reading());
+        assert_eq!(cache.reclamation_stats().pending_nodes, 1);
+        assert!(!reclaimed.load(Ordering::Relaxed));
+        drop(reader);
+        assert!(reclaimed.load(Ordering::Relaxed));
         assert_eq!(cache.reclamation_stats().pending_nodes, 0);
     }
 

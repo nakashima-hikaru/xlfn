@@ -25,6 +25,7 @@ use crate::{XllError, XllResult};
 use papaya::Guard;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::SmallVec;
+use std::collections::hash_map::Entry;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
@@ -490,30 +491,32 @@ impl TopicTable {
         if state.closed || state.generation != generation {
             return Err(XllError::Closing);
         }
-        if state.by_key.contains_key(&key)
-            || state
-                .by_lifetime_key
-                .contains_key(publication.lifetime_key.as_str())
-        {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_TOPIC_COLLISION,
-            });
-        }
+        let state = &mut *state;
+        let entry = match state.by_key.entry(key) {
+            Entry::Vacant(entry)
+                if !state
+                    .by_lifetime_key
+                    .contains_key(publication.lifetime_key.as_str()) =>
+            {
+                entry
+            }
+            _ => {
+                return Err(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_TOPIC_COLLISION,
+                });
+            }
+        };
         let lifetime_key = publication.lifetime_key.clone();
         let publication = PublishedTopicOwner::new(publication);
-        state.by_key.insert(
-            key,
-            Topic {
-                publication,
-                #[cfg(any(target_os = "windows", test))]
-                lifetime_generation: None,
-                observer: None,
-                #[cfg(any(target_os = "windows", test))]
-                observer_committed: false,
-            },
-        );
-        let pointer =
-            PublishedTopicPtr::from_ref(state.by_key.get(&key).unwrap().publication.as_ref());
+        let topic = entry.insert(Topic {
+            publication,
+            #[cfg(any(target_os = "windows", test))]
+            lifetime_generation: None,
+            observer: None,
+            #[cfg(any(target_os = "windows", test))]
+            observer_committed: false,
+        });
+        let pointer = PublishedTopicPtr::from_ref(topic.publication.as_ref());
         state.by_lifetime_key.insert(lifetime_key, key);
         on_linearized(pointer);
         Ok(pointer)

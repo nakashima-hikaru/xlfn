@@ -7,7 +7,7 @@
 
 #[cfg(test)]
 use super::binding::BindingState;
-use super::binding::BindingTable;
+use super::binding::{BindingReservation, BindingTable};
 use super::object::{ObjectArena, ObjectBinding, PendingObjectBinding};
 use super::token::{HandleId, HandleToken, ObjectId, TokenCodec};
 use super::{ExcelHandleObject, Handle};
@@ -82,6 +82,62 @@ type InsertPause = (
     std::sync::mpsc::SyncSender<()>,
     std::sync::mpsc::Receiver<()>,
 );
+
+struct ValidatedBinding<'registry> {
+    registry: &'registry HandleRegistry,
+    object: ObjectBinding,
+}
+
+struct ReservedBinding<'registry> {
+    // Roll back the slot and unlock the table before the object can run Drop.
+    reservation: BindingReservation<'registry>,
+    validated: ValidatedBinding<'registry>,
+}
+
+struct PublishedBinding {
+    id: HandleId,
+    object_id: ObjectId,
+    reused: bool,
+}
+
+impl<'registry> ValidatedBinding<'registry> {
+    fn reserve(self) -> XllResult<ReservedBinding<'registry>> {
+        let registry = self.registry;
+        #[cfg(test)]
+        registry.pause_insert(InsertBoundary::BeforeReserve);
+        let reservation = registry.bindings.reserve()?;
+        let reserved = ReservedBinding {
+            reservation,
+            validated: self,
+        };
+        #[cfg(test)]
+        registry.pause_insert(InsertBoundary::AfterReserve);
+        Ok(reserved)
+    }
+}
+
+impl ReservedBinding<'_> {
+    fn publish(self) -> XllResult<PublishedBinding> {
+        if !self.validated.registry.is_open() {
+            return Err(XllError::Closing);
+        }
+        #[cfg(test)]
+        self.validated
+            .registry
+            .pause_insert(InsertBoundary::BeforePublish);
+        let object_id = self.validated.object.id();
+        let Self {
+            reservation,
+            validated: ValidatedBinding { object, .. },
+        } = self;
+        let (id, reused) = reservation.publish(object);
+        Ok(PublishedBinding {
+            id,
+            object_id,
+            reused,
+        })
+    }
+}
 
 pub(crate) struct HandleRegistry {
     pub(super) codec: TokenCodec,
@@ -208,14 +264,6 @@ impl HandleRegistry {
         arena == NonNull::from(self.objects.as_ref())
     }
 
-    #[inline]
-    fn check_object_arena(&self, object: &ObjectBinding) -> XllResult<()> {
-        if object.arena() != NonNull::from(self.objects.as_ref()) {
-            return Err(XllError::StaleHandle);
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     pub(crate) fn insert_pending<T>(&self, value: &mut Option<T>) -> XllResult<String>
     where
@@ -239,34 +287,33 @@ impl HandleRegistry {
 
     // Only the typed PendingObjectBinding publication path calls this final
     // erased storage boundary; the table owns heterogeneous object payloads.
-    pub(super) fn insert_pending_object(
+    pub(super) fn publish_object_binding(
         &self,
-        value: &mut Option<ObjectBinding>,
+        object: ObjectBinding,
     ) -> XllResult<(String, HandleId, ObjectId, bool)> {
-        if !self.is_open() {
-            return Err(XllError::Closing);
-        }
-        let object = value.as_ref().expect("pending handle object is armed");
-        self.check_object_arena(object)?;
-        #[cfg(test)]
-        self.pause_insert(InsertBoundary::BeforeReserve);
-        let reservation = self.bindings.reserve()?;
-        #[cfg(test)]
-        self.pause_insert(InsertBoundary::AfterReserve);
-        if !self.is_open() {
-            drop(reservation);
-            return Err(XllError::Closing);
-        }
-        #[cfg(test)]
-        self.pause_insert(InsertBoundary::BeforePublish);
-        let object = value.take().expect("pending handle object is armed");
-        let object_id = object.id();
-        let (id, reused) = reservation.publish(object);
+        let PublishedBinding {
+            id,
+            object_id,
+            reused,
+        } = self.validate_binding(object)?.reserve()?.publish()?;
         #[cfg(test)]
         self.pause_insert(InsertBoundary::AfterPublish);
         #[cfg(any(test, feature = "refinement"))]
         self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::AddHandle);
         Ok((self.codec.format(id), id, object_id, reused))
+    }
+
+    fn validate_binding(&self, object: ObjectBinding) -> XllResult<ValidatedBinding<'_>> {
+        if !self.is_open() {
+            return Err(XllError::Closing);
+        }
+        if !self.owns_object_arena(object.arena()) {
+            return Err(XllError::StaleHandle);
+        }
+        Ok(ValidatedBinding {
+            registry: self,
+            object,
+        })
     }
 
     #[cfg(test)]
@@ -477,5 +524,116 @@ impl Drop for HandleRegistry {
         self.retire_values_for_seal();
         self.bindings.read_domain().seal();
         self.objects.assert_reclaimable();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::{Arc, Weak, mpsc};
+
+    #[derive(Default)]
+    struct DropObservation {
+        count: AtomicUsize,
+        writer_released: AtomicBool,
+    }
+
+    struct DropProbe {
+        registry: Weak<HandleRegistry>,
+        observation: Arc<DropObservation>,
+    }
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            let writer_released = self
+                .registry
+                .upgrade()
+                .is_some_and(|registry| registry.bindings.try_read_state().is_some());
+            self.observation
+                .writer_released
+                .store(writer_released, Ordering::Release);
+            self.observation.count.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    fn pending<'registry>(
+        registry: &'registry Arc<HandleRegistry>,
+        observation: &Arc<DropObservation>,
+    ) -> PendingObjectBinding<'registry, DropProbe> {
+        registry
+            .new_object(DropProbe {
+                registry: Arc::downgrade(registry),
+                observation: Arc::clone(observation),
+            })
+            .unwrap()
+    }
+
+    fn assert_released(observation: &DropObservation) {
+        assert_eq!(observation.count.load(Ordering::Acquire), 1);
+        assert!(observation.writer_released.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn miri_binding_publication_boundary_unwind_preserves_the_unique_owner() {
+        for boundary in [
+            InsertBoundary::BeforeReserve,
+            InsertBoundary::AfterReserve,
+            InsertBoundary::BeforePublish,
+            InsertBoundary::AfterPublish,
+        ] {
+            let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
+            let observation = Arc::new(DropObservation::default());
+            let pending = pending(&registry, &observation);
+            let (entered, reached) = mpsc::sync_channel(1);
+            let (resume, paused) = mpsc::channel();
+            *registry.insert_pause.lock() = Some((boundary, entered, paused));
+            drop(resume);
+
+            let result = catch_no_unwind(AssertUnwindSafe(|| pending.publish()));
+            assert!(result.is_err(), "{boundary:?}");
+            assert!(reached.try_recv().is_ok(), "{boundary:?}");
+
+            if boundary == InsertBoundary::AfterPublish {
+                assert_eq!(registry.len(), 1);
+                assert_eq!(observation.count.load(Ordering::Acquire), 0);
+            } else {
+                assert_eq!(registry.len(), 0);
+                assert_released(&observation);
+                // A new publication can reserve the slot abandoned by unwind.
+                assert!(registry.new_object(42_u32).unwrap().publish().is_ok());
+            }
+            registry.seal().unwrap();
+            assert_released(&observation);
+        }
+    }
+
+    #[test]
+    fn miri_binding_publication_errors_release_writer_before_object() {
+        let registry = Arc::new(HandleRegistry::from_entropy(0, [7; 40]));
+        let observation = Arc::new(DropObservation::default());
+        assert!(matches!(
+            pending(&registry, &observation).publish(),
+            Err(XllError::Domain {
+                code: crate::error::DomainErrorCode::Overflow
+            })
+        ));
+        assert_released(&observation);
+
+        let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
+        let observation = Arc::new(DropObservation::default());
+        let pending = pending(&registry, &observation);
+        let (entered, reached) = mpsc::sync_channel(1);
+        let (resume, paused) = mpsc::channel();
+        *registry.insert_pause.lock() = Some((InsertBoundary::AfterReserve, entered, paused));
+        std::thread::scope(|scope| {
+            let publishing = scope.spawn(|| pending.publish());
+            reached.recv().unwrap();
+            registry.begin_close();
+            resume.send(()).unwrap();
+            assert!(matches!(publishing.join().unwrap(), Err(XllError::Closing)));
+        });
+        assert_eq!(registry.len(), 0);
+        assert_released(&observation);
     }
 }

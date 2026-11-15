@@ -22,8 +22,9 @@ impl RtdSubscriptionHost {
     }
 }
 
-pub(crate) struct RtdAdmissionGuard {
-    _ingress: Option<AdmittedExport<'static>>,
+pub(crate) enum RtdAdmissionGuard {
+    Production { _ingress: AdmittedExport<'static> },
+    Detached,
 }
 
 /// External transport ownership released before deferred runtime admission.
@@ -57,33 +58,14 @@ impl SubscriptionHost for RtdSubscriptionHost {
     type Notifier = RtdNotifier;
     type DisconnectCompletion = RtdDisconnectCompletion;
 
-    fn enter_with<F>(&self, operation: F) -> XllResult<Self::AdmissionGuard>
-    where
-        F: FnOnce() -> XllResult<()>,
-    {
+    fn enter_with<T>(&self, operation: impl FnOnce() -> T) -> XllResult<(Self::AdmissionGuard, T)> {
         let Some(ingress) = self.ingress else {
-            operation()?;
-            return Ok(RtdAdmissionGuard { _ingress: None });
+            return Ok((RtdAdmissionGuard::Detached, operation()));
         };
-
-        let mut operation_result = None;
-        let entry = ingress.enter_with(|| {
-            operation_result = Some(operation());
-        });
-        let guard = match entry.into_admitted() {
-            Ok(guard) => guard,
-            Err(_) => return Err(XllError::Closing),
-        };
-
-        match operation_result.expect("accepted host admission runs its operation") {
-            Ok(()) => Ok(RtdAdmissionGuard {
-                _ingress: Some(guard),
-            }),
-            Err(error) => {
-                drop(guard);
-                Err(error)
-            }
-        }
+        let (guard, result) = ingress
+            .enter_with_result(operation)
+            .map_err(|_| XllError::Closing)?;
+        Ok((RtdAdmissionGuard::Production { _ingress: guard }, result))
     }
 
     fn notify(&self, notifier: &Self::Notifier) -> XllResult<()> {

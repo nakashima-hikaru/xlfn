@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 #[cfg(test)]
 use triomphe::Arc;
 use xlfn_kernel::operation_gate::{
-    OperationGate, OperationGuard, OwnedOperationGuard, TerminationWaitGuard,
+    GateClosed, OperationGate, OperationGuard, OwnedOperationGuard, TerminationWaitGuard,
 };
 use xlfn_kernel::quota::Quota;
 
@@ -217,32 +217,80 @@ impl<H: SubscriptionHost> std::fmt::Debug for PublishCore<H> {
 
 pub(crate) struct ScopedPublishOperation<'a, H: SubscriptionHost> {
     // Drop first while both operation gates still keep runtime services live.
-    pub(crate) _observation: ServerOperationObservation,
-    pub(crate) _host_guard: H::AdmissionGuard,
-    #[cfg(test)]
-    _host_drop_trace: DropTrace,
-    // Drop server admission before runtime admission.
-    pub(crate) _server_guard: OperationGuard<'a>,
-    #[cfg(test)]
-    _server_drop_trace: DropTrace,
-    pub(crate) _runtime_guard: OperationGuard<'a>,
-    #[cfg(test)]
-    _runtime_drop_trace: DropTrace,
+    _observation: ServerOperationObservation,
+    _admissions: PublishAdmissions<H::AdmissionGuard, OperationGuard<'a>>,
 }
 
 pub(crate) struct OwnedPublishOperation<H: SubscriptionHost> {
     // Drop first while both operation gates still keep runtime services live.
     _observation: ServerOperationObservation,
-    _host_guard: H::AdmissionGuard,
+    _admissions: PublishAdmissions<H::AdmissionGuard, OwnedOperationGuard>,
+}
+
+struct PublishAdmissions<A, G> {
+    // Release host admission before either operation gate can drain.
+    _host: A,
     #[cfg(test)]
     _host_drop_trace: DropTrace,
-    // Drop server admission before runtime admission.
-    _server_guard: OwnedOperationGuard,
+    _gates: GateAdmissions<G>,
+}
+
+struct GateAdmissions<G> {
+    // Retain runtime services through the server permit's release.
+    _server: G,
     #[cfg(test)]
     _server_drop_trace: DropTrace,
-    _runtime_guard: OwnedOperationGuard,
+    _runtime: G,
     #[cfg(test)]
     _runtime_drop_trace: DropTrace,
+}
+
+enum GateEntry<G> {
+    Admitted(GateAdmissions<G>),
+    RuntimeClosing,
+    ServerClosing(G),
+}
+
+impl<G> GateEntry<G> {
+    fn acquire(
+        enter_runtime: impl FnOnce() -> Result<G, GateClosed>,
+        enter_server: impl FnOnce() -> Result<G, GateClosed>,
+    ) -> Self {
+        let Ok(runtime) = enter_runtime() else {
+            return Self::RuntimeClosing;
+        };
+        let Ok(server) = enter_server() else {
+            return Self::ServerClosing(runtime);
+        };
+        Self::Admitted(GateAdmissions {
+            _server: server,
+            #[cfg(test)]
+            _server_drop_trace: DropTrace::new("server"),
+            _runtime: runtime,
+            #[cfg(test)]
+            _runtime_drop_trace: DropTrace::new("runtime"),
+        })
+    }
+
+    fn with_host<A>(self, host: A) -> XllResult<PublishAdmissions<A, G>> {
+        let gates = match self {
+            Self::Admitted(gates) => gates,
+            Self::RuntimeClosing => return Err(XllError::Closing),
+            Self::ServerClosing(runtime) => {
+                // The runtime must stay live through host cleanup even when
+                // server admission failed.
+                drop(host);
+                drop(runtime);
+                return Err(XllError::Closing);
+            }
+        };
+        Ok(PublishAdmissions {
+            _host: host,
+            #[cfg(test)]
+            _host_drop_trace: DropTrace::new("host"),
+            _gates: gates,
+        })
+    }
 }
 
 #[must_use = "wait for admitted publication before finishing termination"]
@@ -553,25 +601,14 @@ impl<H: SubscriptionHost> PublishCore<H> {
     }
 
     pub(crate) fn enter_operation(&self) -> XllResult<ScopedPublishOperation<'_, H>> {
-        let mut runtime_guard = None;
-        let mut server_guard = None;
-        let host_guard = self.host.enter_with(|| {
-            runtime_guard = Some(self.runtime_gate().enter().map_err(|_| XllError::Closing)?);
-            server_guard = Some(self.server_gate.enter().map_err(|_| XllError::Closing)?);
-            Ok(())
+        let (host, gates) = self.host.enter_with(|| {
+            GateEntry::acquire(|| self.runtime_gate().enter(), || self.server_gate.enter())
         })?;
+        let admissions = gates.with_host(host)?;
 
         Ok(ScopedPublishOperation {
             _observation: ServerOperationObservation::begin(self.services()),
-            _host_guard: host_guard,
-            #[cfg(test)]
-            _host_drop_trace: DropTrace::new("host"),
-            _server_guard: server_guard.expect("host admission acquires the server gate"),
-            #[cfg(test)]
-            _server_drop_trace: DropTrace::new("server"),
-            _runtime_guard: runtime_guard.expect("host admission acquires the runtime gate"),
-            #[cfg(test)]
-            _runtime_drop_trace: DropTrace::new("runtime"),
+            _admissions: admissions,
         })
     }
 
@@ -582,32 +619,21 @@ impl<H: SubscriptionHost> PublishCore<H> {
     /// The caller must keep this `PublishCore` and the runtime-owned fields
     /// referenced by it allocated until the returned operation is dropped.
     pub(crate) unsafe fn enter_owned_operation(&self) -> XllResult<OwnedPublishOperation<H>> {
-        let mut runtime_guard = None;
-        let mut server_guard = None;
-        let host_guard = self.host.enter_with(|| {
-            // SAFETY: the runtime close waits this gate before reclaiming the
-            // runtime and all server-owned publish cores.
-            runtime_guard =
-                Some(unsafe { self.runtime_gate().enter_owned() }.map_err(|_| XllError::Closing)?);
-            // SAFETY: server termination drains this gate before reclaiming
-            // the publish core.
-            server_guard =
-                Some(unsafe { self.server_gate.enter_owned() }.map_err(|_| XllError::Closing)?);
-            Ok(())
+        let (host, gates) = self.host.enter_with(|| {
+            GateEntry::acquire(
+                // SAFETY: the runtime close waits this gate before reclaiming
+                // the runtime and all server-owned publish cores.
+                || unsafe { self.runtime_gate().enter_owned() },
+                // SAFETY: server termination drains this gate before
+                // reclaiming the publish core.
+                || unsafe { self.server_gate.enter_owned() },
+            )
         })?;
-        let observation = ServerOperationObservation::begin(self.services());
+        let admissions = gates.with_host(host)?;
 
         Ok(OwnedPublishOperation {
-            _observation: observation,
-            _host_guard: host_guard,
-            #[cfg(test)]
-            _host_drop_trace: DropTrace::new("host"),
-            _server_guard: server_guard.expect("host admission acquires the server gate"),
-            #[cfg(test)]
-            _server_drop_trace: DropTrace::new("server"),
-            _runtime_guard: runtime_guard.expect("host admission acquires the runtime gate"),
-            #[cfg(test)]
-            _runtime_drop_trace: DropTrace::new("runtime"),
+            _observation: ServerOperationObservation::begin(self.services()),
+            _admissions: admissions,
         })
     }
 
@@ -1197,9 +1223,11 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
 #[cfg(all(test, feature = "rtd"))]
 mod tests {
-    use super::{OperationDropTrace, with_operation_drop_trace};
+    use super::{GateEntry, OperationDropTrace, with_operation_drop_trace};
+    use crate::XllError;
     use crate::subscription::runtime::SubscriptionRuntime;
     use triomphe::Arc;
+    use xlfn_kernel::operation_gate::OperationGate;
 
     #[cfg(not(windows))]
     #[test]
@@ -1532,5 +1560,85 @@ mod tests {
             };
             drop(operation);
         });
+    }
+
+    #[test]
+    fn miri_unwinding_publish_operation_preserves_drop_order() {
+        use std::panic::AssertUnwindSafe;
+
+        let runtime = SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost>::new();
+        let server = runtime.register_test_server(1);
+
+        assert_drop_order(|| {
+            let interrupted = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+                let _operation = server.test_server().enter_operation().unwrap();
+                panic!("injected unwind during admitted publish operation");
+            }));
+            assert!(interrupted.is_err());
+        });
+    }
+
+    #[test]
+    fn miri_server_gate_rejection_releases_host_before_runtime() {
+        struct HostProbe<'a>(&'a OperationGate);
+
+        impl Drop for HostProbe<'_> {
+            fn drop(&mut self) {
+                assert_eq!(self.0.active(), 1);
+            }
+        }
+
+        let runtime = OperationGate::new();
+        let server = OperationGate::new();
+        server.begin_close();
+
+        let entry = GateEntry::acquire(|| runtime.enter(), || server.enter());
+        assert!(matches!(
+            entry.with_host(HostProbe(&runtime)),
+            Err(XllError::Closing)
+        ));
+        assert_eq!(runtime.active(), 0);
+        assert_eq!(server.active(), 0);
+    }
+
+    #[test]
+    fn miri_publish_admission_keeps_production_ingress_live_during_close() {
+        use crate::excel_rtd::RtdSubscriptionHost;
+        use crate::ingress::ExportIngress;
+        use crate::subscription::source::SourceArena;
+        use crate::subscription::topic::RtdLimits;
+
+        static INGRESS: ExportIngress = ExportIngress::new();
+        INGRESS.begin_opening();
+        let generation = crate::generation::RuntimeGeneration::new(1).unwrap();
+        let runtime = SubscriptionRuntime::<RtdSubscriptionHost>::with_host(
+            generation,
+            RtdLimits::standard(),
+            RtdSubscriptionHost::production(&INGRESS),
+            SourceArena::empty(generation),
+        );
+        let server = runtime.register_test_server(1);
+        let publish = &server.test_server().publish;
+        assert!(matches!(publish.enter_operation(), Err(XllError::Closing)));
+        assert_eq!(publish.runtime_gate().active(), 0);
+        assert_eq!(publish.server_gate.active(), 0);
+
+        INGRESS.complete_open(|| Ok::<_, ()>(())).unwrap().unwrap();
+        let operation = publish.enter_operation().unwrap();
+        assert_eq!(INGRESS.active_calls(), 1);
+        assert_eq!(publish.runtime_gate().active(), 1);
+        assert_eq!(publish.server_gate.active(), 1);
+
+        INGRESS.begin_close_with(|| {});
+        assert!(matches!(publish.enter_operation(), Err(XllError::Closing)));
+        assert_eq!(INGRESS.active_calls(), 1);
+        assert_eq!(publish.runtime_gate().active(), 1);
+        assert_eq!(publish.server_gate.active(), 1);
+
+        drop(operation);
+        assert_eq!(INGRESS.active_calls(), 0);
+        assert_eq!(publish.runtime_gate().active(), 0);
+        assert_eq!(publish.server_gate.active(), 0);
+        INGRESS.seal_and_drain().unwrap();
     }
 }
