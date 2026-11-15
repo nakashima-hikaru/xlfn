@@ -2,8 +2,11 @@
 
 use crate::sync::Mutex;
 use std::collections::BTreeMap;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 use crate::registration::{ExcelNameKey, HostMutationJournal, MetadataDebt, PendingRegistration};
+
+type MetadataDebts = BTreeMap<ExcelNameKey, Vec<MetadataDebt>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RegistrationState {
@@ -13,7 +16,7 @@ enum RegistrationState {
 
 struct HostLedgerState {
     registrations: Vec<PendingRegistration>,
-    metadata_debt: BTreeMap<ExcelNameKey, Vec<MetadataDebt>>,
+    metadata_debt: MetadataDebts,
     registration_state: RegistrationState,
     cleanup_in_progress: bool,
     metadata_cleanup_in_progress: bool,
@@ -27,6 +30,15 @@ impl HostLedgerState {
             registration_state: RegistrationState::Known,
             cleanup_in_progress: false,
             metadata_cleanup_in_progress: false,
+        }
+    }
+
+    fn append_metadata_debts(&mut self, debts: MetadataDebts) {
+        for (key, mut debts) in debts {
+            self.metadata_debt
+                .entry(key)
+                .or_default()
+                .append(&mut debts);
         }
     }
 }
@@ -114,17 +126,14 @@ impl HostLedger {
         self.claim_cleanup()?.execute(host)
     }
 
-    fn claim_cleanup(&self) -> crate::XllResult<RegistrationCleanupClaim<'_>> {
+    fn claim_cleanup(&self) -> crate::XllResult<PreparedCleanup<'_, Vec<PendingRegistration>>> {
         let mut state = self.state.lock();
         if state.cleanup_in_progress {
             return Err(crate::XllError::Closing);
         }
         state.cleanup_in_progress = true;
         let registrations = std::mem::take(&mut state.registrations);
-        Ok(RegistrationCleanupClaim {
-            ledger: self,
-            registrations: Some(registrations),
-        })
+        Ok(PreparedCleanup::new(self, registrations))
     }
 
     pub(crate) fn registration_state_unknown(&self) -> bool {
@@ -167,22 +176,24 @@ impl HostLedger {
         &self,
         host: &crate::registration::RegistrationHost<'_>,
     ) -> crate::registration::MetadataDebtRetryResult {
-        let mut state = self.state.lock();
-        if state.metadata_cleanup_in_progress {
-            return crate::registration::MetadataDebtRetryResult {
+        match self.claim_metadata_cleanup() {
+            Ok(claim) => claim.execute(host),
+            Err(error) => crate::registration::MetadataDebtRetryResult {
                 remaining: BTreeMap::new(),
                 cleanup_issues: Vec::new(),
-                terminal: Some(crate::XllError::Closing),
-            };
+                terminal: Some(error),
+            },
+        }
+    }
+
+    fn claim_metadata_cleanup(&self) -> crate::XllResult<PreparedCleanup<'_, MetadataDebts>> {
+        let mut state = self.state.lock();
+        if state.metadata_cleanup_in_progress {
+            return Err(crate::XllError::Closing);
         }
         state.metadata_cleanup_in_progress = true;
         let debts = std::mem::take(&mut state.metadata_debt);
-        drop(state);
-        MetadataCleanupClaim {
-            ledger: self,
-            debts: Some(debts),
-        }
-        .execute(host)
+        Ok(PreparedCleanup::new(self, debts))
     }
 
     pub(crate) fn has_metadata_debt(&self) -> bool {
@@ -202,22 +213,60 @@ pub(crate) struct RegistrationCleanupReport {
     pub(crate) cleanup_issues: Vec<crate::XllError>,
 }
 
-/// One canonical host cleanup interval. Forget/panic while executing leaves
-/// cleanup_in_progress set, so no observer can certify an empty ledger.
-struct RegistrationCleanupClaim<'ledger> {
+/// Holds the moved batch and the right to restore it before any host operation.
+struct PreparedCleanup<'ledger, T>(RollbackGuard<PendingCleanup<'ledger, T>>)
+where
+    PendingCleanup<'ledger, T>: Rollback;
+
+struct PendingCleanup<'ledger, T> {
     ledger: &'ledger HostLedger,
-    registrations: Option<Vec<PendingRegistration>>,
+    entries: T,
 }
-impl RegistrationCleanupClaim<'_> {
+
+/// Interruptions leave the gate set because host effects may be partial.
+/// Only an observed outcome can publish the residual entries and open the gate.
+struct ExecutingCleanup<'ledger, T> {
+    ledger: &'ledger HostLedger,
+    entries: T,
+}
+
+impl<'ledger, T> PreparedCleanup<'ledger, T>
+where
+    PendingCleanup<'ledger, T>: Rollback,
+{
+    fn new(ledger: &'ledger HostLedger, entries: T) -> Self {
+        Self(RollbackGuard::new(PendingCleanup { ledger, entries }))
+    }
+
+    fn begin(self) -> ExecutingCleanup<'ledger, T> {
+        let PendingCleanup { ledger, entries } = self.0.complete();
+        ExecutingCleanup { ledger, entries }
+    }
+}
+
+impl Rollback for PendingCleanup<'_, Vec<PendingRegistration>> {
+    fn rollback(self) {
+        let mut state = self.ledger.state.lock();
+        state.registrations.extend(self.entries);
+        state.cleanup_in_progress = false;
+    }
+}
+
+impl PreparedCleanup<'_, Vec<PendingRegistration>> {
     fn execute(
-        mut self,
+        self,
         host: &crate::registration::RegistrationHost<'_>,
     ) -> crate::XllResult<RegistrationCleanupReport> {
-        let registrations = self
-            .registrations
-            .take()
-            .expect("cleanup claim holds its entries");
-        let outcome = crate::registration::HostRegistrar::unregister_pending(host, registrations);
+        self.begin().execute(host)
+    }
+}
+
+impl ExecutingCleanup<'_, Vec<PendingRegistration>> {
+    fn execute(
+        self,
+        host: &crate::registration::RegistrationHost<'_>,
+    ) -> crate::XllResult<RegistrationCleanupReport> {
+        let outcome = crate::registration::HostRegistrar::unregister_pending(host, self.entries);
         let report = RegistrationCleanupReport {
             succeeded: outcome
                 .succeeded
@@ -247,57 +296,36 @@ impl RegistrationCleanupClaim<'_> {
         Ok(report)
     }
 }
-impl Drop for RegistrationCleanupClaim<'_> {
-    fn drop(&mut self) {
-        // Before host execution the original entries can be restored. After
-        // execution started there may be partial effects: keep the gate sticky.
-        if let Some(registrations) = self.registrations.take() {
-            let mut state = self.ledger.state.lock();
-            state.registrations.extend(registrations);
-            state.cleanup_in_progress = false;
-        }
+
+impl Rollback for PendingCleanup<'_, MetadataDebts> {
+    fn rollback(self) {
+        let mut state = self.ledger.state.lock();
+        state.append_metadata_debts(self.entries);
+        state.metadata_cleanup_in_progress = false;
     }
 }
 
-struct MetadataCleanupClaim<'ledger> {
-    ledger: &'ledger HostLedger,
-    debts: Option<BTreeMap<ExcelNameKey, Vec<MetadataDebt>>>,
-}
-impl MetadataCleanupClaim<'_> {
+impl PreparedCleanup<'_, MetadataDebts> {
     fn execute(
-        mut self,
+        self,
         host: &crate::registration::RegistrationHost<'_>,
     ) -> crate::registration::MetadataDebtRetryResult {
-        let debts = self.debts.take().expect("metadata claim owns its debt map");
-        let mut outcome =
-            crate::registration::recovery::retry_metadata_debt_with_host(host, &debts);
-        let mut state = self.ledger.state.lock();
-        for (key, mut debts) in std::mem::take(&mut outcome.remaining) {
-            state
-                .metadata_debt
-                .entry(key)
-                .or_default()
-                .append(&mut debts);
-        }
-        state.metadata_cleanup_in_progress = false;
-        outcome
+        self.begin().execute(host)
     }
 }
-impl Drop for MetadataCleanupClaim<'_> {
-    fn drop(&mut self) {
-        // Once the entries cross the host boundary, partial effects leave the
-        // cleanup gate sticky until an explicit outcome is published.
-        if let Some(debts) = self.debts.take() {
-            let mut state = self.ledger.state.lock();
-            for (key, mut debts) in debts {
-                state
-                    .metadata_debt
-                    .entry(key)
-                    .or_default()
-                    .append(&mut debts);
-            }
-            state.metadata_cleanup_in_progress = false;
-        }
+
+impl ExecutingCleanup<'_, MetadataDebts> {
+    fn execute(
+        self,
+        host: &crate::registration::RegistrationHost<'_>,
+    ) -> crate::registration::MetadataDebtRetryResult {
+        let Self { ledger, entries } = self;
+        let mut outcome =
+            crate::registration::recovery::retry_metadata_debt_with_host(host, &entries);
+        let mut state = ledger.state.lock();
+        state.append_metadata_debts(std::mem::take(&mut outcome.remaining));
+        state.metadata_cleanup_in_progress = false;
+        outcome
     }
 }
 
@@ -324,6 +352,8 @@ mod cleanup_tests {
         assert!(!ledger.generation_callbacks_detached());
         assert!(!ledger.is_quiescent());
         assert!(ledger.claim_cleanup().is_err());
+        drop(ledger.claim_metadata_cleanup().unwrap());
+        assert!(ledger.claim_cleanup().is_err());
         drop(claim);
         assert_eq!(ledger.registrations_snapshot().len(), 1);
         assert_eq!(ledger.registration_resources(), (1, true));
@@ -348,16 +378,22 @@ mod cleanup_tests {
     #[test]
     fn miri_interrupted_cleanup_retains_uncertain_gate() {
         let ledger = ledger();
-        let mut claim = ledger.claim_cleanup().unwrap();
+        let claim = ledger.claim_cleanup().unwrap();
         let outcome =
             crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(move || {
-                let _entries = claim.registrations.take().unwrap();
+                let _executing = claim.begin();
                 panic!("interrupted after cleanup authority transfer");
             }));
         assert!(outcome.is_err());
+        assert!(ledger.registrations_snapshot().is_empty());
+        assert_eq!(ledger.registration_resources(), (0, false));
         assert!(!ledger.generation_callbacks_detached());
         assert!(!ledger.is_quiescent());
         assert!(ledger.registration_state_unknown());
+        assert!(matches!(
+            ledger.claim_cleanup(),
+            Err(crate::XllError::Closing)
+        ));
     }
 
     #[test]
@@ -444,21 +480,54 @@ mod cleanup_tests {
             },
             crate::XllError::Closing,
         )]);
-        let debts = {
-            let mut state = ledger.state.lock();
-            state.metadata_cleanup_in_progress = true;
-            std::mem::take(&mut state.metadata_debt)
-        };
-        let claim = MetadataCleanupClaim {
-            ledger: &ledger,
-            debts: Some(debts),
-        };
+        let claim = ledger.claim_metadata_cleanup().unwrap();
+        assert!(ledger.metadata_debt_snapshot().is_empty());
         assert!(!ledger.is_quiescent());
+        assert!(ledger.claim_metadata_cleanup().is_err());
+        drop(ledger.claim_cleanup().unwrap());
+        assert!(ledger.claim_metadata_cleanup().is_err());
         drop(claim);
         assert_eq!(ledger.metadata_debt_snapshot().len(), 1);
         assert!(
             ledger.is_quiescent(),
             "metadata debt alone remains best effort"
         );
+    }
+
+    #[test]
+    fn miri_interrupted_metadata_cleanup_keeps_gate_and_concurrent_debt() {
+        let ledger = HostLedger::new();
+        ledger.retain_metadata_debt(vec![MetadataDebt::new(
+            RegistrationId {
+                id: 7.0,
+                excel_name: "OLD.DEBT",
+            },
+            crate::XllError::Closing,
+        )]);
+        let claim = ledger.claim_metadata_cleanup().unwrap();
+        ledger.retain_metadata_debt(vec![MetadataDebt::new(
+            RegistrationId {
+                id: 9.0,
+                excel_name: "NEW.DEBT",
+            },
+            crate::XllError::Closing,
+        )]);
+        let outcome =
+            crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(move || {
+                let _executing = claim.begin();
+                panic!("interrupted after metadata cleanup authority transfer");
+            }));
+        assert!(outcome.is_err());
+        let remaining = ledger.metadata_debt_snapshot();
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining.contains_key(&ExcelNameKey::new("NEW.DEBT")));
+        assert!(ledger.has_metadata_debt());
+        assert!(!ledger.generation_callbacks_detached());
+        assert!(!ledger.is_quiescent());
+        assert!(ledger.registration_state_unknown());
+        assert!(matches!(
+            ledger.claim_metadata_cleanup(),
+            Err(crate::XllError::Closing),
+        ));
     }
 }

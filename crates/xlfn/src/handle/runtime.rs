@@ -14,6 +14,8 @@ use crate::{XllError, XllResult};
 #[cfg(feature = "handles")]
 use std::cell::OnceCell;
 use std::cell::RefCell;
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 
 /// Unpublished inputs carry no destination registry. The reservation alone
@@ -49,7 +51,11 @@ thread_local! {
 
 pub(crate) struct HandleInitializationGuard {
     key: HandleTopicKey,
+    _thread_affine: PhantomData<Rc<()>>,
 }
+
+#[cfg(test)]
+static_assertions::assert_not_impl_any!(HandleInitializationGuard: Send, Sync);
 
 impl HandleInitializationGuard {
     pub(crate) fn enter(key: HandleTopicKey) -> XllResult<Self> {
@@ -59,7 +65,10 @@ impl HandleInitializationGuard {
                 return Err(XllError::ReentrantCall);
             }
             active.push(key);
-            Ok(Self { key })
+            Ok(Self {
+                key,
+                _thread_affine: PhantomData,
+            })
         })
     }
 }

@@ -12,7 +12,9 @@ use crossbeam_utils::sync::Parker;
 use queue::RunnableQueue;
 use std::cell::Cell;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::num::NonZeroUsize;
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
@@ -23,17 +25,26 @@ thread_local! {
     static SCHEDULER_POOL: Cell<usize> = const { Cell::new(0) };
 }
 
-struct SchedulerScope(usize);
+struct SchedulerScope {
+    previous_pool: usize,
+    _thread_affine: PhantomData<Rc<()>>,
+}
+
+#[cfg(test)]
+static_assertions::assert_not_impl_any!(SchedulerScope: Send, Sync);
 
 impl SchedulerScope {
     fn enter(shared: &PoolShared) -> Self {
-        Self(SCHEDULER_POOL.replace(std::ptr::from_ref(shared).addr()))
+        Self {
+            previous_pool: SCHEDULER_POOL.replace(std::ptr::from_ref(shared).addr()),
+            _thread_affine: PhantomData,
+        }
     }
 }
 
 impl Drop for SchedulerScope {
     fn drop(&mut self) {
-        SCHEDULER_POOL.set(self.0);
+        SCHEDULER_POOL.set(self.previous_pool);
     }
 }
 

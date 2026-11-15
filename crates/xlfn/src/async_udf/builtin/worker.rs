@@ -3,6 +3,8 @@ use async_task::Runnable;
 use crossbeam_deque::Worker;
 use crossbeam_utils::sync::Parker;
 use std::cell::Cell;
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use triomphe::Arc;
 
@@ -15,8 +17,23 @@ pub(super) fn is_current_poller(shared: &Arc<PoolShared>) -> bool {
 }
 
 pub(super) struct PollerExitGuard {
-    pub(super) shared: Arc<PoolShared>,
-    pub(super) local: Worker<Runnable>,
+    shared: Arc<PoolShared>,
+    local: Worker<Runnable>,
+    _thread_affine: PhantomData<Rc<()>>,
+}
+
+#[cfg(test)]
+static_assertions::assert_not_impl_any!(PollerExitGuard: Send, Sync);
+
+impl PollerExitGuard {
+    pub(super) fn enter(shared: Arc<PoolShared>, local: Worker<Runnable>) -> Self {
+        POLLER_POOL.set(Arc::as_ptr(&shared).addr());
+        Self {
+            shared,
+            local,
+            _thread_affine: PhantomData,
+        }
+    }
 }
 
 // The final poller must acquire recovery publications from every previous
@@ -79,8 +96,7 @@ pub(super) fn run_poller(
     local: Worker<Runnable>,
     parker: Parker,
 ) {
-    POLLER_POOL.set(Arc::as_ptr(&shared).addr());
-    let exit_guard = PollerExitGuard { shared, local };
+    let exit_guard = PollerExitGuard::enter(shared, local);
     let bit = 1u64 << index;
     loop {
         if let Some(runnable) = find_task(index, &exit_guard.shared, &exit_guard.local) {

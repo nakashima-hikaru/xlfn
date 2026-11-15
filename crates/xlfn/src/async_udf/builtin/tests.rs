@@ -167,10 +167,7 @@ fn failed_poller_recovers_local_runnables_for_surviving_pollers() {
     let failed_shared = triomphe::Arc::clone(&shared);
     assert!(
         crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(move || {
-            let _guard = worker::PollerExitGuard {
-                shared: failed_shared,
-                local,
-            };
+            let _guard = worker::PollerExitGuard::enter(failed_shared, local);
             panic!("injected infrastructure poller failure");
         }))
         .is_err()

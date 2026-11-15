@@ -53,11 +53,7 @@ fn abandoned_leader_detaches_before_follower_retries() {
         .shard(hash)
         .lock()
         .insert_unique(Arc::clone(&flight));
-    let leader = LeaderGuard {
-        cache: &cache,
-        flight: &flight,
-        registered: true,
-    };
+    let leader = LeaderGuard::new(&cache, &flight);
     std::thread::scope(|scope| {
         let (finished_tx, finished_rx) = mpsc::sync_channel(1);
         let cache_ref = &cache;

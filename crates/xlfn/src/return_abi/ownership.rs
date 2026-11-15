@@ -179,29 +179,13 @@ impl ReturnPublicationTxn {
     }
 }
 
-/// No fallback owns the producer once publication starts. Completing this
-/// private phase disarms its unwind policy without another catch boundary.
-struct CommittingPublication;
-
-impl CommittingPublication {
-    fn finish(self) {
-        let _completed = std::mem::ManuallyDrop::new(self);
-    }
-}
-
-impl Drop for CommittingPublication {
-    fn drop(&mut self) {
-        // Only unwinding through an unfinished publication reaches Drop.
-        // Stop before any enclosing ABI catch could manufacture value #2.
-        xlfn_kernel::invariant::fail_stop();
-    }
-}
-
+/// No fallback owns the producer once publication starts. Stop on unwind
+/// before an enclosing ABI catch could publish a second value.
 #[inline]
 pub(super) fn commit_publication<T>(operation: impl FnOnce() -> T) -> T {
-    let committing = CommittingPublication;
+    let committing = std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
     let publication = operation();
-    committing.finish();
+    std::mem::DropGuard::dismiss(committing);
     publication
 }
 

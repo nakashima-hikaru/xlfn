@@ -37,13 +37,13 @@ use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
-#[cfg(test)]
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 #[cfg(any(test, feature = "bench-internals"))]
 use std::time::Instant;
 use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 use xlfn_kernel::rotating_read_domain::{
     GenerationIndex, RotatingReadPermit, RotatingRetirementDomain,
 };
@@ -98,7 +98,12 @@ thread_local! {
     static CACHE_OPERATION_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
-struct ActiveCacheGuard;
+struct ActiveCacheGuard {
+    _thread_affine: PhantomData<Rc<()>>,
+}
+
+#[cfg(test)]
+static_assertions::assert_not_impl_any!(ActiveCacheGuard: Send, Sync);
 
 impl ActiveCacheGuard {
     fn enter() -> XllResult<Self> {
@@ -108,7 +113,9 @@ impl ActiveCacheGuard {
             });
         }
         ACTIVE_CACHE_INITIALIZATION_DEPTH.set(1);
-        Ok(Self)
+        Ok(Self {
+            _thread_affine: PhantomData,
+        })
     }
 }
 
@@ -125,7 +132,13 @@ impl Drop for ActiveCacheGuard {
 // A lookup's final reader can complete a grace period while its caller still
 // owns the singleflight lock. Carry owned destruction batches to the outermost
 // operation boundary, after every nested lookup/initializer lock has left.
-struct CacheOperationGuard;
+struct CacheOperationGuard {
+    _thread_affine: PhantomData<Rc<()>>,
+}
+
+#[cfg(test)]
+static_assertions::assert_not_impl_any!(CacheOperationGuard: Send, Sync);
+
 impl CacheOperationGuard {
     fn enter() -> Self {
         CACHE_OPERATION_DEPTH.set(
@@ -134,7 +147,9 @@ impl CacheOperationGuard {
                 .checked_add(1)
                 .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop()),
         );
-        Self
+        Self {
+            _thread_affine: PhantomData,
+        }
     }
 }
 impl Drop for CacheOperationGuard {
@@ -857,63 +872,78 @@ where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    cache: &'a CalculationCache<K, V>,
-    flight: &'a Arc<Flight<K, V>>,
-    registered: bool,
+    pending: RollbackGuard<PendingFlight<'a, K, V>>,
 }
 
-impl<K, V> LeaderGuard<'_, K, V>
+struct PendingFlight<'a, K, V>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
+    cache: &'a CalculationCache<K, V>,
+    flight: &'a Arc<Flight<K, V>>,
+}
+
+impl<'a, K, V> LeaderGuard<'a, K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    fn new(cache: &'a CalculationCache<K, V>, flight: &'a Arc<Flight<K, V>>) -> Self {
+        Self {
+            pending: RollbackGuard::new(PendingFlight { cache, flight }),
+        }
+    }
+
     /// Publish before detaching the flight, consuming the only completion
     /// authority. Abandonment instead detaches before inviting a retry.
-    fn complete(mut self, result: Result<(FlightAnchor<V>, u64), Box<XllError>>) {
+    fn complete(self, result: Result<(FlightAnchor<V>, u64), Box<XllError>>) {
+        let pending = self.pending.get();
         {
-            let mut state = self.flight.state.lock();
+            let mut state = pending.flight.state.lock();
             *state = FlightState::Finished(result);
         }
-        self.flight.changed.notify_all();
+        pending.flight.changed.notify_all();
 
-        let removed = self
-            .cache
-            .flights
-            .shard(self.flight.hash)
-            .lock()
-            .remove(self.flight);
-        self.registered = false;
+        let removed = pending.detach();
         debug_assert!(removed.is_some(), "the leader owns one registered flight");
+        let _ = self.pending.complete();
         // The leader retains its own Arc. Even the table's reference is
         // released after unlocking, independently of key/value destruction.
         drop(removed);
     }
 }
 
-impl<K, V> Drop for LeaderGuard<'_, K, V>
+impl<K, V> PendingFlight<'_, K, V>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    fn drop(&mut self) {
-        if self.registered {
-            let removed = self
-                .cache
-                .flights
-                .shard(self.flight.hash)
-                .lock()
-                .remove(self.flight);
-            // A retry may immediately register a new flight for this key.
-            // Remove the abandoned identity before waking its followers.
-            drop(removed);
-            {
-                let mut state = self.flight.state.lock();
-                if matches!(*state, FlightState::Pending) {
-                    *state = FlightState::Retry;
-                }
+    fn detach(&self) -> Option<Arc<Flight<K, V>>> {
+        self.cache
+            .flights
+            .shard(self.flight.hash)
+            .lock()
+            .remove(self.flight)
+    }
+}
+
+impl<K, V> Rollback for PendingFlight<'_, K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    fn rollback(self) {
+        // A retry may immediately register a new flight for this key.
+        // Remove the abandoned identity before waking its followers.
+        drop(self.detach());
+        {
+            let mut state = self.flight.state.lock();
+            if matches!(*state, FlightState::Pending) {
+                *state = FlightState::Retry;
             }
-            self.flight.changed.notify_all();
         }
+        self.flight.changed.notify_all();
     }
 }
 
@@ -1679,11 +1709,7 @@ where
 
             // Leader path
             let _active = ActiveCacheGuard::enter()?;
-            let guard = LeaderGuard {
-                cache: self,
-                flight: &flight,
-                registered: true,
-            };
+            let guard = LeaderGuard::new(self, &flight);
 
             let compute_fn = compute_opt.take().expect("compute called once");
             let weight_fn = weight_opt.take().expect("weight called once");
