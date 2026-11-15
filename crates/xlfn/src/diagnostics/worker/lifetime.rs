@@ -4,11 +4,11 @@ use super::{DiagnosticObserver, DiagnosticObserverPtr, QueuedDiagnosticEvent};
 use crate::diagnostics::{DiagnosticInitError, DiagnosticSink};
 use crate::panic_boundary::{catch_no_unwind, contain_panic};
 use std::io;
-use std::mem::ManuallyDrop;
+use std::mem::DropGuard;
 use std::panic::AssertUnwindSafe;
-use std::ptr::NonNull;
 use std::sync::mpsc::{self, SyncSender};
 use std::thread::{JoinHandle, ThreadId};
+use xlfn_kernel::invariant::fail_stop;
 use xlfn_kernel::published_owner::PublishedOwner;
 use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
@@ -41,25 +41,30 @@ impl DiagnosticWorker {
         let (sender, receiver) =
             mpsc::sync_channel::<QueuedDiagnosticEvent>(super::super::DIAGNOSTIC_QUEUE_CAPACITY);
         let observer = PublishedOwner::from_box(DiagnosticObserver::new());
-        let pointer = DiagnosticObserverPtr(NonNull::from(&*observer));
-        let handle = std::thread::Builder::new()
-            .name(name.to_owned())
-            .spawn(move || {
-                let worker_observer = pointer;
-                while let Ok(queued) = receiver.recv() {
-                    let credit = queued.credit.dequeue();
-                    queued.event.deliver(&sink);
-                    drop(credit);
-                    crate::ingress::with_diagnostic_linearization(|| {
-                        // SAFETY: this module retains the exact pointer target
-                        // until its corresponding worker has joined.
-                        let observer = unsafe { worker_observer.0.as_ref() };
-                        observer.record(crate::shutdown_trace::ShutdownEvent::FlushDiagnostic);
-                        observer.decrement_pending();
-                    });
-                }
-            })
-            .map_err(DiagnosticInitError::WorkerSpawn)?;
+        let pointer = DiagnosticObserverPtr(observer.as_non_null());
+        let builder = std::thread::Builder::new().name(name.to_owned());
+        let run = move || {
+            let worker_observer = pointer;
+            while let Ok(queued) = receiver.recv() {
+                let credit = queued.credit.dequeue();
+                queued.event.deliver(&sink);
+                drop(credit);
+                crate::ingress::with_diagnostic_linearization(|| {
+                    // SAFETY: this module retains the exact pointer target
+                    // until its corresponding worker has joined.
+                    let observer = unsafe { worker_observer.0.as_ref() };
+                    observer.record(crate::shutdown_trace::ShutdownEvent::FlushDiagnostic);
+                    observer.decrement_pending();
+                });
+            }
+        };
+        // A spawn unwind could leave a live worker borrowing the observer.
+        let require_spawn = DropGuard::new((), |()| fail_stop());
+        let started = builder.spawn(run);
+        #[cfg(test)]
+        FAIL_SPAWN.with(|fault| assert!(!fault.replace(false), "injected diagnostic spawn unwind"));
+        DropGuard::dismiss(require_spawn);
+        let handle = started.map_err(DiagnosticInitError::WorkerSpawn)?;
         Ok((sender, Self::issued(observer, handle)))
     }
 
@@ -102,17 +107,18 @@ impl RunningDiagnosticWorker {
 
     fn join(self) -> JoinedDiagnosticWorker {
         let Self { handle, observer } = self;
-        // Retain the pointer target if the join operation itself unwinds. A
-        // returned result, including a worker panic, certifies thread exit.
-        let observer = ManuallyDrop::new(observer);
+        // Only a returned result certifies thread exit. On unwind, abort
+        // before releasing the observer that the worker could still access.
+        let require_join = DropGuard::new((), |()| fail_stop());
         if std::thread::current().id() == handle.thread().id() {
-            xlfn_kernel::invariant::fail_stop();
+            fail_stop();
         }
-        let panicked = contain_panic(handle.join()).is_err();
-        JoinedDiagnosticWorker {
-            observer: ManuallyDrop::into_inner(observer),
-            panicked,
-        }
+        #[cfg(test)]
+        FAIL_JOIN.with(|fault| assert!(!fault.replace(false), "injected diagnostic join unwind"));
+        let result = handle.join();
+        DropGuard::dismiss(require_join);
+        let panicked = contain_panic(result).is_err();
+        JoinedDiagnosticWorker { observer, panicked }
     }
 }
 
@@ -133,6 +139,63 @@ impl Rollback for RunningDiagnosticWorker {
             let _ = catch_no_unwind(AssertUnwindSafe(|| {
                 tracing::error!("diagnostic logger worker panicked during drop");
             }));
+        }
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_JOIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoopSink;
+
+    impl DiagnosticSink for NoopSink {
+        fn report(&self, _: &crate::diagnostics::DiagnosticEvent<'_>) {}
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "requires a child process to observe fail-stop")]
+    fn diagnostic_worker_aborts_on_unknown_spawn_or_join_result() {
+        const CHILD: &str = "XLFN_DIAGNOSTIC_WORKER_FAIL_STOP";
+        if let Ok(operation) = std::env::var(CHILD) {
+            FAIL_SPAWN.with(|fault| fault.set(operation == "spawn"));
+            let (sender, worker) =
+                DiagnosticWorker::spawn(NoopSink, "xlfn-diagnostic-fault").unwrap();
+            FAIL_JOIN.with(|fault| fault.set(operation == "join"));
+            // Keep input open while joining so the injected failure happens
+            // while the worker may still be accessing its observer.
+            let _ = worker.join();
+            drop(sender);
+            return;
+        }
+
+        for operation in ["spawn", "join"] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "diagnostics::worker::lifetime::tests::diagnostic_worker_aborts_on_unknown_spawn_or_join_result",
+                ])
+                .env(CHILD, operation)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                assert_eq!(status.signal(), Some(6), "expected SIGABRT on {operation}");
+            }
+            #[cfg(not(unix))]
+            {
+                assert!(!status.success());
+                assert_ne!(status.code(), Some(101), "unwound during {operation}");
+            }
         }
     }
 }

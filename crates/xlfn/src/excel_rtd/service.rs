@@ -1,6 +1,7 @@
 use crate::RtdSubscription;
 use crate::generation::RuntimeGeneration;
-use crate::subscription::{RtdLimits, SubscriptionRuntime};
+use crate::shutdown::{CleanupIssue, CleanupIssueKind, StopOutcome};
+use crate::subscription::{RtdLimits, RuntimeShutdownOutcome, SubscriptionRuntime};
 
 /// Issued only after the corresponding subscription slot has been sealed.
 #[derive(Debug)]
@@ -97,7 +98,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SubscriptionServiceSlot<
     pub(crate) fn seal(
         &self,
         generation: Option<RuntimeGeneration>,
-    ) -> crate::XllResult<SubscriptionsStopped> {
+    ) -> crate::XllResult<StopOutcome<SubscriptionsStopped>> {
         let generation = generation.or_else(|| {
             self.service
                 .read_if_ready()
@@ -106,16 +107,30 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SubscriptionServiceSlot<
         let sealed = self
             .service
             .seal(
-                move || SubscriptionsStopped::new(generation),
+                move || StopOutcome {
+                    certificate: SubscriptionsStopped::new(generation),
+                    issues: Vec::new(),
+                },
                 |runtime| {
-                    crate::excel_rtd::shutdown_subscriptions(runtime)
-                        .map(|()| SubscriptionsStopped::new(Some(runtime.generation)))
+                    let outcome = crate::excel_rtd::shutdown_subscriptions(runtime)?;
+                    let issues = match outcome {
+                        RuntimeShutdownOutcome::Clean => Vec::new(),
+                        RuntimeShutdownOutcome::PublisherPanicked => vec![CleanupIssue {
+                            component: "RTD publisher",
+                            kind: CleanupIssueKind::WorkerPanickedAfterJoin,
+                            error: crate::XllError::Panic,
+                        }],
+                    };
+                    Ok(StopOutcome {
+                        certificate: SubscriptionsStopped::new(Some(runtime.generation)),
+                        issues,
+                    })
                 },
             )
             .map_err(crate::error::map_service_slot_error)?;
-        let (runtime, stopped) = sealed.into_parts();
+        let (runtime, outcome) = sealed.into_parts();
         drop(runtime);
-        Ok(stopped)
+        Ok(outcome)
     }
 
     #[cfg(any(test, feature = "refinement"))]
@@ -205,6 +220,31 @@ mod tests {
             slot.read(RtdSubscriptionHost::detached()),
             Err(crate::XllError::Closing)
         ));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn joined_publisher_panic_is_reported_and_subscription_slot_is_reclaimed() {
+        let slot = SubscriptionServiceSlot::<()>::new();
+        slot.arm(
+            generation(),
+            RtdLimits::standard(),
+            crate::subscription::SourceArena::empty(generation()),
+        )
+        .unwrap();
+        let runtime = slot.read(RtdSubscriptionHost::detached()).unwrap();
+        runtime.panic_publisher_for_test();
+        drop(runtime);
+
+        let stopped = slot.seal(Some(generation())).unwrap();
+        assert_eq!(stopped.certificate.generation(), Some(generation()));
+        assert_eq!(stopped.issues.len(), 1);
+        assert_eq!(
+            stopped.issues[0].kind,
+            CleanupIssueKind::WorkerPanickedAfterJoin
+        );
+        assert!(matches!(stopped.issues[0].error, crate::XllError::Panic));
+        assert!(slot.is_none());
     }
 
     #[test]

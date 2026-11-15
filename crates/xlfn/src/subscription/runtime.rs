@@ -3,7 +3,6 @@
     reason = "subscription runtime resolves stable Box-owned server arena entries through non-owning pointers"
 )]
 
-use super::RuntimeServices;
 use super::catalog::{ConnectionTicket, PreparationFinish, SubscriptionCatalog, SubscriptionEntry};
 use super::data_plane::PublishCore;
 use super::disconnect::OwnedSubscription;
@@ -15,6 +14,7 @@ use super::server::{
 };
 use super::source::{RtdSourceHandle, RtdSubscription, SourceArena, SourceSubscription};
 use super::termination::TerminationCoordinator;
+use super::{RuntimeServices, RuntimeShutdownOutcome};
 
 mod termination;
 use super::topic::{
@@ -618,7 +618,12 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         }
         Self::disconnect_from_handle(handle, topic)
     }
+
     pub(crate) fn close(&self) -> XllResult<()> {
+        self.close_for_shutdown()?.result()
+    }
+
+    pub(crate) fn close_for_shutdown(&self) -> XllResult<RuntimeShutdownOutcome> {
         match RuntimeTermination::begin(self) {
             RuntimeTerminationAdmission::Owner(owner) => owner
                 .request_stop()
@@ -627,7 +632,19 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 .finish(),
             RuntimeTerminationAdmission::Waiter(waiter) => waiter.wait(),
             RuntimeTerminationAdmission::Complete(completed) => completed.result(),
+        }?;
+        #[cfg(feature = "rtd")]
+        if let super::channel::JoinedPublisher::Panicked = self.services.publishers.joined() {
+            return Ok(RuntimeShutdownOutcome::PublisherPanicked);
         }
+        Ok(RuntimeShutdownOutcome::Clean)
+    }
+
+    #[cfg(all(test, feature = "rtd"))]
+    pub(crate) fn panic_publisher_for_test(&self) {
+        self.services
+            .publishers
+            .start_test_worker(|| panic!("injected pool worker panic"));
     }
 
     /// The outer result distinguishes failed dispatch preparation (no hook

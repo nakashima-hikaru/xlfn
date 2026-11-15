@@ -136,6 +136,48 @@ fn miri_executed_source_barriers_preserve_errors_without_skipping_later_sources(
 }
 
 #[test]
+fn miri_publisher_panic_preserves_the_joined_runtime_and_reports_cleanup_failure() {
+    let fixture = crate::subscription::tests::SourceFixture::new();
+    let (source, _, _) = fixture.add::<i32>(None);
+    let runtime =
+        SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost, _>::with_sources_for_internal(
+            fixture.finish(),
+        );
+    let topic = crate::subscription::RtdTopic::single("publisher-panic").unwrap();
+    runtime.prepare(&source, topic.borrowed()).unwrap().commit();
+    assert!(!runtime.catalog.lock().entries.is_empty());
+    runtime.panic_publisher_for_test();
+
+    assert_eq!(
+        runtime.close_for_shutdown().unwrap(),
+        RuntimeShutdownOutcome::PublisherPanicked
+    );
+    assert!(runtime.catalog.lock().entries.is_empty());
+    assert_eq!(
+        runtime.termination_coordinator.phase(),
+        TerminationPhase::Terminated
+    );
+    assert!(matches!(runtime.close(), Err(XllError::Panic)));
+}
+
+#[test]
+fn miri_publisher_panic_does_not_override_other_cleanup_failures() {
+    let (runtime, _, joined) = runtime_with_sources(false, true);
+    runtime.panic_publisher_for_test();
+
+    assert!(matches!(
+        runtime.close_for_shutdown(),
+        Err(XllError::Overloaded)
+    ));
+    assert_eq!(joined.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        runtime.termination_coordinator.phase(),
+        TerminationPhase::Terminated
+    );
+    assert!(matches!(runtime.close(), Err(XllError::Overloaded)));
+}
+
+#[test]
 fn miri_source_dispatch_preflight_failure_never_certifies_executed_barriers() {
     let (runtime, stopped, joined) = runtime_with_sources(false, false);
     runtime

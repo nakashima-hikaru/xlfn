@@ -615,12 +615,15 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
 
     pub(in crate::runtime) fn close_subscriptions(
         &self,
-    ) -> crate::XllResult<crate::shutdown::SubscriptionsStopped> {
+    ) -> crate::XllResult<crate::shutdown::StopOutcome<crate::shutdown::SubscriptionsStopped>> {
         #[cfg(not(feature = "rtd"))]
         {
-            Ok(crate::excel_rtd_protocol::stopped_subscriptions(
-                self.protocol_generation(),
-            ))
+            Ok(crate::shutdown::StopOutcome {
+                certificate: crate::excel_rtd_protocol::stopped_subscriptions(
+                    self.protocol_generation(),
+                ),
+                issues: Vec::new(),
+            })
         }
         #[cfg(feature = "rtd")]
         {
@@ -631,7 +634,10 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
             let Some(result) = result else {
                 #[cfg(test)]
                 {
-                    return Ok(crate::excel_rtd_protocol::stopped_subscriptions(generation));
+                    return Ok(crate::shutdown::StopOutcome {
+                        certificate: crate::excel_rtd_protocol::stopped_subscriptions(generation),
+                        issues: Vec::new(),
+                    });
                 }
                 #[cfg(not(test))]
                 {

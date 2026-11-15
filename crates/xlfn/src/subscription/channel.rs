@@ -18,9 +18,10 @@ use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{Builder, JoinHandle};
+use std::thread::{Builder, JoinHandle, ThreadId};
 use std::time::Duration;
 use triomphe::Arc;
+use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 /// Cell behavior when an RTD producer returns an error or panics.
 ///
@@ -637,17 +638,62 @@ impl PublisherQueue {
     }
 }
 
+enum PublisherWorker {
+    Dormant,
+    Running(RunningPublisher),
+    // Keep the worker's identity available to reject a self-join even after
+    // another thread has taken the handle.
+    Joining(ThreadId),
+    Joined(JoinedPublisher),
+}
+
+struct RunningPublisher {
+    pending: RollbackGuard<PublisherResources>,
+}
+
+struct PublisherResources {
+    queue: Arc<PublisherQueue>,
+    handle: JoinHandle<()>,
+}
+
+impl Rollback for PublisherResources {
+    fn rollback(self) {
+        // Dropping a live join owner would detach the publisher.
+        xlfn_kernel::invariant::fail_stop();
+    }
+}
+
+impl RunningPublisher {
+    fn join(self) -> JoinedPublisher {
+        let PublisherResources { queue, handle } = self.pending.complete();
+        // This owner cannot abandon the worker. Only a returned join result
+        // proves exit, including when it reports a panic inside the worker.
+        let require_join = std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
+        queue.stop();
+        #[cfg(test)]
+        FAIL_PUBLISHER_JOIN
+            .with(|fault| assert!(!fault.replace(false), "injected publisher join unwind"));
+        let result = handle.join();
+        std::mem::DropGuard::dismiss(require_join);
+        match crate::panic_boundary::contain_panic(result) {
+            Ok(()) => JoinedPublisher::Clean,
+            Err(_) => JoinedPublisher::Panicked,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum JoinedPublisher {
+    Clean,
+    Panicked,
+}
+
 /// Generation-owned, lazily started publisher. One ready-queue entry per
 /// topic; at most 32 FIFO values per turn gives other ready topics progress.
 /// Surviving senders may retain the inert queue, never a worker or a sink.
-enum PublisherWorker {
-    Dormant,
-    Running(Arc<PublisherQueue>, JoinHandle<()>),
-    Stopped,
-}
-
 pub(super) struct PublisherPool {
     worker: Mutex<PublisherWorker>,
+    joined: Condvar,
     queue: OnceLock<Arc<PublisherQueue>>,
     stopped: AtomicBool,
 }
@@ -660,7 +706,10 @@ struct PublisherStartup<'pool> {
 }
 
 impl PublisherStartup<'_> {
-    fn start(mut self) -> XllResult<Arc<PublisherQueue>> {
+    fn start(
+        mut self,
+        run: impl FnOnce(Arc<PublisherQueue>) + Send + 'static,
+    ) -> XllResult<Arc<PublisherQueue>> {
         let queue = Arc::new(PublisherQueue {
             ready: Mutex::new(Ready {
                 channels: VecDeque::new(),
@@ -669,11 +718,20 @@ impl PublisherStartup<'_> {
             changed: Condvar::new(),
         });
         let shared = Arc::clone(&queue);
-        let handle = Builder::new()
-            .name("xlfn-rtd-publisher".into())
-            .spawn(move || shared.run())
-            .map_err(spawn_error)?;
-        *self.worker = PublisherWorker::Running(Arc::clone(&queue), handle);
+        let builder = Builder::new().name("xlfn-rtd-publisher".into());
+        let require_spawn = std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
+        let result = builder.spawn(move || run(shared));
+        #[cfg(test)]
+        FAIL_PUBLISHER_SPAWN
+            .with(|fault| assert!(!fault.replace(false), "injected publisher spawn unwind"));
+        std::mem::DropGuard::dismiss(require_spawn);
+        let handle = result.map_err(spawn_error)?;
+        *self.worker = PublisherWorker::Running(RunningPublisher {
+            pending: RollbackGuard::new(PublisherResources {
+                queue: Arc::clone(&queue),
+                handle,
+            }),
+        });
         // Only this consumed Dormant claim initializes the cell, after the
         // join owner exists. Failed spawn retains Dormant and no publication.
         self.pool.queue.get_or_init(|| Arc::clone(&queue));
@@ -685,6 +743,7 @@ impl PublisherPool {
     pub(super) const fn new() -> Self {
         Self {
             worker: Mutex::new(PublisherWorker::Dormant),
+            joined: Condvar::new(),
             queue: OnceLock::new(),
             stopped: AtomicBool::new(false),
         }
@@ -699,29 +758,88 @@ impl PublisherPool {
         }
         let worker = self.worker.lock();
         match &*worker {
-            PublisherWorker::Running(queue, _) => return Ok(Arc::clone(queue)),
-            PublisherWorker::Stopped => return Err(XllError::Closing),
+            PublisherWorker::Running(running) => {
+                return Ok(Arc::clone(&running.pending.get().queue));
+            }
+            PublisherWorker::Joining(_) | PublisherWorker::Joined(_) => {
+                return Err(XllError::Closing);
+            }
             PublisherWorker::Dormant => {}
         }
-        PublisherStartup { pool: self, worker }.start()
+        PublisherStartup { pool: self, worker }.start(|queue| queue.run())
     }
 
-    pub(super) fn stop(&self) {
-        let mut worker = self.worker.lock();
-        self.stopped.store(true, Ordering::Release);
-        if let PublisherWorker::Running(queue, handle) =
-            std::mem::replace(&mut *worker, PublisherWorker::Stopped)
-        {
-            queue.stop();
-            let _ = crate::panic_boundary::contain_panic(handle.join());
+    /// Seal queue admission and wait for the publisher's exit. Keep the joined
+    /// outcome for the other shutdown callers and for runtime reclamation.
+    pub(super) fn stop(&self) -> JoinedPublisher {
+        let running = {
+            let mut worker = self.worker.lock();
+            self.stopped.store(true, Ordering::Release);
+            let publisher = loop {
+                match &*worker {
+                    PublisherWorker::Dormant => {
+                        *worker = PublisherWorker::Joined(JoinedPublisher::Clean);
+                        return JoinedPublisher::Clean;
+                    }
+                    PublisherWorker::Running(running) => {
+                        break running.pending.get().handle.thread().id();
+                    }
+                    PublisherWorker::Joining(publisher) => {
+                        if *publisher == std::thread::current().id() {
+                            xlfn_kernel::invariant::fail_stop();
+                        }
+                        self.joined.wait(&mut worker);
+                    }
+                    PublisherWorker::Joined(joined) => return *joined,
+                }
+            };
+            if publisher == std::thread::current().id() {
+                xlfn_kernel::invariant::fail_stop();
+            }
+            let PublisherWorker::Running(running) =
+                std::mem::replace(&mut *worker, PublisherWorker::Joining(publisher))
+            else {
+                xlfn_kernel::invariant::fail_stop();
+            };
+            running
+        };
+        let joined = running.join();
+        *self.worker.lock() = PublisherWorker::Joined(joined);
+        self.joined.notify_all();
+        joined
+    }
+
+    /// The runtime may inspect this only after its shutdown barriers finished.
+    pub(super) fn joined(&self) -> JoinedPublisher {
+        match *self.worker.lock() {
+            PublisherWorker::Joined(joined) => joined,
+            _ => xlfn_kernel::invariant::fail_stop(),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn start_test_worker(
+        &self,
+        run: impl FnOnce() + Send + 'static,
+    ) -> Arc<PublisherQueue> {
+        let worker = self.worker.lock();
+        assert!(matches!(*worker, PublisherWorker::Dormant));
+        PublisherStartup { pool: self, worker }
+            .start(|_| run())
+            .unwrap()
     }
 }
 
 impl Drop for PublisherPool {
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.stop();
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_PUBLISHER_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_PUBLISHER_JOIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn value_bytes(value: &StoredRtdValue) -> usize {
@@ -1959,12 +2077,101 @@ mod tests {
 
     #[test]
     fn generation_pool_stop_is_terminal_and_joins_its_worker() {
+        for started in [false, true] {
+            let pool = PublisherPool::new();
+            let queue = started.then(|| pool.queue().unwrap());
+            assert!(matches!(pool.stop(), JoinedPublisher::Clean));
+            if let Some(queue) = queue {
+                assert!(queue.ready.lock().stopping);
+            }
+            assert!(matches!(pool.queue(), Err(XllError::Closing)));
+            assert!(matches!(pool.stop(), JoinedPublisher::Clean));
+        }
+    }
+
+    #[test]
+    fn miri_publisher_stop_releases_the_worker_lock_and_shares_the_join_error() {
         let pool = PublisherPool::new();
-        let queue = pool.queue().unwrap();
-        pool.stop();
-        assert!(queue.ready.lock().stopping);
+        let (release, held) = std::sync::mpsc::channel();
+        let queue = pool.start_test_worker(move || {
+            held.recv().unwrap();
+            panic!("injected pool worker panic");
+        });
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| pool.stop());
+            let stopping = {
+                let mut ready = queue.ready.lock();
+                queue
+                    .changed
+                    .wait_while_for(&mut ready, |ready| !ready.stopping, DEADLINE);
+                ready.stopping
+            };
+            let joining_unlocked = pool
+                .worker
+                .try_lock()
+                .is_some_and(|worker| matches!(*worker, PublisherWorker::Joining(_)));
+            let queue_sealed = matches!(pool.queue(), Err(XllError::Closing));
+            let second = scope.spawn(|| pool.stop());
+
+            // Release the worker even if shutdown failed to transition.
+            release.send(()).unwrap();
+            assert!(stopping);
+            assert!(joining_unlocked);
+            assert!(queue_sealed);
+            for caller in [first, second] {
+                assert!(matches!(caller.join().unwrap(), JoinedPublisher::Panicked));
+            }
+        });
+        assert!(matches!(pool.stop(), JoinedPublisher::Panicked));
         assert!(matches!(pool.queue(), Err(XllError::Closing)));
-        pool.stop();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "requires a child process to observe fail-stop")]
+    fn publisher_aborts_on_unknown_exit_or_abandonment() {
+        const CHILD: &str = "XLFN_TEST_PUBLISHER_OUTCOME_FAIL_STOP";
+        if let Ok(operation) = std::env::var(CHILD) {
+            // If the fail-stop is lost, let the test harness observe unwind
+            // without the abandoned Joining state blocking the child's Drop.
+            let pool = std::mem::ManuallyDrop::new(PublisherPool::new());
+            FAIL_PUBLISHER_SPAWN.with(|fault| fault.set(operation == "spawn"));
+            pool.queue().unwrap();
+            if operation == "abandon" {
+                let running = std::mem::replace(&mut *pool.worker.lock(), PublisherWorker::Dormant);
+                drop(running);
+                return;
+            }
+            FAIL_PUBLISHER_JOIN.with(|fault| fault.set(operation == "join"));
+            pool.stop();
+            return;
+        }
+
+        for operation in ["spawn", "join", "abandon"] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "subscription::channel::tests::publisher_aborts_on_unknown_exit_or_abandonment",
+                ])
+                .env(CHILD, operation)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                assert_eq!(
+                    status.signal(),
+                    Some(6),
+                    "expected fail-stop on {operation}"
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                assert!(!status.success());
+                assert_ne!(status.code(), Some(101), "unwound during {operation}");
+            }
+        }
     }
 
     #[test]

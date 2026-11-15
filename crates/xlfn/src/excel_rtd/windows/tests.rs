@@ -4934,6 +4934,26 @@ fn observation_rollback_racing_shutdown_releases_server_reference_once() {
     assert!(server.backends.lock().subscriptions.is_none());
 }
 
+#[cfg(feature = "rtd")]
+#[test]
+fn joined_publisher_panic_preserves_cleanup_outcome_after_com_detach() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _apartment = TestComApartment::enter();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let retained =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    subscriptions.panic_publisher_for_test();
+
+    assert_eq!(
+        shutdown_subscriptions(&subscriptions).unwrap(),
+        crate::subscription::RuntimeShutdownOutcome::PublisherPanicked
+    );
+    // SAFETY: the retained COM reference keeps the detached server alive.
+    let server = unsafe { &*retained.pointer() };
+    assert!(server.backends.lock().subscriptions.is_none());
+    assert!(ACTIVE_SERVER.lock().is_none());
+}
+
 #[test]
 fn foreign_subscription_key_is_rejected_before_server_allocation() {
     let _guard = TEST_LOCK.lock().unwrap();

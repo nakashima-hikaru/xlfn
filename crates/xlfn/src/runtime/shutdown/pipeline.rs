@@ -613,7 +613,7 @@ impl ExecutionDrained {
     pub(crate) fn stop_producers<A: Addin>(
         self,
         deps: ShutdownDeps<'_, A>,
-        report_issue: impl FnMut(&crate::shutdown::CleanupIssue),
+        mut report_issue: impl FnMut(&crate::shutdown::CleanupIssue),
     ) -> Result<
         ProducersStopped,
         (
@@ -621,11 +621,6 @@ impl ExecutionDrained {
             crate::module_runtime::ModuleExportsDrained,
         ),
     > {
-        #[cfg(feature = "async")]
-        let mut report_issue = report_issue;
-        #[cfg(not(feature = "async"))]
-        let _ = report_issue;
-
         #[cfg(feature = "async")]
         let async_was_running = !deps.async_runtime().is_stopped();
         #[cfg(not(feature = "async"))]
@@ -658,8 +653,8 @@ impl ExecutionDrained {
         #[cfg(not(feature = "async"))]
         let async_stopped = AsyncStopped::feature_disabled();
 
-        let subscriptions_stopped = match deps.close_subscriptions() {
-            Ok(subscriptions_stopped) => subscriptions_stopped,
+        let subscription_outcome = match deps.close_subscriptions() {
+            Ok(outcome) => outcome,
             Err(error) => {
                 return Err((
                     ProducerStopFailure {
@@ -670,11 +665,14 @@ impl ExecutionDrained {
                 ));
             }
         };
+        for issue in &subscription_outcome.issues {
+            report_issue(issue);
+        }
 
         Ok(ProducersStopped {
             execution: self,
             async_stopped,
-            subscriptions_stopped,
+            subscriptions_stopped: subscription_outcome.certificate,
         })
     }
 }

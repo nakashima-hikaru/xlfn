@@ -26,7 +26,7 @@ use crate::error::InputError;
 use crate::formula_lifetime::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
 use crate::subscription::ServerGeneration;
 #[cfg(any(test, feature = "rtd"))]
-use crate::subscription::SubscriptionRuntime;
+use crate::subscription::{RuntimeShutdownOutcome, SubscriptionRuntime};
 use crate::sync::Mutex;
 use crate::win32::E_UNEXPECTED;
 use crate::win32::{
@@ -737,7 +737,7 @@ pub(crate) fn shutdown<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
 #[cfg(any(test, feature = "rtd"))]
 pub(crate) fn shutdown_subscriptions<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     subscriptions: &SubscriptionRuntime<E, C>,
-) -> XllResult<()> {
+) -> XllResult<RuntimeShutdownOutcome> {
     let mut shutdown_error = None;
     let retained = {
         let active = ACTIVE_SERVER.lock();
@@ -787,7 +787,7 @@ pub(crate) fn shutdown_subscriptions<E: crate::RtdSubscription, C: crate::RtdSou
             crate::diagnostics::report_no_unwind("IRtdServer::deferred termination join", &error);
             shutdown_error = Some(error);
         }
-        let close_result = subscriptions.close();
+        let close_result = subscriptions.close_for_shutdown();
         // Subscription producers stop before Addin::quiesce. Keep the handle
         // roots and their backend attached until shutdown(handles), which runs
         // after quiesce and layer disposal.
@@ -811,7 +811,7 @@ pub(crate) fn shutdown_subscriptions<E: crate::RtdSubscription, C: crate::RtdSou
             None => close_result,
         }
     } else {
-        let close_result = subscriptions.close();
+        let close_result = subscriptions.close_for_shutdown();
         retry_git_revocation_debt();
         close_result
     }

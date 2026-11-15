@@ -43,6 +43,7 @@ pub(crate) fn stopped_subscriptions(
         crate::excel_rtd::SubscriptionServiceSlot::<()>::new()
             .seal(generation)
             .expect("empty subscription slot seals")
+            .certificate
     }
 }
 

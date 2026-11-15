@@ -46,6 +46,22 @@ pub(crate) type SubscriptionRuntime<E = (), C = crate::DynamicRtdSources<E>> =
 pub(crate) type SubscriptionServerHandle<E = (), C = crate::DynamicRtdSources<E>> =
     server::SubscriptionServerHandle<crate::excel_rtd::RtdSubscriptionHost, E, C>;
 
+/// All runtime barriers completed. A joined publisher may still have failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RuntimeShutdownOutcome {
+    Clean,
+    PublisherPanicked,
+}
+
+impl RuntimeShutdownOutcome {
+    pub(crate) fn result(self) -> crate::XllResult<()> {
+        match self {
+            Self::Clean => Ok(()),
+            Self::PublisherPanicked => Err(crate::XllError::Panic),
+        }
+    }
+}
+
 #[cfg(feature = "rtd")]
 pub use budget::{RtdDelivery, RtdDeliveryPolicy, RtdFifo, RtdLatest, RtdSourceLimits};
 #[cfg(feature = "rtd")]

@@ -38,6 +38,7 @@ MODULES = {
     "kernel/service_slot/transaction": Path("crates/xlfn-kernel/src/service_slot/transaction.rs"),
     "async_udf": Path("crates/xlfn/src/async_udf.rs"),
     "async_udf/boundary": Path("crates/xlfn/src/async_udf/boundary.rs"),
+    "async_udf/builtin": Path("crates/xlfn/src/async_udf/builtin.rs"),
     "async_udf/completion": Path("crates/xlfn/src/async_udf/completion.rs"),
     "async_udf/instrumentation": Path("crates/xlfn/src/async_udf/instrumentation.rs"),
     "cancellation": Path("crates/xlfn/src/cancellation.rs"),
@@ -194,6 +195,8 @@ def check_fixture(
         else "xlfn"
     )
     features = (*FEATURES, *extra_features) if package == "xlfn" else ()
+    if fixture.module == "async_udf/builtin" and "async-builtin" not in features:
+        features = (*features, "async-builtin")
     command = [
         "cargo",
         "check",

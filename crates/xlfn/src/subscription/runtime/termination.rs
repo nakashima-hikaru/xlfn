@@ -170,7 +170,12 @@ impl<'runtime, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatal
             return Err(self.fail(error));
         }
         #[cfg(feature = "rtd")]
-        self.runtime.services.publishers.stop();
+        {
+            // Every returned outcome proves the worker exited. The pool
+            // retains a panic outcome separately from failures that block
+            // runtime reclamation.
+            self.runtime.services.publishers.stop();
+        }
         Ok(self.transition(WorkersJoined))
     }
 }

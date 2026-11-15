@@ -1,5 +1,6 @@
 //! Optional runnable pool; task lifecycle remains in the async runtime core.
 
+mod lifetime;
 mod queue;
 mod worker;
 
@@ -8,7 +9,7 @@ use crate::diagnostics::id::DiagnosticId;
 use crate::sync::{Condvar, Mutex, MutexGuard};
 use crate::{XllError, XllResult};
 use async_task::Runnable;
-use crossbeam_utils::sync::Parker;
+use lifetime::{PollerPool, Running};
 use queue::RunnableQueue;
 use std::cell::Cell;
 use std::future::Future;
@@ -17,7 +18,6 @@ use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread::{self, JoinHandle};
 use triomphe::Arc;
 use xlfn_kernel::operation_gate::OperationGate;
 
@@ -143,7 +143,7 @@ pub struct BuiltinAsyncExecutor {
 
 enum Lifecycle {
     Idle,
-    Running(Pool),
+    Running(PollerPool<Running>),
     Closing,
     Stopped(XllResult<()>),
 }
@@ -158,16 +158,16 @@ struct BuiltinStartup<'executor> {
 
 impl BuiltinStartup<'_> {
     fn start(mut self) -> XllResult<()> {
-        #[cfg(test)]
-        let fail_at = self.executor.fail_start_at;
-        #[cfg(not(test))]
-        let fail_at = None;
-        let pool = Pool::start(self.executor.config.poller_count.get(), fail_at)?;
+        let pool = PollerPool::start(
+            self.executor.config.poller_count.get(),
+            #[cfg(test)]
+            self.executor.fail_start_at,
+        )?;
         // This cell has one initializer: the consumed, locked Idle claim.
         // Failed startup leaves it untouched so a later attempt can retry.
         self.executor
             .shared
-            .get_or_init(|| Arc::clone(&pool.shared));
+            .get_or_init(|| Arc::clone(pool.shared()));
         *self.lifecycle = Lifecycle::Running(pool);
         Ok(())
     }
@@ -208,7 +208,7 @@ impl AsyncExecutor for BuiltinAsyncExecutor {
         let lifecycle = self.lifecycle.lock();
         match &*lifecycle {
             Lifecycle::Running(pool) => {
-                return if pool.shared.failed.load(Ordering::Acquire) {
+                return if pool.shared().failed.load(Ordering::Acquire) {
                     Err(pool_failure())
                 } else {
                     Ok(())
@@ -257,7 +257,7 @@ impl AsyncExecutor for BuiltinAsyncExecutor {
         {
             return Err(pool_failure());
         }
-        let mut pool = {
+        let pool = {
             let mut lifecycle = self.lifecycle.lock();
             loop {
                 match std::mem::replace(&mut *lifecycle, Lifecycle::Closing) {
@@ -272,13 +272,13 @@ impl AsyncExecutor for BuiltinAsyncExecutor {
                     }
                     Lifecycle::Closing => self.stopped.wait(&mut lifecycle),
                     Lifecycle::Running(pool) => {
-                        pool.shared.closing.store(true, Ordering::Release);
+                        pool.shared().closing.store(true, Ordering::Release);
                         break pool;
                     }
                 }
             }
         };
-        let result = pool.close_and_join();
+        let result = pool.shutdown().finish();
         *self.lifecycle.lock() = Lifecycle::Stopped(result.clone());
         self.stopped.notify_all();
         result
@@ -288,102 +288,6 @@ impl AsyncExecutor for BuiltinAsyncExecutor {
 impl Drop for BuiltinAsyncExecutor {
     fn drop(&mut self) {
         let _ = self.shutdown();
-    }
-}
-
-struct Pool {
-    shared: Arc<PoolShared>,
-    pollers: Vec<JoinHandle<()>>,
-}
-
-impl Pool {
-    fn start(poller_count: usize, fail_at: Option<usize>) -> XllResult<Self> {
-        let mut local_pollers = Vec::with_capacity(poller_count);
-        let mut stealers = Vec::with_capacity(poller_count);
-        let mut unparkers = Vec::with_capacity(poller_count);
-        for _ in 0..poller_count {
-            let local = crossbeam_deque::Worker::new_fifo();
-            stealers.push(local.stealer());
-            let parker = Parker::new();
-            unparkers.push(parker.unparker().clone());
-            local_pollers.push((local, parker));
-        }
-        let shared = Arc::new(PoolShared {
-            queue: RunnableQueue::new(stealers.into_boxed_slice(), unparkers.into_boxed_slice()),
-            scheduler_callbacks: OperationGate::new(),
-            live_pollers: AtomicUsize::new(0),
-            failed: AtomicBool::new(false),
-            closing: AtomicBool::new(false),
-            #[cfg(test)]
-            before_poll_hook: Mutex::new(None),
-            #[cfg(test)]
-            after_scheduler_drop_hook: Mutex::new(None),
-        });
-        let mut pool = Self {
-            shared,
-            pollers: Vec::with_capacity(poller_count),
-        };
-        for (index, (local, parker)) in local_pollers.into_iter().enumerate() {
-            if fail_at == Some(index) {
-                return Err(pool_failure());
-            }
-            pool.shared.live_pollers.fetch_add(1, Ordering::Relaxed);
-            let shared = Arc::clone(&pool.shared);
-            let spawned = thread::Builder::new()
-                .name(format!("xlfn-async-poller-{index}"))
-                .spawn(move || worker::run_poller(index, shared, local, parker));
-            let handle = match spawned {
-                Ok(handle) => handle,
-                Err(_) => {
-                    let _ = xlfn_kernel::invariant::checked_atomic_dec_release(
-                        &pool.shared.live_pollers,
-                    );
-                    return Err(pool_failure());
-                }
-            };
-            pool.pollers.push(handle);
-        }
-        Ok(pool)
-    }
-
-    fn close_and_join(&mut self) -> XllResult<()> {
-        self.shared.closing.store(true, Ordering::Release);
-        let self_callback = is_current_scheduler(&self.shared);
-        self.shared.scheduler_callbacks.begin_close();
-        if !self_callback {
-            self.shared
-                .scheduler_callbacks
-                .close_and_wait_begin()
-                .wait();
-        }
-        self.shared.queue.seal_and_wake_all();
-        // Drop may run inside a rejected runnable's user destructor. Its
-        // scheduler closure retains this shared allocation through callback
-        // release; waiting for our own admission here would deadlock.
-        let mut result = if self_callback {
-            Err(pool_failure())
-        } else {
-            Ok(())
-        };
-        for poller in self.pollers.drain(..) {
-            if poller.thread().id() == thread::current().id() {
-                // A final executor owner may be dropped by its own task. The
-                // poller retains the shared allocation until its sealed loop
-                // exits; direct shutdown rejects this self-join above.
-                result = Err(pool_failure());
-                continue;
-            }
-            if crate::panic_boundary::contain_panic(poller.join()).is_err() {
-                result = Err(XllError::Panic);
-            }
-        }
-        result
-    }
-}
-
-impl Drop for Pool {
-    fn drop(&mut self) {
-        let _ = self.close_and_join();
     }
 }
 

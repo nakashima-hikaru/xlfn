@@ -61,6 +61,9 @@ the pending handle authority; its fixtures reject a second delivery attempt.
 Executor close retains the runtime and executor through publication-reader and
 task drain. Only the drained stage exposes executor shutdown; abandoning any
 stage restores the sealed executor after releasing the registry close claim.
+Built-in poller fixtures enable `async-builtin` for their module. They check
+that spawn, join, and pool shutdown consume their respective owners and that
+the pool exposes its completion result only after all joins.
 
 Removal owners retain their issuing coordinator and observer from acquisition,
 so abandoning either purpose returns its module authority to that issuer. The

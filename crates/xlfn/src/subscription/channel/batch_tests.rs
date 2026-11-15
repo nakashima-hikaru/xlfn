@@ -250,6 +250,6 @@ fn miri_publisher_queue_warm_access_does_not_take_the_worker_lock() {
         worker.join().unwrap();
         assert!(Arc::ptr_eq(&queue, &result.unwrap().unwrap()));
     });
-    pool.stop();
+    assert!(matches!(pool.stop(), JoinedPublisher::Clean));
     assert!(matches!(pool.queue(), Err(XllError::Closing)));
 }

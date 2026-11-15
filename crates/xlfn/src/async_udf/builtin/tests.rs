@@ -1,10 +1,12 @@
 use super::*;
 use crate::async_udf::future::NoUnwindFuture;
+use crossbeam_utils::sync::Parker;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
 use std::task::{Context, Poll};
+use std::thread;
 use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -271,26 +273,33 @@ fn miri_retained_completed_task_waker_can_be_used_after_executor_drop() {
 }
 
 #[test]
-fn last_executor_owner_can_be_destroyed_by_its_own_poller() {
-    let executor = Arc::new(executor(2));
+fn miri_last_executor_owner_can_be_destroyed_by_its_own_poller() {
+    // Miri exercises self-destruction with one poller to avoid crossbeam's
+    // global peer-stealing collector. Native execution also joins a peer.
+    let executor = Arc::new(executor(if cfg!(miri) { 1 } else { 2 }));
     executor.start().unwrap();
     let shared = triomphe::Arc::clone(executor.shared.get().unwrap());
     let owned = Arc::clone(&executor);
     let (resume_tx, resume_rx) = mpsc::channel();
     let (dropped_tx, dropped_rx) = mpsc::channel();
+    let (exit_tx, exit_rx) = mpsc::channel();
     executor.submit(
         executor.reserve().unwrap(),
         task(async move {
             resume_rx.recv().unwrap();
+            assert!(matches!(owned.shutdown(), Err(XllError::Internal { .. })));
             drop(owned);
             dropped_tx.send(()).unwrap();
+            exit_rx.recv().unwrap();
         }),
     );
     drop(executor);
     resume_tx.send(()).unwrap();
     dropped_rx.recv_timeout(TIMEOUT).unwrap();
-    wait_until(|| shared.live_pollers.load(Ordering::Acquire) == 0);
     assert!(shared.queue.is_sealed());
+    assert_eq!(shared.live_pollers.load(Ordering::Acquire), 1);
+    exit_tx.send(()).unwrap();
+    wait_until(|| shared.live_pollers.load(Ordering::Acquire) == 0);
 }
 
 #[test]

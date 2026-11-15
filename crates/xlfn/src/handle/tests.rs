@@ -2294,12 +2294,18 @@ fn terminate_and_close_release_every_remaining_topic_once() {
 #[test]
 fn panicking_factory_does_not_publish_a_topic() {
     let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("panic");
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = runtime
-            .prepare::<DataRecord, _>(test_topic_key("panic"), || panic!("injected factory panic"));
+        let _ = runtime.prepare::<DataRecord, _>(key, || panic!("injected factory panic"));
     }));
     assert!(panic.is_err());
     assert_eq!(runtime.len(), 0);
+    assert!(
+        runtime
+            .prepare(key, || Ok(DataRecord(1)))
+            .unwrap()
+            .is_published()
+    );
 }
 
 #[test]
@@ -2320,6 +2326,29 @@ fn same_thread_factory_reentry_returns_an_error_without_waiting() {
         with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
         1
     );
+}
+
+#[test]
+fn miri_same_key_reentry_only_rejects_a_cycle_in_the_same_service() {
+    let outer = FormulaHandleService::new(8);
+    let inner = FormulaHandleService::new(8);
+    let key = test_topic_key("cross-service-reentry");
+    let outer_value = outer
+        .prepare(key, || {
+            let inner_value = inner.prepare(key, || {
+                assert!(matches!(
+                    outer.prepare::<DataRecord, _>(key, || panic!("cycle must not run")),
+                    Err(XllError::ReentrantCall)
+                ));
+                Ok(DataRecord(2))
+            })?;
+            assert!(inner_value.is_published());
+            Ok(DataRecord(1))
+        })
+        .unwrap();
+    assert!(outer_value.is_published());
+    assert_eq!(outer.len(), 1);
+    assert_eq!(inner.len(), 1);
 }
 
 #[test]

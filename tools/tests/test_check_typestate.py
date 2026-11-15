@@ -19,6 +19,7 @@ class PackageRoutingTests(unittest.TestCase):
             ("kernel/service_slot", "xlfn-kernel", ()),
             ("kernel/service_slot/transaction", "xlfn-kernel", ()),
             ("registration/host", "xlfn", (*checker.FEATURES, "blake3/pure")),
+            ("async_udf/builtin", "xlfn", (*checker.FEATURES, "blake3/pure", "async-builtin")),
             (
                 "subscription/data_plane/refresh/windows",
                 "xlfn",

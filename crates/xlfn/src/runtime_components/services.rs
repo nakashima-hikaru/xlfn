@@ -200,7 +200,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
     pub(crate) fn close_subscriptions(
         &self,
         generation: Option<RuntimeGeneration>,
-    ) -> crate::XllResult<crate::shutdown::SubscriptionsStopped> {
+    ) -> crate::XllResult<crate::shutdown::StopOutcome<crate::shutdown::SubscriptionsStopped>> {
         self.rtd.subscriptions.seal(generation)
     }
 

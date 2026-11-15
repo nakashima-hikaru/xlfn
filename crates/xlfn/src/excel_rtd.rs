@@ -234,14 +234,14 @@ pub(crate) fn shutdown_handle_topics(handles: &FormulaLifetimeBackend) -> XllRes
 #[cfg(feature = "rtd")]
 pub(crate) fn shutdown_subscriptions<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     subscriptions: &crate::subscription::SubscriptionRuntime<E, C>,
-) -> XllResult<()> {
+) -> XllResult<crate::subscription::RuntimeShutdownOutcome> {
     #[cfg(all(target_os = "windows", feature = "rtd"))]
     {
         windows::shutdown_subscriptions(subscriptions)
     }
     #[cfg(not(all(target_os = "windows", feature = "rtd")))]
     {
-        subscriptions.close()
+        subscriptions.close_for_shutdown()
     }
 }
 

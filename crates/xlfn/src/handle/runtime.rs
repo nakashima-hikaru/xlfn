@@ -51,26 +51,32 @@ enum WarmOutcome<F> {
 }
 
 thread_local! {
-    static ACTIVE_HANDLE_INITIALIZATION_KEYS: RefCell<Vec<HandleTopicKey>> = const { RefCell::new(Vec::new()) };
+    // The address is used only as identity. The guard borrows the service
+    // until the corresponding entry leaves this thread's stack.
+    static ACTIVE_HANDLE_INITIALIZATIONS: RefCell<Vec<(*const FormulaHandleService, HandleTopicKey)>> =
+        const { RefCell::new(Vec::new()) };
 }
 
-pub(crate) struct HandleInitializationGuard {
+struct HandleInitializationGuard<'service> {
+    service: &'service FormulaHandleService,
     key: HandleTopicKey,
     _thread_affine: PhantomData<Rc<()>>,
 }
 
 #[cfg(test)]
-static_assertions::assert_not_impl_any!(HandleInitializationGuard: Send, Sync);
+static_assertions::assert_not_impl_any!(HandleInitializationGuard<'static>: Send, Sync);
 
-impl HandleInitializationGuard {
-    pub(crate) fn enter(key: HandleTopicKey) -> XllResult<Self> {
-        ACTIVE_HANDLE_INITIALIZATION_KEYS.with(|active| {
+impl<'service> HandleInitializationGuard<'service> {
+    fn enter(service: &'service FormulaHandleService, key: HandleTopicKey) -> XllResult<Self> {
+        ACTIVE_HANDLE_INITIALIZATIONS.with(|active| {
             let mut active = active.borrow_mut();
-            if active.contains(&key) {
+            let identity = (std::ptr::from_ref(service), key);
+            if active.contains(&identity) {
                 return Err(XllError::ReentrantCall);
             }
-            active.push(key);
+            active.push(identity);
             Ok(Self {
+                service,
                 key,
                 _thread_affine: PhantomData,
             })
@@ -78,14 +84,14 @@ impl HandleInitializationGuard {
     }
 }
 
-impl Drop for HandleInitializationGuard {
+impl Drop for HandleInitializationGuard<'_> {
     fn drop(&mut self) {
-        ACTIVE_HANDLE_INITIALIZATION_KEYS.with(|active| {
+        ACTIVE_HANDLE_INITIALIZATIONS.with(|active| {
             let popped = active
                 .borrow_mut()
                 .pop()
                 .expect("handle initialization stack remains balanced");
-            debug_assert_eq!(popped, self.key);
+            debug_assert_eq!(popped, (std::ptr::from_ref(self.service), self.key));
         });
     }
 }
@@ -234,7 +240,7 @@ impl FormulaHandleService {
         K: Into<HandleTopicKey>,
     {
         let key = key.into();
-        let _active_initialization = HandleInitializationGuard::enter(key)?;
+        let _active_initialization = HandleInitializationGuard::enter(self, key)?;
         let _prepare = self.prepares.try_enter().ok_or(XllError::Closing)?;
         let _refinement_prepare = self.refinement.observe_prepare();
         let observe = match self.prepare_warm(key, observe)? {

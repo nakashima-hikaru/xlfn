@@ -748,7 +748,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
                     return Err(XllError::Closing);
                 }
             };
-            result
+            result.map(|outcome| outcome.certificate)
         }
     }
 
