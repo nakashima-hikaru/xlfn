@@ -770,7 +770,10 @@ pub(crate) mod test_support {
                     "expected argument inspection was skipped"
                 );
                 assert_eq!(script.unexpected_calls, 0);
-                assert!(script.release_statuses.is_empty(), "result was not released");
+                assert!(
+                    script.release_statuses.is_empty(),
+                    "result was not released"
+                );
                 assert_eq!(
                     script.calls.iter().filter(|call| **call == XL_FREE).count(),
                     expected.len(),

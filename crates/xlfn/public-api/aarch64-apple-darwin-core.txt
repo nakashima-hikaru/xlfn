@@ -76,6 +76,7 @@ pub struct xlfn::addin::MacroSheetContext<'call, A: xlfn::Addin>
 impl<'call, A: xlfn::Addin> xlfn::addin::MacroSheetContext<'call, A>
 pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<xlfn::value::ExcelValue>
 pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce_matrix<T>(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<xlfn::value::Matrix<T>> where T: for<'value> xlfn::value::FromExcel<'value>
+pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce_with<R>(&self, &xlfn::reference::ExcelReference<'_>, impl for<'value> core::ops::function::FnOnce(xlfn::value::raw::XlValueRef<'value>) -> xlfn::error::XllResult<R>) -> xlfn::error::XllResult<R>
 pub const fn xlfn::addin::MacroSheetContext<'call, A>::diagnostics(&self) -> &'call xlfn::diagnostics::DiagnosticHistory
 pub fn xlfn::addin::MacroSheetContext<'call, A>::sheet_name(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<alloc::string::String>
 pub const fn xlfn::addin::MacroSheetContext<'call, A>::state(&self) -> &'call <A as xlfn::Addin>::SharedState
@@ -1435,6 +1436,7 @@ pub struct xlfn::prelude::MacroSheetContext<'call, A: xlfn::Addin>
 impl<'call, A: xlfn::Addin> xlfn::addin::MacroSheetContext<'call, A>
 pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<xlfn::value::ExcelValue>
 pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce_matrix<T>(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<xlfn::value::Matrix<T>> where T: for<'value> xlfn::value::FromExcel<'value>
+pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce_with<R>(&self, &xlfn::reference::ExcelReference<'_>, impl for<'value> core::ops::function::FnOnce(xlfn::value::raw::XlValueRef<'value>) -> xlfn::error::XllResult<R>) -> xlfn::error::XllResult<R>
 pub const fn xlfn::addin::MacroSheetContext<'call, A>::diagnostics(&self) -> &'call xlfn::diagnostics::DiagnosticHistory
 pub fn xlfn::addin::MacroSheetContext<'call, A>::sheet_name(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<alloc::string::String>
 pub const fn xlfn::addin::MacroSheetContext<'call, A>::state(&self) -> &'call <A as xlfn::Addin>::SharedState
