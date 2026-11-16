@@ -4,7 +4,7 @@
 //! [`super::host::RegistrationHost`].  This module only decides how those
 //! host observations affect the registration journal and rollback policy.
 
-use super::host::{RegistrationHost, RegistrationMutation};
+use super::host::{CountedModuleName, RegistrationHost, RegistrationMutation};
 use super::preflight::{ValidatedRegistration, ValidatedRegistrationSet};
 use super::{
     PendingRegistration, RegistrationId, RegistrationTransactionError, UnknownRegistrationState,
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 pub(crate) struct HostRegistrar {
     module_path: PathBuf,
-    module_units: Vec<u16>,
+    module: CountedModuleName,
 }
 
 impl HostRegistrar {
@@ -33,9 +33,11 @@ impl HostRegistrar {
                 ),
             )));
         }
+        let module = CountedModuleName::from_units(&module_name.units)
+            .map_err(RegistrationTransactionError::new)?;
         Ok(Self {
             module_path: module_name.path,
-            module_units: module_name.units,
+            module,
         })
     }
 
@@ -75,7 +77,7 @@ impl HostRegistrar {
             ));
         }
 
-        let mutation = host.register(&self.module_units, descriptor);
+        let mutation = host.register(&self.module, descriptor);
         match mutation {
             RegistrationMutation::Applied { value, cleanup } => match cleanup {
                 Ok(()) => Ok(value),

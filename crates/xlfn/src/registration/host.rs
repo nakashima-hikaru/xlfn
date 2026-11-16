@@ -82,10 +82,10 @@ impl<'call> RegistrationHost<'call> {
     /// registration transaction layer.
     pub(crate) fn register(
         &self,
-        module_units: &[u16],
+        module: &CountedModuleName,
         registration: &ValidatedRegistration,
     ) -> RegistrationMutation<RegistrationId> {
-        match RegistrationCall::new(module_units, registration) {
+        match RegistrationCall::new(module, registration) {
             Ok(call) => call.invoke(self.excel),
             Err(error) => RegistrationMutation::Rejected { error },
         }
@@ -418,11 +418,50 @@ pub(crate) fn valid_registration_id(id: f64) -> bool {
     id.is_finite() && id != 0.0
 }
 
-/// Owns the operands for one synchronous `xlfRegister` call. Pointers are
-/// formed only after all inline and heap storage is in its invocation scope.
-struct RegistrationCall {
+/// A counted Excel module name owned once by the registration transaction.
+/// Every xlfRegister invocation borrows its unchanged UTF-16 buffer.
+pub(crate) struct CountedModuleName {
+    units: Box<[u16]>,
+}
+
+impl CountedModuleName {
+    pub(crate) fn from_units(units: &[u16]) -> XllResult<Self> {
+        if units.len() > crate::utf16::EXCEL_STRING_LIMIT {
+            return Err(XllError::input(
+                "registration",
+                InputError::TooLarge {
+                    limit: crate::utf16::EXCEL_STRING_LIMIT,
+                    actual: units.len(),
+                },
+            ));
+        }
+        let mut counted = Vec::with_capacity(units.len() + 1);
+        counted.push(units.len() as u16);
+        counted.extend_from_slice(units);
+        Ok(Self {
+            units: counted.into_boxed_slice(),
+        })
+    }
+
+    fn pointer(&self, oper: &mut XLOPER12) -> NonNull<XLOPER12> {
+        *oper = XLOPER12 {
+            value: XLOPER12Value {
+                // Excel reads the operand but its input ABI field is *mut.
+                string: self.units.as_ptr().cast_mut(),
+            },
+            xltype: XLTYPE_STR,
+        };
+        NonNull::from_mut(oper)
+    }
+}
+
+/// Owns the operands for one synchronous `xlfRegister` call. Its borrowed
+/// module path is retained by HostRegistrar, and pointers are formed only
+/// after all other operands have reached their invocation storage.
+struct RegistrationCall<'module> {
     excel_name: &'static str,
-    module: TemporaryString,
+    module: &'module CountedModuleName,
+    module_oper: XLOPER12,
     procedure: TemporaryString,
     type_text: TemporaryString,
     function_text: TemporaryString,
@@ -435,14 +474,18 @@ struct RegistrationCall {
     argument_help: SmallVec<[TemporaryString; 4]>,
 }
 
-impl RegistrationCall {
-    fn new(module_units: &[u16], registration: &ValidatedRegistration) -> XllResult<Self> {
+impl<'module> RegistrationCall<'module> {
+    fn new(
+        module: &'module CountedModuleName,
+        registration: &ValidatedRegistration,
+    ) -> XllResult<Self> {
         let descriptor = registration.descriptor();
         let (signature_length, signature) = registration.signature_text();
         let (argument_length, argument_names) = registration.argument_names();
         Ok(Self {
             excel_name: descriptor.excel_name,
-            module: TemporaryString::from_units(module_units)?,
+            module,
+            module_oper: XLOPER12::nil(),
             procedure: TemporaryString::new(descriptor.export_name)?,
             type_text: TemporaryString::from_validated_units(signature_length, signature),
             function_text: TemporaryString::new(descriptor.excel_name)?,
@@ -472,7 +515,7 @@ impl RegistrationCall {
 
     fn invoke(mut self, excel: ExcelHost<'_>) -> RegistrationMutation<RegistrationId> {
         let mut pointers: SmallVec<[NonNull<XLOPER12>; 16]> = smallvec::smallvec![
-            self.module.pointer(),
+            self.module.pointer(&mut self.module_oper),
             self.procedure.pointer(),
             self.type_text.pointer(),
             self.function_text.pointer(),
@@ -512,25 +555,6 @@ impl TemporaryString {
     pub(crate) fn new(text: &str) -> XllResult<Self> {
         let storage =
             crate::utf16::encode_counted(text, "registration", crate::utf16::EXCEL_STRING_LIMIT)?;
-        Ok(Self {
-            storage,
-            oper: XLOPER12::nil(),
-        })
-    }
-
-    pub(crate) fn from_units(units: &[u16]) -> XllResult<Self> {
-        if units.len() > crate::utf16::EXCEL_STRING_LIMIT {
-            return Err(XllError::input(
-                "registration",
-                InputError::TooLarge {
-                    limit: crate::utf16::EXCEL_STRING_LIMIT,
-                    actual: units.len(),
-                },
-            ));
-        }
-        let mut storage = SmallVec::with_capacity(units.len() + 1);
-        storage.push(units.len() as u16);
-        storage.extend_from_slice(units);
         Ok(Self {
             storage,
             oper: XLOPER12::nil(),
@@ -949,6 +973,7 @@ mod tests {
         const ABIS: [ArgumentAbi; 6] = [ArgumentAbi::Value12; 6];
         let module = "C:\\test\\addin.xll";
         let module_units = module.encode_utf16().collect::<Vec<_>>();
+        let prepared_module = CountedModuleName::from_units(&module_units).unwrap();
 
         // Ten fixed operands plus n help strings and their blank trailer
         // exercise empty, inline-full, and spilled help and pointer storage.
@@ -971,9 +996,18 @@ mod tests {
             let prepared = super::super::preflight_registration(&[descriptor]).unwrap();
             let script =
                 CallbackScript::install([Reply::success(XLF_REGISTER, XLOPER12::number(42.0))]);
+            let expected_module_pointer = prepared_module.units.as_ptr() as usize;
+            script.on_arguments(XLF_REGISTER, move |arguments| {
+                // SAFETY: the registration call retains its immutable module
+                // storage throughout the host callback.
+                let oper = unsafe { &*arguments[0] };
+                assert_eq!(oper.xltype, XLTYPE_STR);
+                // SAFETY: XLTYPE_STR selects the string pointer field.
+                assert_eq!(unsafe { oper.value.string } as usize, expected_module_pointer);
+            });
             let callbacks = HostCallbackSession::new();
             let host = RegistrationHost::new(&callbacks);
-            let outcome = host.register(&module_units, &prepared.as_slice()[0]);
+            let outcome = host.register(&prepared_module, &prepared.as_slice()[0]);
             assert!(
                 matches!(outcome, RegistrationMutation::Applied { value, cleanup: Ok(()) } if value.id == 42.0)
             );
@@ -1048,6 +1082,8 @@ mod tests {
         let inner = prepared.clone();
         let outer_module = "C:\\outer\\".repeat(500).encode_utf16().collect::<Vec<_>>();
         let inner_module = "C:\\inner\\".repeat(500).encode_utf16().collect::<Vec<_>>();
+        let outer_module = CountedModuleName::from_units(&outer_module).unwrap();
+        let inner_module = CountedModuleName::from_units(&inner_module).unwrap();
         let script = CallbackScript::install([
             Reply::success(XLF_REGISTER, XLOPER12::number(11.0)),
             Reply::success(XLF_REGISTER, XLOPER12::number(42.0)),
