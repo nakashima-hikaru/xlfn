@@ -195,13 +195,13 @@ pub(crate) fn validate_manifest_bytes(artifacts: &[VerifiedArtifact]) -> Package
 
     let actual = artifacts
         .iter()
-        .filter(|artifact| artifact.relative_path != Path::new("build-manifest.json"))
-        .collect::<Vec<_>>();
-    if described.len() != actual.len() {
+        .filter(|artifact| artifact.relative_path != Path::new("build-manifest.json"));
+    let actual_count = actual.clone().count();
+    if described.len() != actual_count {
         return Err(PackageError::InvalidBuildManifest(format!(
             "manifest describes {} files but package contains {}",
             described.len(),
-            actual.len()
+            actual_count
         )));
     }
     for artifact in actual {

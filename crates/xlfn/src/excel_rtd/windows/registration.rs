@@ -272,6 +272,16 @@ fn delete_registry_tree(path: &str) -> XllResult<()> {
     }
 }
 
+/// Filter the registry's wide key names before allocating UTF-8 strings.
+fn is_rtd_prog_id_utf16(name: &[u16]) -> bool {
+    let prefix = RTD_PROG_ID_PREFIX.as_bytes();
+    name.len() >= prefix.len()
+        && name[..prefix.len()]
+            .iter()
+            .zip(prefix)
+            .all(|(&unit, &byte)| unit == u16::from(byte))
+}
+
 fn rtd_prog_ids() -> XllResult<Vec<String>> {
     let classes_path = wide_nul("Software\\Classes");
     let mut classes: HKEY = ptr::null_mut();
@@ -330,9 +340,9 @@ fn rtd_prog_ids() -> XllResult<Vec<String>> {
             return Err(registry_error("RegEnumKeyExW", status));
         }
 
-        let value = String::from_utf16_lossy(&name[..length as usize]);
-        if value.starts_with(RTD_PROG_ID_PREFIX) {
-            names.push(value);
+        let units = &name[..length as usize];
+        if is_rtd_prog_id_utf16(units) {
+            names.push(String::from_utf16_lossy(units));
         }
 
         index += 1;
@@ -550,4 +560,29 @@ pub(super) fn guid_braced(guid: GUID) -> String {
         guid.data4[6],
         guid.data4[7],
     )
+}
+
+#[cfg(test)]
+mod registry_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn filter_registry_keys_before_utf16_decoding() {
+        let matching = "XlFnRtd_00112233445566778899AABBCCDDEEFF"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        let unrelated = "OtherComponent_価格".encode_utf16().collect::<Vec<_>>();
+        let upper = "XLFNRTD_00112233445566778899AABBCCDDEEFF"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        assert!(is_rtd_prog_id_utf16(&matching));
+        assert!(!is_rtd_prog_id_utf16(&matching[..7]));
+        assert!(!is_rtd_prog_id_utf16(&unrelated));
+        // Preserve the previous starts_with case-sensitive matching policy.
+        assert!(!is_rtd_prog_id_utf16(&upper));
+
+        let mut malformed_suffix = "XlFnRtd_".encode_utf16().collect::<Vec<_>>();
+        malformed_suffix.push(0xD800);
+        assert!(is_rtd_prog_id_utf16(&malformed_suffix));
+    }
 }

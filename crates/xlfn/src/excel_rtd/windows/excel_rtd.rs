@@ -10,8 +10,12 @@ use super::subscription_backend::BackendSubscriptions;
 use crate::XllError;
 use crate::XllResult;
 #[cfg(feature = "handles")]
+use crate::excel_rtd::counted_string::CountedString;
+#[cfg(any(test, feature = "rtd"))]
+use crate::excel_rtd::counted_string::InlineCountedTransport;
+#[cfg(feature = "handles")]
 use crate::excel_rtd::counted_string::handle_matches;
-use crate::excel_rtd::counted_string::{CountedString, invoke_rtd};
+use crate::excel_rtd::counted_string::invoke_rtd;
 #[cfg(feature = "handles")]
 use crate::formula_lifetime::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
 use crate::host_api::ExcelHost;
@@ -91,7 +95,7 @@ pub(crate) fn observe_subscription<E: crate::RtdSubscription, C: crate::RtdSourc
     };
 
     let key_transport = key.to_transport();
-    let topic = CountedString::new(key_transport.as_str())?;
+    let topic = InlineCountedTransport::new(key_transport.as_bytes());
     if let Some(subscription_server) = &ensured.subscription_server {
         subscription_server.claim(*key)?;
     }
