@@ -9,12 +9,12 @@ use super::subscription_backend::BackendSubscriptions;
 #[cfg(feature = "handles")]
 use crate::XllError;
 use crate::XllResult;
+#[cfg(feature = "handles")]
+use crate::excel_rtd::counted_string::CountedString;
 #[cfg(any(test, feature = "rtd"))]
 use crate::excel_rtd::counted_string::InlineCountedTransport;
 #[cfg(feature = "handles")]
 use crate::excel_rtd::counted_string::handle_matches;
-#[cfg(feature = "handles")]
-use crate::excel_rtd::counted_string::CountedString;
 use crate::excel_rtd::counted_string::invoke_rtd;
 #[cfg(feature = "handles")]
 use crate::formula_lifetime::{FormulaLifetimeBackend, FormulaLifetimeGeneration};

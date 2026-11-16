@@ -1003,7 +1003,10 @@ mod tests {
                 let oper = unsafe { &*arguments[0] };
                 assert_eq!(oper.xltype, XLTYPE_STR);
                 // SAFETY: XLTYPE_STR selects the string pointer field.
-                assert_eq!(unsafe { oper.value.string } as usize, expected_module_pointer);
+                assert_eq!(
+                    unsafe { oper.value.string } as usize,
+                    expected_module_pointer
+                );
             });
             let callbacks = HostCallbackSession::new();
             let host = RegistrationHost::new(&callbacks);
