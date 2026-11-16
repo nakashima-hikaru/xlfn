@@ -13,6 +13,7 @@ use super::value::{IntoRtdValue, StoredRtdValue};
 use crate::sync::{Condvar, Mutex, MutexGuard};
 use crate::{ExcelError, XllError, XllResult};
 use std::collections::VecDeque;
+use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
@@ -22,6 +23,14 @@ use std::thread::{Builder, JoinHandle, ThreadId};
 use std::time::Duration;
 use triomphe::Arc;
 use xlfn_kernel::rollback::{Rollback, RollbackGuard};
+
+struct TopicDiagnostic<'topic>(&'topic RtdTopic);
+
+impl fmt::Debug for TopicDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_list().entries(self.0.parts()).finish()
+    }
+}
 
 /// Cell behavior when an RTD producer returns an error or panics.
 ///
@@ -1195,7 +1204,7 @@ impl<D: RtdDeliveryPolicy> Channel<D> {
             crate::diagnostics::report_no_unwind(
                 "RTD producer",
                 &XllError::RtdProducerFailure {
-                    topic: format!("{:?}", topic.parts().collect::<Vec<_>>()),
+                    topic: format!("{:?}", TopicDiagnostic(topic)),
                     source: Box::new(error.clone()),
                 },
             );
@@ -1888,19 +1897,15 @@ mod tests {
                             })
                         })
                         .with_error_policy(policy);
-                    let subscription = source
-                        .subscribe(
-                            &RtdTopic::single("diagnostic-channel-policy").unwrap(),
-                            sink,
-                        )
-                        .unwrap();
+                    let topic = RtdTopic::new(["diagnostic-channel-policy", "引用\"\n"]).unwrap();
+                    let subscription = source.subscribe(&topic, sink).unwrap();
                     let sender = sender_rx.recv_timeout(DEADLINE).unwrap();
                     assert!(sender.wait_closed(DEADLINE));
                     let event = events.recv_timeout(DEADLINE).unwrap();
                     let XllError::RtdProducerFailure { topic, source } = event else {
                         panic!("missing producer diagnostic context");
                     };
-                    assert_eq!(topic, "[\"diagnostic-channel-policy\"]");
+                    assert_eq!(topic, r#"["diagnostic-channel-policy", "引用\"\n"]"#);
                     if panic {
                         assert!(matches!(*source, XllError::Panic));
                     } else {

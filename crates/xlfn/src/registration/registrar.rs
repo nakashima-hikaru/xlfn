@@ -4,7 +4,9 @@
 //! [`super::host::RegistrationHost`].  This module only decides how those
 //! host observations affect the registration journal and rollback policy.
 
-use super::host::{CountedModuleName, RegistrationHost, RegistrationMutation};
+use super::host::{
+    CountedModuleName, RegistrationHost, RegistrationMutation, RegistrationTextCache,
+};
 use super::preflight::{ValidatedRegistration, ValidatedRegistrationSet};
 use super::{
     PendingRegistration, RegistrationId, RegistrationTransactionError, UnknownRegistrationState,
@@ -51,10 +53,11 @@ impl HostRegistrar {
         host: &RegistrationHost<'_>,
         prepared: &ValidatedRegistrationSet,
     ) -> Result<super::SuccessfulRegistrations, RegistrationTransactionError> {
+        let mut text = RegistrationTextCache::default();
         let result = register_all_transaction(
             host,
             prepared.as_slice(),
-            |host, registration| self.register_one(host, registration),
+            |host, registration| self.register_one(host, registration, &mut text),
             Self::unregister_pending,
         );
         result.map(super::SuccessfulRegistrations::from_applied)
@@ -64,6 +67,7 @@ impl HostRegistrar {
         &self,
         host: &RegistrationHost<'_>,
         descriptor: &ValidatedRegistration,
+        text: &mut RegistrationTextCache,
     ) -> Result<RegistrationId, RegistrationTransactionError> {
         let names = descriptor.descriptor();
         if host
@@ -77,7 +81,7 @@ impl HostRegistrar {
             ));
         }
 
-        let mutation = host.register(&self.module, descriptor);
+        let mutation = host.register(&self.module, descriptor, text);
         match mutation {
             RegistrationMutation::Applied { value, cleanup } => match cleanup {
                 Ok(()) => Ok(value),

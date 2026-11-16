@@ -885,9 +885,10 @@ mod tests {
 #[cfg(test)]
 mod coerce_tests {
     use super::*;
+    use crate::error::InputError;
     use crate::reference::FromExcelReference;
     use crate::registration::host::test_support::{CallbackScript, Reply};
-    use crate::value::raw::XlArrayRef;
+    use crate::value::raw::{CoercedGridRef, XlArrayRef};
     use std::cell::Cell;
     use xlfn_sys::{
         XLOPER12Array, XLOPER12SRef, XLOPER12Value, XLREF12, XLTYPE_MULTI, XLTYPE_SREF, XLTYPE_STR,
@@ -963,6 +964,119 @@ mod coerce_tests {
         assert!(visited.get());
         assert_eq!(sum, 4.0);
         script.assert_calls(&[XL_COERCE]);
+    }
+
+    #[test]
+    fn miri_coerce_grid_checks_only_visited_cells_and_preserves_cleanup_priority() {
+        use xlfn_sys::XLRET_FAILED;
+        fn sum(value: XlValueRef<'_>, count: usize) -> XllResult<f64> {
+            let grid = CoercedGridRef::new(value)?;
+            assert_eq!(
+                grid.shape(),
+                crate::value::Shape {
+                    rows: 1,
+                    columns: 3
+                }
+            );
+            assert_eq!(grid.len(), 3);
+            grid.try_cells()
+                .take(count)
+                .try_fold(0.0, |sum, cell| Ok(sum + cell?.as_f64()?))
+        }
+        let mut cells = [
+            XLOPER12::number(1.5),
+            XLOPER12::integer(2),
+            XLOPER12 {
+                xltype: 0,
+                ..XLOPER12::missing()
+            },
+        ];
+        let result = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    rows: 1,
+                    columns: 3,
+                    values: cells.as_mut_ptr(),
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+        let script = CallbackScript::install([
+            Reply::success(XL_COERCE, result),
+            Reply::success(XL_COERCE, result).release_status(XLRET_FAILED),
+            Reply::success(XL_COERCE, result).release_status(XLRET_FAILED),
+            Reply::success(XL_COERCE, result),
+        ]);
+        let callbacks = HostCallbackSession::new();
+        let host = ExcelHost::new(&callbacks);
+        let reference_raw = reference_raw();
+        let reference = reference(&reference_raw);
+        assert_eq!(
+            host.coerce_with(&reference, |value| sum(value, 2)).unwrap(),
+            3.5
+        );
+        assert!(matches!(
+            host.coerce_with(&reference, |value| sum(value, 3)),
+            Err(XllError::Input {
+                argument: "reference",
+                reason: InputError::Malformed("unknown base xltype")
+            })
+        ));
+        assert!(matches!(
+            host.coerce_with(&reference, |value| sum(value, 2)),
+            Err(XllError::ExcelApi {
+                function: ExcelApiFunction::Free,
+                ..
+            })
+        ));
+        assert!(matches!(
+            host.coerce_with(&reference, |value| XlArrayRef::from_excel(
+                value,
+                "reference"
+            )
+            .map(|_| ())),
+            Err(XllError::Input {
+                argument: "reference",
+                reason: InputError::Malformed("unknown base xltype")
+            })
+        ));
+        script.assert_calls(&[XL_COERCE; 4]);
+    }
+
+    #[test]
+    fn coerce_grid_accepts_a_scalar_and_rejects_invalid_array_storage_before_iteration() {
+        let number = XLOPER12::number(9.5);
+        let grid = CoercedGridRef::new(XlValueRef::from_array_cell(&number).unwrap()).unwrap();
+        assert_eq!(
+            grid.shape(),
+            crate::value::Shape {
+                rows: 1,
+                columns: 1
+            }
+        );
+        assert!(!grid.is_empty());
+        assert_eq!(
+            grid.try_cells().next().unwrap().unwrap().as_f64().unwrap(),
+            9.5
+        );
+
+        let missing_buffer = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    rows: 1,
+                    columns: 1,
+                    values: std::ptr::null_mut(),
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+        assert!(matches!(
+            CoercedGridRef::new(XlValueRef::from_array_cell(&missing_buffer).unwrap()),
+            Err(XllError::Input {
+                argument: "reference",
+                reason: InputError::NullPointer
+            })
+        ));
     }
 
     #[test]

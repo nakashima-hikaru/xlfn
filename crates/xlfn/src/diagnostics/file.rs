@@ -79,21 +79,40 @@ fn bounded_diagnostic_text(value: &str) -> Cow<'_, str> {
 #[derive(Default)]
 struct BoundedDiagnosticText {
     text: String,
+    source_bytes: usize,
+    prefix_bytes: usize,
     truncated: bool,
 }
+
+const DIAGNOSTIC_PREFIX_BYTES: usize =
+    DIAGNOSTIC_TEXT_MAX_BYTES - DIAGNOSTIC_TRUNCATION_SUFFIX.len();
 
 impl fmt::Write for BoundedDiagnosticText {
     fn write_str(&mut self, value: &str) -> fmt::Result {
         if self.truncated {
             return Err(fmt::Error);
         }
-        let remaining = DIAGNOSTIC_TEXT_MAX_BYTES - self.text.len();
-        if value.len() <= remaining {
-            self.text.push_str(value);
+        let remaining = DIAGNOSTIC_TEXT_MAX_BYTES - self.source_bytes;
+        let end = value.floor_char_boundary(remaining.min(value.len()));
+        let accepted = &value[..end];
+        self.text.reserve(end);
+        if self.source_bytes < DIAGNOSTIC_PREFIX_BYTES {
+            // Control characters may shrink. Save the normalized length at
+            // the source boundary where a truncation suffix would begin.
+            let prefix_limit = DIAGNOSTIC_PREFIX_BYTES - self.source_bytes;
+            let prefix_end = accepted.floor_char_boundary(prefix_limit.min(end));
+            let (prefix, tail) = accepted.split_at(prefix_end);
+            self.push_sanitized(prefix);
+            self.prefix_bytes = self.text.len();
+            self.push_sanitized(tail);
+        } else {
+            self.push_sanitized(accepted);
+        }
+        self.source_bytes += end;
+
+        if end == value.len() {
             return Ok(());
         }
-        let end = value.floor_char_boundary(remaining.min(value.len()));
-        self.text.push_str(&value[..end]);
         self.truncated = true;
         // Display implementations propagate this to stop formatting fields
         // whose output can no longer appear in the record.
@@ -102,11 +121,21 @@ impl fmt::Write for BoundedDiagnosticText {
 }
 
 impl BoundedDiagnosticText {
+    fn push_sanitized(&mut self, value: &str) {
+        let mut start = 0;
+        for (index, character) in value.char_indices() {
+            if character.is_control() {
+                self.text.push_str(&value[start..index]);
+                self.text.push(' ');
+                start = index + character.len_utf8();
+            }
+        }
+        self.text.push_str(&value[start..]);
+    }
+
     fn finish(mut self) -> String {
         if self.truncated {
-            let limit = DIAGNOSTIC_TEXT_MAX_BYTES - DIAGNOSTIC_TRUNCATION_SUFFIX.len();
-            self.text
-                .truncate(self.text.floor_char_boundary(limit.min(self.text.len())));
+            self.text.truncate(self.prefix_bytes);
             self.text.push_str(DIAGNOSTIC_TRUNCATION_SUFFIX);
         }
         self.text
@@ -119,15 +148,7 @@ pub(crate) fn bounded_diagnostic_error(error: &crate::XllError) -> String {
         &mut output,
         format_args!("{}", super::payload::TracedError(error)),
     );
-    let formatted = output.finish();
-    if formatted.chars().any(char::is_control) {
-        formatted
-            .chars()
-            .map(|c| if c.is_control() { ' ' } else { c })
-            .collect()
-    } else {
-        formatted
-    }
+    output.finish()
 }
 
 pub(crate) struct FileDiagnosticSink {
@@ -549,6 +570,40 @@ mod bounded_text_tests {
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect();
         assert_eq!(bounded_diagnostic_error(&error), expected);
+    }
+
+    #[test]
+    fn split_writes_preserve_source_byte_boundaries_after_sanitization() {
+        use std::fmt::Write as _;
+
+        let controls = "\u{0085}\u{009f}\n\t\0".repeat(16);
+        let over_budget = "\n".repeat(DIAGNOSTIC_TRUNCATION_SUFFIX.len() + 1);
+        for boundary in [DIAGNOSTIC_PREFIX_BYTES, DIAGNOSTIC_TEXT_MAX_BYTES] {
+            for character in ["é", "\u{0085}", "🦀"] {
+                for offset in 0..character.len() {
+                    let padding = "x".repeat(boundary - controls.len() - offset);
+                    for tail in ["", over_budget.as_str()] {
+                        let source = [&controls, &padding, character, tail].concat();
+                        let expected: String = bounded_diagnostic_text(&source)
+                            .chars()
+                            .map(|c| if c.is_control() { ' ' } else { c })
+                            .collect();
+                        let marker = controls.len() + padding.len();
+                        for split in [0, controls.len(), marker, marker + character.len()] {
+                            let mut output = BoundedDiagnosticText::default();
+                            let result = output
+                                .write_str(&source[..split])
+                                .and_then(|()| output.write_str(&source[split..]));
+                            assert_eq!(result.is_err(), source.len() > DIAGNOSTIC_TEXT_MAX_BYTES);
+                            if result.is_err() {
+                                assert!(output.write_str("ignored").is_err());
+                            }
+                            assert_eq!(output.finish(), expected);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

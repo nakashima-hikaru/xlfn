@@ -5,8 +5,8 @@ use super::{ExcelNameKey, RegistrationDescriptor};
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashSet;
 
-/// Checked metadata and the layout of its generated Excel strings. Each
-/// registration call encodes its own arguments immediately before invocation.
+/// Checked metadata and the layout of its generated Excel strings.
+/// A registration call materializes or borrows the counted text it needs.
 #[derive(Clone)]
 pub(crate) struct ValidatedRegistration {
     descriptor: RegistrationDescriptor,

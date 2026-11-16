@@ -1024,7 +1024,8 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
     ///
     /// The visitor runs while the callback result is still live; xlFree is
     /// attempted after the visitor returns, including if it returns an error.
-    /// The visitor may read individual cells as needed. It cannot retain
+    /// Use [`CoercedGridRef`](crate::value::raw::CoercedGridRef) to validate and
+    /// convert cells as the visitor reads them. The visitor cannot retain
     /// references into the temporary result after this method returns.
     /// Nested Excel callbacks use this invocation's existing callback session.
     ///
@@ -1035,19 +1036,18 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
     /// ```rust
     /// use xlfn::addin::{Addin, MacroSheetContext};
     /// use xlfn::reference::ExcelReference;
-    /// use xlfn::value::{FromExcel, raw::{XlArrayRef, XlValueType}};
+    /// use xlfn::value::raw::CoercedGridRef;
     /// use xlfn::XllResult;
     ///
-    /// fn sum<A: Addin>(
+    /// fn sum_first_ten<A: Addin>(
     ///     context: &MacroSheetContext<'_, A>,
     ///     reference: &ExcelReference<'_>,
     /// ) -> XllResult<f64> {
-    ///     context.coerce_with(reference, |value| match value.value_type() {
-    ///         XlValueType::Multi => {
-    ///             let array = XlArrayRef::from_excel(value, "reference")?;
-    ///             array.cells().try_fold(0.0, |sum, cell| Ok(sum + cell.as_f64()?))
-    ///         }
-    ///         _ => value.as_f64(),
+    ///     context.coerce_with(reference, |value| {
+    ///         CoercedGridRef::new(value)?
+    ///             .try_cells()
+    ///             .take(10)
+    ///             .try_fold(0.0, |sum, cell| Ok(sum + cell?.as_f64()?))
     ///     })
     /// }
     /// ```
@@ -1055,14 +1055,14 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
     /// ```compile_fail
     /// use xlfn::addin::{Addin, MacroSheetContext};
     /// use xlfn::reference::ExcelReference;
-    /// use xlfn::value::raw::XlValueRef;
+    /// use xlfn::value::raw::CoercedGridRef;
     /// use xlfn::XllResult;
     ///
     /// fn escape<'borrow, A: Addin>(
     ///     context: &MacroSheetContext<'_, A>,
     ///     reference: &ExcelReference<'_>,
-    /// ) -> XllResult<XlValueRef<'borrow>> {
-    ///     context.coerce_with(reference, |value| Ok(value))
+    /// ) -> XllResult<CoercedGridRef<'borrow>> {
+    ///     context.coerce_with(reference, CoercedGridRef::new)
     /// }
     /// ```
     pub fn coerce_with<R>(

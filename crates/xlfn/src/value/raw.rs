@@ -100,6 +100,7 @@ impl std::fmt::Debug for XlValueRef<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum GridView<'call> {
     Scalar(XlValueRef<'call>),
     Multi {
@@ -112,23 +113,29 @@ pub(crate) enum GridView<'call> {
 impl<'call> GridView<'call> {
     pub(crate) fn from_value(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         if value.value_type() == XlValueType::Multi {
-            let array = value.array(argument)?;
-            let len = (array.rows as usize) * (array.columns as usize);
-            let values = if len == 0 {
-                &[]
-            } else {
-                // SAFETY: `XlValueRef::array` validated the non-null pointer,
-                // alignment, byte size, and contiguous element range.
-                unsafe { slice::from_raw_parts(array.values.cast_const(), len) }
-            };
-            Ok(Self::Multi {
-                rows: array.rows as usize,
-                columns: array.columns as usize,
-                values,
-            })
+            Self::from_array(value, argument)
         } else {
             Ok(Self::Scalar(value))
         }
+    }
+
+    fn from_array(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        let array = value.array(argument)?;
+        let rows = array.rows as usize;
+        let columns = array.columns as usize;
+        let len = rows * columns;
+        let values = if len == 0 {
+            &[]
+        } else {
+            // SAFETY: XlValueRef::array validated the non-null pointer,
+            // alignment, byte size, and contiguous element range.
+            unsafe { slice::from_raw_parts(array.values.cast_const(), len) }
+        };
+        Ok(Self::Multi {
+            rows,
+            columns,
+            values,
+        })
     }
 
     pub(crate) const fn shape(&self) -> (usize, usize) {
@@ -392,25 +399,14 @@ impl<'call> XlArrayRef<'call> {
     }
 
     fn from_value(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        let array = value.array(argument)?;
-        let rows = array.rows as usize;
-        let columns = array.columns as usize;
-        let len = rows * columns;
-        let cells = if len == 0 {
-            &[]
-        } else {
-            // SAFETY: XlValueRef::array validated the non-null pointer,
-            // dimensions, byte size, and lifetime of this contiguous range.
-            unsafe { slice::from_raw_parts(array.values.cast_const(), len) }
-        };
+        let grid = GridView::from_array(value, argument)?;
+        let (rows, columns) = grid.shape();
+        let cells = grid.cells();
         // Indexed access and iteration expose infallible XlValueRef values,
         // whose semantic type must already be valid. Check only the cell
         // headers here; payload conversion and string decoding remain lazy.
         for cell in cells {
-            XlValueRef::from_array_cell(cell).map_err(|error| match error {
-                XllError::Input { reason, .. } => XllError::Input { argument, reason },
-                other => other,
-            })?;
+            checked_grid_cell(cell, argument)?;
         }
         Ok(Self {
             cells,
@@ -479,6 +475,69 @@ impl<'call> FromExcel<'call> for XlArrayRef<'call> {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         Self::from_value(value, argument)
     }
+}
+
+/// A scoped grid for visiting the result of Excel's xlCoerce callback.
+///
+/// Construction checks the shape and backing buffer of an array. Each cell's
+/// header is validated when the iterator yields it. A scalar is a one-cell
+/// grid. Use this view inside
+/// [`MacroSheetContext::coerce_with`](crate::addin::MacroSheetContext::coerce_with)
+/// for partial reads or single-pass conversion.
+#[derive(Clone, Copy)]
+pub struct CoercedGridRef<'call>(GridView<'call>);
+
+impl std::fmt::Debug for CoercedGridRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoercedGridRef")
+            .field("shape", &self.shape())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'call> CoercedGridRef<'call> {
+    /// Borrows a scalar or a structurally valid rectangular array.
+    pub fn new(value: XlValueRef<'call>) -> XllResult<Self> {
+        GridView::from_value(value, "reference").map(Self)
+    }
+
+    /// Returns the rectangular shape.
+    #[must_use]
+    pub const fn shape(self) -> Shape {
+        let (rows, columns) = self.0.shape();
+        Shape { rows, columns }
+    }
+
+    /// Returns the number of cells, including blank and missing cells.
+    #[must_use]
+    pub fn len(self) -> usize {
+        self.0.cells().len()
+    }
+
+    /// Returns whether the grid has no cells.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.0.cells().is_empty()
+    }
+
+    /// Iterates in row-major order, checking each cell's header as it is read.
+    /// Payload validation occurs when the caller converts the yielded value.
+    pub fn try_cells(self) -> impl ExactSizeIterator<Item = XllResult<XlValueRef<'call>>> + 'call {
+        self.0
+            .cells()
+            .iter()
+            .map(|cell| checked_grid_cell(cell, "reference"))
+    }
+}
+
+fn checked_grid_cell<'call>(
+    cell: &'call XLOPER12,
+    argument: &'static str,
+) -> XllResult<XlValueRef<'call>> {
+    XlValueRef::from_array_cell(cell).map_err(|error| match error {
+        XllError::Input { reason, .. } => XllError::Input { argument, reason },
+        other => other,
+    })
 }
 
 #[repr(u8)]

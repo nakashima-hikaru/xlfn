@@ -3304,6 +3304,25 @@ impl core::marker::Unpin for xlfn::value::raw::XlValueType
 impl core::marker::UnsafeUnpin for xlfn::value::raw::XlValueType
 impl core::panic::unwind_safe::RefUnwindSafe for xlfn::value::raw::XlValueType
 impl core::panic::unwind_safe::UnwindSafe for xlfn::value::raw::XlValueType
+pub struct xlfn::value::raw::CoercedGridRef<'call>(_)
+impl<'call> xlfn::value::raw::CoercedGridRef<'call>
+pub fn xlfn::value::raw::CoercedGridRef<'call>::is_empty(self) -> bool
+pub fn xlfn::value::raw::CoercedGridRef<'call>::len(self) -> usize
+pub fn xlfn::value::raw::CoercedGridRef<'call>::new(xlfn::value::raw::XlValueRef<'call>) -> xlfn::error::XllResult<Self>
+pub const fn xlfn::value::raw::CoercedGridRef<'call>::shape(self) -> xlfn::value::Shape
+pub fn xlfn::value::raw::CoercedGridRef<'call>::try_cells(self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = xlfn::error::XllResult<xlfn::value::raw::XlValueRef<'call>>> + 'call
+impl core::fmt::Debug for xlfn::value::raw::CoercedGridRef<'_>
+pub fn xlfn::value::raw::CoercedGridRef<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'call> core::clone::Clone for xlfn::value::raw::CoercedGridRef<'call>
+pub fn xlfn::value::raw::CoercedGridRef<'call>::clone(&self) -> Self
+impl<'call> core::marker::Copy for xlfn::value::raw::CoercedGridRef<'call>
+impl<'call> core::marker::Freeze for xlfn::value::raw::CoercedGridRef<'call>
+impl<'call> !core::marker::Send for xlfn::value::raw::CoercedGridRef<'call>
+impl<'call> !core::marker::Sync for xlfn::value::raw::CoercedGridRef<'call>
+impl<'call> core::marker::Unpin for xlfn::value::raw::CoercedGridRef<'call>
+impl<'call> core::marker::UnsafeUnpin for xlfn::value::raw::CoercedGridRef<'call>
+impl<'call> core::panic::unwind_safe::RefUnwindSafe for xlfn::value::raw::CoercedGridRef<'call>
+impl<'call> core::panic::unwind_safe::UnwindSafe for xlfn::value::raw::CoercedGridRef<'call>
 pub struct xlfn::value::raw::XlArrayRef<'call>
 impl<'call> xlfn::value::raw::XlArrayRef<'call>
 pub fn xlfn::value::raw::XlArrayRef<'call>::cells(self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = xlfn::value::raw::XlValueRef<'call>> + 'call
