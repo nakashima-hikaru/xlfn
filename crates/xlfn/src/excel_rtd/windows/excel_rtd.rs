@@ -13,7 +13,9 @@ use crate::XllResult;
 use crate::excel_rtd::counted_string::InlineCountedTransport;
 #[cfg(feature = "handles")]
 use crate::excel_rtd::counted_string::handle_matches;
-use crate::excel_rtd::counted_string::{CountedString, invoke_rtd};
+#[cfg(feature = "handles")]
+use crate::excel_rtd::counted_string::CountedString;
+use crate::excel_rtd::counted_string::invoke_rtd;
 #[cfg(feature = "handles")]
 use crate::formula_lifetime::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
 use crate::host_api::ExcelHost;
