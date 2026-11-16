@@ -717,7 +717,7 @@ pub(crate) mod test_support {
     struct ScriptState {
         replies: VecDeque<Reply>,
         calls: Vec<i32>,
-        release_status: Option<i32>,
+        release_statuses: Vec<i32>,
         unexpected_calls: usize,
         registration_arguments: Vec<RegisterArgument>,
         registration_arguments_at_release: Vec<RegisterArgument>,
@@ -770,7 +770,7 @@ pub(crate) mod test_support {
                     "expected argument inspection was skipped"
                 );
                 assert_eq!(script.unexpected_calls, 0);
-                assert!(script.release_status.is_none(), "result was not released");
+                assert!(script.release_statuses.is_empty(), "result was not released");
                 assert_eq!(
                     script.calls.iter().filter(|call| **call == XL_FREE).count(),
                     expected.len(),
@@ -875,7 +875,7 @@ pub(crate) mod test_support {
                         unsafe { read_registration_arguments(&script.registration_pointers) };
                     script.registration_pointers.clear();
                 }
-                return match script.release_status.take() {
+                return match script.release_statuses.pop() {
                     Some(status) => status,
                     None => {
                         script.unexpected_calls += 1;
@@ -887,7 +887,7 @@ pub(crate) mod test_support {
                 script.unexpected_calls += 1;
                 return XLRET_FAILED;
             };
-            script.release_status = Some(reply.release_status);
+            script.release_statuses.push(reply.release_status);
             if reply.function != function || result.is_null() {
                 script.unexpected_calls += 1;
                 return XLRET_FAILED;

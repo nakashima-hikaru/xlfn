@@ -12,7 +12,7 @@ use crate::shutdown::CleanupReporter;
 use crate::subscription::RtdLimits;
 #[cfg(feature = "rtd")]
 use crate::subscription::{RtdSource, RtdSourceHandle};
-use crate::value::{ExcelValue, FromExcel, Matrix};
+use crate::value::{ExcelValue, FromExcel, Matrix, XlValueRef};
 use crate::{XllError, XllResult};
 use std::marker::PhantomData;
 #[cfg(feature = "handles")]
@@ -1017,6 +1017,60 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
     /// Borrows shared state for the whole worksheet invocation.
     pub const fn state(&self) -> &'call A::SharedState {
         self.state
+    }
+
+    /// Visits the result of Excel's xlCoerce callback without eagerly owning
+    /// every cell in the returned range.
+    ///
+    /// The visitor runs while the callback result is still live; xlFree is
+    /// attempted after the visitor returns, including if it returns an error.
+    /// The visitor may read individual cells as needed. It cannot retain
+    /// references into the temporary result after this method returns.
+    /// Nested Excel callbacks use this invocation's existing callback session.
+    ///
+    /// Use [`Self::coerce`] or [`Self::coerce_matrix`] if an owned result is needed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use xlfn::addin::{Addin, MacroSheetContext};
+    /// use xlfn::reference::ExcelReference;
+    /// use xlfn::value::{FromExcel, raw::{XlArrayRef, XlValueType}};
+    /// use xlfn::XllResult;
+    ///
+    /// fn sum<A: Addin>(
+    ///     context: &MacroSheetContext<'_, A>,
+    ///     reference: &ExcelReference<'_>,
+    /// ) -> XllResult<f64> {
+    ///     context.coerce_with(reference, |value| match value.value_type() {
+    ///         XlValueType::Multi => {
+    ///             let array = XlArrayRef::from_excel(value, "reference")?;
+    ///             array.cells().try_fold(0.0, |sum, cell| Ok(sum + cell.as_f64()?))
+    ///         }
+    ///         _ => value.as_f64(),
+    ///     })
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use xlfn::addin::{Addin, MacroSheetContext};
+    /// use xlfn::reference::ExcelReference;
+    /// use xlfn::value::raw::XlValueRef;
+    /// use xlfn::XllResult;
+    ///
+    /// fn escape<'borrow, A: Addin>(
+    ///     context: &MacroSheetContext<'_, A>,
+    ///     reference: &ExcelReference<'_>,
+    /// ) -> XllResult<XlValueRef<'borrow>> {
+    ///     context.coerce_with(reference, |value| Ok(value))
+    /// }
+    /// ```
+    pub fn coerce_with<R>(
+        &self,
+        reference: &ExcelReference<'_>,
+        visit: impl for<'value> FnOnce(XlValueRef<'value>) -> XllResult<R>,
+    ) -> XllResult<R> {
+        self.host.coerce_with(reference, visit)
     }
 
     /// Resolves a reference through Excel into an owned value.
