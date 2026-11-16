@@ -15,9 +15,9 @@ use crate::reference::ExcelReference;
 #[cfg(feature = "handles")]
 use crate::reference::FromExcelReference;
 use crate::return_abi::ExcelCallbackStatus;
-use crate::value::{ExcelDateSystem, ExcelValue, FromExcel, Matrix, convert};
 #[cfg(feature = "handles")]
-use crate::value::{XlValueRef, XlValueType};
+use crate::value::XlValueType;
+use crate::value::{ExcelDateSystem, ExcelValue, FromExcel, Matrix, XlValueRef, convert};
 use crate::{XllError, XllResult};
 use std::ptr::NonNull;
 #[cfg(feature = "handles")]
@@ -153,10 +153,22 @@ impl<'call> ExcelHost<'call> {
         }
     }
 
-    pub(crate) fn coerce(&self, reference: &ExcelReference<'_>) -> XllResult<ExcelValue> {
+    /// Invokes xlCoerce and visits the result while Excel still owns it.
+    /// The visitor cannot return a borrow of the callback result.
+    pub(crate) fn coerce_with<R>(
+        &self,
+        reference: &ExcelReference<'_>,
+        visit: impl for<'value> FnOnce(XlValueRef<'value>) -> XllResult<R>,
+    ) -> XllResult<R> {
         let arguments = [reference.raw_pointer()];
         self.invoke(XL_COERCE, ExcelApiFunction::Coerce, &arguments, |result| {
-            <ExcelValue as FromExcel>::from_excel(result.borrow()?, "reference")
+            visit(result.borrow()?)
+        })
+    }
+
+    pub(crate) fn coerce(&self, reference: &ExcelReference<'_>) -> XllResult<ExcelValue> {
+        self.coerce_with(reference, |value| {
+            <ExcelValue as FromExcel>::from_excel(value, "reference")
         })
     }
 
@@ -164,9 +176,8 @@ impl<'call> ExcelHost<'call> {
     where
         T: for<'value> FromExcel<'value>,
     {
-        let arguments = [reference.raw_pointer()];
-        self.invoke(XL_COERCE, ExcelApiFunction::Coerce, &arguments, |result| {
-            convert::matrix(result.borrow()?, "reference", T::from_excel)
+        self.coerce_with(reference, |value| {
+            convert::matrix(value, "reference", T::from_excel)
         })
     }
 
@@ -809,5 +820,220 @@ mod tests {
                 reason: InputError::Malformed("misaligned reference table pointer"),
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod coerce_tests {
+    use super::*;
+    use crate::reference::FromExcelReference;
+    use crate::registration::host::test_support::{CallbackScript, Reply};
+    use crate::value::raw::XlArrayRef;
+    use std::cell::Cell;
+    use xlfn_sys::{
+        XLOPER12Array, XLOPER12SRef, XLOPER12Value, XLREF12, XLTYPE_MULTI, XLTYPE_SREF, XLTYPE_STR,
+    };
+
+    fn reference_raw() -> XLOPER12 {
+        XLOPER12 {
+            value: XLOPER12Value {
+                sref: XLOPER12SRef {
+                    count: 1,
+                    reference: XLREF12 {
+                        rw_first: 0,
+                        rw_last: 0,
+                        col_first: 0,
+                        col_last: 1,
+                    },
+                },
+            },
+            xltype: XLTYPE_SREF,
+        }
+    }
+
+    fn reference(raw: &XLOPER12) -> ExcelReference<'_> {
+        ExcelReference::from_excel_reference(XlValueRef::from_array_cell(raw).unwrap(), "reference")
+            .unwrap()
+    }
+
+    fn callback_text(units: &mut [u16]) -> XLOPER12 {
+        XLOPER12 {
+            value: XLOPER12Value {
+                string: units.as_mut_ptr(),
+            },
+            xltype: XLTYPE_STR,
+        }
+    }
+
+    #[test]
+    fn coerce_with_traverses_callback_array_without_an_owned_matrix() {
+        let mut cells = [XLOPER12::number(1.5), XLOPER12::number(2.5)];
+        let result = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    rows: 1,
+                    columns: 2,
+                    values: cells.as_mut_ptr(),
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+        let script = CallbackScript::install([Reply::success(XL_COERCE, result)]);
+        let callbacks = HostCallbackSession::new();
+        let host = ExcelHost::new(&callbacks);
+        let reference_raw = reference_raw();
+        let reference = reference(&reference_raw);
+        let visited = Cell::new(false);
+
+        let sum = host
+            .coerce_with(&reference, |value| {
+                visited.set(true);
+                let array = XlArrayRef::from_excel(value, "reference")?;
+                assert_eq!(
+                    array.shape(),
+                    crate::value::Shape {
+                        rows: 1,
+                        columns: 2
+                    }
+                );
+                array
+                    .cells()
+                    .try_fold(0.0, |sum, cell| Ok(sum + cell.as_f64()?))
+            })
+            .unwrap();
+        assert!(visited.get());
+        assert_eq!(sum, 4.0);
+        script.assert_calls(&[XL_COERCE]);
+    }
+
+    #[test]
+    fn coerce_with_keeps_outer_text_live_during_nested_host_callback() {
+        let mut outer = crate::utf16::encode_counted("外側🦀", "test", 32767).unwrap();
+        let mut inner = crate::utf16::encode_counted("Inner", "test", 32767).unwrap();
+        let script = CallbackScript::install([
+            Reply::success(XL_COERCE, callback_text(&mut outer)),
+            Reply::success(XL_SHEET_NM, callback_text(&mut inner)),
+        ]);
+        let callbacks = HostCallbackSession::new();
+        let host = ExcelHost::new(&callbacks);
+        let reference_raw = reference_raw();
+        let reference = reference(&reference_raw);
+
+        let n = host
+            .coerce_with(&reference, |value| {
+                let text = value.as_str()?.as_utf16();
+                assert!(text.iter().copied().eq("外側🦀".encode_utf16()));
+                let nested = host.sheet_name(&reference)?;
+                assert_eq!(nested, "Inner");
+                // The inner callback and its xlFree must not invalidate the
+                // borrowed result of the outer xlCoerce callback.
+                assert!(text.iter().copied().eq("外側🦀".encode_utf16()));
+                Ok(text.len())
+            })
+            .unwrap();
+        assert_eq!(n, 4);
+        script.assert_calls(&[XL_COERCE, XL_SHEET_NM]);
+    }
+
+    #[test]
+    fn coerce_with_preserves_decode_error_over_cleanup_failure() {
+        let script =
+            CallbackScript::install([Reply::success(XL_COERCE, XLOPER12::number(5.0))
+                .release_status(xlfn_sys::XLRET_FAILED)]);
+        let callbacks = HostCallbackSession::new();
+        let host = ExcelHost::new(&callbacks);
+        let reference_raw = reference_raw();
+        let reference = reference(&reference_raw);
+        let result: XllResult<()> = host.coerce_with(&reference, |value| {
+            assert_eq!(value.as_f64()?, 5.0);
+            Err(XllError::Closing)
+        });
+        assert!(matches!(result, Err(XllError::Closing)));
+        script.assert_calls(&[XL_COERCE]);
+    }
+
+    #[test]
+    fn coerce_with_reports_cleanup_failure_after_successful_visit() {
+        let script =
+            CallbackScript::install([Reply::success(XL_COERCE, XLOPER12::number(5.0))
+                .release_status(xlfn_sys::XLRET_FAILED)]);
+        let callbacks = HostCallbackSession::new();
+        let host = ExcelHost::new(&callbacks);
+        let reference_raw = reference_raw();
+        let reference = reference(&reference_raw);
+        assert!(matches!(
+            host.coerce_with(&reference, |value| value.as_f64()),
+            Err(XllError::ExcelApi {
+                function: ExcelApiFunction::Free,
+                ..
+            })
+        ));
+        script.assert_calls(&[XL_COERCE]);
+    }
+
+    #[test]
+    fn coerce_with_skips_visitor_on_terminal_callback() {
+        let script = CallbackScript::install([
+            Reply::success(XL_COERCE, XLOPER12::number(5.0)).status(xlfn_sys::XLRET_ABORT)
+        ]);
+        let callbacks = HostCallbackSession::new();
+        let host = ExcelHost::new(&callbacks);
+        let reference_raw = reference_raw();
+        let reference = reference(&reference_raw);
+        let result: XllResult<()> = host.coerce_with(&reference, |_| {
+            panic!("terminal callback must not expose a result")
+        });
+        assert!(matches!(
+            result,
+            Err(XllError::ExcelApi {
+                function: ExcelApiFunction::Coerce,
+                ..
+            })
+        ));
+        script.assert_calls(&[XL_COERCE]);
+    }
+
+    #[test]
+    fn coerce_with_nested_abort_suppresses_later_calls_but_frees_outer_result() {
+        let mut inner = crate::utf16::encode_counted("Inner", "test", 32767).unwrap();
+        let script = CallbackScript::install([
+            Reply::success(XL_COERCE, XLOPER12::number(12.0)),
+            Reply::success(XL_SHEET_NM, callback_text(&mut inner)).status(xlfn_sys::XLRET_UNCALCED),
+        ]);
+        let callbacks = HostCallbackSession::new();
+        let host = ExcelHost::new(&callbacks);
+        let reference_raw = reference_raw();
+        let reference = reference(&reference_raw);
+        let value = host
+            .coerce_with(&reference, |outer| {
+                assert_eq!(outer.as_f64()?, 12.0);
+                assert!(host.sheet_name(&reference).is_err());
+                assert!(matches!(
+                    host.sheet_name(&reference),
+                    Err(XllError::ExcelApi {
+                        failure: ExcelApiFailure::Suppressed(ExcelCallbackStatus::Uncalced),
+                        ..
+                    })
+                ));
+                outer.as_f64()
+            })
+            .unwrap();
+        assert_eq!(value, 12.0);
+        assert_eq!(host.terminal_status(), Some(ExcelCallbackStatus::Uncalced));
+        script.assert_calls(&[XL_COERCE, XL_SHEET_NM]);
+    }
+
+    #[test]
+    fn coerce_with_panic_drops_callback_result_once() {
+        let script = CallbackScript::install([Reply::success(XL_COERCE, XLOPER12::number(5.0))]);
+        let callbacks = HostCallbackSession::new();
+        let host = ExcelHost::new(&callbacks);
+        let reference_raw = reference_raw();
+        let reference = reference(&reference_raw);
+        let outcome = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: XllResult<()> = host.coerce_with(&reference, |_| panic!("visitor panic"));
+        }));
+        assert!(outcome.is_err());
+        script.assert_calls(&[XL_COERCE]);
     }
 }
