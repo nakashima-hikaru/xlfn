@@ -1005,11 +1005,12 @@ mod tests {
                 // storage throughout the host callback.
                 let oper = unsafe { &*arguments[0] };
                 assert_eq!(oper.xltype, XLTYPE_STR);
-                // SAFETY: XLTYPE_STR selects the string pointer field.
-                assert_eq!(
-                    unsafe { oper.value.string } as usize,
-                    expected_module_pointer
-                );
+                let module_pointer = {
+                    // SAFETY: The preceding tag check proved XLTYPE_STR, so
+                    // this reads the active string union member.
+                    unsafe { oper.value.string }
+                };
+                assert_eq!(module_pointer as usize, expected_module_pointer);
             });
             let callbacks = HostCallbackSession::new();
             let host = RegistrationHost::new(&callbacks);
