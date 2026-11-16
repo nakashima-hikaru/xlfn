@@ -242,6 +242,11 @@ pub(crate) struct SubscriptionKey {
 pub(crate) struct SubscriptionTransportKey([u8; 43]);
 
 impl SubscriptionTransportKey {
+    #[cfg(any(test, feature = "rtd"))]
+    pub(crate) fn as_bytes(&self) -> &[u8; 43] {
+        &self.0
+    }
+
     pub(crate) fn as_str(&self) -> &str {
         std::str::from_utf8(&self.0).expect("subscription transport contains only ASCII")
     }

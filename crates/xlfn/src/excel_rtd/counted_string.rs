@@ -40,18 +40,41 @@ impl CountedString {
     }
 
     fn borrow(&self) -> BorrowedCountedString<'_> {
-        let units = self.0.as_ref();
-        BorrowedCountedString {
-            _units: units,
-            oper: XLOPER12 {
-                value: XLOPER12Value {
-                    // The RTD input is read-only. The SDK uses the same
-                    // mutable pointer field for inputs and outputs.
-                    string: units.as_ptr().cast_mut(),
-                },
-                xltype: XLTYPE_STR,
-            },
+        BorrowedCountedString::new(self.0.as_ref())
+    }
+}
+
+impl AsRef<[u16]> for CountedString {
+    fn as_ref(&self) -> &[u16] {
+        self.0.as_ref()
+    }
+}
+
+/// A fixed-width ASCII subscription transport encoded directly into an inline
+/// Excel counted string. The XLOPER12 itself is assembled only when borrowed,
+/// so moving this value cannot leave an interior pointer dangling.
+#[cfg(any(test, feature = "rtd"))]
+pub(super) struct InlineCountedTransport {
+    units: [u16; 44],
+}
+
+#[cfg(any(test, feature = "rtd"))]
+impl InlineCountedTransport {
+    pub(super) fn new(bytes: &[u8; 43]) -> Self {
+        debug_assert!(bytes.iter().all(u8::is_ascii));
+        let mut units = [0_u16; 44];
+        units[0] = 43;
+        for (&byte, unit) in bytes.iter().zip(&mut units[1..]) {
+            *unit = u16::from(byte);
         }
+        Self { units }
+    }
+}
+
+#[cfg(any(test, feature = "rtd"))]
+impl AsRef<[u16]> for InlineCountedTransport {
+    fn as_ref(&self) -> &[u16] {
+        &self.units
     }
 }
 
@@ -60,7 +83,21 @@ struct BorrowedCountedString<'a> {
     oper: XLOPER12,
 }
 
-impl BorrowedCountedString<'_> {
+impl<'a> BorrowedCountedString<'a> {
+    fn new(units: &'a [u16]) -> Self {
+        Self {
+            _units: units,
+            oper: XLOPER12 {
+                value: XLOPER12Value {
+                    // The RTD input is read-only; Excel exposes a mutable
+                    // pointer field even for read-only input arguments.
+                    string: units.as_ptr().cast_mut(),
+                },
+                xltype: XLTYPE_STR,
+            },
+        }
+    }
+
     fn pointer(&mut self) -> NonNull<XLOPER12> {
         NonNull::from_mut(&mut self.oper)
     }
@@ -68,11 +105,11 @@ impl BorrowedCountedString<'_> {
 
 fn with_rtd_arguments<T>(
     prog_id: &CountedString,
-    topic: &CountedString,
+    topic: &impl AsRef<[u16]>,
     invoke: impl FnOnce(&[NonNull<XLOPER12>]) -> T,
 ) -> T {
     let mut prog_id = prog_id.borrow();
-    let mut topic = topic.borrow();
+    let mut topic = BorrowedCountedString::new(topic.as_ref());
     let mut server_name = XLOPER12::missing();
     // The argument pointers and their read-only buffers stay live through
     // invocation and result release. Keep the raw pointers in this adapter.
@@ -87,7 +124,7 @@ fn with_rtd_arguments<T>(
 pub(super) fn invoke_rtd<T>(
     host: crate::host_api::ExcelHost<'_>,
     prog_id: &CountedString,
-    topic: &CountedString,
+    topic: &impl AsRef<[u16]>,
     decode: impl FnOnce(&mut crate::callback_value::ExcelCallbackValue<'_>) -> XllResult<T>,
 ) -> XllResult<T> {
     with_rtd_arguments(prog_id, topic, |arguments| {
@@ -197,6 +234,24 @@ mod tests {
     };
     use crate::return_abi::ExcelCallbackStatus;
     use xlfn_sys::{XLF_RTD, XLRET_ABORT, XLTYPE_MISSING};
+
+    #[test]
+    fn miri_inline_transport_uses_no_heap_and_survives_moves() {
+        let text = *b"stream:v1:0123456789abcdef:fedcba9876543210";
+        let transport = InlineCountedTransport::new(&text);
+        let mut owners = vec![transport];
+        owners.reserve(64);
+        let transport = owners.pop().unwrap();
+        let prog_id = CountedString::new("XlFnRtd_fixture").unwrap();
+        with_rtd_arguments(&prog_id, &transport, |arguments| {
+            // SAFETY: all argument owners and the borrowed XLOPER12 are live
+            // for the entire closure; no pointer escapes this invocation.
+            let topic = unsafe { crate::value::XlValueRef::from_raw(arguments[2].as_ptr()) }
+                .unwrap();
+            assert!(topic.as_str().unwrap().as_utf16().iter().copied().eq(text.map(u16::from)));
+        });
+        assert_eq!(transport.units[0], 43);
+    }
 
     #[test]
     fn miri_counted_string_remains_readable_after_owner_moves() {

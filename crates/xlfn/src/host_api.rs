@@ -19,6 +19,7 @@ use crate::value::{ExcelDateSystem, ExcelValue, FromExcel, Matrix, convert};
 #[cfg(feature = "handles")]
 use crate::value::{XlValueRef, XlValueType};
 use crate::{XllError, XllResult};
+use smallvec::SmallVec;
 use std::ptr::NonNull;
 #[cfg(feature = "handles")]
 use xlfn_sys::{IDSHEET, XL_SHEET_ID, XLF_CALLER};
@@ -194,10 +195,15 @@ impl<'call> ExcelHost<'call> {
                 ),
             ));
         }
-        let sheet = self.sheet_name(reference)?;
-        let workbook = workbook_name(&sheet)?;
-        let mut units =
-            crate::utf16::encode_counted(workbook, "reference", crate::utf16::EXCEL_STRING_LIMIT)?;
+        // Preserve the xlSheetNm result's cleanup boundary before issuing
+        // GET.DOCUMENT. Only the counted workbook operand is retained.
+        let sheet_arguments = [reference.raw_pointer()];
+        let mut units = self.invoke(
+            XL_SHEET_NM,
+            ExcelApiFunction::SheetName,
+            &sheet_arguments,
+            |result| workbook_name_counted(result.borrow()?.utf16("reference")?),
+        )?;
         let mut name = XLOPER12 {
             value: xlfn_sys::XLOPER12Value {
                 string: units.as_mut_ptr(),
@@ -307,21 +313,32 @@ impl<'call> ExcelHost<'call> {
     }
 }
 
-fn workbook_name(sheet: &str) -> XllResult<&str> {
-    let name = sheet
-        .strip_prefix('[')
-        .and_then(|name| name.split_once(']'));
-    match name {
-        Some((workbook, sheet))
-            if !workbook.is_empty() && !sheet.is_empty() && !workbook.contains(['[', '\0']) =>
-        {
-            Ok(workbook)
-        }
-        _ => Err(XllError::ExcelApi {
+/// Extract the workbook operand directly from the callback's UTF-16 result.
+fn workbook_name_counted(sheet: &[u16]) -> XllResult<SmallVec<[u16; 64]>> {
+    // The previous String decoder validated the entire sheet name, including
+    // the suffix that is not passed to GET.DOCUMENT. Preserve that behavior.
+    if char::decode_utf16(sheet.iter().copied()).any(|unit| unit.is_err()) {
+        return Err(XllError::input(
+            "reference",
+            crate::error::InputError::InvalidUtf16,
+        ));
+    }
+    let close = sheet.iter().position(|&unit| unit == u16::from(b']'));
+    let workbook = close
+        .filter(|&index| sheet.first() == Some(&u16::from(b'[')) && index > 1 && index + 1 < sheet.len())
+        .map(|index| &sheet[1..index])
+        .filter(|name| !name.contains(&u16::from(b'[')) && !name.contains(&0))
+        .ok_or(XllError::ExcelApi {
             function: ExcelApiFunction::SheetName,
             failure: ExcelApiFailure::UnexpectedResult,
-        }),
-    }
+        })?;
+
+    // The source is an Excel counted string, so the substring fits the same
+    // 16-bit length bound. Small workbook names stay inside SmallVec.
+    let mut units = SmallVec::with_capacity(workbook.len() + 1);
+    units.push(workbook.len() as u16);
+    units.extend_from_slice(workbook);
+    Ok(units)
 }
 
 #[cfg(feature = "handles")]
@@ -510,6 +527,46 @@ mod date_tests {
             },
             xltype: xlfn_sys::XLTYPE_STR,
         }
+    }
+
+    #[test]
+    fn workbook_utf16_parser_matches_owned_sheet_name_protocol() {
+        for (sheet, expected) in [
+            ("[Book.xlsx]Data", Some("Book.xlsx")),
+            ("[価格💡.xlsx]Sheet", Some("価格💡.xlsx")),
+            ("", None),
+            ("Data", None),
+            ("[]Data", None),
+            ("[Book]", None),
+            ("[[Book]Data", None),
+            ("[Book\0]Data", None),
+        ] {
+            let units = sheet.encode_utf16().collect::<Vec<_>>();
+            let parsed = workbook_name_counted(&units);
+            match expected {
+                Some(name) => {
+                    let counted = parsed.unwrap();
+                    assert_eq!(usize::from(counted[0]), counted.len() - 1);
+                    assert!(counted[1..].iter().copied().eq(name.encode_utf16()));
+                }
+                None => assert!(matches!(
+                    parsed,
+                    Err(XllError::ExcelApi {
+                        function: ExcelApiFunction::SheetName,
+                        failure: ExcelApiFailure::UnexpectedResult,
+                    })
+                )),
+            }
+        }
+        let mut malformed = "[Book.xlsx]Data".encode_utf16().collect::<Vec<_>>();
+        malformed.push(0xd800);
+        assert!(matches!(
+            workbook_name_counted(&malformed),
+            Err(XllError::Input {
+                argument: "reference",
+                reason: crate::error::InputError::InvalidUtf16,
+            })
+        ));
     }
 
     #[test]
