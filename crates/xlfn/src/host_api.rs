@@ -325,7 +325,9 @@ fn workbook_name_counted(sheet: &[u16]) -> XllResult<SmallVec<[u16; 64]>> {
     }
     let close = sheet.iter().position(|&unit| unit == u16::from(b']'));
     let workbook = close
-        .filter(|&index| sheet.first() == Some(&u16::from(b'[')) && index > 1 && index + 1 < sheet.len())
+        .filter(|&index| {
+            sheet.first() == Some(&u16::from(b'[')) && index > 1 && index + 1 < sheet.len()
+        })
         .map(|index| &sheet[1..index])
         .filter(|name| !name.contains(&u16::from(b'[')) && !name.contains(&0))
         .ok_or(XllError::ExcelApi {

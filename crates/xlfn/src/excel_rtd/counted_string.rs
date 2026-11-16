@@ -246,9 +246,17 @@ mod tests {
         with_rtd_arguments(&prog_id, &transport, |arguments| {
             // SAFETY: all argument owners and the borrowed XLOPER12 are live
             // for the entire closure; no pointer escapes this invocation.
-            let topic = unsafe { crate::value::XlValueRef::from_raw(arguments[2].as_ptr()) }
-                .unwrap();
-            assert!(topic.as_str().unwrap().as_utf16().iter().copied().eq(text.map(u16::from)));
+            let topic =
+                unsafe { crate::value::XlValueRef::from_raw(arguments[2].as_ptr()) }.unwrap();
+            assert!(
+                topic
+                    .as_str()
+                    .unwrap()
+                    .as_utf16()
+                    .iter()
+                    .copied()
+                    .eq(text.map(u16::from))
+            );
         });
         assert_eq!(transport.units[0], 43);
     }
