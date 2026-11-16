@@ -53,12 +53,12 @@ impl AsRef<[u16]> for CountedString {
 /// A fixed-width ASCII subscription transport encoded directly into an inline
 /// Excel counted string. The XLOPER12 itself is assembled only when borrowed,
 /// so moving this value cannot leave an interior pointer dangling.
-#[cfg(any(test, feature = "rtd"))]
+#[cfg(any(test, all(target_os = "windows", feature = "rtd")))]
 pub(super) struct InlineCountedTransport {
     units: [u16; 44],
 }
 
-#[cfg(any(test, feature = "rtd"))]
+#[cfg(any(test, all(target_os = "windows", feature = "rtd")))]
 impl InlineCountedTransport {
     pub(super) fn new(bytes: &[u8; 43]) -> Self {
         debug_assert!(bytes.iter().all(u8::is_ascii));
@@ -71,7 +71,7 @@ impl InlineCountedTransport {
     }
 }
 
-#[cfg(any(test, feature = "rtd"))]
+#[cfg(any(test, all(target_os = "windows", feature = "rtd")))]
 impl AsRef<[u16]> for InlineCountedTransport {
     fn as_ref(&self) -> &[u16] {
         &self.units
