@@ -17,23 +17,22 @@ pub struct ReturnFrameAccess<'call> {
     pub(crate) callbacks: &'call crate::host_callback::HostCallbackSession,
 }
 
-/// Retains plain-input call services until the return owner finishes. Plain
-/// UDFs may decode handles without producing a formula handle themselves.
+/// Retains the invocation lifetime for plain-input return preparation.
 #[cfg(feature = "handles")]
 #[doc(hidden)]
 pub struct PlainReturnState<'call> {
-    _handles: Option<crate::handle::FormulaHandleServiceRead<'call>>,
+    _scope: Option<&'call crate::call::CallScope<'call>>,
 }
 
 #[cfg(feature = "handles")]
 impl<'call> PlainReturnState<'call> {
     const fn empty() -> Self {
-        Self { _handles: None }
+        Self { _scope: None }
     }
 
     pub(crate) fn with_call(call: crate::value::input::CallContext<'call>) -> Self {
         Self {
-            _handles: call.into_plain_return_guard(),
+            _scope: Some(call.scope()),
         }
     }
 }

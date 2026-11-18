@@ -112,8 +112,8 @@ impl Rollback for PendingClose<'_> {
 impl<'registry> CloseClaim<'registry> {
     pub(super) fn acquire(
         registry: &'registry TaskRegistry,
-        prepare_locked: impl FnOnce(&RegistryControl) -> TaskControlBatch,
-    ) -> XllResult<(Self, TaskControlBatch)> {
+        prepare_locked: impl FnOnce(&RegistryControl) -> Vec<CalculationPin>,
+    ) -> XllResult<(Self, Vec<CalculationPin>)> {
         // Release the mutex before rollback on unwind. The lock never travels
         // with the issued claim.
         let claim;
@@ -125,9 +125,9 @@ impl<'registry> CloseClaim<'registry> {
         claim = Self {
             pending: RollbackGuard::new(PendingClose { registry }),
         };
-        let tasks = prepare_locked(&control);
+        let calculations = prepare_locked(&control);
         drop(control);
-        Ok((claim, tasks))
+        Ok((claim, calculations))
     }
     pub(super) fn registry(&self) -> &'registry TaskRegistry {
         self.pending.get().registry
@@ -162,6 +162,7 @@ fn miri_close_preparation_unwind_releases_the_lock_before_returning_the_claim() 
 /// an unpublished candidate. Abandonment changes no registry state. The
 /// candidate drops after the guards, so no payload destruction runs under them.
 pub(in crate::async_udf) struct RegistryPreparedStart<'registry> {
+    publication: MutexGuard<'registry, ()>,
     control: MutexGuard<'registry, RegistryControl>,
     transition: MutexGuard<'registry, ()>,
     activity: xlfn_kernel::drain_gate::GateControl<'registry, xlfn_kernel::drain_gate::GateDrained>,
@@ -173,6 +174,7 @@ pub(in crate::async_udf) struct RegistryPreparedStart<'registry> {
 impl RegistryPreparedStart<'_> {
     pub(in crate::async_udf) fn publish(self) {
         let Self {
+            publication,
             mut control,
             transition,
             activity,
@@ -180,10 +182,11 @@ impl RegistryPreparedStart<'_> {
             candidate,
             limit,
         } = self;
-        let publication = registry.publication.lock();
         let epoch = candidate.epoch;
         let pointer = NonNull::from(candidate.as_ref());
-        control.calculations.insert(epoch, candidate);
+        // The same publication guard covers the zero-pin check and the
+        // replacement. A concurrent snapshot can only pin the new allocation.
+        let previous = control.calculations.insert(epoch, candidate);
         control
             .calculations
             .retain(|id, state| *id == epoch || state.pin_count() != 0);
@@ -195,6 +198,7 @@ impl RegistryPreparedStart<'_> {
         drop(publication);
         drop(control);
         drop(transition);
+        drop(previous);
     }
 }
 
@@ -216,8 +220,8 @@ impl TaskRegistry {
         }
         let candidate = PublishedOwner::new(CalculationState::new(current.epoch));
         let activity = self.activity.control().seal().wait();
-        drop(publication);
         Ok(RegistryPreparedStart {
+            publication,
             control,
             transition,
             activity,
@@ -262,6 +266,33 @@ mod tests {
             .unwrap()
             .publish();
         assert!(registry.preflight_available().unwrap());
+        registry.request_close().unwrap().cancel().wait().finish();
+    }
+
+    #[test]
+    fn miri_prepared_registry_start_excludes_old_snapshots_until_publication() {
+        let registry = TaskRegistry::new();
+        registry.start(crate::AsyncTaskLimit::DEFAULT).unwrap();
+        registry.request_close().unwrap().cancel().wait().finish();
+        let old = registry.current.load(Ordering::Acquire);
+        let prepared = registry
+            .prepare_start(crate::AsyncTaskLimit::DEFAULT)
+            .unwrap();
+        assert!(registry.publication.try_lock().is_none());
+
+        std::thread::scope(|scope| {
+            let (attempted, received) = std::sync::mpsc::channel();
+            let registry = &registry;
+            let reader = scope.spawn(move || {
+                attempted.send(()).unwrap();
+                registry.snapshot()
+            });
+            received.recv().unwrap();
+            prepared.publish();
+            let snapshot = reader.join().unwrap();
+            assert_eq!(snapshot.epoch(), CalculationEpoch::INITIAL);
+            assert_ne!(snapshot.calculation.pointer().as_ptr(), old);
+        });
         registry.request_close().unwrap().cancel().wait().finish();
     }
 

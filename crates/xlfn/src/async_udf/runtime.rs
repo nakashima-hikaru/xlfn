@@ -297,7 +297,7 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
     }
 
     pub(crate) fn cancel_current_calculation(&self) {
-        let tasks = self.registry().cancel_calculation(self.current_epoch());
+        let tasks = self.registry().cancel_current_calculation();
         cancel_tasks(tasks);
     }
 

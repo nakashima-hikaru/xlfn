@@ -19,7 +19,7 @@ use quote::quote;
 #[cfg(test)]
 use syn::ItemFn;
 use syn::ext::IdentExt;
-use syn::{DeriveInput, ItemStruct, parse_macro_input};
+use syn::{DeriveInput, parse_macro_input};
 mod codegen;
 mod function;
 mod input_derive;
@@ -30,7 +30,7 @@ mod options;
 mod support;
 mod validation;
 
-use options::parse_addin_options;
+use options::{ParsedAddinOptions, parse_addin_options};
 use support::{extract_gating_attributes, resolve_crate_path};
 use validation::validate_addin_metadata;
 
@@ -290,7 +290,7 @@ fn expand_excel_addin_impl(
         }
         ordinary_items.push(item);
     }
-    let options = parse_addin_options(attributes.clone())?;
+    let options = parse_addin_options(attributes)?;
     let krate = resolve_crate_path(options.krate.as_ref());
     let rtd_types: syn::ImplItem = match (subscription, sources) {
         (None, None) => syn::parse_quote! {
@@ -339,32 +339,16 @@ fn expand_excel_addin_impl(
     }
     implementation.items = ordinary_items;
 
-    // Use the same metadata/ABI emitter for both supported declaration forms.
-    // The temporary struct is replaced before anything reaches the consumer.
-    let impl_attributes = &implementation.attrs;
-    let declaration: ItemStruct = syn::parse_quote! {
-        #(#impl_attributes)*
-        struct #ident;
-    };
-    let mut expanded: syn::File = syn::parse2(expand_excel_addin(attributes, declaration)?)?;
-    expanded.items[0] = syn::Item::Impl(implementation);
-    Ok(quote!(#expanded))
+    emit_addin_exports(&implementation, &ident, options, &krate)
 }
 
-fn expand_excel_addin(
-    attributes: proc_macro2::TokenStream,
-    item: ItemStruct,
+fn emit_addin_exports(
+    implementation: &syn::ItemImpl,
+    ident: &syn::Ident,
+    options: ParsedAddinOptions,
+    krate: &syn::Path,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let options = parse_addin_options(attributes)?;
-    let krate = resolve_crate_path(options.krate.as_ref());
-    let gating = extract_gating_attributes(&item.attrs);
-    if !item.generics.params.is_empty() || item.generics.where_clause.is_some() {
-        return Err(syn::Error::new_spanned(
-            &item.generics,
-            "Add-in types cannot be generic",
-        ));
-    }
-    let ident = &item.ident;
+    let gating = extract_gating_attributes(&implementation.attrs);
     let display_name = options.name.unwrap_or_else(|| ident.unraw().to_string());
     let id = options
         .id
@@ -380,10 +364,11 @@ fn expand_excel_addin(
     } else {
         quote!(#krate::__private::v1::LogicalUnload)
     };
-    let metadata = validate_addin_metadata(&display_name, &id, &category, &item)?;
+    // The metadata options are on the attribute invocation.
+    let metadata = validate_addin_metadata(&display_name, &id, &category, &quote!(excel_addin))?;
     let (name_length, name_units) = metadata.name();
     Ok(quote! {
-        #item
+        #implementation
 
         #(#gating)*
         #[doc(hidden)]
@@ -401,7 +386,7 @@ fn expand_excel_addin(
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
         #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
-        static __XLFN_FRAMEWORK_EXPORTS: [u8; b"xlAutoOpen\0xlAutoClose\0xlAutoRemove\0xlAutoFree12\0xlAddInManagerInfo12\0".len()] =
+        static __XLFN_FRAMEWORK_EXPORTS: [::core::primitive::u8; b"xlAutoOpen\0xlAutoClose\0xlAutoRemove\0xlAutoFree12\0xlAddInManagerInfo12\0".len()] =
             *b"xlAutoOpen\0xlAutoClose\0xlAutoRemove\0xlAutoFree12\0xlAddInManagerInfo12\0";
 
         #(#gating)*
@@ -420,7 +405,7 @@ fn expand_excel_addin(
         /// callbacks are permitted; do not call it to renew UDF callback authority.
         #(#gating)*
         #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn xlAutoOpen() -> i32 {
+        pub unsafe extern "system" fn xlAutoOpen() -> ::core::primitive::i32 {
             #krate::__private::v1::export_status_boundary(0, || {
                 // SAFETY: Excel invokes this lifecycle entrypoint with callback authority.
                 unsafe {
@@ -443,7 +428,7 @@ fn expand_excel_addin(
         /// callbacks are permitted; do not call it to renew UDF callback authority.
         #(#gating)*
         #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn xlAutoClose() -> i32 {
+        pub unsafe extern "system" fn xlAutoClose() -> ::core::primitive::i32 {
             #krate::__private::v1::export_status_boundary(0, || {
                 // SAFETY: Excel invokes this lifecycle entrypoint with callback authority.
                 unsafe {
@@ -459,7 +444,7 @@ fn expand_excel_addin(
         /// callbacks are permitted; do not call it to renew UDF callback authority.
         #(#gating)*
         #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn xlAutoRemove() -> i32 {
+        pub unsafe extern "system" fn xlAutoRemove() -> ::core::primitive::i32 {
             #krate::__private::v1::export_status_boundary(0, || {
                 // SAFETY: Excel invokes this lifecycle entrypoint with callback authority.
                 unsafe {
@@ -607,10 +592,10 @@ mod tests {
             assert_outer_abi_boundary(exported[0], expected);
         }
 
-        let expanded = expand_excel_addin(
+        let expanded = expand_excel_addin_impl(
             quote!(),
             syn::parse_quote!(
-                struct TestAddin;
+                impl Addin for TestAddin {}
             ),
         )
         .unwrap();
@@ -675,6 +660,15 @@ mod tests {
                 ReturnAbi::NumericArray12,
             ),
             (quote!(XllResult<Matrix<f64>>), ReturnAbi::Value12),
+            (
+                quote!(UdfResult<NumericArrayOutput>),
+                ReturnAbi::NumericArray12,
+            ),
+            (
+                quote!(xlfn::prelude::UdfResult<xlfn::output::NumericArrayOutput>),
+                ReturnAbi::NumericArray12,
+            ),
+            (quote!(UdfResult<Matrix<f64>>), ReturnAbi::Value12),
             (quote!(xlfn::error::XllResult<Row<f64>>), ReturnAbi::Value12),
             (quote!(Result<Column<f64>, CustomError>), ReturnAbi::Value12),
             (
@@ -1230,9 +1224,9 @@ mod tests {
             quote!(id = "lPt9"),
         ] {
             let item = syn::parse_quote!(
-                struct TestAddin;
+                impl Addin for TestAddin {}
             );
-            assert!(expand_excel_addin(attributes, item).is_err());
+            assert!(expand_excel_addin_impl(attributes, item).is_err());
         }
     }
 
@@ -1939,7 +1933,10 @@ mod tests {
         for item in file.items {
             let (name, attributes) = match item {
                 syn::Item::Fn(item) => (item.sig.ident.to_string(), item.attrs),
-                syn::Item::Struct(item) => (item.ident.to_string(), item.attrs),
+                syn::Item::Impl(item) => {
+                    let self_type = item.self_ty;
+                    (quote!(#self_type).to_string(), item.attrs)
+                }
                 syn::Item::Static(item) => (item.ident.to_string(), item.attrs),
                 syn::Item::Macro(item) => (
                     item.mac.path.segments.last().unwrap().ident.to_string(),
@@ -1963,12 +1960,12 @@ mod tests {
 
     #[test]
     fn excel_addin_propagates_cfg_to_lifecycle_exports() {
-        let item: ItemStruct = syn::parse2(quote! {
+        let item = syn::parse2(quote! {
             #[cfg(feature = "gated")]
-            struct GatedAddin;
+            impl Addin for GatedAddin {}
         })
         .unwrap();
-        let expanded = expand_excel_addin(quote!(), item).unwrap();
+        let expanded = expand_excel_addin_impl(quote!(), item).unwrap();
         assert_generated_items_are_gated(
             expanded,
             &[
@@ -1985,6 +1982,35 @@ mod tests {
                 "xlAutoFree12",
                 "xlAddInManagerInfo12",
             ],
+        );
+    }
+
+    #[test]
+    fn excel_addin_preserves_inner_impl_attributes() {
+        let implementation = syn::parse_quote! {
+            #[cfg(target_pointer_width = "64")]
+            impl Addin for MyAddin {
+                #![allow(dead_code)]
+            }
+        };
+        let expanded = expand_excel_addin_impl(quote!(), implementation).unwrap();
+        let syntax: syn::File = syn::parse2(expanded).unwrap();
+        let syn::Item::Impl(implementation) = &syntax.items[0] else {
+            panic!("expected the original add-in impl");
+        };
+        assert!(implementation.attrs.iter().any(|attribute| {
+            matches!(attribute.style, syn::AttrStyle::Inner(_))
+                && attribute.path().is_ident("allow")
+        }));
+        let syn::Item::Static(runtime) = &syntax.items[1] else {
+            panic!("expected the add-in runtime");
+        };
+        assert!(runtime.attrs.iter().any(|attr| attr.path().is_ident("cfg")));
+        assert!(
+            !runtime
+                .attrs
+                .iter()
+                .any(|attr| attr.path().is_ident("allow"))
         );
     }
 
@@ -2079,11 +2105,11 @@ mod tests {
 
     #[test]
     fn addin_attribute_owns_runtime_and_lifecycle_exports() {
-        let item: ItemStruct = syn::parse2(quote! {
-            pub struct TestAddin;
+        let item = syn::parse2(quote! {
+            impl Addin for TestAddin {}
         })
         .unwrap();
-        let expanded = expand_excel_addin(
+        let expanded = expand_excel_addin_impl(
             quote!(name = "Test Add-in", id = "test-addin", category = "Test"),
             item,
         )
@@ -2323,11 +2349,11 @@ mod tests {
 
     #[test]
     fn physical_unload_requires_the_explicit_runtime_constructor() {
-        let item: ItemStruct = syn::parse2(quote! {
-            pub struct UnloadableAddin;
+        let item = syn::parse2(quote! {
+            impl Addin for UnloadableAddin {}
         })
         .unwrap();
-        let expanded = expand_excel_addin(quote!(physical_unload), item)
+        let expanded = expand_excel_addin_impl(quote!(physical_unload), item)
             .unwrap()
             .to_string();
         assert!(expanded.contains("new_with_physical_unload"));
@@ -2369,11 +2395,11 @@ mod tests {
         assert!(func_expanded.contains("my_custom_xlfn :: __private :: v1"));
         assert!(!func_expanded.contains("my_custom_xlfn :: convert"));
 
-        let addin_item: ItemStruct = syn::parse2(quote!(
-            struct MyAddin;
+        let addin_item = syn::parse2(quote!(
+            impl Addin for MyAddin {}
         ))
         .unwrap();
-        let addin_expanded = expand_excel_addin(quote!(crate = my_custom_xlfn), addin_item)
+        let addin_expanded = expand_excel_addin_impl(quote!(crate = my_custom_xlfn), addin_item)
             .unwrap()
             .to_string();
         assert!(

@@ -10,7 +10,7 @@ use crate::diagnostics::event::DROPPED_EVENTS;
 use std::ptr::NonNull;
 #[cfg(any(test, feature = "refinement"))]
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
 
 mod lifetime;
@@ -66,6 +66,7 @@ unsafe impl Send for DiagnosticObserverPtr {}
 unsafe impl Sync for DiagnosticObserverPtr {}
 
 pub(crate) struct DiagnosticObserver {
+    sink_disposal_panicked: AtomicBool,
     // Reservations include builders and queued events, but not delivery.
     // Payload credits additionally cover the currently delivered event, until
     // its owned error is destroyed. The channel publishes both payload and credit.
@@ -81,6 +82,7 @@ impl DiagnosticObserver {
         Box::new(Self {
             reserved: AtomicUsize::new(0),
             payload_bytes: AtomicUsize::new(0),
+            sink_disposal_panicked: AtomicBool::new(false),
             #[cfg(any(test, feature = "refinement"))]
             pending: AtomicU64::new(0),
             sink: crate::shutdown_trace::ObservationSink::new(),
@@ -307,7 +309,9 @@ impl AsyncDiagnosticSink {
         clippy::boxed_local,
         reason = "Explicit Box<Self> represents unique retired ownership transferred from service slot"
     )]
-    pub(crate) fn shutdown(self: Box<Self>) -> Result<(), DiagnosticShutdownError> {
+    pub(crate) fn shutdown(
+        self: Box<Self>,
+    ) -> Result<Option<crate::shutdown::CleanupIssue>, DiagnosticShutdownError> {
         if self.is_current_thread_worker() {
             return Err(DiagnosticShutdownError::ReentrantShutdown);
         }
@@ -326,7 +330,15 @@ impl AsyncDiagnosticSink {
             }
             return Err(DiagnosticShutdownError::WorkerPanicked);
         }
-        Ok(())
+        Ok(joined
+            .observer()
+            .sink_disposal_panicked
+            .load(Ordering::Relaxed)
+            .then_some(crate::shutdown::CleanupIssue {
+                component: "diagnostic sink",
+                kind: crate::shutdown::CleanupIssueKind::DisposalPanicked,
+                error: crate::XllError::Panic,
+            }))
     }
 }
 

@@ -397,32 +397,28 @@ mod tests {
         let old = domain.enter(0).unwrap();
         assert!(
             domain
-                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| ())
+                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| Some(()))
                 .is_none()
         );
         assert_eq!(domain.current_generation().index(), 1);
         let later = domain.enter(1).unwrap();
         drop(old);
         assert_eq!(
-            domain.poll_quiesce_with_publication_barrier(
-                |_| Some(()),
-                |old| old.index_for(&domain).unwrap()
-            ),
+            domain
+                .poll_quiesce_with_publication_barrier(|_| Some(()), |old| old.index_for(&domain)),
             Some(Ok(0))
         );
         assert!(
             domain
-                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| ())
+                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| Some(()))
                 .is_none()
         );
         assert_eq!(domain.current_generation().index(), 0);
         let newest = domain.enter(0).unwrap();
         drop(later);
         assert_eq!(
-            domain.poll_quiesce_with_publication_barrier(
-                |_| Some(()),
-                |old| old.index_for(&domain).unwrap()
-            ),
+            domain
+                .poll_quiesce_with_publication_barrier(|_| Some(()), |old| old.index_for(&domain)),
             Some(Ok(1))
         );
         drop(newest);
@@ -434,7 +430,7 @@ mod tests {
         let old = domain.enter(0).unwrap();
         assert!(
             domain
-                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| ())
+                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| Some(()))
                 .is_none()
         );
         drop(old);
@@ -454,7 +450,7 @@ mod tests {
         let old = domain.enter(0).unwrap();
         assert!(
             domain
-                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| ())
+                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| Some(()))
                 .is_none()
         );
         let later = domain.enter(1).unwrap();
@@ -492,7 +488,7 @@ mod tests {
             assert_eq!(
                 domain.poll_quiesce_with_publication_barrier(
                     |_| Some(()),
-                    |old| old.index_for(&domain).unwrap()
+                    |old| old.index_for(&domain)
                 ),
                 Some(Ok(0))
             );
@@ -518,7 +514,7 @@ mod tests {
             let old = domain.enter(0).unwrap();
             assert!(
                 domain
-                    .poll_quiesce_with_publication_barrier(|_| Some(()), |_| ())
+                    .poll_quiesce_with_publication_barrier(|_| Some(()), |_| Some(()))
                     .is_none()
             );
             drop(old);
@@ -552,7 +548,7 @@ mod tests {
         let old = domain.enter(0).unwrap();
         assert!(
             domain
-                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| ())
+                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| Some(()))
                 .is_none()
         );
         let current = domain.enter(1).unwrap();
@@ -566,7 +562,7 @@ mod tests {
             sealing.join().unwrap();
         });
         assert_eq!(
-            domain.poll_quiesce_with_publication_barrier(|_| Some(()), |_| ()),
+            domain.poll_quiesce_with_publication_barrier(|_| Some(()), |_| Some(())),
             Some(Err(DomainClosed))
         );
     }
@@ -613,7 +609,7 @@ mod tests {
         let registration = queue.lock();
         assert!(
             domain
-                .try_quiesce_if_idle_with_publication_barrier(
+                .try_quiesce_if_idle_with_publication_barrier::<_, ()>(
                     |_| queue.try_lock(),
                     |_| panic!("busy registration must skip rotation"),
                 )
@@ -623,7 +619,7 @@ mod tests {
         let reader = domain.enter(0).unwrap();
         assert!(
             domain
-                .try_quiesce_if_idle_with_publication_barrier(
+                .try_quiesce_if_idle_with_publication_barrier::<_, ()>(
                     |_| queue.try_lock(),
                     |_| panic!("busy reader must skip rotation"),
                 )
@@ -635,7 +631,10 @@ mod tests {
         domain
             .try_quiesce_if_idle_with_publication_barrier(
                 |_| queue.try_lock(),
-                |_| assert!(queue.try_lock().is_some()),
+                |_| {
+                    assert!(queue.try_lock().is_some());
+                    Some(())
+                },
             )
             .unwrap()
             .unwrap();

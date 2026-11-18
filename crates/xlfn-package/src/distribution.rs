@@ -38,6 +38,13 @@ pub trait DistributionFileOps {
 
 /// Validates a distribution destination before any replacement is attempted.
 pub fn validate_output_destination(destination: &Path) -> PackageResult {
+    // The destination name is also used in transaction directory and lock
+    // basenames. Host ancestors are independent of those generated names.
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("distribution destination must have a UTF-8 basename")?;
+    crate::validate_windows_basename(name)?;
     crate::validate_directory_path(destination)?;
     Ok(())
 }
@@ -89,7 +96,9 @@ impl DistributionCommitGuard {
         {
             use std::os::unix::fs::OpenOptionsExt;
 
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
 
         #[cfg(target_os = "windows")]
@@ -108,6 +117,10 @@ impl DistributionCommitGuard {
                 lock_path.display()
             )
         })?;
+        let metadata = lock_file.metadata()?;
+        if !metadata.is_file() || crate::is_reparse_point(&metadata) {
+            return Err("distribution commit lock handle is not a regular file".into());
+        }
 
         #[cfg(unix)]
         {
@@ -667,6 +680,42 @@ fn remove_empty_transaction(
     Ok(())
 }
 
+fn cleanup_unmutated_transaction(
+    parent: &Path,
+    transaction: &Path,
+    identity: DirectoryIdentity,
+    file_ops: &impl DistributionFileOps,
+) -> PackageResult {
+    let directory = PrivateStagingDirectory::open(transaction)?;
+    directory.verify()?;
+    if directory.identity != identity || !transaction_payloads(transaction)?.is_empty() {
+        return Err(format!(
+            "transaction cannot be cleaned before publication: {}",
+            transaction.display()
+        )
+        .into());
+    }
+    for name in [TRANSACTION_JOURNAL, "journal.next"] {
+        let path = transaction.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !crate::is_reparse_point(&metadata) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => {
+                return Err(format!(
+                    "transaction contains an unexpected journal entry: {}",
+                    path.display()
+                )
+                .into());
+            }
+        }
+    }
+    drop(directory);
+    file_ops.remove_dir_all(transaction)?;
+    file_ops.sync_directory(parent)?;
+    Ok(())
+}
+
 fn journal_checksum(journal: &TransactionJournal) -> PackageResult<String> {
     let mut unsigned = journal.clone();
     unsigned.checksum.clear();
@@ -999,38 +1048,51 @@ impl DistributionTransactionDirectory {
                 }
                 Err(error) => return Err(error.into()),
             };
-            let parent_identity = directory_identity(parent)?;
-            let transaction_identity = directory_identity(&private_path)?;
-            let mut journal_state = TransactionJournal::new(
-                transaction_id.clone(),
-                destination_name.to_owned(),
-                parent_identity,
-                transaction_identity,
-                destination_identity,
-            )?;
-            let journal = private_path.join(TRANSACTION_JOURNAL);
-            if let Err(error) = write_transaction_state(
-                &journal,
-                parent,
-                &mut journal_state,
-                TransactionState::Prepared,
-                file_ops,
-            ) {
+            let transaction_identity = capability.identity;
+            let mut path = private_path.clone();
+            let result = (|| -> DistributionResult<_> {
+                let mut journal_state = TransactionJournal::new(
+                    transaction_id,
+                    destination_name.to_owned(),
+                    directory_identity(parent)?,
+                    transaction_identity,
+                    destination_identity,
+                )?;
+                write_transaction_state(
+                    &private_path.join(TRANSACTION_JOURNAL),
+                    parent,
+                    &mut journal_state,
+                    TransactionState::Prepared,
+                    file_ops,
+                )?;
+                capability.verify()?;
                 drop(capability);
-                return Err(error.into());
-            }
-            capability.verify()?;
-            drop(capability);
-            rename_path(&private_path, &final_path)?;
-            sync_rename_parents(&private_path, &final_path, file_ops)?;
-            let capability = crate::PrivateStagingDirectory::open(&final_path)?;
-            return Ok((
-                Self {
-                    path: final_path,
-                    capability: Some(capability),
-                },
-                journal_state,
-            ));
+                rename_path(&private_path, &final_path)?;
+                path = final_path;
+                sync_rename_parents(&private_path, &path, file_ops)?;
+                let capability = PrivateStagingDirectory::open(&path)?;
+                if capability.identity != transaction_identity {
+                    return Err(DistributionError::Invalid(
+                        "distribution transaction directory identity changed".to_owned(),
+                    ));
+                }
+                Ok((capability, journal_state))
+            })();
+            return match result {
+                Ok((capability, journal)) => Ok((
+                    Self {
+                        path,
+                        capability: Some(capability),
+                    },
+                    journal,
+                )),
+                Err(primary) => Err(cleanup_after_unmutated_failure(
+                    &parent.join(destination_name),
+                    &path,
+                    primary,
+                    cleanup_unmutated_transaction(parent, &path, transaction_identity, file_ops),
+                )),
+            };
         }
         Err(DistributionError::Invalid(
             "failed to allocate a unique distribution transaction directory".to_owned(),
@@ -1053,20 +1115,20 @@ impl DistributionTransactionDirectory {
         Ok(())
     }
 
-    fn keep(mut self) -> PathBuf {
+    fn keep(&mut self) -> PathBuf {
         self.capability.take();
         std::mem::take(&mut self.path)
     }
 
-    fn cleanup_now(mut self, parent: &Path, file_ops: &impl DistributionFileOps) -> io::Result<()> {
+    fn cleanup_now(
+        &mut self,
+        parent: &Path,
+        file_ops: &impl DistributionFileOps,
+    ) -> io::Result<()> {
         self.capability.take();
         file_ops.remove_dir_all(&self.path)?;
         file_ops.sync_directory(parent)
     }
-}
-
-impl Drop for DistributionTransactionDirectory {
-    fn drop(&mut self) {}
 }
 
 fn validate_commit_location(parent: &Path, destination: &Path) -> DistributionResult {
@@ -1104,29 +1166,31 @@ fn commit_prepared_directory_with(
     verify_source(prepared.staging_directory())?;
 
     let destination_identity = optional_directory_identity(destination)?;
-    let (transaction, mut journal_state) = DistributionTransactionDirectory::create(
+    let (mut transaction, mut journal_state) = DistributionTransactionDirectory::create(
         parent,
         destination_name,
         destination_identity,
         file_ops,
     )?;
-    transaction.verify()?;
     let previous = transaction.path().join("previous");
     let journal = transaction.path().join(TRANSACTION_JOURNAL);
-    validate_commit_location(parent, destination)?;
     let had_previous = destination_identity.is_some();
     let transaction_path = transaction.path().to_path_buf();
     let previous_path = had_previous.then(|| previous.clone());
     let mut output_changed = false;
+    let mut output_was_changed = false;
     // Every fallible exit after a successful namespace mutation passes through
     // one outcome boundary. A completed rollback resets the marker; otherwise
     // callers receive the locations needed to inspect or recover the commit.
     let result = (|| {
-        if had_previous {
+        transaction.verify()?;
+        if let Some(expected) = destination_identity {
             validate_commit_location(parent, destination)?;
             commit_guard.ensure_held()?;
+            require_directory_identity(destination, expected, "original destination")?;
             file_ops.rename(destination, &previous)?;
             output_changed = true;
+            output_was_changed = true;
             sync_rename_parents(destination, &previous, file_ops)?;
             journal_state.previous_identity = Some(directory_identity(&previous)?);
             write_transaction_state(
@@ -1228,7 +1292,7 @@ fn commit_prepared_directory_with(
                     });
                 if let Err(rollback_error) = rollback {
                     return Err(distribution_recovery_error(
-                        transaction,
+                        &mut transaction,
                         destination,
                         commit_error,
                         rollback_error,
@@ -1256,6 +1320,7 @@ fn commit_prepared_directory_with(
             return Err(DistributionError::Io(commit_error));
         }
         output_changed = true;
+        output_was_changed = true;
         sync_rename_parents(prepared.staging_directory(), destination, file_ops)?;
         #[cfg(not(target_os = "windows"))]
         drop(source_lease);
@@ -1315,7 +1380,7 @@ fn commit_prepared_directory_with(
                     .and_then(|_| sync_rename_parents(destination, &failed, file_ops));
                 if let Err(rollback_error) = failed_install {
                     return Err(distribution_recovery_error(
-                        transaction,
+                        &mut transaction,
                         destination,
                         error_as_io(verification_error),
                         rollback_error,
@@ -1349,7 +1414,7 @@ fn commit_prepared_directory_with(
                     });
                 if let Err(rollback_error) = rollback {
                     return Err(distribution_recovery_error(
-                        transaction,
+                        &mut transaction,
                         destination,
                         error_as_io(verification_error),
                         rollback_error,
@@ -1379,7 +1444,7 @@ fn commit_prepared_directory_with(
                 })
             {
                 return Err(distribution_recovery_error(
-                    transaction,
+                    &mut transaction,
                     destination,
                     error_as_io(verification_error),
                     rollback_error,
@@ -1421,6 +1486,29 @@ fn commit_prepared_directory_with(
             transaction_path,
             previous_path,
         )),
+        Err(primary) if !output_was_changed => {
+            transaction.capability.take();
+            let cleanup = (|| -> PackageResult {
+                commit_guard.ensure_held()?;
+                if optional_directory_identity(destination)? != destination_identity {
+                    return Err(
+                        "destination changed before the transaction could be cleaned".into(),
+                    );
+                }
+                cleanup_unmutated_transaction(
+                    parent,
+                    &transaction_path,
+                    journal_state.transaction_identity,
+                    file_ops,
+                )
+            })();
+            Err(cleanup_after_unmutated_failure(
+                destination,
+                &transaction_path,
+                primary,
+                cleanup,
+            ))
+        }
         outcome => outcome,
     }
 }
@@ -1450,7 +1538,7 @@ where
 }
 
 fn distribution_recovery_error(
-    transaction: DistributionTransactionDirectory,
+    transaction: &mut DistributionTransactionDirectory,
     destination: &Path,
     commit_error: io::Error,
     rollback_error: io::Error,
@@ -1461,6 +1549,29 @@ fn distribution_recovery_error(
         commit_error,
         rollback_error,
         recovery_path: recovery_root.join("previous"),
+    }
+}
+
+fn cleanup_after_unmutated_failure(
+    destination: &Path,
+    transaction: &Path,
+    primary: DistributionError,
+    cleanup: PackageResult,
+) -> DistributionError {
+    match cleanup {
+        Ok(()) => primary,
+        Err(cleanup) => interrupted_distribution(
+            DistributionRecoveryError {
+                destination: destination.to_path_buf(),
+                commit_error: error_as_io(primary),
+                rollback_error: error_as_io(cleanup),
+                recovery_path: transaction.join("previous"),
+            }
+            .into(),
+            destination,
+            transaction.to_path_buf(),
+            None,
+        ),
     }
 }
 
@@ -1714,15 +1825,34 @@ fn recover_distribution_transaction(
             }
         }
 
-        if private_transaction && !payloads.is_empty() {
-            return quarantine_transaction(
+        if private_transaction {
+            if !payloads.is_empty()
+                || journal_state.state != TransactionState::Prepared
+                || journal_state.previous_identity.is_some()
+                || journal_state.installed_identity.is_some()
+            {
+                return quarantine_transaction(
+                    parent,
+                    destination_name,
+                    prefix,
+                    transaction,
+                    "private transaction contains state from after publication",
+                    file_ops,
+                );
+            }
+            // Output renames are only possible after publishing the transaction
+            // directory. No recovery action depends on the destination that
+            // existed when this private journal was written.
+            commit_guard.ensure_held()?;
+            previous_path = None;
+            drop(transaction_directory);
+            cleanup_unmutated_transaction(
                 parent,
-                destination_name,
-                prefix,
                 transaction,
-                "private transaction directory contains recovery payloads",
+                journal_state.transaction_identity,
                 file_ops,
-            );
+            )?;
+            return Ok(());
         }
 
         let previous = transaction.join("previous");

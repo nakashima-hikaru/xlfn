@@ -101,7 +101,7 @@ impl ExcelArrayBuilder {
         Ok(Self {
             rows,
             columns,
-            cells: Box::<[XLOPER12]>::new_uninit_slice(len),
+            cells: super::storage::try_uninit_boxed_slice::<XLOPER12>(len)?,
             initialized: 0,
             storage: None,
             payload_bytes: cell_bytes,

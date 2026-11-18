@@ -61,7 +61,6 @@ MODULES = {
     ),
     "return_abi": Path("crates/xlfn/src/return_abi.rs"),
     "return_abi/ownership": Path("crates/xlfn/src/return_abi/ownership.rs"),
-    "return_abi/slot": Path("crates/xlfn/src/return_abi/slot.rs"),
     "macro_abi": Path("crates/xlfn/src/__private.rs"),
     "macros/lib": Path("crates/xlfn-macros/src/lib.rs"),
     "subscription/data_plane": Path("crates/xlfn/src/subscription/data_plane.rs"),

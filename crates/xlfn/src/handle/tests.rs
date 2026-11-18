@@ -95,7 +95,7 @@ fn input_identity<T: ExcelHandleObject>(
         let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
             storage,
             brand,
-            FormulaHandleServiceResolver::new(slot),
+            storage.handle_resolver(slot),
             1,
         );
         // SAFETY: raw and its counted UTF-16 buffer live for the entire conversion.
@@ -3530,9 +3530,10 @@ fn resolver_does_not_initialize_slot_when_unused() {
     let slot = FormulaHandleServiceSlot::new();
     assert!(slot.is_none());
 
-    let resolver = FormulaHandleServiceResolver::new(&slot);
-    assert!(slot.is_none());
-    drop(resolver);
+    crate::call::with_branded_call_scope_and_state(&slot, |slot, storage, _| {
+        let _resolver = storage.handle_resolver(slot);
+        assert!(slot.is_none());
+    });
     assert!(slot.is_none());
 }
 
@@ -3554,7 +3555,7 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
 
     let callbacks = crate::host_callback::HostCallbackSession::new();
     crate::call::with_branded_call_scope_and_state(&callbacks, |callbacks, storage, brand| {
-        let resolver = FormulaHandleServiceResolver::new(slot);
+        let resolver = storage.handle_resolver(slot);
         let mut call_ctx =
             crate::value::DecodeCallContext::from_handle_access(storage, brand, resolver);
 

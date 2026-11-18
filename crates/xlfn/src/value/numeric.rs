@@ -36,6 +36,16 @@ impl<'call> NumericMatrixRef<'call> {
         self.columns
     }
 
+    /// Number of elements in the matrix.
+    pub const fn len(self) -> usize {
+        self.values.len()
+    }
+
+    /// Returns whether there are zero elements. Valid matrices are non-empty.
+    pub const fn is_empty(self) -> bool {
+        self.values.is_empty()
+    }
+
     /// The matrix dimensions.
     pub const fn shape(self) -> crate::value::Shape {
         crate::value::Shape {

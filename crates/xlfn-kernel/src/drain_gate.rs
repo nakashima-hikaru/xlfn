@@ -171,9 +171,10 @@ impl DrainGate {
     /// Acquires a lifetime-erased permit for an owner-managed shutdown path.
     ///
     /// # Safety
-    /// The owner must retain this exact gate until the permit's final release
-    /// and notification tail finish. Counting zero is not a substitute for
-    /// sealing and waiting for the same gate before reclaiming its owner.
+    /// Keep this gate initialized at the same address through the final
+    /// release and its notification tail. While a detached permit can access
+    /// it, do not move the gate or create an exclusive reference covering it.
+    /// Seal and drain this exact gate before reclaiming its owner.
     #[inline]
     pub unsafe fn try_enter_detached(&self) -> Result<DetachedDrainPermit, Sealed> {
         // SAFETY: forwards the caller's exact owner-lifetime contract.
@@ -364,8 +365,10 @@ impl<const N: usize> StripedDrainGate<N> {
     /// Acquires a stripe-bound permit for an owner-managed shutdown path.
     ///
     /// # Safety
-    /// This exact gate must remain alive through the permit's final release
-    /// notification. Its owner must seal and drain every stripe before reclaim.
+    /// Keep this gate initialized at the same address through notification
+    /// after the final release. Do not move the gate or create an exclusive
+    /// reference covering it while a detached permit can access it. Seal
+    /// and drain all stripes before reclaiming the owner.
     #[inline]
     pub unsafe fn try_enter_detached(
         &self,
@@ -421,7 +424,11 @@ impl<const N: usize> StripedDrainGate<N> {
     fn seal(&self) {
         // Serialize whole-gate administrative changes with reopen. Otherwise
         // a concurrent seal could reseal an early stripe during partial reopen.
-        let _guard = self.idle.lock();
+        let guard = self.idle.lock();
+        self.seal_locked(&guard);
+    }
+
+    fn seal_locked(&self, _notification: &MutexGuard<'_, ()>) {
         protocol::seal_all_stripes!(index; self.counters.len(), self.counters[index].seal(););
     }
 
@@ -461,7 +468,11 @@ impl<const N: usize> StripedDrainGate<N> {
     }
 
     fn reopen(&self) -> Result<(), ReopenError> {
-        let _guard = self.idle.lock();
+        let guard = self.idle.lock();
+        self.reopen_locked(&guard)
+    }
+
+    fn reopen_locked(&self, _notification: &MutexGuard<'_, ()>) -> Result<(), ReopenError> {
         if self
             .counters
             .iter()
@@ -548,6 +559,17 @@ pub struct StripedDrainPermit<'a, const N: usize> {
 }
 
 impl<const N: usize> StripedDrainPermit<'_, N> {
+    /// Transfers the existing count without crossing admission again.
+    ///
+    /// # Safety
+    /// The gate must stay alive at the same address and be accessed through
+    /// shared references or shared-derived pointers until the detached
+    /// permit completes release, including the notification tail.
+    pub(crate) unsafe fn detach(self) -> DetachedStripedDrainPermit<N> {
+        let permit = std::mem::ManuallyDrop::new(self);
+        DetachedStripedDrainPermit::from_admitted(NonNull::from(permit.gate), permit.stripe)
+    }
+
     pub fn release(self) {
         drop(self);
     }

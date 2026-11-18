@@ -2630,9 +2630,10 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
                 }
                 StoredRtdValue::Error(expected) => {
                     assert_eq!(value.Anonymous.Anonymous.vt, VT_ERROR);
+                    assert_eq!(*expected, crate::ExcelError::NotAvailable);
                     assert_eq!(
                         value.Anonymous.Anonymous.Anonymous.scode,
-                        2000 + expected.code()
+                        0x800A_07FA_u32 as i32
                     );
                 }
                 StoredRtdValue::Empty => {
@@ -2648,6 +2649,37 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
     // SAFETY: ownership was not transferred from this test and the live
     // SAFEARRAY is destroyed exactly once.
     assert_eq!(unsafe { SafeArrayDestroy(array) }, S_OK);
+}
+
+#[test]
+fn worksheet_errors_use_automation_scodes() {
+    use crate::ExcelError::{
+        DivisionByZero, GettingData, Name, NotAvailable, Null, Number, Reference, Value,
+    };
+    for (error, scode) in [
+        (Null, 0x800A_07D0_u32),
+        (DivisionByZero, 0x800A_07D7),
+        (Value, 0x800A_07DF),
+        (Reference, 0x800A_07E7),
+        (Name, 0x800A_07ED),
+        (Number, 0x800A_07F4),
+        (NotAvailable, 0x800A_07FA),
+        (GettingData, 0x800A_07FB),
+    ] {
+        let mut variant = VARIANT::default();
+        assert_eq!(
+            // SAFETY: this test owns writable VARIANT storage.
+            unsafe {
+                super::automation::write_value_variant(&mut variant, &StoredRtdValue::Error(error))
+            },
+            S_OK
+        );
+        // SAFETY: successful conversion initialized the VARIANT as VT_ERROR.
+        unsafe {
+            assert_eq!(variant.Anonymous.Anonymous.vt, VT_ERROR);
+            assert_eq!(variant.Anonymous.Anonymous.Anonymous.scode, scode as i32);
+        }
+    }
 }
 
 #[test]
@@ -2713,6 +2745,25 @@ fn topic_key_limits_reject_extreme_bounds_and_oversized_strings() {
     assert!(checked_topic_part_count(i32::MIN, i32::MAX).is_err());
     assert!(checked_topic_part_length(crate::utf16::EXCEL_STRING_LIMIT).is_ok());
     assert!(checked_topic_part_length(crate::utf16::EXCEL_STRING_LIMIT + 1).is_err());
+}
+
+#[test]
+fn topic_array_element_layout_requires_consistent_width_and_ownership_flags() {
+    use crate::win32::{FADF_BSTR, FADF_UNKNOWN, FADF_VARIANT};
+    let bstr_width = size_of::<*mut u16>() as u32;
+    let variant_width = size_of::<VARIANT>() as u32;
+    let bstr = FADF_BSTR as u16;
+    let variant = FADF_VARIANT as u16;
+    let unknown = FADF_UNKNOWN as u16;
+    let element_type = super::automation::topic_element_type;
+
+    assert_eq!(element_type(bstr, bstr_width).unwrap(), VT_BSTR);
+    assert_eq!(element_type(variant, variant_width).unwrap(), VT_VARIANT);
+    assert!(element_type(bstr, variant_width).is_err());
+    assert!(element_type(variant, bstr_width).is_err());
+    assert!(element_type(0, variant_width).is_err());
+    assert!(element_type(variant | bstr, variant_width).is_err());
+    assert!(element_type(bstr | unknown, bstr_width).is_err());
 }
 
 #[test]
@@ -4099,6 +4150,52 @@ fn sta_drain_pumps_com_during_helper_thread_exit() {
     assert!(dispatched.load(Ordering::Acquire));
     // SAFETY: no proxy user remains after the MTA caller was joined.
     assert_eq!(unsafe { git.revoke(cookie) }, S_OK);
+}
+
+#[test]
+#[cfg(all(feature = "rtd", feature = "handles"))]
+fn logical_rtd_close_dispatches_com_until_inflight_calls_return() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    close_test_ingress();
+    let _apartment = TestComApartment::enter_sta();
+    let sta = thread::current().id();
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&dispatched);
+    let probe = sta_probe::new(move || {
+        assert_eq!(thread::current().id(), sta);
+        observed.store(true, Ordering::Release);
+    });
+    // SAFETY: the STA retains the live interface through registration.
+    let git = unsafe { super::global_interface_table::get_git() }.unwrap();
+    let mut cookie = 0;
+    assert_eq!(
+        // SAFETY: the interface, IID, and writable cookie remain live here.
+        unsafe { git.register(probe.as_ptr(), &IID_IUNKNOWN, &mut cookie) },
+        S_OK
+    );
+    let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+    let caller = thread::spawn(move || {
+        let _apartment = TestComApartment::enter();
+        let (_call, accepted) = module_lifetime().enter_call();
+        assert!(!accepted);
+        entered_tx.send(()).unwrap();
+        sta_probe::call(&sta_probe::interface(cookie));
+    });
+
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let quiescence = crate::excel_rtd_protocol::wait_for_module_quiescence(true);
+    // Keep dispatching through apartment exit, and let a timed-out close
+    // finish the probe before failing the assertion.
+    let wait = crate::excel_rtd::drain_wait::UnstartedDrain::new(move || caller.join().unwrap());
+    assert!(
+        drain_with_com_dispatch(wait)
+            .and_then(|prepared| prepared.run())
+            .is_ok()
+    );
+    assert!(dispatched.load(Ordering::Acquire));
+    // SAFETY: no proxy user remains after completing the MTA call.
+    assert_eq!(unsafe { git.revoke(cookie) }, S_OK);
+    quiescence.unwrap();
 }
 
 #[test]

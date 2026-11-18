@@ -15,7 +15,7 @@ const CALLBACK_CLEANUP_AUDIT_CAPACITY: usize = 64;
 pub(crate) enum CallbackValueReleaseState {
     Live,
     Released,
-    TerminalSuppressed { status: ExcelCallbackStatus },
+    CleanupOnly,
     Indeterminate { status: ExcelCallbackStatus },
 }
 
@@ -43,25 +43,19 @@ fn record_callback_value_debt(debt: CallbackCleanupDebt) {
 type ReleaseCallback = unsafe fn(&mut XLOPER12) -> i32;
 
 #[cfg(test)]
-fn state_after_call(
-    callback_invoked: bool,
-    status: ExcelCallbackStatus,
-) -> CallbackValueReleaseState {
-    if !callback_invoked {
-        CallbackValueReleaseState::Released
-    } else if status.is_terminal() {
-        CallbackValueReleaseState::TerminalSuppressed { status }
-    } else {
+fn state_after_callback(status: ExcelCallbackStatus) -> CallbackValueReleaseState {
+    if status == ExcelCallbackStatus::Success {
         CallbackValueReleaseState::Live
+    } else {
+        CallbackValueReleaseState::CleanupOnly
     }
 }
 
 /// Owns one result returned by an Excel callback for the rest of its call scope.
 ///
-/// A live Excel-owned value gets at most one `xlFree` attempt. Terminal callback
-/// statuses suppress read access but still allow `xlFree` cleanup once per value
-/// during the active invocation lifetime. Once cleanup is indeterminate,
-/// Excel is no longer called.
+/// The output of an invoked callback gets at most one `xlFree` attempt.
+/// Excel12 grants read access on xlretSuccess. The result slot starts as nil
+/// so cleanup can also handle a failed invocation that left it unwritten.
 struct CallbackOwner<'session> {
     raw: XLOPER12,
     release_required: bool,
@@ -80,7 +74,7 @@ pub(crate) struct ExcelCallbackValue<'session> {
     owner: CallbackOwner<'session>,
 }
 
-/// Dynamic callback evidence is classified once; terminal results carry
+/// Dynamic callback evidence is classified once; failed results carry
 /// cleanup authority without exposing a readable owner.
 pub(crate) enum CallbackResult<'session> {
     Readable(ExcelCallbackValue<'session>),
@@ -98,7 +92,7 @@ impl<'session> CallbackResult<'session> {
         release: ReleaseCallback,
     ) -> Self {
         let owner = CallbackOwner::from_callback_for_test(raw, status, release);
-        if status.is_terminal() {
+        if status != ExcelCallbackStatus::Success {
             Self::CleanupOnly(CleanupOnlyValue { owner })
         } else {
             Self::Readable(ExcelCallbackValue { owner })
@@ -153,7 +147,7 @@ impl CallbackOwner<'static> {
             release_required: true,
             audit_failures: false,
             release_callback,
-            state: state_after_call(true, status),
+            state: state_after_callback(status),
             session: None,
             module_permit: None,
             _not_send_or_sync: PhantomData,
@@ -174,7 +168,7 @@ impl<'session> CallbackOwner<'session> {
             release_required: true,
             audit_failures: false,
             release_callback,
-            state: state_after_call(true, status),
+            state: state_after_callback(status),
             session: Some(session),
             module_permit: None,
             _not_send_or_sync: PhantomData,
@@ -194,7 +188,7 @@ impl<'session> CallbackOwner<'session> {
             release_required: true,
             audit_failures: false,
             release_callback,
-            state: state_after_call(true, status),
+            state: state_after_callback(status),
             session: Some(session),
             module_permit,
             _not_send_or_sync: PhantomData,
@@ -239,15 +233,13 @@ impl<'session> ExcelCallbackValue<'session> {
             module_permit: Some(callback_admission),
             _not_send_or_sync: PhantomData,
         };
-        let result = if callback_status.is_terminal() {
-            CallbackResult::CleanupOnly(CleanupOnlyValue {
-                owner: make_owner(CallbackValueReleaseState::TerminalSuppressed {
-                    status: callback_status,
-                }),
-            })
-        } else {
+        let result = if callback_status == ExcelCallbackStatus::Success {
             CallbackResult::Readable(ExcelCallbackValue {
                 owner: make_owner(CallbackValueReleaseState::Live),
+            })
+        } else {
+            CallbackResult::CleanupOnly(CleanupOnlyValue {
+                owner: make_owner(CallbackValueReleaseState::CleanupOnly),
             })
         };
         Ok((status, result))
@@ -293,8 +285,8 @@ impl CallbackOwner<'_> {
 
     /// Attempts cleanup once.
     ///
-    /// Terminal results suppress read operations but permit `xlFree` cleanup. A
-    /// failed `xlFree` is returned as an error and permanently changes the
+    /// Excel permits `xlFree` cleanup even after Abort or Uncalced. A failed
+    /// `xlFree` is returned as an error and permanently changes the
     /// state to `Indeterminate`; neither `Drop` nor a later explicit call can
     /// retry it.
     fn release_in_place(&mut self) -> XllResult<()> {
@@ -306,8 +298,7 @@ impl CallbackOwner<'_> {
                     failure: crate::error::ExcelApiFailure::Indeterminate(status),
                 });
             }
-            CallbackValueReleaseState::Live
-            | CallbackValueReleaseState::TerminalSuppressed { .. } => {}
+            CallbackValueReleaseState::Live | CallbackValueReleaseState::CleanupOnly => {}
         }
 
         if !self.release_required {
@@ -327,7 +318,7 @@ impl CallbackOwner<'_> {
         let release = self.release_callback;
         #[cfg(not(test))]
         let release = excel_free;
-        // SAFETY: `Live` / `TerminalSuppressed` plus `release_required` means this exact XLOPER12
+        // SAFETY: `Live` / `CleanupOnly` plus `release_required` means this exact XLOPER12
         // was supplied as result storage to one completed callback.
         let raw_status = unsafe { release(&mut self.raw) };
         drop(permit);
@@ -381,7 +372,10 @@ mod tests {
             FREE_CALLS.store(0, Ordering::Relaxed);
             let mut result =
                 CallbackResult::callback_for_test(XLOPER12::integer(7), status, successful_free);
-            assert_eq!(result.readable().is_ok(), !status.is_terminal());
+            assert_eq!(
+                result.readable().is_ok(),
+                status == ExcelCallbackStatus::Success
+            );
             result.release().unwrap();
             assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
         }
@@ -531,10 +525,7 @@ mod tests {
                 ExcelCallbackStatus::from_raw(status),
                 successful_free,
             );
-            assert!(matches!(
-                value.state,
-                CallbackValueReleaseState::TerminalSuppressed { .. }
-            ));
+            assert_eq!(value.state, CallbackValueReleaseState::CleanupOnly);
             value.release_in_place().unwrap();
             assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
             drop(value);

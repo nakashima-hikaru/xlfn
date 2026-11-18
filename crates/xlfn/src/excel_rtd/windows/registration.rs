@@ -2,9 +2,10 @@ use super::ActiveServer;
 use crate::sync::{Mutex, MutexGuard};
 use crate::win32::{
     CloseHandle, CreateMutexW, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GUID,
-    GetLastError, HANDLE, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ, RegCloseKey,
-    RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW,
-    RegSetValueExW, ReleaseMutex, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WaitForSingleObject,
+    GetLastError, HANDLE, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
+    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW,
+    RegQueryValueExW, RegSetValueExW, ReleaseMutex, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0,
+    WaitForSingleObject,
 };
 use crate::{XllError, XllResult};
 use std::ptr;
@@ -18,6 +19,8 @@ pub(super) const RTD_REGISTRATION_SCHEMA: &str = "2";
 pub(super) const RTD_PROG_ID_PREFIX: &str = "XlFnRtd_";
 pub(super) static REGISTRATION_MAINTENANCE: Mutex<()> = Mutex::new(());
 const REGISTRATION_MUTEX_TIMEOUT_MS: u32 = 1_000;
+const CLASSES_KEY: &str = "Software\\Classes";
+const CLSID_KEY: &str = "Software\\Classes\\CLSID";
 // WOW64 rejects volatile creation under the redirected CLSID key. Keep both
 // keys persistent on x86 so scavenging can still find the CLSID after a reboot.
 #[cfg(target_arch = "x86")]
@@ -43,32 +46,32 @@ impl TemporaryRegistration {
         }
 
         let class = guid_braced(*identity.class_id());
-        let prog_key = format!("Software\\Classes\\{}", identity.prog_id());
-        let class_key = format!("Software\\Classes\\CLSID\\{class}");
+        // RegCreateKeyExW applies its options to every missing component.
+        // Open the shared ancestors as persistent keys before adding the
+        // temporary children, in the same default registry view as cleanup.
+        let classes = RegistryKey::persistent_parent(CLASSES_KEY)?;
+        let clsid = RegistryKey::persistent_parent(CLSID_KEY)?;
         let registration = Self {
-            prog_key: wide_nul(&prog_key),
-            class_key: wide_nul(&class_key),
+            prog_key: wide_nul(&format!("{CLASSES_KEY}\\{}", identity.prog_id())),
+            class_key: wide_nul(&format!("{CLSID_KEY}\\{class}")),
             _maintenance: maintenance,
             _cross_process: cross_process,
         };
 
         let result = (|| {
-            set_registry_value(&prog_key, Some("XlFnOwner"), RTD_REGISTRATION_OWNER)?;
-            set_registry_value(
-                &prog_key,
-                Some("XlFnRegistrationSchema"),
-                RTD_REGISTRATION_SCHEMA,
-            )?;
-            set_registry_value(&prog_key, Some("XlFnOwnerModule"), module_path)?;
-            set_registry_value(&prog_key, Some("XlFnClassId"), &class)?;
-            set_registry_value(&format!("{prog_key}\\CLSID"), None, &class)?;
-            set_registry_value(&format!("{class_key}\\InProcServer32"), None, module_path)?;
-            set_registry_value(
-                &format!("{class_key}\\InProcServer32"),
-                Some("ThreadingModel"),
-                "Both",
-            )?;
-            set_registry_value(&format!("{class_key}\\ProgID"), None, identity.prog_id())?;
+            let prog_key = classes.temporary_child(identity.prog_id())?;
+            prog_key.set_value(Some("XlFnOwner"), RTD_REGISTRATION_OWNER)?;
+            prog_key.set_value(Some("XlFnRegistrationSchema"), RTD_REGISTRATION_SCHEMA)?;
+            prog_key.set_value(Some("XlFnOwnerModule"), module_path)?;
+            prog_key.set_value(Some("XlFnClassId"), &class)?;
+            prog_key.temporary_child("CLSID")?.set_value(None, &class)?;
+            let class_key = clsid.temporary_child(&class)?;
+            let in_proc = class_key.temporary_child("InProcServer32")?;
+            in_proc.set_value(None, module_path)?;
+            in_proc.set_value(Some("ThreadingModel"), "Both")?;
+            class_key
+                .temporary_child("ProgID")?
+                .set_value(None, identity.prog_id())?;
             Ok(())
         })();
 
@@ -477,64 +480,88 @@ fn class_id_from_prog_id(prog_id: &str) -> Option<String> {
     ))
 }
 
+struct RegistryKey(HKEY);
+
+impl RegistryKey {
+    fn persistent_parent(path: &str) -> XllResult<Self> {
+        Self::create(HKEY_CURRENT_USER, path, REG_OPTION_NON_VOLATILE as u32)
+    }
+
+    fn create(parent: HKEY, path: &str, options: u32) -> XllResult<Self> {
+        let path = wide_nul(path);
+        let mut key = ptr::null_mut();
+        // SAFETY: the parent is a live registry key, the path is NUL
+        // terminated, and key points to writable storage.
+        let status = unsafe {
+            RegCreateKeyExW(
+                parent,
+                path.as_ptr(),
+                0,
+                ptr::null(),
+                options,
+                KEY_WRITE as u32,
+                ptr::null(),
+                &mut key,
+                ptr::null_mut(),
+            )
+        };
+        if status == ERROR_SUCCESS {
+            Ok(Self(key))
+        } else {
+            Err(registry_error("RegCreateKeyExW", status))
+        }
+    }
+
+    fn temporary_child(&self, path: &str) -> XllResult<Self> {
+        Self::create(self.0, path, REGISTRATION_KEY_OPTIONS)
+    }
+
+    fn set_value(&self, name: Option<&str>, value: &str) -> XllResult<()> {
+        let name = name.map(wide_nul);
+        let value = wide_nul(value);
+        let bytes = u32::try_from(size_of_val(value.as_slice())).map_err(|_| XllError::Domain {
+            code: crate::error::DomainErrorCode::Overflow,
+        })?;
+
+        // SAFETY: this key is open and both buffers are NUL terminated.
+        let status = unsafe {
+            RegSetValueExW(
+                self.0,
+                name.as_ref().map_or(ptr::null(), |name| name.as_ptr()),
+                0,
+                REG_SZ,
+                value.as_ptr().cast(),
+                bytes,
+            )
+        };
+        if status == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(registry_error("RegSetValueExW", status as i32))
+        }
+    }
+}
+
+impl Drop for RegistryKey {
+    fn drop(&mut self) {
+        // SAFETY: this key owns the handle returned by RegCreateKeyExW.
+        unsafe { RegCloseKey(self.0) };
+    }
+}
+
+#[cfg(test)]
 pub(super) fn set_registry_value(path: &str, name: Option<&str>, value: &str) -> XllResult<()> {
-    let path = wide_nul(path);
-    let name = name.map(wide_nul);
-    let value = wide_nul(value);
-    let mut key: HKEY = ptr::null_mut();
-    let mut disposition = 0;
-
-    // SAFETY: all input string buffers are NUL-terminated and remain readable.
-    // `key` and `disposition` point to writable output storage.
-    let status = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            path.as_ptr(),
-            0,
-            ptr::null(),
-            REGISTRATION_KEY_OPTIONS,
-            KEY_WRITE as u32,
-            ptr::null(),
-            &mut key,
-            &mut disposition,
-        )
-    };
-
-    if status != ERROR_SUCCESS {
-        return Err(XllError::WindowsApi {
-            function: "RegCreateKeyExW",
-            code: status,
-        });
-    }
-
-    let bytes = u32::try_from(value.len() * 2).map_err(|_| XllError::Domain {
-        code: crate::error::DomainErrorCode::Overflow,
-    })?;
-
-    // SAFETY: `key` is open, the optional name and value buffers are
-    // NUL-terminated and readable, and `bytes` does not exceed the value buffer.
-    let status = unsafe {
-        RegSetValueExW(
-            key,
-            name.as_ref().map_or(ptr::null(), |name| name.as_ptr()),
-            0,
-            REG_SZ,
-            value.as_ptr().cast(),
-            bytes,
-        )
-    };
-
-    // SAFETY: `key` was returned by RegCreateKeyExW and is closed exactly once.
-    unsafe { RegCloseKey(key) };
-
-    if status == ERROR_SUCCESS {
-        Ok(())
+    let (parent, child) = if let Some(child) = path.strip_prefix("Software\\Classes\\CLSID\\") {
+        (CLSID_KEY, child)
     } else {
-        Err(XllError::WindowsApi {
-            function: "RegSetValueExW",
-            code: status as i32,
-        })
-    }
+        (
+            CLASSES_KEY,
+            path.strip_prefix("Software\\Classes\\").unwrap(),
+        )
+    };
+    RegistryKey::persistent_parent(parent)?
+        .temporary_child(child)?
+        .set_value(name, value)
 }
 
 pub(super) fn wide_nul(value: &str) -> Vec<u16> {
@@ -565,6 +592,27 @@ pub(super) fn guid_braced(guid: GUID) -> String {
 #[cfg(test)]
 mod registry_prefix_tests {
     use super::*;
+
+    #[test]
+    fn new_shared_ancestors_accept_persistent_children_after_temporary_registration() {
+        let root = format!(
+            "Software\\xlfn-rtd-registry-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let _cleanup = std::mem::DropGuard::new(wide_nul(&root), |root| {
+            // SAFETY: this private test key has no other owner and its path is NUL terminated.
+            unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, root.as_ptr()) };
+        });
+        let classes = RegistryKey::persistent_parent(&format!("{root}\\Classes")).unwrap();
+        let clsid = RegistryKey::persistent_parent(&format!("{root}\\Classes\\CLSID")).unwrap();
+        let _prog_key = classes.temporary_child("TemporaryProgID").unwrap();
+        let _class_key = clsid.temporary_child("TemporaryClassID").unwrap();
+        RegistryKey::create(clsid.0, "PersistentClassID", REG_OPTION_NON_VOLATILE as u32).unwrap();
+    }
 
     #[test]
     fn filter_registry_keys_before_utf16_decoding() {

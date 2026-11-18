@@ -73,6 +73,12 @@ fn remove_unused_tlibattr_default(path: &Path) {
 }
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--list-outputs")) {
+        for &(_, output) in BINDINGS {
+            println!("{output}");
+        }
+        return;
+    }
     let root = workspace_root();
     std::env::set_current_dir(&root).unwrap_or_else(|error| {
         panic!(

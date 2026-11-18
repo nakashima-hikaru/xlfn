@@ -371,11 +371,18 @@ type CacheMap = papaya::HashMap<(TypeId, &'static str), CacheEntry, FxBuildHashe
 pub struct CacheBudget(usize);
 
 impl CacheBudget {
-    /// Selects the maximum resident weight for each cache.
+    /// Selects the maximum resident weight for each cache. The budget is
+    /// capped at `u64::MAX / 2` to allow safe addition of incoming weight.
     pub const fn weight_units(units: usize) -> Self {
-        Self(units)
+        // Every 32-bit budget already fits this limit.
+        const MAX_WEIGHT: u64 = u64::MAX / 2;
+        if units as u64 > MAX_WEIGHT {
+            Self(MAX_WEIGHT as usize)
+        } else {
+            Self(units)
+        }
     }
-    /// Returns the configured weight units.
+    /// Returns the effective weight budget.
     pub const fn get(self) -> usize {
         self.0
     }
@@ -1031,24 +1038,19 @@ impl<V> ReclaimEntry<V> {
             .register_retired_with_hook(after_generation_load, |_, mut queue| {
                 let weight = entry.weight;
                 queue.append(entry);
-                let _nodes = domain
-                    .pending_nodes
-                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                        current.checked_add(1)
-                    })
-                    .map(|previous| previous + 1)
-                    .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-                let _weight = domain.add_pending_weight(weight);
+                let mut debt = domain.pending_debt.lock();
+                debt.enqueue(weight);
+                domain.pending_nodes.store(debt.nodes, Ordering::Release);
                 #[cfg(any(test, feature = "bench-internals"))]
                 {
                     domain
                         .metrics
                         .peak_pending_nodes
-                        .fetch_max(_nodes, Ordering::Relaxed);
+                        .fetch_max(debt.nodes, Ordering::Relaxed);
                     domain
                         .metrics
                         .peak_pending_weight
-                        .fetch_max(_weight, Ordering::Relaxed);
+                        .fetch_max(debt.weight(), Ordering::Relaxed);
                 }
             });
     }
@@ -1134,14 +1136,50 @@ struct CacheLookupDomain<V> {
     // only after the grace period covering every reader that could
     // have observed its pointer has ended.
     domain: RotatingRetirementDomain<DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
+    // Fast observation for readers that would otherwise lock on every release.
+    // Writes occur only while holding pending_debt.
     pending_nodes: AtomicUsize,
     maintenance_requests: AtomicUsize,
-    pending_weight: AtomicU64,
-    // Once the sum exceeds u64, keep a conservative backpressure signal
-    // until both retirement queues are observed empty under their locks.
-    pending_weight_saturated: AtomicBool,
+    pending_debt: Mutex<PendingDebt>,
     #[cfg(any(test, feature = "bench-internals"))]
     metrics: CacheReclamationMetrics,
+}
+
+struct PendingDebt {
+    // Includes registered entries and detached batches until accounted.
+    nodes: usize,
+    // None conservatively reports saturation until the last debt is removed.
+    weight: Option<u64>,
+}
+
+impl PendingDebt {
+    fn enqueue(&mut self, weight: u64) {
+        self.nodes = self
+            .nodes
+            .checked_add(1)
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+        self.weight = self.weight.and_then(|current| current.checked_add(weight));
+    }
+
+    fn retire(&mut self, nodes: usize, weight: u64) {
+        self.nodes = self
+            .nodes
+            .checked_sub(nodes)
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+        if let Some(current) = self.weight {
+            self.weight = Some(
+                current
+                    .checked_sub(weight)
+                    .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop()),
+            );
+        } else if self.nodes == 0 {
+            self.weight = Some(0);
+        }
+    }
+
+    fn weight(&self) -> u64 {
+        self.weight.unwrap_or(u64::MAX)
+    }
 }
 
 /// Observation only: admission, backpressure and retirement never read these.
@@ -1161,8 +1199,10 @@ impl<V> CacheLookupDomain<V> {
             domain: RotatingRetirementDomain::new(),
             pending_nodes: AtomicUsize::new(0),
             maintenance_requests: AtomicUsize::new(0),
-            pending_weight: AtomicU64::new(0),
-            pending_weight_saturated: AtomicBool::new(false),
+            pending_debt: Mutex::new(PendingDebt {
+                nodes: 0,
+                weight: Some(0),
+            }),
             #[cfg(any(test, feature = "bench-internals"))]
             metrics: CacheReclamationMetrics::default(),
         }
@@ -1192,46 +1232,7 @@ impl<V> CacheLookupDomain<V> {
     }
 
     fn pending_weight(&self) -> u64 {
-        if self.pending_weight_saturated.load(Ordering::Relaxed) {
-            u64::MAX
-        } else {
-            self.pending_weight.load(Ordering::Relaxed)
-        }
-    }
-
-    fn add_pending_weight(&self, weight: u64) -> u64 {
-        let previous =
-            self.pending_weight
-                .update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    if self.pending_weight_saturated.load(Ordering::Relaxed) {
-                        current
-                    } else if let Some(next) = current.checked_add(weight) {
-                        next
-                    } else {
-                        // This closure may retry. Setting a sticky flag early is
-                        // conservative and cannot lose the backpressure signal.
-                        self.pending_weight_saturated.store(true, Ordering::Relaxed);
-                        u64::MAX
-                    }
-                });
-        if self.pending_weight_saturated.load(Ordering::Relaxed) {
-            u64::MAX
-        } else {
-            previous.saturating_add(weight)
-        }
-    }
-
-    fn clear_saturated_weight_if_empty(&self) {
-        if !self.pending_weight_saturated.load(Ordering::Relaxed) {
-            return;
-        }
-        let _ = self.domain.try_observe_queue_lengths(|lengths| {
-            if lengths == [0, 0] && self.pending_nodes.load(Ordering::Relaxed) == 0 {
-                self.pending_weight.store(0, Ordering::Relaxed);
-                self.pending_weight_saturated
-                    .store(false, Ordering::Relaxed);
-            }
-        });
+        self.pending_debt.lock().weight()
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
@@ -1252,9 +1253,10 @@ impl<V> CacheLookupDomain<V> {
 
     #[cfg(any(test, feature = "bench-internals"))]
     fn stats(&self) -> CacheReclamationStats {
+        let debt = self.pending_debt.lock();
         CacheReclamationStats {
-            pending_nodes: self.pending_nodes.load(Ordering::Relaxed),
-            pending_weight: self.pending_weight(),
+            pending_nodes: debt.nodes,
+            pending_weight: debt.weight(),
             peak_pending_nodes: self.metrics.peak_pending_nodes.load(Ordering::Relaxed),
             peak_pending_weight: self.metrics.peak_pending_weight.load(Ordering::Relaxed),
             reclaimed_nodes: self.metrics.reclaimed_nodes.load(Ordering::Relaxed),
@@ -3763,6 +3765,22 @@ mod tests {
         assert_eq!(*value, 7);
         assert!(cache.get(&1).is_none());
         drop(value);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn maximum_cache_budget_leaves_room_for_incoming_weight() {
+        let budget = CacheBudget::weight_units(usize::MAX);
+        assert_eq!(budget.get(), (u64::MAX / 2) as usize);
+        let cache = CalculationCache::<u32, u32>::new(budget);
+        for key in [1, 2] {
+            let value = cache
+                .get_or_try_insert_weighted(key, |_| budget.get(), || Ok(key))
+                .unwrap();
+            assert_eq!(*value, key);
+        }
+        assert!(cache.get(&1).is_none());
+        assert_eq!(*cache.get(&2).unwrap(), 2);
     }
 
     #[test]

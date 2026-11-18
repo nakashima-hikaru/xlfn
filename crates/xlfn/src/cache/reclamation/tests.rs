@@ -68,3 +68,38 @@ fn saturated_pending_weight_keeps_backpressure_until_both_queues_empty() {
     assert_eq!(domain.stats().pending_nodes, 0);
     assert_eq!(domain.pending_weight(), 0);
 }
+
+#[test]
+#[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+#[cfg_attr(miri, ignore)]
+fn loom_saturated_debt_resets_only_after_all_entries_are_accounted() {
+    use loom::sync::{Arc, Mutex};
+
+    loom::model(|| {
+        let debt = Arc::new(Mutex::new(PendingDebt {
+            nodes: 0,
+            weight: Some(0),
+        }));
+        debt.lock().unwrap().enqueue(u64::MAX);
+        debt.lock().unwrap().enqueue(1);
+
+        let writer_debt = Arc::clone(&debt);
+        let writer = loom::thread::spawn(move || writer_debt.lock().unwrap().enqueue(7));
+        let first_debt = Arc::clone(&debt);
+        let first = loom::thread::spawn(move || first_debt.lock().unwrap().retire(1, u64::MAX));
+        debt.lock().unwrap().retire(1, 1);
+        writer.join().unwrap();
+        first.join().unwrap();
+
+        let mut debt = debt.lock().unwrap();
+        assert_eq!(debt.nodes, 1);
+        // The concurrent insertion may have happened before the old batches
+        // finished or after their debt was completely cleared.
+        assert!(matches!(debt.weight, None | Some(7)));
+        debt.retire(1, 7);
+        assert_eq!(debt.nodes, 0);
+        assert_eq!(debt.weight(), 0);
+        debt.enqueue(9);
+        assert_eq!(debt.weight(), 9);
+    });
+}

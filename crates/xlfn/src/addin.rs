@@ -1,6 +1,6 @@
 #[cfg(feature = "async")]
 use crate::cancellation::{CancellationGuarantee, CancellationToken};
-use crate::diagnostics::{AddinId, DiagnosticInitError, DiagnosticSink};
+use crate::diagnostics::{AddinId, DiagnosticFileConfig, DiagnosticInitError, DiagnosticSink};
 use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
 use crate::host_api::ExcelHost;
@@ -213,7 +213,16 @@ impl<A: Addin> DiagnosticsSetup<'_, A> {
     /// Installs a process-wide failure log at `%LOCALAPPDATA%/<addin-id>/logs/diagnostics.log`.
     /// Returns [`DiagnosticInitError::AlreadyInstalled`] if another sink exists.
     pub fn install_file_sink(&self) -> Result<PathBuf, DiagnosticInitError> {
-        crate::diagnostics::install_file_diagnostic_sink(&self.context.build_info.addin_id)
+        self.install_file_sink_with(DiagnosticFileConfig::new())
+    }
+
+    /// Installs the diagnostic file sink with explicit rotation settings.
+    /// Returns [`DiagnosticInitError::AlreadyInstalled`] if another sink exists.
+    pub fn install_file_sink_with(
+        &self,
+        config: DiagnosticFileConfig,
+    ) -> Result<PathBuf, DiagnosticInitError> {
+        crate::diagnostics::install_file_diagnostic_sink(&self.context.build_info.addin_id, config)
     }
 
     /// Installs the process-wide sink, failing if another sink is already installed.
@@ -310,9 +319,10 @@ impl Default for HandleConfig {
     }
 }
 
-/// RTD, handle, and asynchronous runtime policy selected during one add-in open.
+/// Calculation-event and service policies selected during one add-in open.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
+    calculation_end_notifications: bool,
     #[cfg(feature = "rtd")]
     rtd: RtdConfig,
     #[cfg(feature = "handles")]
@@ -326,6 +336,7 @@ impl RuntimeConfig {
     /// Creates the default policy for every enabled runtime service.
     pub const fn new() -> Self {
         Self {
+            calculation_end_notifications: true,
             #[cfg(feature = "rtd")]
             rtd: RtdConfig::new(),
             #[cfg(feature = "handles")]
@@ -333,6 +344,23 @@ impl RuntimeConfig {
             #[cfg(feature = "async")]
             async_runtime: AsyncConfig::new(),
         }
+    }
+
+    /// Controls calculation-end notifications for synchronous-only add-ins.
+    ///
+    /// Enabled by default so diagnostic invocation records and execution
+    /// layers can distinguish successive Excel calculations. A synchronous
+    /// add-in that does not need those identities can disable registration,
+    /// which removes a native callback residency hold. Async functions
+    /// always require calculation-end and cancellation events.
+    #[must_use]
+    pub const fn with_calculation_end_notifications(mut self, enabled: bool) -> Self {
+        self.calculation_end_notifications = enabled;
+        self
+    }
+
+    pub(crate) const fn calculation_end_notifications(self) -> bool {
+        self.calculation_end_notifications
     }
 
     #[cfg(feature = "rtd")]

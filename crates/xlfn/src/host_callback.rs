@@ -146,8 +146,9 @@ mod tests {
             let session = HostCallbackSession::new();
             // SAFETY: the installed script implements the callback ABI and
             // this operation has no arguments to borrow.
-            let (status, value) = unsafe { session.call(xlfn_sys::XLF_CALLER, &[]) }.unwrap();
+            let (status, mut value) = unsafe { session.call(xlfn_sys::XLF_CALLER, &[]) }.unwrap();
             assert_eq!(status, ExcelCallbackStatus::from_raw(raw_status));
+            assert!(value.readable().is_err());
             drop(value);
             assert_eq!(session.terminal_status(), Some(status));
             // SAFETY: terminal suppression must reject this call before it
@@ -158,5 +159,28 @@ mod tests {
             assert_eq!(suppressed.status, status);
             script.assert_calls(&[xlfn_sys::XLF_CALLER]);
         }
+    }
+
+    #[test]
+    fn ordinary_failure_only_grants_cleanup_and_keeps_the_session_available() {
+        let script = CallbackScript::install([
+            Reply::success(xlfn_sys::XLF_CALLER, XLOPER12::nil()).status(xlfn_sys::XLRET_FAILED),
+            Reply::success(xlfn_sys::XLF_CALLER, XLOPER12::integer(7)),
+        ]);
+        let session = HostCallbackSession::new();
+        // SAFETY: the installed script implements the callback ABI for this
+        // argument-free operation. A failed call may leave its result as nil.
+        let (status, mut failed) = unsafe { session.call(xlfn_sys::XLF_CALLER, &[]) }.unwrap();
+        assert_eq!(status, ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED));
+        assert!(failed.readable().is_err());
+        failed.release().unwrap();
+        assert!(session.permits_callbacks());
+
+        // SAFETY: this second argument-free call uses the same installed script.
+        let (status, mut success) = unsafe { session.call(xlfn_sys::XLF_CALLER, &[]) }.unwrap();
+        assert_eq!(status, ExcelCallbackStatus::Success);
+        assert!(success.readable().is_ok());
+        success.release().unwrap();
+        script.assert_calls(&[xlfn_sys::XLF_CALLER, xlfn_sys::XLF_CALLER]);
     }
 }

@@ -31,6 +31,7 @@ mod payload;
 /// Private bounded worker and ownership handoff.
 pub(crate) mod worker;
 
+pub use file::DiagnosticFileConfig;
 #[cfg(target_os = "windows")]
 pub(crate) use file::append_startup_log;
 pub(crate) use file::install_file_diagnostic_sink;
@@ -217,7 +218,14 @@ impl DiagnosticRouter {
         self.unmark_retiring(old_worker_id);
 
         match shutdown_result {
-            Ok(()) => Ok(()),
+            Ok(issue) => {
+                if let Some(issue) = issue {
+                    self.observer
+                        .record(crate::shutdown_trace::ShutdownEvent::RecordCleanupIssue);
+                    crate::boundary::report_cleanup_issue(&issue);
+                }
+                Ok(())
+            }
             Err(DiagnosticShutdownError::ReentrantShutdown) => {
                 Err(DiagnosticInitError::ReentrantMutation)
             }
@@ -287,7 +295,7 @@ impl DiagnosticRouter {
         let previous = crate::ingress::with_diagnostic_linearization(|| self.sink.close());
 
         let result = match previous {
-            None => Ok(()),
+            None => Ok(None),
             Some(previous) => {
                 let old_sink = previous.into_inner();
                 old_sink.shutdown()
@@ -306,6 +314,12 @@ impl DiagnosticRouter {
             // The queue items lost with it are accounted for by the sink
             // before this milestone is recorded.
             self.record_stop_diagnostics();
+        }
+        drop(phase);
+        if let Ok(Some(issue)) = &result {
+            self.observer
+                .record(crate::shutdown_trace::ShutdownEvent::RecordCleanupIssue);
+            crate::boundary::report_cleanup_issue(issue);
         }
         result.map(|_| DiagnosticsDrained { _private: () })
     }
@@ -345,7 +359,7 @@ impl DiagnosticRouter {
         });
 
         let previous = crate::ingress::with_diagnostic_linearization(|| self.sink.close());
-        let issues = Vec::new();
+        let mut issues = Vec::new();
         if let Some(previous) = previous {
             let old_sink = previous.into_inner();
             let res = old_sink.shutdown();
@@ -356,7 +370,7 @@ impl DiagnosticRouter {
             // state. The retired sink has been consumed even when join fails.
             *phase = DiagnosticPhase::Closed;
             match res {
-                Ok(()) => {}
+                Ok(issue) => issues.extend(issue),
                 Err(DiagnosticShutdownError::WorkerPanicked) => {
                     return Err(DiagnosticTerminalCloseError::WorkerPanicked);
                 }
@@ -1110,12 +1124,33 @@ mod tests {
     }
 
     #[test]
+    fn sink_disposal_panic_is_reported_after_a_clean_worker_join() {
+        struct DisposalPanic;
+        impl DiagnosticSink for DisposalPanic {
+            fn report(&self, _: &DiagnosticEvent<'_>) {}
+        }
+        impl Drop for DisposalPanic {
+            fn drop(&mut self) {
+                panic!("injected diagnostic sink destructor panic");
+            }
+        }
+
+        let sink = Box::new(AsyncDiagnosticSink::new(DisposalPanic).unwrap());
+        let issue = sink.shutdown().unwrap().unwrap();
+        assert_eq!(issue.component, "diagnostic sink");
+        assert_eq!(
+            issue.kind,
+            crate::shutdown::CleanupIssueKind::DisposalPanicked
+        );
+    }
+
+    #[test]
     fn worker_panic_is_observable_during_shutdown() {
         let sink = Box::new(AsyncDiagnosticSink::panicking_for_test());
-        assert_eq!(
+        assert!(matches!(
             sink.shutdown(),
             Err(DiagnosticShutdownError::WorkerPanicked)
-        );
+        ));
     }
 
     struct CountingSink(Arc<AtomicUsize>);

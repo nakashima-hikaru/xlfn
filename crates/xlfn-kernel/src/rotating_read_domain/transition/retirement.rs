@@ -98,7 +98,9 @@ impl<const N: usize, Q: RetirementStorage> RotatingRetirementDomain<N, Q> {
                 // The scoped certificate was just issued by self.domain.
                 // Its index selects self's queue inside this issuing operation;
                 // there is no independent domain/certificate join API.
-                DetachedLocked::detach(self, self.queues[certificate.index.index()].lock())
+                self.queues[certificate.index.index()]
+                    .try_lock()
+                    .map(|queue| DetachedLocked::detach(self, queue))
             },
         )?;
         Some(batch.map(|batch| batch.after_unlock()))
@@ -111,7 +113,9 @@ impl<const N: usize, Q: RetirementStorage> RotatingRetirementDomain<N, Q> {
                 // The scoped certificate was just issued by self.domain.
                 // Its index selects self's queue inside this issuing operation;
                 // there is no independent domain/certificate join API.
-                DetachedLocked::detach(self, self.queues[certificate.index.index()].lock())
+                self.queues[certificate.index.index()]
+                    .try_lock()
+                    .map(|queue| DetachedLocked::detach(self, queue))
             },
         )?;
         Some(batch.map(|batch| batch.after_unlock()))
@@ -137,6 +141,26 @@ impl<const N: usize, Q: RetirementStorage> Drop for RotatingRetirementDomain<N, 
 mod tests {
     use super::*;
     use std::sync::{Arc, atomic::AtomicUsize};
+
+    #[test]
+    fn idle_retirement_keeps_the_same_drained_queue_pending_when_busy() {
+        let domain = RotatingRetirementDomain::<2, Vec<usize>>::new();
+        let original_generation = domain.domain.current_generation();
+        let reader = domain.domain.enter(0).unwrap();
+        assert!(domain.poll_quiesce().is_none());
+        assert_ne!(domain.domain.current_generation(), original_generation);
+        drop(reader);
+
+        let mut busy = domain.queues[original_generation.index()].lock();
+        busy.push(42);
+        assert!(domain.try_quiesce_if_idle().is_none());
+        assert_ne!(domain.domain.current_generation(), original_generation);
+        drop(busy);
+
+        let batch = domain.try_quiesce_if_idle().unwrap().unwrap();
+        assert_eq!(batch.into_inner(), vec![42]);
+        assert_ne!(domain.domain.current_generation(), original_generation);
+    }
 
     struct Probe(Arc<AtomicUsize>);
     impl Drop for Probe {

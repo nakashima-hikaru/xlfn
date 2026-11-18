@@ -45,7 +45,7 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
 
     pub(crate) fn clear_certified_retirement(
         &self,
-        control: &mut LifecycleAccess<'_, A>,
+        control: LifecycleAccess<'_, A>,
         authorization: crate::runtime::CertifiedRetirement<'_, A>,
     ) -> bool {
         self.coordinator

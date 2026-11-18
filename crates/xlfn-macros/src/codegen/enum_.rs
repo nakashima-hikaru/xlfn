@@ -132,7 +132,7 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
     let identities = variants
         .iter()
         .enumerate()
-        .map(|(index, (variant, _))| quote!(Self::#variant => #index as u32))
+        .map(|(index, (variant, _))| quote!(Self::#variant => #index as ::core::primitive::u32))
         .collect::<Vec<_>>();
     Ok(quote! {
         impl #from_excel_impl_generics #krate::value::FromExcel<'__xlfn_call>
@@ -140,7 +140,7 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
         {
             fn from_excel(
                 __value: #krate::value::raw::XlValueRef<'__xlfn_call>,
-                __argument: &'static str,
+                __argument: &'static ::core::primitive::str,
             ) -> #krate::error::XllResult<Self> {
                 let __text = __value.as_str().map_err(|error| error.with_argument(__argument))?.with_argument(__argument);
                 #(#comparisons)*
@@ -156,7 +156,7 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
             for #ident #type_generics #from_excel_where_clause
         {
             type Prepared = Self;
-            fn prepare(value: #krate::value::raw::XlValueRef<'__xlfn_call>, argument: &'static str,
+            fn prepare(value: #krate::value::raw::XlValueRef<'__xlfn_call>, argument: &'static ::core::primitive::str,
                 identity: &mut #krate::value::InputIdentityEncoder) -> #krate::XllResult<Self> {
                 <Self as #krate::value::FromExcel>::from_excel_with_identity(value, argument, identity)
             }

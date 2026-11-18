@@ -83,12 +83,15 @@ jobs:
 
             - name: Verify generated Windows bindings
               run: |
+                  outputs="$(cargo run --quiet --locked --package xlfn-windows-bindings-gen -- --list-outputs)"
+                  test -n "$outputs"
+                  mapfile -t bindings <<< "$outputs"
+                  git ls-files --error-unmatch -- "${bindings[@]}"
+                  for binding in "${bindings[@]}"; do
+                    test -f "$binding"
+                  done
                   cargo run --locked --package xlfn-windows-bindings-gen
-                  git diff --exit-code -- \
-                    crates/xlfn-sys/src/win32.rs \
-                    crates/xlfn/src/win32.rs \
-                    crates/xlfn-package/src/win32.rs \
-                    crates/cargo-xlfn/src/win32.rs
+                  git diff --exit-code -- "${bindings[@]}"
 
             - name: Check dependency advisories, licenses, bans, and sources
               run: just deny

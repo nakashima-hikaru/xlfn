@@ -3,7 +3,8 @@ use crate::generation::RuntimeGeneration;
 use crate::shutdown::{CleanupIssue, CleanupIssueKind, StopOutcome};
 use crate::subscription::{RtdLimits, RuntimeShutdownOutcome, SubscriptionRuntime};
 
-/// Issued only after the corresponding subscription slot has been sealed.
+/// Issued after the corresponding slot is sealed, or canonical state proves
+/// that no subscription service was published for the generation.
 #[derive(Debug)]
 pub(crate) struct SubscriptionsStopped {
     generation: Option<RuntimeGeneration>,
@@ -12,6 +13,10 @@ pub(crate) struct SubscriptionsStopped {
 impl SubscriptionsStopped {
     const fn new(generation: Option<RuntimeGeneration>) -> Self {
         Self { generation }
+    }
+
+    pub(crate) fn absent_services(absent: &crate::lifecycle::AbsentGenerationServices) -> Self {
+        Self::new(absent.generation())
     }
 
     pub(crate) const fn generation(&self) -> Option<RuntimeGeneration> {

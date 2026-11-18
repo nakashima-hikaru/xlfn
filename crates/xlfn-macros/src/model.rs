@@ -740,7 +740,7 @@ fn is_numeric_array_return(ty: &Type, crate_path: &Path) -> bool {
     };
     match name.as_str() {
         "NumericArrayOutput" if framework_path(&["output"]) => arguments.is_none(),
-        "XllResult" if framework_path(&["", "error", "prelude"]) => {
+        "XllResult" | "UdfResult" if framework_path(&["", "error", "prelude"]) => {
             let Some(arguments) = arguments else {
                 return false;
             };

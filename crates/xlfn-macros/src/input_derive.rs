@@ -96,7 +96,7 @@ pub(super) fn prepare(input: DeriveInput) -> syn::Result<TokenStream> {
             type Prepared = Self;
             fn prepare(
                 value: #krate::value::raw::XlValueRef<#lifetime>,
-                argument: &'static str,
+                argument: &'static ::core::primitive::str,
                 identity: &mut #krate::value::InputIdentityEncoder,
             ) -> #krate::XllResult<Self> {
                 <Self as #krate::value::FromExcel<#lifetime>>::from_excel_with_identity(value, argument, identity)

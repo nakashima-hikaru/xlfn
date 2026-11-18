@@ -8,7 +8,7 @@ fn with_terminal_context(
     let _module = crate::ingress::acquire_test_module_lease();
     let _diagnostics = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     crate::diagnostics::close_diagnostic_router().unwrap();
-    let opening = crate::module_runtime::begin_open();
+    let opening = crate::module_runtime::begin_open().unwrap();
     crate::diagnostics::reset_diagnostic_router().unwrap();
     before_close();
     let drained = opening.rollback(|| {}).seal_and_drain().unwrap();

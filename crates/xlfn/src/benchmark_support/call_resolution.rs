@@ -114,9 +114,15 @@ impl ConcurrentHandleResolutionBenchmark {
                     for _ in 0..iterations_per_thread {
                         runtime
                             .with_generation_services(|services| {
-                                let resolver = services.handle_call_access();
-                                let rt = resolver.get().expect("handle runtime must resolve");
-                                std::hint::black_box(rt);
+                                crate::call::with_branded_call_scope_and_state(
+                                    services,
+                                    |services, storage, _| {
+                                        let resolver = services.handle_call_access(storage);
+                                        let rt =
+                                            resolver.get().expect("handle runtime must resolve");
+                                        std::hint::black_box(rt);
+                                    },
+                                );
                             })
                             .expect("benchmark generation remains published");
                     }

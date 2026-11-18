@@ -47,27 +47,36 @@ impl ModuleCallbackAdmission {
         }
     }
 
-    pub(crate) fn reset(&self) {
+    pub(crate) fn try_reopen(&self) -> crate::XllResult<()> {
         let _transition = self.transition.lock();
-        let active = self.callbacks.active();
-        if active != 0 {
-            let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-                tracing::error!(
-                    active,
-                    "callback admission reopened while callbacks are still active"
-                );
-            }));
-            std::process::abort();
+        if self.phase.load(Ordering::Acquire) == ModuleCallbackLifecycle::Open as u8 {
+            // Fixture and benchmark paths may already have opened admission.
+            // An existing reservation remains in its original epoch.
+            return if self.callbacks.active() == 0 {
+                Ok(())
+            } else {
+                Err(crate::XllError::Closing)
+            };
         }
-        // A closed gate stays unavailable until every stripe has reopened.
-        // Repeating reset on an already open, idle gate requires no counter
-        // reset and preserves reservations that start after the active check.
-        match self.callbacks.control().wait_if_sealed() {
-            Ok(drained) => drop(drained.reopen()),
-            Err(open) => drop(open),
-        }
+        // Opening can run on Excel's lifecycle thread with the canonical
+        // lock held. Refuse a busy gate without waiting on an old callback.
+        let drained = self
+            .callbacks
+            .control()
+            .try_drained()
+            .map_err(|_| crate::XllError::Closing)?;
+        drop(drained.reopen());
         self.phase
             .store(ModuleCallbackLifecycle::Open as u8, Ordering::Release);
+        Ok(())
+    }
+
+    /// Certifies that close sealed every stripe and all result/cleanup tails
+    /// completed. An outstanding callback prevents terminal certification.
+    pub(crate) fn is_closed_and_quiescent(&self) -> bool {
+        let _transition = self.transition.lock();
+        self.phase.load(Ordering::Acquire) != ModuleCallbackLifecycle::Open as u8
+            && self.callbacks.control().try_drained().is_ok()
     }
 
     pub(crate) fn close(&self) {
@@ -213,7 +222,11 @@ mod tests {
         assert!(gate.enter().is_err());
         assert_eq!(gate.lifecycle(), ModuleCallbackLifecycle::Closing);
         assert_eq!(gate.active(), 1);
+        assert!(!gate.is_closed_and_quiescent());
+        assert!(matches!(gate.try_reopen(), Err(crate::XllError::Closing)));
+        assert!(gate.enter().is_err());
         drop(callback);
+        assert!(gate.is_closed_and_quiescent());
         assert_eq!(gate.lifecycle(), ModuleCallbackLifecycle::Closed);
         assert_eq!(gate.active(), 0);
         assert_eq!(
@@ -233,7 +246,7 @@ mod tests {
         std::thread::spawn(move || drop(permit)).join().unwrap();
         assert_eq!(gate.active(), 0);
         assert_eq!(gate.lifecycle(), ModuleCallbackLifecycle::Closed);
-        gate.reset();
+        gate.try_reopen().unwrap();
         let next_epoch = gate.enter().unwrap();
         assert_eq!(gate.active(), 1);
         drop(next_epoch);
@@ -270,7 +283,7 @@ mod tests {
             worker.join().unwrap();
         }
         assert_eq!(gate.lifecycle(), ModuleCallbackLifecycle::Closed);
-        gate.reset();
+        gate.try_reopen().unwrap();
         assert!(gate.enter().is_ok());
     }
 
@@ -286,7 +299,7 @@ mod tests {
         assert!(!gate.callbacks.is_sealed());
         assert!(gate.enter().is_err());
         gate.close();
-        gate.reset();
+        gate.try_reopen().unwrap();
         assert!(gate.enter().is_ok());
     }
 }

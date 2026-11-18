@@ -57,6 +57,14 @@ impl DiagnosticWorker {
                     observer.decrement_pending();
                 });
             }
+            if catch_no_unwind(AssertUnwindSafe(|| drop(sink))).is_err() {
+                // SAFETY: the joined owner retains the observer through the
+                // worker's final cleanup, including this destructor outcome.
+                let observer = unsafe { worker_observer.0.as_ref() };
+                observer
+                    .sink_disposal_panicked
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         };
         // A spawn unwind could leave a live worker borrowing the observer.
         let require_spawn = DropGuard::new((), |()| fail_stop());

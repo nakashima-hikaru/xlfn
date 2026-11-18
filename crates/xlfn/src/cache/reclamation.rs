@@ -13,6 +13,9 @@ pub(super) unsafe fn release_node_pin<V>(node_ptr: NonNull<CacheNode<V>>) {
     let node = unsafe { node_ptr.as_ref() };
     // SAFETY: transfer that exact live pin into final-release ownership.
     if let Some(entry) = unsafe { ReclaimEntry::release_pin(node_ptr) } {
+        // Initializers keep the existing retirement/reader barrier. Outside
+        // initialization, a node that never reached the index needs only
+        // the calling cache operation's destruction boundary.
         if !node.published && ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
             NeverPublished(entry).reclaim();
         } else {
@@ -28,6 +31,17 @@ pub(super) unsafe fn release_node_pin<V>(node_ptr: NonNull<CacheNode<V>>) {
 struct NeverPublished<V>(ReclaimEntry<V>);
 impl<V> NeverPublished<V> {
     fn reclaim(self) {
+        if destruction_deferred() {
+            // SAFETY: nodes own their 'static payload and the destructor uses
+            // only this allocation, including after the original cache drops.
+            // destroy contains user destructor panics.
+            unsafe { deferred_drop::defer(self, Self::destroy) };
+        } else {
+            self.destroy();
+        }
+    }
+
+    fn destroy(self) {
         // SAFETY: only the final-release decision above constructs this owner,
         // after observing that the node was never published to the index.
         unsafe {
@@ -85,26 +99,16 @@ pub(super) struct ReclaimEntries<'domain, V> {
 
 impl<'domain, V> ReclaimEntries<'domain, V> {
     fn account(domain: &'domain CacheLookupDomain<V>, entries: PendingEntries<V>) -> Self {
-        // Keep detached entries counted until their weight accounting completes.
-        // A concurrent empty-queue observer may reset saturation only after
-        // this final pending_nodes subtraction makes the whole domain empty.
-        if !domain.pending_weight_saturated.load(Ordering::Relaxed) {
+        // The queue locks have been released. Retiring a detached batch and
+        // recording a new entry serialize here, including the last-node reset.
+        if !entries.is_empty() {
             let weight = entries
                 .iter()
                 .fold(0_u64, |sum, entry| sum.saturating_add(entry.weight));
-            domain
-                .pending_weight
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    current.checked_sub(weight)
-                })
-                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+            let mut debt = domain.pending_debt.lock();
+            debt.retire(entries.len(), weight);
+            domain.pending_nodes.store(debt.nodes, Ordering::Release);
         }
-        domain
-            .pending_nodes
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_sub(entries.len())
-            })
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
         ReclaimEntries {
             _domain: domain,
             entries,
@@ -149,10 +153,7 @@ impl<'domain, V> ClosedCacheDomain<'domain, V> {
         let [first, second] = closed.take_queues();
         let mut entries = first.into_inner();
         append_records(&mut entries, second.into_inner());
-        ReclaimEntries {
-            _domain: domain,
-            entries,
-        }
+        ReclaimEntries::account(domain, entries)
     }
 }
 
@@ -180,7 +181,6 @@ impl<V> CacheLookupDomain<V> {
             append_records(&mut records, batch.into_inner());
         }
         let entries = ReclaimEntries::account(self, records);
-        self.clear_saturated_weight_if_empty();
         #[cfg(any(test, feature = "bench-internals"))]
         self.record_batch(&entries, start);
         entries
@@ -228,7 +228,6 @@ impl<V> CacheLookupDomain<V> {
             _domain: self,
             entries: records,
         };
-        self.clear_saturated_weight_if_empty();
         #[cfg(any(test, feature = "bench-internals"))]
         self.record_batch(&entries, start);
         entries

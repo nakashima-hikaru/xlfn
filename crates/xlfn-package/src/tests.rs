@@ -1139,6 +1139,28 @@ fn explicit_external_import_permits_dynamic_msvc_runtime() {
 }
 
 #[test]
+fn bundled_crt_takes_precedence_over_case_insensitive_external_fallback() {
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("VcRuntime140.dll"), b"runtime").unwrap();
+    let resolved = resolve_bundle_files(
+        source.path(),
+        "x86_64-pc-windows-msvc",
+        &["VcRuntime140.dll".to_owned()],
+    )
+    .unwrap();
+    let destination = source.path().join("staging");
+    let destination = PrivateStagingDirectory::create(&destination).unwrap();
+    let mut bundle = stage_bundle(&resolved, &destination).unwrap();
+    bundle
+        .try_add_external_imports(["vcruntime140.DLL", "VCRUNTIME140_1.DLL"])
+        .unwrap();
+    assert_eq!(
+        bundle.external_imports,
+        BTreeSet::from(["vcruntime140_1.dll".to_owned()])
+    );
+}
+
+#[test]
 fn staged_bundle_external_imports_validate_all_inputs_before_mutating() {
     let mut bundle = StagedBundle {
         files: vec![],
@@ -2166,6 +2188,9 @@ fn export_names_must_be_strictly_sorted_even_for_zero_slots() {
 #[test]
 fn destination_names_reject_win32_aliases() {
     for name in ["dist.", "dist ", "NUL", "dir/CON"] {
-        assert!(validate_directory_path(Path::new(name)).is_err(), "{name}");
+        assert!(
+            validate_output_destination(Path::new(name)).is_err(),
+            "{name}"
+        );
     }
 }

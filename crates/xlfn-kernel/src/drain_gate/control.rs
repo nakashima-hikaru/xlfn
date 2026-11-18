@@ -183,7 +183,32 @@ impl<'a, const N: usize> StripedGateControl<'a, GateUnknown, N> {
         })
     }
 
-    /// No blocking control or notification mutex is acquired on this path.
+    // Reserve both gate locks before committing a polled rotation. Keeping
+    // the notification guard through reopen eliminates a blocking re-lock.
+    pub(crate) fn try_prepare_reopen(self) -> Option<PreparedStripedReopen<'a, N>> {
+        let notification = self.gate.idle.lock.try_lock()?;
+        if !self.gate.is_sealed() || !self.gate.observe_stripes_idle() {
+            return None;
+        }
+        Some(PreparedStripedReopen {
+            control: self,
+            notification,
+        })
+    }
+
+    pub(crate) fn try_seal(self) -> Option<StripedGateControl<'a, GateSealed, N>> {
+        let notification = self.gate.idle.lock.try_lock()?;
+        self.gate.seal_locked(&notification);
+        Some(StripedGateControl {
+            gate: self.gate,
+            claim: self.claim,
+            phase: PhantomData,
+        })
+    }
+
+    /// Attempts to seal all stripes without waiting for readers or locks.
+    /// When a stripe is busy, earlier stripes that were sealed reopen before
+    /// return. Admissions racing that partial seal may observe rejection.
     pub fn try_seal_if_idle(self) -> Result<StripedGateControl<'a, GateSealed, N>, Self> {
         if !self.gate.try_seal_if_idle() {
             return Err(self);
@@ -231,6 +256,21 @@ impl<'a, const N: usize> StripedGateControl<'a, GateDrained, N> {
     }
 }
 
+#[must_use = "retain the prepared reopen until publication"]
+pub(crate) struct PreparedStripedReopen<'a, const N: usize> {
+    notification: MutexGuard<'a, ()>,
+    control: StripedGateControl<'a, GateUnknown, N>,
+}
+
+impl<const N: usize> PreparedStripedReopen<'_, N> {
+    pub(crate) fn reopen(self) {
+        self.control
+            .gate
+            .reopen_locked(&self.notification)
+            .unwrap_or_else(|_| crate::invariant::fail_stop());
+    }
+}
+
 /// Lifetime-erased permit for an explicitly owner-managed gate. It can only be
 /// constructed through an unsafe lifetime contract; there is no safe borrowed
 /// permit conversion which erases its lifetime.
@@ -274,6 +314,10 @@ pub struct DetachedStripedDrainPermit<const N: usize> {
 }
 
 impl<const N: usize> DetachedStripedDrainPermit<N> {
+    pub(super) fn from_admitted(gate: NonNull<StripedDrainGate<N>>, stripe: usize) -> Self {
+        Self { gate, stripe }
+    }
+
     #[inline]
     pub(super) unsafe fn acquire(
         gate: &StripedDrainGate<N>,

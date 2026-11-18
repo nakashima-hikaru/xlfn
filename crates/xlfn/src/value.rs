@@ -850,6 +850,14 @@ impl ArrayInputBudget {
     }
 }
 
+fn try_allocate_cells<T>(count: usize) -> XllResult<Vec<T>> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| XllError::Overloaded)?;
+    Ok(values)
+}
+
 fn convert_grid_elements<'call, T, M>(
     grid: &GridView<'call>,
     argument: &'static str,
@@ -878,7 +886,7 @@ where
     let cells = grid.cells();
     let mut budget = ArrayInputBudget::new::<T>(cells.len(), argument)?;
     context.scratch().collect_copy(cells.len(), |index| {
-        let element = XlValueRef::from_array_cell(&cells[index])?;
+        let element = raw::checked_grid_cell(&cells[index], argument)?;
         budget.include(element)?;
         T::decode(element, argument, context, identity)
     })
@@ -1965,7 +1973,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelValueRef<'call> {
                 M::u64(identity, rows as u64);
                 M::u64(identity, columns as u64);
                 for cell in grid.cells() {
-                    let cell = XlValueRef::from_array_cell(cell)?;
+                    let cell = raw::checked_grid_cell(cell, argument)?;
                     budget.include(cell)?;
                     validate_dynamic_cell::<M>(cell, argument, identity)?;
                 }
@@ -2050,9 +2058,9 @@ fn convert_owned_grid_elements<'call, T>(
 ) -> XllResult<Vec<T>> {
     let cells = grid.cells();
     let mut budget = ArrayInputBudget::new::<T>(cells.len(), argument)?;
-    let mut data = Vec::with_capacity(cells.len());
-    for element in cells.iter().map(XlValueRef::from_array_cell) {
-        let element = element?;
+    let mut data = try_allocate_cells(cells.len())?;
+    for cell in cells {
+        let element = raw::checked_grid_cell(cell, argument)?;
         budget.include(element)?;
         data.push(convert(element)?);
     }
@@ -3490,6 +3498,34 @@ mod tests {
     }
 
     #[test]
+    fn malformed_array_cell_reports_its_worksheet_argument() {
+        let mut cell = XLOPER12::number(1.0);
+        cell.xltype |= 0x2000;
+        let mut array = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    values: &mut cell,
+                    rows: 1,
+                    columns: 1,
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+        for error in [
+            convert::<Matrix<f64>>(&mut array).unwrap_err(),
+            convert::<ExcelValue>(&mut array).unwrap_err(),
+        ] {
+            assert!(matches!(
+                error,
+                XllError::Input {
+                    argument: "arg",
+                    reason: InputError::Malformed("unknown xltype flag"),
+                }
+            ));
+        }
+    }
+
+    #[test]
     fn custom_conversion_can_return_owned_data() {
         #[derive(Debug, PartialEq)]
         struct FiniteNumber(f64);
@@ -4258,7 +4294,7 @@ mod tests {
                 let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
                     storage,
                     brand,
-                    crate::handle::FormulaHandleServiceResolver::new(slot),
+                    storage.handle_resolver(slot),
                     1,
                 );
                 // SAFETY: raw_a is live for this conversion.
@@ -4278,7 +4314,7 @@ mod tests {
                 let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
                     storage,
                     brand,
-                    crate::handle::FormulaHandleServiceResolver::new(slot),
+                    storage.handle_resolver(slot),
                     1,
                 );
                 // SAFETY: raw_b is live for this conversion.

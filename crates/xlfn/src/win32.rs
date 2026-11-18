@@ -12,6 +12,7 @@ windows_link::link!("kernel32.dll" "system" fn CloseHandle(hobject : HANDLE) -> 
 windows_link::link!("ole32.dll" "system" fn CoCreateGuid(pguid : *mut GUID) -> HRESULT);
 windows_link::link!("ole32.dll" "system" fn CoCreateInstance(rclsid : *const GUID, punkouter : *mut core::ffi::c_void, dwclscontext : u32, riid : *const GUID, ppv : *mut *mut core::ffi::c_void) -> HRESULT);
 windows_link::link!("ole32.dll" "system" fn CoInitializeEx(pvreserved : *const core::ffi::c_void, dwcoinit : u32) -> HRESULT);
+windows_link::link!("ole32.dll" "system" fn CoTaskMemFree(pv : *mut core::ffi::c_void));
 windows_link::link!("ole32.dll" "system" fn CoUninitialize());
 windows_link::link!("ole32.dll" "system" fn CoWaitForMultipleHandles(dwflags : u32, dwtimeout : u32, chandles : u32, phandles : *const HANDLE, lpdwindex : *mut u32) -> HRESULT);
 windows_link::link!("advapi32.dll" "system" fn ConvertSecurityDescriptorToStringSecurityDescriptorW(securitydescriptor : PSECURITY_DESCRIPTOR, requestedstringsdrevision : u32, securityinformation : SECURITY_INFORMATION, stringsecuritydescriptor : *mut PWSTR, stringsecuritydescriptorlen : *mut u32) -> BOOL);
@@ -25,11 +26,13 @@ windows_link::link!("kernel32.dll" "system" fn FreeLibrary(hlibmodule : HMODULE)
 windows_link::link!("advapi32.dll" "system" fn GetAce(pacl : *const ACL, dwaceindex : u32, pace : *mut *mut core::ffi::c_void) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn GetCurrentProcess() -> HANDLE);
 windows_link::link!("kernel32.dll" "system" fn GetCurrentThread() -> HANDLE);
+windows_link::link!("kernel32.dll" "system" fn GetFileInformationByHandle(hfile : HANDLE, lpfileinformation : *mut BY_HANDLE_FILE_INFORMATION) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn GetLastError() -> u32);
 windows_link::link!("kernel32.dll" "system" fn GetModuleHandleExW(dwflags : u32, lpmodulename : PCWSTR, phmodule : *mut HMODULE) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn GetSecurityDescriptorSacl(psecuritydescriptor : PSECURITY_DESCRIPTOR, lpbsaclpresent : *mut BOOL, psacl : *mut PACL, lpbsacldefaulted : *mut BOOL) -> BOOL);
 windows_link::link!("advapi32.dll" "system" fn GetSecurityInfo(handle : HANDLE, objecttype : SE_OBJECT_TYPE, securityinfo : SECURITY_INFORMATION, ppsidowner : *mut PSID, ppsidgroup : *mut PSID, ppdacl : *mut PACL, ppsacl : *mut PACL, ppsecuritydescriptor : *mut PSECURITY_DESCRIPTOR) -> u32);
 windows_link::link!("advapi32.dll" "system" fn GetTokenInformation(tokenhandle : HANDLE, tokeninformationclass : TOKEN_INFORMATION_CLASS, tokeninformation : *mut core::ffi::c_void, tokeninformationlength : u32, returnlength : *mut u32) -> BOOL);
+windows_link::link!("advapi32.dll" "system" fn IsValidSid(psid : PSID) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn LocalFree(hmem : HLOCAL) -> HLOCAL);
 windows_link::link!("advapi32.dll" "system" fn OpenProcessToken(processhandle : HANDLE, desiredaccess : u32, tokenhandle : *mut HANDLE) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn OutputDebugStringW(lpoutputstring : PCWSTR));
@@ -42,6 +45,7 @@ windows_link::link!("advapi32.dll" "system" fn RegQueryValueExW(hkey : HKEY, lpv
 windows_link::link!("advapi32.dll" "system" fn RegSetValueExW(hkey : HKEY, lpvaluename : PCWSTR, reserved : u32, dwtype : u32, lpdata : *const u8, cbdata : u32) -> LSTATUS);
 windows_link::link!("kernel32.dll" "system" fn ReleaseMutex(hmutex : HANDLE) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn ResetEvent(hevent : HANDLE) -> BOOL);
+windows_link::link!("shell32.dll" "system" fn SHGetKnownFolderPath(rfid : *const KNOWNFOLDERID, dwflags : u32, htoken : HANDLE, ppszpath : *mut PWSTR) -> HRESULT);
 windows_link::link!("oleaut32.dll" "system" fn SafeArrayAccessData(psa : *const SAFEARRAY, ppvdata : *mut *mut core::ffi::c_void) -> HRESULT);
 windows_link::link!("oleaut32.dll" "system" fn SafeArrayCreate(vt : VARTYPE, cdims : u32, rgsabound : *const SAFEARRAYBOUND) -> *mut SAFEARRAY);
 windows_link::link!("oleaut32.dll" "system" fn SafeArrayDestroy(psa : *const SAFEARRAY) -> HRESULT);
@@ -53,6 +57,7 @@ windows_link::link!("oleaut32.dll" "system" fn SafeArrayGetVartype(psa : *const 
 windows_link::link!("oleaut32.dll" "system" fn SafeArrayPutElement(psa : *const SAFEARRAY, rgindices : *const i32, pv : *const core::ffi::c_void) -> HRESULT);
 windows_link::link!("oleaut32.dll" "system" fn SafeArrayUnaccessData(psa : *const SAFEARRAY) -> HRESULT);
 windows_link::link!("kernel32.dll" "system" fn SetEvent(hevent : HANDLE) -> BOOL);
+windows_link::link!("kernel32.dll" "system" fn SetFileInformationByHandle(hfile : HANDLE, fileinformationclass : FILE_INFO_BY_HANDLE_CLASS, lpfileinformation : *const core::ffi::c_void, dwbuffersize : u32) -> BOOL);
 windows_link::link!("oleaut32.dll" "system" fn SysAllocStringLen(strin : *const OLECHAR, ui : u32) -> BSTR);
 windows_link::link!("oleaut32.dll" "system" fn SysFreeString(bstrstring : BSTR));
 windows_link::link!("oleaut32.dll" "system" fn SysStringLen(pbstr : BSTR) -> u32);
@@ -102,6 +107,20 @@ impl Default for BINDPTR {
 }
 pub type BOOL = i32;
 pub type BSTR = *const u16;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct BY_HANDLE_FILE_INFORMATION {
+    pub dwFileAttributes: u32,
+    pub ftCreationTime: FILETIME,
+    pub ftLastAccessTime: FILETIME,
+    pub ftLastWriteTime: FILETIME,
+    pub dwVolumeSerialNumber: u32,
+    pub nFileSizeHigh: u32,
+    pub nFileSizeLow: u32,
+    pub nNumberOfLinks: u32,
+    pub nFileIndexHigh: u32,
+    pub nFileIndexLow: u32,
+}
 pub type CALLCONV = i32;
 pub const CC_CDECL: CALLCONV = 1;
 pub const CC_FASTCALL: CALLCONV = 0;
@@ -188,6 +207,7 @@ pub struct DECIMAL_1_0 {
     pub Lo32: u32,
     pub Mid32: u32,
 }
+pub const DELETE: i32 = 65536;
 pub type DESCKIND = i32;
 pub const DESCKIND_FUNCDESC: DESCKIND = 1;
 pub const DESCKIND_IMPLICITAPPOBJ: DESCKIND = 4;
@@ -258,12 +278,55 @@ pub const E_NOTIMPL: HRESULT = 0x80004001_u32 as _;
 pub const E_OUTOFMEMORY: HRESULT = 0x8007000E_u32 as _;
 pub const E_POINTER: HRESULT = 0x80004003_u32 as _;
 pub const E_UNEXPECTED: HRESULT = 0x8000FFFF_u32 as _;
+pub const FADF_BSTR: i32 = 256;
+pub const FADF_DISPATCH: i32 = 1024;
+pub const FADF_HAVEIID: i32 = 64;
+pub const FADF_RECORD: i32 = 32;
+pub const FADF_UNKNOWN: i32 = 512;
+pub const FADF_VARIANT: i32 = 2048;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct FILETIME {
     pub dwLowDateTime: u32,
     pub dwHighDateTime: u32,
 }
+pub const FILE_ATTRIBUTE_REPARSE_POINT: i32 = 1024;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FILE_DISPOSITION_INFO {
+    pub DeleteFile: bool,
+}
+pub const FILE_FLAG_BACKUP_SEMANTICS: i32 = 33554432;
+pub const FILE_FLAG_OPEN_REPARSE_POINT: i32 = 2097152;
+pub type FILE_INFO_BY_HANDLE_CLASS = i32;
+pub const FILE_READ_ATTRIBUTES: i32 = 128;
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FILE_RENAME_INFO {
+    pub Anonymous: FILE_RENAME_INFO_0,
+    pub RootDirectory: HANDLE,
+    pub FileNameLength: u32,
+    pub FileName: [u16; 1],
+}
+impl Default for FILE_RENAME_INFO {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union FILE_RENAME_INFO_0 {
+    pub ReplaceIfExists: bool,
+    pub Flags: u32,
+}
+impl Default for FILE_RENAME_INFO_0 {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+pub const FILE_SHARE_READ: i32 = 1;
+pub const FILE_SHARE_WRITE: i32 = 2;
+pub const FILE_TRAVERSE: i32 = 32;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FUNCDESC {
@@ -305,6 +368,8 @@ pub const FUNC_NONVIRTUAL: FUNCKIND = 2;
 pub const FUNC_PUREVIRTUAL: FUNCKIND = 1;
 pub const FUNC_STATIC: FUNCKIND = 3;
 pub const FUNC_VIRTUAL: FUNCKIND = 0;
+pub const FileDispositionInfo: FILE_INFO_BY_HANDLE_CLASS = 4;
+pub const FileRenameInfo: FILE_INFO_BY_HANDLE_CLASS = 3;
 pub const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: i32 = 4;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -550,6 +615,7 @@ pub struct IUnknown_Vtbl {
 }
 pub const KEY_READ: i32 = 131097;
 pub const KEY_WRITE: i32 = 131078;
+pub type KNOWNFOLDERID = GUID;
 pub const LABEL_SECURITY_INFORMATION: i32 = 16;
 pub type LCID = u32;
 pub type LPPARAMDESCEX = *mut PARAMDESCEX;
@@ -650,10 +716,33 @@ pub type SECURITY_INFORMATION = u32;
 pub const SE_KERNEL_OBJECT: SE_OBJECT_TYPE = 6;
 pub type SE_OBJECT_TYPE = i32;
 #[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SID {
+    pub Revision: u8,
+    pub SubAuthorityCount: u8,
+    pub IdentifierAuthority: SID_IDENTIFIER_AUTHORITY,
+    pub SubAuthority: [u32; 1],
+}
+impl Default for SID {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+#[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct SID_AND_ATTRIBUTES {
     pub Sid: PSID,
     pub Attributes: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SID_IDENTIFIER_AUTHORITY {
+    pub Value: [u8; 6],
+}
+impl Default for SID_IDENTIFIER_AUTHORITY {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
 }
 pub const SYNCHRONIZE: i32 = 1048576;
 pub type SYSKIND = i32;

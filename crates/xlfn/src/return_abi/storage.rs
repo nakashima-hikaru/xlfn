@@ -1,8 +1,25 @@
+use std::alloc::{Allocator, Global, Layout};
+use std::mem::MaybeUninit;
 use std::panic::AssertUnwindSafe;
+use std::ptr::NonNull;
 
 use crate::error::InputError;
 use crate::{XllError, XllResult};
 use xlfn_kernel::published_owner::PublishedOwner;
+
+/// Allocates the exact boxed layout with a recoverable allocator failure.
+#[allow(
+    unsafe_code,
+    reason = "transfers an exact Global allocation into its typed box"
+)]
+pub(super) fn try_uninit_boxed_slice<T>(len: usize) -> XllResult<Box<[MaybeUninit<T>]>> {
+    let layout = Layout::array::<MaybeUninit<T>>(len).map_err(|_| XllError::Overloaded)?;
+    let allocation = Global.allocate(layout).map_err(|_| XllError::Overloaded)?;
+    let slice = NonNull::slice_from_raw_parts(allocation.cast(), len);
+    // SAFETY: Global supplied this owned allocation for the boxed slice's
+    // exact layout. MaybeUninit permits any initialized or uninitialized bytes.
+    Ok(unsafe { Box::from_non_null(slice) })
+}
 
 /// Allocation storage shared by one encoded Excel return value.
 ///
@@ -42,13 +59,16 @@ impl ReturnStorage {
         // selects direct widening without another ASCII scan or decoder.
         if text.len() == usize::from(length) {
             let bytes = text.as_bytes();
-            let units = self.arena.alloc_slice_fill_with(bytes.len() + 1, |index| {
-                if index == 0 {
-                    length
-                } else {
-                    u16::from(bytes[index - 1])
-                }
-            });
+            let units = self
+                .arena
+                .try_alloc_slice_fill_with(bytes.len() + 1, |index| {
+                    if index == 0 {
+                        length
+                    } else {
+                        u16::from(bytes[index - 1])
+                    }
+                })
+                .map_err(|_| XllError::Overloaded)?;
             return Ok(units.as_mut_ptr());
         }
         // UTF-8 uses at most three bytes per UTF-16 unit. Equality proves
@@ -56,22 +76,25 @@ impl ReturnStorage {
         // units for four bytes). Rust str validity already excludes surrogates.
         if text.len() == usize::from(length) * 3 {
             let bytes = text.as_bytes().as_chunks::<3>().0;
-            let units = self.arena.alloc_slice_fill_with(bytes.len() + 1, |index| {
-                if index == 0 {
-                    length
-                } else {
-                    let [first, second, third] = bytes[index - 1];
-                    (u16::from(first & 0x0f) << 12)
-                        | (u16::from(second & 0x3f) << 6)
-                        | u16::from(third & 0x3f)
-                }
-            });
+            let units = self
+                .arena
+                .try_alloc_slice_fill_with(bytes.len() + 1, |index| {
+                    if index == 0 {
+                        length
+                    } else {
+                        let [first, second, third] = bytes[index - 1];
+                        (u16::from(first & 0x0f) << 12)
+                            | (u16::from(second & 0x3f) << 6)
+                            | u16::from(third & 0x3f)
+                    }
+                })
+                .map_err(|_| XllError::Overloaded)?;
             return Ok(units.as_mut_ptr());
         }
         let mut encoded = text.encode_utf16();
         let units = self
             .arena
-            .alloc_slice_fill_with(length as usize + 1, |index| {
+            .try_alloc_slice_fill_with(length as usize + 1, |index| {
                 if index == 0 {
                     length
                 } else {
@@ -79,7 +102,8 @@ impl ReturnStorage {
                         .next()
                         .expect("the UTF-16 length was counted before allocation")
                 }
-            });
+            })
+            .map_err(|_| XllError::Overloaded)?;
         debug_assert!(encoded.next().is_none());
         Ok(units.as_mut_ptr())
     }
@@ -114,7 +138,7 @@ impl ScalarStringStorage {
                 },
             )
         })?;
-        let mut units = Box::<[u16]>::new_uninit_slice(usize::from(length) + 1);
+        let mut units = try_uninit_boxed_slice::<u16>(usize::from(length) + 1)?;
         units[0].write(length);
         let payload = &mut units[1..];
         if text.len() == usize::from(length) {
@@ -166,6 +190,14 @@ impl ScalarStringStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boxed_slice_layout_overflow_is_recoverable() {
+        assert!(matches!(
+            try_uninit_boxed_slice::<u16>(usize::MAX),
+            Err(XllError::Overloaded)
+        ));
+    }
 
     proptest::proptest! {
         #[test]

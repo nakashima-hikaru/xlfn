@@ -108,6 +108,9 @@ pub(super) fn run_poller(
             continue;
         }
         exit_guard.shared.queue.announce_idle(bit);
+        // Acquire all admitted enqueue operations before checking for the
+        // final time. A seal alone can race an already-admitted scheduler.
+        let admission_drained = exit_guard.shared.queue.admission_drained();
         if let Some(runnable) = find_task(index, &exit_guard.shared, &exit_guard.local) {
             exit_guard
                 .shared
@@ -121,7 +124,7 @@ pub(super) fn run_poller(
             runnable.run();
             continue;
         }
-        if exit_guard.shared.queue.is_sealed() {
+        if admission_drained {
             exit_guard
                 .shared
                 .queue

@@ -10,13 +10,20 @@ use crate::sync::Mutex;
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use std::borrow::Cow;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::num::NonZeroU64;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 #[cfg(target_os = "windows")]
 use std::time::SystemTime;
 use std::{fs, io};
+
+#[cfg_attr(unix, path = "file/unix.rs")]
+#[cfg_attr(target_os = "windows", path = "file/windows.rs")]
+mod log_directory;
+use log_directory::LogDirectory;
 
 struct FileDiagnosticRecord<'a> {
     timestamp_ms: u128,
@@ -151,6 +158,58 @@ pub(crate) fn bounded_diagnostic_error(error: &crate::XllError) -> String {
     output.finish()
 }
 
+/// Size and retention settings for the add-in's diagnostic file sink.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiagnosticFileConfig {
+    maximum_file_bytes: NonZeroU64,
+    archives: u8,
+}
+
+impl DiagnosticFileConfig {
+    /// Uses the default 4 MiB per file and retains three archives.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            maximum_file_bytes: NonZeroU64::new(LOG_MAX_BYTES).unwrap(),
+            archives: LOG_GENERATIONS as u8,
+        }
+    }
+
+    /// Sets the maximum file size in bytes, including each line terminator.
+    /// A record larger than the limit counts as a failed diagnostic write.
+    #[must_use]
+    pub const fn with_maximum_file_bytes(mut self, limit: NonZeroU64) -> Self {
+        self.maximum_file_bytes = limit;
+        self
+    }
+
+    /// Sets the archive depth used on each rotation. Zero removes the
+    /// outgoing active file instead of archiving it.
+    #[must_use]
+    pub const fn with_archives(mut self, count: u8) -> Self {
+        self.archives = count;
+        self
+    }
+
+    /// Returns the configured per-file size limit.
+    #[must_use]
+    pub const fn maximum_file_bytes(self) -> NonZeroU64 {
+        self.maximum_file_bytes
+    }
+
+    /// Returns the configured number of rotated archives.
+    #[must_use]
+    pub const fn archives(self) -> u8 {
+        self.archives
+    }
+}
+
+impl Default for DiagnosticFileConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub(crate) struct FileDiagnosticSink {
     pub(crate) log: Mutex<RotatingLog>,
 }
@@ -187,83 +246,87 @@ pub(crate) struct RotatingLog {
     pub(crate) generations: usize,
 }
 
-fn reject_log_links(path: &Path) -> io::Result<()> {
-    for ancestor in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {
-        match fs::symlink_metadata(ancestor) {
-            Ok(metadata) => {
-                #[cfg(target_os = "windows")]
-                let linked = {
-                    use std::os::windows::fs::MetadataExt;
-                    metadata.file_attributes() & 0x400 != 0
-                };
-                #[cfg(not(target_os = "windows"))]
-                let linked = metadata.is_symlink();
-                if linked {
-                    return Err(io::Error::other(
-                        "log path contains a link or reparse point",
-                    ));
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
+fn reject_parent_traversal(path: &Path) -> io::Result<()> {
+    if path.components().any(|part| part == Component::ParentDir) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "log path contains a parent directory component",
+        ));
     }
     Ok(())
 }
 
-fn open_log_file(path: &Path, lock: bool) -> io::Result<fs::File> {
-    reject_log_links(path)?;
-    let mut options = fs::OpenOptions::new();
-    options.create(true).write(true).read(lock).append(!lock);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
-    }
-    let file = options.open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::other("log destination is not a regular file"));
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if metadata.file_attributes() & 0x400 != 0 {
-            return Err(io::Error::other("log destination is a reparse point"));
-        }
-    }
-    Ok(file)
+enum LogAccess {
+    Lock,
+    Append,
+    Rotate,
 }
 
-struct LogLock(fs::File);
+struct LogLock<'a> {
+    file: fs::File,
+    directory: LogDirectory,
+    name: &'a OsStr,
+}
 
-impl LogLock {
-    fn acquire(path: &Path) -> io::Result<Self> {
-        let mut lock_name = path.file_name().unwrap_or_default().to_os_string();
+impl<'a> LogLock<'a> {
+    fn acquire(path: &'a Path) -> io::Result<Self> {
+        reject_parent_traversal(path)?;
+        let name = path.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "log path has no filename")
+        })?;
+        let parent = path.parent().filter(|path| !path.as_os_str().is_empty());
+        let directory = LogDirectory::open(parent.unwrap_or_else(|| Path::new(".")))?;
+        let mut lock_name = name.to_os_string();
         lock_name.push(".lock");
-        let lock_path = path.with_file_name(lock_name);
-        let file = open_log_file(&lock_path, true)?;
+        let file = directory.open_file(&lock_name, LogAccess::Lock)?;
         // Logging is best effort: contention must never stall the worker or
         // startup. report() accounts this WouldBlock as a failed write.
         file.try_lock().map_err(io::Error::from)?;
-        Ok(Self(file))
+        Ok(Self {
+            file,
+            directory,
+            name,
+        })
+    }
+
+    fn open_active(&self) -> io::Result<fs::File> {
+        self.directory.open_file(self.name, LogAccess::Append)
+    }
+
+    fn rotate(&self, generations: usize) -> io::Result<()> {
+        let rotated = |generation: usize| {
+            let mut name = self.name.to_os_string();
+            name.push(format!(".{generation}"));
+            name
+        };
+        if generations == 0 {
+            return self.rotate_entry(self.name, None);
+        }
+        self.rotate_entry(&rotated(generations), None)?;
+        for generation in (1..generations).rev() {
+            self.rotate_entry(&rotated(generation), Some(&rotated(generation + 1)))?;
+        }
+        self.rotate_entry(self.name, Some(&rotated(1)))
+    }
+
+    fn rotate_entry(&self, name: &OsStr, destination: Option<&OsStr>) -> io::Result<()> {
+        let file = match self.directory.open_file(name, LogAccess::Rotate) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        self.directory.rotate_file(&file, name, destination)
     }
 }
 
-impl Drop for LogLock {
+impl Drop for LogLock<'_> {
     fn drop(&mut self) {
-        let _ = self.0.unlock();
+        let _ = self.file.unlock();
     }
 }
 
 impl RotatingLog {
+    #[cfg(any(target_os = "windows", test))]
     pub(crate) fn open(path: PathBuf) -> io::Result<Self> {
         Self::open_with_policy(path, LOG_MAX_BYTES, LOG_GENERATIONS)
     }
@@ -273,16 +336,15 @@ impl RotatingLog {
         maximum_bytes: u64,
         generations: usize,
     ) -> io::Result<Self> {
-        let _lock = LogLock::acquire(&path)?;
-        match fs::metadata(&path) {
-            Ok(metadata) if metadata.len() >= maximum_bytes => {
-                rotate_log_files(&path, generations)?;
+        {
+            let lock = LogLock::acquire(&path)?;
+            let file = lock.open_active()?;
+            if file.metadata()?.len() >= maximum_bytes {
+                drop(file);
+                lock.rotate(generations)?;
+                lock.open_active()?;
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
         }
-        open_log_file(&path, false)?;
         Ok(Self {
             path,
             maximum_bytes,
@@ -298,48 +360,20 @@ impl RotatingLog {
                 "log record exceeds the maximum log size",
             ));
         }
-        let _lock = LogLock::acquire(&self.path)?;
+        let lock = LogLock::acquire(&self.path)?;
         // Another instance or process may have appended or rotated since the
         // previous write. Resolve both the active file and its size while the
         // shared lock is held; retaining a file handle would target an archive.
-        let mut file = open_log_file(&self.path, false)?;
+        let mut file = lock.open_active()?;
         let size = file.metadata()?.len();
         if size > 0 && size.saturating_add(incoming) > self.maximum_bytes {
             drop(file);
-            rotate_log_files(&self.path, self.generations)?;
-            file = open_log_file(&self.path, false)?;
+            lock.rotate(self.generations)?;
+            file = lock.open_active()?;
         }
         writeln!(file, "{line}")?;
         Ok(())
     }
-}
-
-fn rotate_log_files(path: &Path, generations: usize) -> io::Result<()> {
-    if generations == 0 {
-        if fs::exists(path)? {
-            fs::remove_file(path)?;
-        }
-        return Ok(());
-    }
-    let rotated = |generation: usize| {
-        let mut name = path.file_name().unwrap_or_default().to_os_string();
-        name.push(format!(".{generation}"));
-        path.with_file_name(name)
-    };
-    let oldest = rotated(generations);
-    if fs::exists(&oldest)? {
-        fs::remove_file(&oldest)?;
-    }
-    for generation in (1..generations).rev() {
-        let source = rotated(generation);
-        if fs::exists(&source)? {
-            fs::rename(source, rotated(generation + 1))?;
-        }
-    }
-    if fs::exists(path)? {
-        fs::rename(path, rotated(1))?;
-    }
-    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -357,60 +391,116 @@ pub(crate) fn append_startup_log(path: &Path, message: &str) -> io::Result<()> {
 /// Installs a basic failure log at `%LOCALAPPDATA%/<addin-id>/logs/diagnostics.log`.
 pub(crate) fn install_file_diagnostic_sink(
     addin_id: &super::AddinId,
+    config: DiagnosticFileConfig,
 ) -> Result<PathBuf, DiagnosticInitError> {
     let directory = log_directory(addin_id)?;
-    install_file_diagnostic_sink_at(directory.join("diagnostics.log"))
+    open_file_sink(directory.join("diagnostics.log"), config)
 }
 
-fn validated_log_base(base: Option<std::ffi::OsString>) -> io::Result<PathBuf> {
+fn validated_log_base(base: Option<OsString>) -> io::Result<PathBuf> {
     let base = base.map(PathBuf::from).filter(|path| {
+        let valid =
+            path.is_absolute() && !path.components().any(|part| part == Component::ParentDir);
         #[cfg(target_os = "windows")]
-        {
-            path.is_absolute()
-                && matches!(
-                    path.components().next(),
-                    Some(std::path::Component::Prefix(prefix))
-                        if matches!(prefix.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_))
+        let valid = valid
+            && matches!(
+                path.components().next(),
+                Some(Component::Prefix(prefix)) if matches!(
+                    prefix.kind(),
+                    std::path::Prefix::Disk(_)
+                    | std::path::Prefix::VerbatimDisk(_)
+                    | std::path::Prefix::UNC(..)
+                    | std::path::Prefix::VerbatimUNC(..)
                 )
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            path.is_absolute()
-        }
+            );
+        valid
     });
     base.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "LOCALAPPDATA must be an absolute path",
+            "local app data must be an absolute path without parent traversal",
         )
     })
+}
+
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code, reason = "Read and release the Windows Known Folder path")]
+fn local_app_data() -> io::Result<PathBuf> {
+    use crate::win32::{CoTaskMemFree, GUID, SHGetKnownFolderPath};
+    use std::os::windows::ffi::OsStringExt;
+    use std::ptr::null_mut;
+
+    const LOCAL_APP_DATA: GUID = GUID {
+        data1: 0xf1b3_2785,
+        data2: 0x6fba,
+        data3: 0x4fcf,
+        data4: [0x9d, 0x55, 0x7b, 0x8e, 0x7f, 0x15, 0x70, 0x91],
+    };
+
+    struct KnownFolderPath(*mut u16);
+    impl Drop for KnownFolderPath {
+        fn drop(&mut self) {
+            // SAFETY: the API transfers the allocation even on failure, and
+            // CoTaskMemFree accepts null if no allocation was returned.
+            unsafe { CoTaskMemFree(self.0.cast()) };
+        }
+    }
+
+    let mut path = KnownFolderPath(null_mut());
+    // SAFETY: the GUID and output have live storage. A null token requests the
+    // current user's folder.
+    let status = unsafe { SHGetKnownFolderPath(&LOCAL_APP_DATA, 0, null_mut(), &mut path.0) };
+    if status < 0 || path.0.is_null() {
+        return Err(io::Error::other(format!(
+            "SHGetKnownFolderPath for LocalAppData failed ({status:#010x})"
+        )));
+    }
+    let mut len = 0;
+    // SAFETY: success returned a NUL-terminated UTF-16 path owned by `path`.
+    while unsafe { path.0.wrapping_add(len).read() } != 0 {
+        len += 1;
+    }
+    // SAFETY: the scan counted the initialized path units before its terminator.
+    let units = unsafe { std::slice::from_raw_parts(path.0, len) };
+    // Resolve any user-profile redirection before validating the add-in's own
+    // descendants, which must not traverse reparse points.
+    validated_log_base(Some(OsString::from_wide(units)))?.canonicalize()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn local_app_data() -> io::Result<PathBuf> {
+    validated_log_base(std::env::var_os("LOCALAPPDATA"))
 }
 
 pub(crate) fn log_directory(addin_id: &super::AddinId) -> io::Result<PathBuf> {
     // The user profile is the trust boundary. Never fall back to the current
     // directory or a shared temporary directory when its location is missing.
-    let base = validated_log_base(std::env::var_os("LOCALAPPDATA"))?;
-    let directory = base.join(addin_id.as_str()).join("logs");
-    reject_log_links(&directory)?;
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(&directory)?;
-    reject_log_links(&directory)?;
-    Ok(directory)
+    let base = local_app_data()?;
+    let directory =
+        LogDirectory::open(&base)?.ensure_subdirectory(OsStr::new(addin_id.as_str()))?;
+    directory.ensure_subdirectory(OsStr::new("logs"))?;
+    Ok(base.join(addin_id.as_str()).join("logs"))
 }
 
+#[cfg(test)]
 pub(crate) fn install_file_diagnostic_sink_at(
     path: PathBuf,
+) -> Result<PathBuf, DiagnosticInitError> {
+    open_file_sink(path, DiagnosticFileConfig::new())
+}
+
+fn open_file_sink(
+    path: PathBuf,
+    config: DiagnosticFileConfig,
 ) -> Result<PathBuf, DiagnosticInitError> {
     // Construct the sink before touching the router. Installation rejects an
     // existing process-wide sink rather than implicitly replacing its owner.
     let sink = FileDiagnosticSink {
-        log: Mutex::new(RotatingLog::open(path.clone())?),
+        log: Mutex::new(RotatingLog::open_with_policy(
+            path.clone(),
+            config.maximum_file_bytes().get(),
+            usize::from(config.archives()),
+        )?),
     };
     super::install_diagnostic_sink(sink)?;
     Ok(path)
@@ -455,11 +545,124 @@ mod bounded_text_tests {
             validated_log_base(Some(absolute.clone().into_os_string())).unwrap(),
             absolute
         );
+        #[cfg(not(target_os = "windows"))]
+        assert!(validated_log_base(Some("/profile/local/../logs".into())).is_err());
         #[cfg(target_os = "windows")]
         {
             assert!(validated_log_base(Some(r"\relative".into())).is_err());
+            assert!(validated_log_base(Some(r"\\.\DEVICE\folder".into())).is_err());
+            assert!(validated_log_base(Some(r"C:\Users\example\..\logs".into())).is_err());
             assert!(validated_log_base(Some(r"C:\Users\example\AppData\Local".into())).is_ok());
+            assert!(validated_log_base(Some(r"\\host\users\example\Local".into())).is_ok());
         }
+    }
+
+    #[cfg(any(unix, target_os = "windows"))]
+    #[test]
+    fn log_rotation_requires_single_link_archives() {
+        let directory = test_log_directory();
+        let path = directory.path().join("diagnostics.log");
+        let archive = path.with_file_name("diagnostics.log.1");
+        let original = directory.path().join("original");
+        let mut log = RotatingLog::open_with_policy(path.clone(), 8, 1).unwrap();
+        log.write_line("first").unwrap();
+        fs::write(&original, "unchanged").unwrap();
+        fs::hard_link(&original, &archive).unwrap();
+        assert!(log.write_line("next").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first\n");
+        assert_eq!(fs::read_to_string(&archive).unwrap(), "unchanged");
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn log_rotation_preserves_an_occupied_archive() {
+        let directory = test_log_directory();
+        let path = directory.path().join("diagnostics.log");
+        let archive = path.with_file_name("diagnostics.log.1");
+        fs::write(&path, "new").unwrap();
+        fs::write(&archive, "older").unwrap();
+        let lock = LogLock::acquire(&path).unwrap();
+
+        let result = lock.rotate_entry(lock.name, archive.file_name());
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&archive).unwrap(), "older");
+    }
+
+    #[test]
+    fn log_rotation_keeps_the_directory_pinned_until_unlock() {
+        let directory = test_log_directory();
+        let parent = directory.path().join("original");
+        let moved = directory.path().join("moved");
+        fs::create_dir(&parent).unwrap();
+        let path = parent.join("diagnostics.log");
+        fs::write(&path, "original").unwrap();
+        let lock = LogLock::acquire(&path).unwrap();
+
+        #[cfg(unix)]
+        {
+            fs::rename(&parent, &moved).unwrap();
+            fs::create_dir(&parent).unwrap();
+            fs::write(&path, "replacement").unwrap();
+        }
+        #[cfg(target_os = "windows")]
+        assert!(fs::rename(&parent, &moved).is_err());
+
+        lock.rotate(1).unwrap();
+        drop(lock);
+        #[cfg(unix)]
+        assert_eq!(fs::read_to_string(&path).unwrap(), "replacement");
+        #[cfg(target_os = "windows")]
+        fs::rename(&parent, &moved).unwrap();
+        assert_eq!(
+            fs::read_to_string(moved.join("diagnostics.log.1")).unwrap(),
+            "original"
+        );
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn log_lock_serializes_separate_processes() {
+        const PROBE: &str = "XLFN_TEST_LOG_LOCK_PROBE";
+        if let Some(path) = std::env::var_os(PROBE) {
+            let result = LogLock::acquire(Path::new(&path));
+            assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+            println!("log lock was held by the parent process");
+            return;
+        }
+
+        let directory = test_log_directory();
+        let path = directory.path().join("diagnostics.log");
+        let _lock = LogLock::acquire(&path).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "diagnostics::file::bounded_text_tests::log_lock_serializes_separate_processes",
+                "--nocapture",
+            ])
+            .env(PROBE, &path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                child.wait().unwrap();
+                panic!("an unsuccessful log lock attempt must return promptly");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(stdout.contains("log lock was held by the parent process"));
     }
 
     #[test]

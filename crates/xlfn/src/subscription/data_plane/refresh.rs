@@ -199,7 +199,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 });
             }
             let refresh_id = refresh.next_refresh_id;
-            refresh.next_refresh_id = refresh_id.checked_add(1).ok_or(XllError::Internal {
+            let next_refresh_id = refresh_id.checked_add(1).ok_or(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_OVERFLOW,
             })?;
 
@@ -212,7 +212,9 @@ impl<H: SubscriptionHost> PublishCore<H> {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_OVERFLOW,
                 })?;
             let epoch = previous_epoch + 1;
+            refresh.next_refresh_id = next_refresh_id;
             refresh.phase = DeliveryPhase::Refreshing { refresh_id };
+            self.invalidate_notified_epoch();
             (
                 RefreshPlan {
                     refresh_id,

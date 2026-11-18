@@ -45,14 +45,9 @@ pub fn validate_path_components(path: &Path) -> PackageResult {
     Ok(())
 }
 
-/// Validates a directory destination and all of its existing ancestors.
+/// Validates a host directory and its existing ancestors using native paths.
+/// Callers that generate package entries must validate those basenames separately.
 pub fn validate_directory_path(path: &Path) -> PackageResult {
-    for component in path.components() {
-        if let Component::Normal(name) = component {
-            let name = name.to_str().ok_or("directory component is not UTF-8")?;
-            validate_windows_basename_for("directory component", name)?;
-        }
-    }
     validate_path_components(path)?;
     for ancestor in path.ancestors() {
         if ancestor.as_os_str().is_empty() {

@@ -203,8 +203,8 @@ macro_rules! __xlfn_private_async_exports {
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
         #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
-        static __XLFN_ASYNC_MANIFEST: [u8; b"__xlfn_calculation_canceled\0".len()] =
-            *b"__xlfn_calculation_canceled\0";
+        static __XLFN_ASYNC_MANIFEST: [::core::primitive::u8;
+            b"__xlfn_calculation_canceled\0".len()] = *b"__xlfn_calculation_canceled\0";
 
         #[doc(hidden)]
         #[unsafe(no_mangle)]
@@ -230,8 +230,8 @@ macro_rules! __xlfn_private_calculation_exports {
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
         #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
-        static __XLFN_CALCULATION_MANIFEST: [u8; b"__xlfn_calculation_ended\0".len()] =
-            *b"__xlfn_calculation_ended\0";
+        static __XLFN_CALCULATION_MANIFEST: [::core::primitive::u8;
+            b"__xlfn_calculation_ended\0".len()] = *b"__xlfn_calculation_ended\0";
 
         #[doc(hidden)]
         #[unsafe(no_mangle)]
@@ -251,7 +251,8 @@ macro_rules! __xlfn_private_excel_rtd_exports {
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
         #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
-        static __XLFN_RTD_MANIFEST: [u8; b"DllGetClassObject\0DllCanUnloadNow\0".len()] =
+        static __XLFN_RTD_MANIFEST: [::core::primitive::u8;
+            b"DllGetClassObject\0DllCanUnloadNow\0".len()] =
             *b"DllGetClassObject\0DllCanUnloadNow\0";
 
         #[doc(hidden)]
@@ -260,23 +261,26 @@ macro_rules! __xlfn_private_excel_rtd_exports {
             __class_id: *const ::core::ffi::c_void,
             __interface_id: *const ::core::ffi::c_void,
             __output: *mut *mut ::core::ffi::c_void,
-        ) -> i32 {
-            $crate::__private::v1::export_status_boundary(0x8000_FFFF_u32 as i32, || {
-                // SAFETY: Excel/COM supplies the three live ABI pointers for this
-                // entry point, and the boundary validates their use.
-                unsafe {
-                    $crate::__private::v1::dll_get_class_object(
-                        __class_id,
-                        __interface_id,
-                        __output,
-                    )
-                }
-            })
+        ) -> ::core::primitive::i32 {
+            $crate::__private::v1::export_status_boundary(
+                0x8000_FFFF_u32 as ::core::primitive::i32,
+                || {
+                    // SAFETY: Excel/COM supplies the three live ABI pointers for this
+                    // entry point, and the boundary validates their use.
+                    unsafe {
+                        $crate::__private::v1::dll_get_class_object(
+                            __class_id,
+                            __interface_id,
+                            __output,
+                        )
+                    }
+                },
+            )
         }
 
         #[doc(hidden)]
         #[unsafe(no_mangle)]
-        pub extern "system" fn DllCanUnloadNow() -> i32 {
+        pub extern "system" fn DllCanUnloadNow() -> ::core::primitive::i32 {
             $crate::__private::v1::export_status_boundary(1, || {
                 $crate::__private::v1::dll_can_unload_now($runtime)
             })

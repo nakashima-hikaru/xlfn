@@ -9,7 +9,9 @@ use crate::sync::{Condvar, Mutex, MutexGuard};
 use std::mem;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
-use xlfn_kernel::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit};
+use xlfn_kernel::drain_gate::{
+    DEFAULT_STRIPE_COUNT, DrainGate, StripedDrainGate, StripedDrainPermit,
+};
 use xlfn_kernel::published_owner::PublishedOwner;
 
 mod authority_slot;
@@ -39,8 +41,20 @@ use crate::module_runtime::{
 };
 use crate::runtime_components::GenerationServices;
 
+type AddinGenerationServices<A> =
+    GenerationServices<crate::addin_impl::AddinSubscription<A>, crate::addin_impl::AddinSources<A>>;
+
 mod removal;
 pub(crate) use removal::{FinalCloseDecision, IssuedRemovalClaim, RollbackDecision};
+
+/// Proof that the canonical state had no service owner for this generation.
+pub(crate) struct AbsentGenerationServices(Option<RuntimeGeneration>);
+
+impl AbsentGenerationServices {
+    pub(crate) fn generation(&self) -> Option<RuntimeGeneration> {
+        self.0
+    }
+}
 
 /// A read-side publication of one coherent open generation.
 ///
@@ -1693,6 +1707,7 @@ pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
     phase: AtomicU8,
     publication: AtomicPtr<PublishedGeneration<A>>,
     publication_readers: StripedDrainGate<DEFAULT_STRIPE_COUNT>,
+    service_readers: DrainGate,
     core: Mutex<LifecycleCore<A>>,
     changed: Condvar,
     #[cfg(test)]
@@ -1741,6 +1756,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             phase: AtomicU8::new(LifecyclePhase::Closed as u8),
             publication: AtomicPtr::new(std::ptr::null_mut()),
             publication_readers: StripedDrainGate::new_sealed(),
+            service_readers: DrainGate::new_open(),
             core: Mutex::new(LifecycleCore::new()),
             changed: Condvar::new(),
             #[cfg(test)]
@@ -1869,7 +1885,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
 
     pub(in crate::lifecycle) fn clear_certified_retirement(
         &self,
-        access: &mut LifecycleAccess<'_, A>,
+        mut access: LifecycleAccess<'_, A>,
         authorization: crate::runtime::CertifiedRetirement<'_, A>,
     ) -> bool {
         // Neither a stale ready observation nor another coordinator's mutex
@@ -1877,23 +1893,31 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         if !std::ptr::eq(access.coordinator, self) {
             return false;
         }
-        access.transition(|core| {
+        let retirement = access.transition(|core| {
             let Some(FinalRemovalReady::Committed {
                 generation,
                 module_epoch,
             }) = core.final_removal_ready(authorization.attempt())
             else {
-                return (false, TransitionEffect::Keep);
+                return (None, TransitionEffect::Keep);
             };
             if !authorization.matches(self, authorization.attempt(), generation, module_epoch) {
-                return (false, TransitionEffect::Keep);
+                return (None, TransitionEffect::Keep);
             }
-            let Some(retirement) = core.state.take_retirement() else {
-                return (false, TransitionEffect::Keep);
-            };
-            drop(retirement.services);
-            (true, TransitionEffect::ClearPublication)
-        })
+            (
+                core.state.take_retirement(),
+                TransitionEffect::ClearPublication,
+            )
+        });
+        drop(access);
+        let Some(retirement) = retirement else {
+            return false;
+        };
+        // Canonical lookup can no longer reach this owner. The removal
+        // claim prevents a new generation from publishing during disposal.
+        drop(self.service_readers.control().wait_idle());
+        drop(retirement);
+        true
     }
 
     fn wait<'a>(&self, access: &mut LifecycleAccess<'a, A>) {
@@ -1966,7 +1990,12 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         match effect {
             TransitionEffect::Keep => {}
             TransitionEffect::ClearPublication => {
-                drop(self.publication_readers.control().seal());
+                // Canonical transitions are the only writers of this gate.
+                // Avoid taking its control lock again while a shutdown
+                // owner is draining the already sealed publication.
+                if !self.publication_readers.is_sealed() {
+                    drop(self.publication_readers.control().seal());
+                }
                 self.publication
                     .store(std::ptr::null_mut(), Ordering::Release);
             }
@@ -2623,22 +2652,39 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         self.access().has_current_generation()
     }
 
-    /// Borrows generation services while either a read admission or the
-    /// canonical lifecycle lock proves the unique owner cannot move.
+    /// Runs a service operation without holding the lifecycle lock.
     pub(crate) fn with_generation_services<R>(
         &self,
-        operation: impl FnOnce(
-            &GenerationServices<
-                crate::addin_impl::AddinSubscription<A>,
-                crate::addin_impl::AddinSources<A>,
-            >,
-        ) -> R,
+        operation: impl FnOnce(&AddinGenerationServices<A>) -> R,
     ) -> Option<R> {
         if let Ok(admission) = self.try_admit() {
             return Some(operation(admission.services()));
         }
+        self.with_service_snapshot(|services| services.ok().map(operation))
+    }
+
+    /// Takes a canonical snapshot and pins any service owner before unlocking.
+    /// The generation and absence observation come from the same transition.
+    pub(crate) fn with_service_snapshot<R>(
+        &self,
+        operation: impl FnOnce(Result<&AddinGenerationServices<A>, AbsentGenerationServices>) -> R,
+    ) -> R {
         let access = self.access();
-        access.generation_services().map(operation)
+        let Some(services) = access.generation_services() else {
+            let absent = AbsentGenerationServices(access.protocol_generation());
+            drop(access);
+            return operation(Err(absent));
+        };
+        let permit = self.service_readers.try_enter().unwrap_or_else(|_| {
+            lifecycle_invariant_violation("canonical service reader gate is always open")
+        });
+        let services = NonNull::from(services);
+        drop(access);
+        // SAFETY: the permit was acquired before the canonical owner could
+        // be detached. Retirement waits for this permit before destruction.
+        let result = operation(Ok(unsafe { services.as_ref() }));
+        drop(permit);
+        result
     }
 
     pub(in crate::lifecycle) fn take_opening_for_rollback(&self) -> Option<OpeningGeneration<A>> {
@@ -2648,7 +2694,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
 
     fn take_current_bundle(
         &self,
-        core: &mut LifecycleAccess<'_, A>,
+        mut core: LifecycleAccess<'_, A>,
     ) -> Option<Box<ExecutionGeneration<A>>> {
         let generation = core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
@@ -2700,6 +2746,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 }
             }
         });
+        drop(core);
         if generation.is_some() {
             drop(self.publication_readers.control().wait_idle());
         }
@@ -2711,16 +2758,14 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
 
     #[cfg(test)]
     pub(crate) fn take_current_generation(&self) -> Option<Box<ExecutionGeneration<A>>> {
-        let mut core = self.access();
-        self.take_current_bundle(&mut core)
+        self.take_current_bundle(self.access())
     }
 
     pub(crate) fn take_generation_for_shutdown(&self) -> Option<ShutdownGeneration<A>> {
-        let mut core = self.access();
-        if let Some(generation) = self.take_current_bundle(&mut core) {
+        if let Some(generation) = self.take_current_bundle(self.access()) {
             return Some(ShutdownGeneration::Open(generation));
         }
-        core.transition(|core| {
+        self.access().transition(|core| {
             (
                 core.state.take_opening().map(ShutdownGeneration::Opening),
                 TransitionEffect::Keep,

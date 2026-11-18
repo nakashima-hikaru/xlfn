@@ -85,11 +85,14 @@ impl<T: 'static> BindingClaim<'_, T> {
         if occupied {
             return Err(ThreadAffineError::Occupied);
         }
-        // A live non-Send claim prevents rebinding or another occupancy
-        // transition until its Drop clears modifying. The owner and binding
-        // therefore still match the acquisition; retain the mutex for the
-        // synchronized update and keep modifying set through claim destruction.
-        self.access.slot.affinity.lock().owner = None;
+        // The non-Send claim protects the TLS vacancy until both parts of
+        // the binding are cleared under the same affinity lock.
+        let mut affinity = self.access.slot.affinity.lock();
+        if !affinity.modifying || affinity.binding != self.access.binding {
+            return Err(ThreadAffineError::StaleAccess);
+        }
+        affinity.owner = None;
+        affinity.modifying = false;
         Ok(())
     }
 }
@@ -166,11 +169,20 @@ impl<'slot, T: 'static> BindingTxn<'slot, T, BindingEmpty> {
         }
     }
 
+    /// Removes the empty binding and its exclusive claim in one transition.
+    /// A failed vacancy check returns the original claim for retry.
+    #[allow(
+        clippy::mem_forget,
+        reason = "the consumed claim owns only a borrow and was already cleared"
+    )]
     pub fn release(
         self,
     ) -> Result<BindingReleased, BindingTransitionError<'slot, T, BindingEmpty>> {
         match self.claim.release_empty_claimed() {
-            Ok(()) => Ok(BindingReleased),
+            Ok(()) => {
+                std::mem::forget(self);
+                Ok(BindingReleased)
+            }
             Err(reason) => Err(BindingTransitionError {
                 transaction: self,
                 reason,
@@ -441,35 +453,24 @@ mod tests {
         empty.release().unwrap();
     }
     #[test]
-    fn miri_rebind_is_blocked_between_release_and_claim_drop() {
+    fn miri_released_claim_cannot_clear_a_new_binding() {
         let slot = ThreadAffineSlot::<usize>::new();
         let access = slot.bind_current().unwrap();
-        let BindingState::Empty(txn) = access.binding().unwrap() else {
+        let BindingState::Empty(old) = access.binding().unwrap() else {
             panic!("empty")
         };
-        txn.claim.release_empty_claimed().unwrap();
-        std::thread::scope(|scope| {
-            assert_eq!(
-                scope
-                    .spawn(|| slot.bind_current().map(|_| ()))
-                    .join()
-                    .unwrap(),
-                Err(ThreadAffineError::ReentrantAccess)
-            );
-        });
-        drop(txn);
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    let access = slot.bind_current().unwrap();
-                    let BindingState::Empty(empty) = access.binding().unwrap() else {
-                        panic!("empty")
-                    };
-                    empty.release().unwrap();
-                })
-                .join()
-                .unwrap();
-        });
+        // Observe the release linearization point before the old claim's Drop.
+        old.claim.release_empty_claimed().unwrap();
+        let rebound = slot.bind_current().unwrap();
+        let BindingState::Empty(new) = rebound.binding().unwrap() else {
+            panic!("empty")
+        };
+        drop(old);
+        assert!(matches!(
+            rebound.binding(),
+            Err(ThreadAffineError::ReentrantAccess)
+        ));
+        new.release().unwrap();
     }
 
     #[test]

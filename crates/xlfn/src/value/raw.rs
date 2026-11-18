@@ -530,7 +530,7 @@ impl<'call> CoercedGridRef<'call> {
     }
 }
 
-fn checked_grid_cell<'call>(
+pub(super) fn checked_grid_cell<'call>(
     cell: &'call XLOPER12,
     argument: &'static str,
 ) -> XllResult<XlValueRef<'call>> {

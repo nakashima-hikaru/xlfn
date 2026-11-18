@@ -8,7 +8,9 @@
 //! Generation shutdown cannot finish before reader quiescence; lane recovery
 //! additionally retains the transition lock until the exact owner is extracted.
 
-use crate::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit};
+use crate::drain_gate::{
+    DEFAULT_STRIPE_COUNT, DetachedStripedDrainPermit, StripedDrainGate, StripedDrainPermit,
+};
 use crate::published_owner::PublishedOwner;
 use crate::sync::{Condvar, Mutex};
 use std::marker::PhantomData;
@@ -60,6 +62,39 @@ enum GenerationServiceState<C, R, E> {
 pub struct GenerationServiceRead<'slot, R> {
     pointer: NonNull<R>,
     _permit: StripedDrainPermit<'slot, SERVICE_READER_STRIPES>,
+}
+
+impl<R> GenerationServiceRead<'_, R> {
+    /// Moves the read into storage that cannot carry the slot borrow in its type.
+    ///
+    /// # Safety
+    /// Keep the issuing slot alive at a stable address and avoid exclusive
+    /// references covering it through the detached read's complete drop.
+    /// Release this read before dropping the slot or waiting for the slot
+    /// to drain on the same thread.
+    pub unsafe fn detach(self) -> DetachedGenerationServiceRead<R> {
+        DetachedGenerationServiceRead {
+            pointer: self.pointer,
+            // SAFETY: the caller guarantees the issuing slot/gate's lifetime.
+            _permit: unsafe { self._permit.detach() },
+        }
+    }
+}
+
+/// The same read capability with an externally guaranteed slot lifetime.
+pub struct DetachedGenerationServiceRead<R> {
+    pointer: NonNull<R>,
+    _permit: DetachedStripedDrainPermit<SERVICE_READER_STRIPES>,
+}
+
+impl<R> Deref for DetachedGenerationServiceRead<R> {
+    type Target = R;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: the detached count prevents reclamation of this publication.
+        unsafe { self.pointer.as_ref() }
+    }
 }
 
 impl<R> Deref for GenerationServiceRead<'_, R> {

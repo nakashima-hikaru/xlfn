@@ -584,7 +584,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         #[allow(non_upper_case_globals, reason = "Generated registration descriptor identifier")]
         static #descriptor_ident: #krate::__private::v1::FunctionRegistration =
             #krate::__private::v1::FunctionRegistration::new(
-                stringify!(#export_ident),
+                ::core::stringify!(#export_ident),
                 #excel_name,
                 #category,
                 #description,
@@ -617,7 +617,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
         #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
-        static #export_manifest_entry_ident: [u8; #export_name_bytes.len()] =
+        static #export_manifest_entry_ident: [::core::primitive::u8; #export_name_bytes.len()] =
             *#export_name_bytes;
 
         #wrapper

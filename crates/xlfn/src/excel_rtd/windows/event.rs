@@ -155,7 +155,7 @@ impl<W: DrainWork> DispatchPrepared<W> {
             let helper = terminated
                 .get()
                 .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-            wait_with_com_pumping(helper.as_handle())
+            wait_with_com_pumping(helper.as_handle(), INFINITE)
                 .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
             Ok(transferred.join())
         })
@@ -185,7 +185,7 @@ fn duplicate_current_thread() -> OwnedHandle {
     unsafe { OwnedHandle::from_raw_handle(raw) }
 }
 
-fn wait_with_com_pumping(handle: BorrowedHandle<'_>) -> Result<(), i32> {
+fn wait_with_com_pumping(handle: BorrowedHandle<'_>, timeout_ms: u32) -> Result<(), i32> {
     let raw = handle.as_raw_handle();
     let mut index = u32::MAX;
     // SAFETY: the borrow keeps the handle live; one readable HANDLE is
@@ -193,7 +193,7 @@ fn wait_with_com_pumping(handle: BorrowedHandle<'_>) -> Result<(), i32> {
     // calls during CoWait; COWAIT_DISPATCH_CALLS also enables them for an ASTA.
     // Omit COWAIT_DISPATCH_WINDOW_MESSAGES to avoid broad window dispatch.
     let status =
-        unsafe { CoWaitForMultipleHandles(COWAIT_DISPATCH_CALLS, INFINITE, 1, &raw, &mut index) };
+        unsafe { CoWaitForMultipleHandles(COWAIT_DISPATCH_CALLS, timeout_ms, 1, &raw, &mut index) };
 
     if status < 0 {
         Err(status)
@@ -269,8 +269,15 @@ impl ManualResetEvent {
     }
 
     pub(super) fn wait_with_com_pumping(&self) -> Result<(), i32> {
+        self.wait_with_com_pumping_for(INFINITE)
+    }
+
+    pub(super) fn wait_with_com_pumping_for(&self, timeout_ms: u32) -> Result<(), i32> {
         // SAFETY: this event uniquely owns the live handle for the borrow.
-        wait_with_com_pumping(unsafe { BorrowedHandle::borrow_raw(self.raw()) })
+        wait_with_com_pumping(
+            unsafe { BorrowedHandle::borrow_raw(self.raw()) },
+            timeout_ms,
+        )
     }
 
     pub(super) fn wait_blocking(&self) -> Result<(), i32> {

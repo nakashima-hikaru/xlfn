@@ -40,7 +40,7 @@ impl<T> Matrix<T> {
         mut make: impl FnMut(usize, usize) -> T,
     ) -> XllResult<Self> {
         let count = validated_element_count(rows, columns)?;
-        let mut data = Vec::with_capacity(count);
+        let mut data = super::try_allocate_cells(count)?;
         for row in 0..rows {
             for column in 0..columns {
                 data.push(make(row, column));
@@ -61,10 +61,12 @@ impl<T> Matrix<T> {
         T: Clone,
     {
         let count = validated_element_count(rows, columns)?;
+        let mut data = super::try_allocate_cells(count)?;
+        data.resize(count, value);
         Ok(Self {
             rows,
             columns,
-            data: vec![value; count],
+            data,
         })
     }
 
@@ -78,6 +80,18 @@ impl<T> Matrix<T> {
     #[must_use]
     pub const fn columns(&self) -> usize {
         self.columns
+    }
+
+    /// Returns the number of elements.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Returns whether there are zero elements. Valid matrices are non-empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.data.is_empty()
     }
 
     /// Returns the rectangular shape used by conversion diagnostics.
@@ -196,7 +210,7 @@ impl<T> TryFrom<Vec<Vec<T>>> for Matrix<T> {
                 ));
             }
         }
-        let mut data = Vec::with_capacity(count);
+        let mut data = super::try_allocate_cells(count)?;
         for row in rows {
             data.extend(row);
         }
@@ -349,6 +363,18 @@ impl<'call, T> MatrixRef<'call, T> {
         self.columns
     }
 
+    /// Returns the number of elements.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Returns whether there are zero elements. Valid matrices are non-empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     /// Returns the rectangular shape used by conversion diagnostics.
     #[must_use]
     pub const fn shape(&self) -> Shape {
@@ -397,7 +423,9 @@ impl<'call, T> MatrixRef<'call, T> {
     where
         T: Clone,
     {
-        Matrix::new(self.rows, self.columns, self.data.to_vec())
+        let mut data = super::try_allocate_cells(self.data.len())?;
+        data.extend_from_slice(self.data);
+        Matrix::new(self.rows, self.columns, data)
     }
 }
 

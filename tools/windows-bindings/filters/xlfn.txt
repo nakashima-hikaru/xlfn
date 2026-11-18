@@ -24,6 +24,7 @@
     Windows.Win32.E_POINTER
     Windows.Win32.E_UNEXPECTED
     Windows.Win32.GetLastError
+    Windows.Win32.GetFileInformationByHandle
     Windows.Win32.HANDLE
     Windows.Win32.RPC_E_CHANGED_MODE
     Windows.Win32.S_FALSE
@@ -43,8 +44,23 @@
     Windows.Win32.CoCreateGuid
     Windows.Win32.CoCreateInstance
     Windows.Win32.CoInitializeEx
+    Windows.Win32.CoTaskMemFree
     Windows.Win32.CoUninitialize
     Windows.Win32.CoWaitForMultipleHandles
+    Windows.Win32.SHGetKnownFolderPath
+    Windows.Win32.FILE_FLAG_OPEN_REPARSE_POINT
+    Windows.Win32.FILE_ATTRIBUTE_REPARSE_POINT
+    Windows.Win32.FILE_FLAG_BACKUP_SEMANTICS
+    Windows.Win32.FILE_READ_ATTRIBUTES
+    Windows.Win32.FILE_TRAVERSE
+    Windows.Win32.FILE_SHARE_READ
+    Windows.Win32.FILE_SHARE_WRITE
+    Windows.Win32.DELETE
+    Windows.Win32.SetFileInformationByHandle
+    Windows.Win32.FILE_DISPOSITION_INFO
+    Windows.Win32.FILE_RENAME_INFO
+    Windows.Win32.FileDispositionInfo
+    Windows.Win32.FileRenameInfo
     Windows.Win32.DISPATCH_METHOD
     Windows.Win32.DISPPARAMS
     Windows.Win32.EXCEPINFO
@@ -70,6 +86,12 @@
     Windows.Win32.ITypeInfo
     Windows.Win32.SAFEARRAY
     Windows.Win32.SAFEARRAYBOUND
+    Windows.Win32.FADF_RECORD
+    Windows.Win32.FADF_HAVEIID
+    Windows.Win32.FADF_BSTR
+    Windows.Win32.FADF_UNKNOWN
+    Windows.Win32.FADF_DISPATCH
+    Windows.Win32.FADF_VARIANT
     Windows.Win32.ARRAYDESC
     Windows.Win32.PARAMDESCEX
     Windows.Win32.PARAMDESC
@@ -144,6 +166,8 @@
     Windows.Win32.GetSecurityDescriptorSacl
     Windows.Win32.GetAce
     Windows.Win32.EqualSid
+    Windows.Win32.IsValidSid
+    Windows.Win32.SID
     Windows.Win32.SYSTEM_MANDATORY_LABEL_ACE
     Windows.Win32.SYSTEM_MANDATORY_LABEL_ACE_TYPE
     Windows.Win32.TOKEN_MANDATORY_LABEL

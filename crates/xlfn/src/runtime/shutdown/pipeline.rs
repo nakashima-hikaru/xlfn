@@ -940,7 +940,7 @@ impl ResourcesReclaimed {
             },
         };
         let (module_quiescent, exports) =
-            crate::module_runtime::ModuleExportsDrained::certify(completion);
+            crate::module_runtime::ModuleExportsDrained::certify(completion)?;
         let module_epoch = module_quiescent.id();
         let _terminal_resources = (exports, module_quiescent);
         Ok(QuiescenceProof {

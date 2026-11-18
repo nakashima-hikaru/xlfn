@@ -82,14 +82,16 @@ where
         Err(error) => return Err(transaction.failure(error)),
     };
     let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
-    let (mut transaction, _runtime_config) = initialize_addin::<A>(context, transaction)?;
+    let (mut transaction, runtime_config) = initialize_addin::<A>(context, transaction)?;
     if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
         return Err(transaction.failure(XllError::Closing));
     }
     let has_async_functions = prepared_set
         .iter()
         .any(|descriptor| descriptor.execution().is_async());
-    if !prepared_set.as_slice().is_empty() {
+    if has_async_functions
+        || (!prepared_set.as_slice().is_empty() && runtime_config.calculation_end_notifications())
+    {
         let event_result = {
             let host = RegistrationHost::new(transaction.callbacks_mut());
             deps.ensure_calculation_events(&host, has_async_functions)
@@ -106,18 +108,17 @@ where
         let host = RegistrationHost::new(transaction.callbacks_mut());
         registrar.register_all(&host, &prepared_set)
     };
-    let registrations = match registration_result {
+    let mut registrations = match registration_result {
         Ok(registrations) => registrations,
         Err(error) => {
             let error = retain_transaction_error(&mut transaction, error);
             return Err(transaction.failure(error));
         }
     };
+    // Retain successful Excel mutations before installing the lifecycle
+    // state. Either operation can still lose to a nested close.
+    transaction.retain_journal(registrations.take_journal());
     if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
-        // A successful Excel mutation still belongs to this transaction when
-        // a nested close requested rollback. Preserve every ID so recovery
-        // unregisters it using the original callback session.
-        transaction.retain_journal(registrations.into_journal());
         return Err(transaction.failure(XllError::Closing));
     }
     Ok((transaction, registrations))

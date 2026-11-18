@@ -7,6 +7,34 @@ macro_rules! env {
     };
 }
 
+#[allow(unused_macros, reason = "detect accidental resolution at the call site")]
+macro_rules! stringify {
+    ($($arguments:tt)*) => {
+        compile_error!("generated registration must use core::stringify!")
+    };
+}
+
+#[allow(non_camel_case_types, dead_code)]
+type u8 = ();
+#[allow(non_camel_case_types, dead_code)]
+type i32 = ();
+#[allow(non_camel_case_types, dead_code)]
+type u32 = ();
+#[allow(non_camel_case_types, dead_code)]
+type str = ();
+
+#[derive(ExcelEnum)]
+enum Choice {
+    First,
+}
+
+#[excel_function]
+fn accepts_a_choice(choice: Choice) -> f64 {
+    match choice {
+        Choice::First => 1.0,
+    }
+}
+
 struct HygieneAddin;
 
 #[excel_addin(name = "Macro Hygiene", id = "macro-hygiene")]

@@ -20,10 +20,9 @@ impl HandlesSealed {
     fn empty(generation: Option<RuntimeGeneration>) -> Self {
         Self { generation }
     }
-    fn absent_services<A: crate::Addin>(
-        control: &crate::lifecycle::LifecycleAccess<'_, A>,
-    ) -> crate::XllResult<Self> {
-        Ok(Self::empty(control.protocol_generation()))
+
+    fn absent_services(absent: crate::lifecycle::AbsentGenerationServices) -> Self {
+        Self::empty(absent.generation())
     }
     pub(crate) fn finish(self) -> crate::XllResult<HandlesQuiescent> {
         Ok(HandlesQuiescent {
@@ -166,8 +165,11 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
     }
 
     #[cfg(feature = "handles")]
-    pub(crate) fn handle_call_access(&self) -> crate::handle::FormulaHandleServiceResolver<'_> {
-        crate::handle::FormulaHandleServiceResolver::new(&self.formula_handles)
+    pub(crate) fn handle_call_access<'call>(
+        &'call self,
+        storage: &'call crate::call::CallStorage<'_, 'call>,
+    ) -> crate::handle::FormulaHandleServiceResolver<'call> {
+        storage.handle_resolver(&self.formula_handles)
     }
 
     #[cfg(feature = "rtd")]
@@ -199,9 +201,8 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
     #[cfg(feature = "rtd")]
     pub(crate) fn close_subscriptions(
         &self,
-        generation: Option<RuntimeGeneration>,
     ) -> crate::XllResult<crate::shutdown::StopOutcome<crate::shutdown::SubscriptionsStopped>> {
-        self.rtd.subscriptions.seal(generation)
+        self.rtd.subscriptions.seal(Some(self.generation))
     }
 
     #[cfg(any(test, feature = "refinement"))]
@@ -252,19 +253,26 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
 }
 
 impl SealedGenerationServices {
-    /// Derive a no-services result from canonical state while its lock is
-    /// retained. Callers cannot select an arbitrary empty generation.
+    /// Seals the canonical service owner, or certifies the generation observed
+    /// without an owner. Slot shutdown may wait or run user code.
     pub(crate) fn seal_lifecycle<A: crate::Addin>(
         lifecycle: &crate::lifecycle::LifecycleCoordinator<A>,
         subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     ) -> crate::XllResult<Self> {
-        let control = lifecycle.access();
-        if let Some(services) = control.generation_services() {
-            return services.seal(subscriptions_stopped);
-        }
-        Ok(Self {
-            handles: crate::shutdown::HandlesSealed::absent_services(&control)?,
-            subscriptions_stopped,
+        lifecycle.with_service_snapshot(|services| {
+            let absent = match services {
+                Ok(services) => return services.seal(subscriptions_stopped),
+                Err(absent) => absent,
+            };
+            if subscriptions_stopped.generation() != absent.generation() {
+                return Err(crate::XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
+                });
+            }
+            Ok(Self {
+                handles: crate::shutdown::HandlesSealed::absent_services(absent),
+                subscriptions_stopped,
+            })
         })
     }
 

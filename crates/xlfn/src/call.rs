@@ -219,12 +219,15 @@ impl<'call> CallScope<'call> {
 }
 
 /// Invocation-owned permits and scratch, with private construction and fields.
-/// Permits are append-only and drop before scratch, including during unwinding.
+/// Binding permits are append-only. They drop before the enclosing service
+/// permit, including during unwinding.
 /// The fresh GhostCell brand is independent of the invariant call lifetime.
 #[doc(hidden)]
 pub struct CallStorage<'brand, 'call> {
     #[cfg(feature = "handles")]
     handle_permits: GhostCell<'brand, HandlePermits>,
+    #[cfg(feature = "handles")]
+    handle_service: crate::handle::ResolvedFormulaHandleService,
     #[cfg(not(feature = "handles"))]
     brand: PhantomData<&'brand mut &'brand ()>,
     scope: CallScope<'call>,
@@ -234,11 +237,24 @@ impl<'brand, 'call> CallStorage<'brand, 'call> {
         Self {
             #[cfg(feature = "handles")]
             handle_permits: GhostCell::new(HandlePermits::Empty),
+            #[cfg(feature = "handles")]
+            handle_service: std::cell::OnceCell::new(),
             #[cfg(not(feature = "handles"))]
             brand: PhantomData,
             scope: CallScope::new(),
         }
     }
+    #[cfg(feature = "handles")]
+    pub(crate) fn handle_resolver(
+        &'call self,
+        slot: &'call crate::handle::FormulaHandleServiceSlot,
+    ) -> crate::handle::FormulaHandleServiceResolver<'call> {
+        // SAFETY: private generative construction and invariant 'call require
+        // an enclosing slot owner. The scope releases its cache before the
+        // owner can move or drop, including during unwinding.
+        unsafe { crate::handle::FormulaHandleServiceResolver::new(slot, &self.handle_service) }
+    }
+
     pub(crate) fn scope(&'call self) -> &'call CallScope<'call> {
         &self.scope
     }
@@ -389,8 +405,9 @@ mod scratch_tests {
     #[test]
     fn ghostcell_storage_preserves_layout_budget() {
         use std::mem::size_of;
-        // One additional word tracks the aggregate input scratch budget.
-        assert_eq!(size_of::<super::CallStorage<'_, '_>>(), 104);
+        // The scope includes the service read and cached error. The decode
+        // context now borrows that storage instead of carrying a second owner.
+        assert_eq!(size_of::<super::CallStorage<'_, '_>>(), 168);
         assert_eq!(size_of::<ghost_cell::GhostToken<'_>>(), 0);
         assert_eq!(size_of::<super::HandleDomainWitness<'_>>(), 16);
         assert!(size_of::<crate::value::DecodeCallContext<'_, '_>>() <= 80);

@@ -84,9 +84,9 @@ pub(crate) fn package(args: &PackageArgs) -> Result {
         report_distribution_cleanup(distribution.commit(&args.out)?);
         println!("created {}", args.out.display());
     } else {
-        validate_output_destination(&args.out)?;
+        xlfn_package::validate_directory_path(&args.out)?;
         fs::create_dir_all(&args.out)?;
-        validate_output_destination(&args.out)?;
+        xlfn_package::validate_directory_path(&args.out)?;
         let target = targets[0];
         let destination = args.out.join(target.directory());
         validate_output_destination(&destination)?;

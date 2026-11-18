@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_task::Runnable;
 use crossbeam_deque::{Injector, Stealer, Worker};
@@ -55,6 +55,7 @@ pub(crate) struct RunnableQueue {
     pub(crate) injector: Injector<Runnable>,
     stealers: Box<[Stealer<Runnable>]>,
     schedule_admission: DrainGate,
+    admission_drained: AtomicBool,
     pub(crate) idle_pollers: AtomicU64,
     unparkers: Box<[Unparker]>,
 }
@@ -65,6 +66,7 @@ impl RunnableQueue {
             injector: Injector::new(),
             stealers,
             schedule_admission: DrainGate::new_open(),
+            admission_drained: AtomicBool::new(false),
             idle_pollers: AtomicU64::new(0),
             unparkers,
         }
@@ -100,11 +102,16 @@ impl RunnableQueue {
 
     pub(crate) fn seal_and_wake_all(&self) {
         drop(self.schedule_admission.control().seal().wait());
+        self.admission_drained.store(true, Ordering::Release);
         self.wake_all();
     }
 
     pub(crate) fn is_sealed(&self) -> bool {
         self.schedule_admission.is_sealed()
+    }
+
+    pub(super) fn admission_drained(&self) -> bool {
+        self.admission_drained.load(Ordering::Acquire)
     }
 
     pub(crate) fn steal_injector_batch_and_pop(
@@ -176,9 +183,57 @@ impl RunnableQueue {
 
 #[cfg(all(test, not(all(target_os = "windows", target_arch = "x86"))))]
 mod tests {
-    use super::{IdlePollerMask, claim_idle_poller};
+    use super::{IdlePollerMask, RunnableQueue, claim_idle_poller};
     use loom::sync::Arc;
     use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    #[test]
+    fn miri_queue_admission_drains_before_pollers_can_exit() {
+        let queue = RunnableQueue::new(Box::new([]), Box::new([]));
+        let scheduling = queue.schedule_admission.try_enter().unwrap();
+        std::thread::scope(|scope| {
+            let closer = scope.spawn(|| queue.seal_and_wake_all());
+            while !queue.is_sealed() {
+                std::thread::yield_now();
+            }
+            assert!(!queue.admission_drained());
+            drop(scheduling);
+            closer.join().unwrap();
+        });
+        assert!(queue.admission_drained());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn loom_poller_exit_observes_work_committed_by_an_admitted_scheduler() {
+        loom::model(|| {
+            use loom::sync::Mutex;
+
+            let queue = Arc::new((
+                Mutex::new(()),
+                AtomicBool::new(false),
+                AtomicBool::new(false),
+            ));
+            // Model one in-flight scheduler. The stop attempt cannot publish
+            // drain completion until this scheduler has published and released.
+            let admitted = queue.0.lock().unwrap();
+            let closing_queue = Arc::clone(&queue);
+            let closing = loom::thread::spawn(move || {
+                drop(closing_queue.0.lock().unwrap());
+                closing_queue.2.store(true, Ordering::Release);
+            });
+            let observing_queue = Arc::clone(&queue);
+            let poller = loom::thread::spawn(move || {
+                let admission_drained = observing_queue.2.load(Ordering::Acquire);
+                let found_work = observing_queue.1.load(Ordering::Relaxed);
+                assert!(!admission_drained || found_work);
+            });
+            queue.1.store(true, Ordering::Relaxed);
+            drop(admitted);
+            closing.join().unwrap();
+            poller.join().unwrap();
+        });
+    }
 
     impl IdlePollerMask for AtomicU64 {
         fn publish_work(&self) -> u64 {

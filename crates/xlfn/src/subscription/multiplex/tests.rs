@@ -1033,3 +1033,41 @@ fn spawn_failure_preserves_capture_until_disposal_outside_source_mutexes() {
     source.shutdown_and_wait().unwrap();
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn miri_multiplex_spawn_failure_retries_the_same_job_without_a_stale_event() {
+    let (event_tx, event_rx) = mpsc::channel();
+    let source = RtdMultiplexedSource::new(RtdLatest, move |context| {
+        let Some(RtdSourceEvent::Subscribe { topic, sender, .. }) =
+            context.recv_timeout(DEADLINE)?
+        else {
+            panic!("the retried source received no subscription");
+        };
+        sender.try_send(7)?;
+        assert!(context.recv_timeout(Duration::ZERO)?.is_none());
+        event_tx.send(topic).unwrap();
+        let _ = context.recv_timeout(DEADLINE);
+        Ok(())
+    })
+    .with_limits(
+        RtdSourceLimits::standard().with_max_subscriptions(RtdCapacity::disabled_if_zero(1)),
+    );
+    let (_runtime, _server, sink) =
+        crate::subscription::tests::connected_sink::<i32>(None, "multiplex-retry");
+    source.fail_spawn.store(true, Ordering::Relaxed);
+    let first = source.subscribe(&RtdTopic::single("abandoned").unwrap(), sink.clone());
+    assert!(matches!(first, Err(XllError::Native { .. })));
+    assert!(!source.worker.shared.closed.load(Ordering::Acquire));
+    {
+        let state = source.worker.shared.state.lock();
+        assert!(state.events.is_empty());
+        assert!(state.active.is_empty());
+        assert_eq!(state.removals, 0);
+    }
+    let retry = RtdTopic::single("retry").unwrap();
+    let subscription = source.subscribe(&retry, sink).unwrap();
+    assert_eq!(event_rx.recv_timeout(DEADLINE).unwrap(), retry);
+    source.request_stop();
+    subscription.disconnect_and_wait().unwrap();
+    source.shutdown_and_wait().unwrap();
+}

@@ -564,7 +564,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         let server = server_handle.server()?;
         // SAFETY: the COM caller owns runtime admission while transferring
         // this operation to the generation-owned queue. Close drains that
-        // queue's admissions and joins the worker before reclaiming servers.
+        // queue's admissions and joins its workers before reclaiming servers.
         let operation = unsafe { server.enter_owned_operation() }?;
         let mut subscriptions = server.subscriptions.lock();
         let std::collections::hash_map::Entry::Occupied(subscription) =

@@ -475,6 +475,43 @@ fn stale_empty_transaction_without_journal_is_removed() {
 }
 
 #[test]
+fn private_prepared_journal_does_not_depend_on_the_old_destination() {
+    let (directory, destination, _staging) = distribution_fixture();
+    let transaction = directory
+        .path()
+        .join(".win-x64.transaction-private-prepared");
+    let transaction_directory = PrivateStagingDirectory::create(&transaction).unwrap();
+    write_stale_journal(
+        directory.path(),
+        &transaction,
+        "win-x64",
+        Some(directory_identity(&destination).unwrap()),
+        TransactionState::Prepared,
+        None,
+        None,
+    );
+    drop(transaction_directory);
+    fs::rename(&destination, directory.path().join("renamed")).unwrap();
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("replacement.xll"), b"replacement").unwrap();
+
+    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+    recover_stale_transactions(
+        directory.path(),
+        "win-x64",
+        &guard,
+        &SystemDistributionFileOps,
+    )
+    .unwrap();
+
+    assert!(!transaction.exists());
+    assert_eq!(
+        fs::read(destination.join("replacement.xll")).unwrap(),
+        b"replacement"
+    );
+}
+
+#[test]
 fn stale_journal_next_is_promoted_before_recovery() {
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("win-x64");
@@ -772,17 +809,25 @@ fn first_install_sync_failure_reports_interruption_without_previous_package() {
 
 #[test]
 fn failed_backup_rename_leaves_destination_and_plain_error() {
-    let (_directory, destination, staging) = distribution_fixture();
+    let (directory, destination, staging) = distribution_fixture();
     let prepared = prepared_test_directory(&staging);
     let error = crate::PreparedDistribution::new(prepared)
         .commit_with(&destination, &InjectedFileOps::failing_renames([1]))
         .unwrap_err();
     assert!(matches!(error, DistributionError::Io(_)));
     assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+    assert!(transaction_directories(directory.path()).is_empty());
+
+    fs::rename(&destination, directory.path().join("renamed")).unwrap();
+    fs::create_dir(&destination).unwrap();
+    crate::PreparedDistribution::new(prepared_test_directory(&staging))
+        .commit(&destination)
+        .unwrap();
+    assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
 }
 
 #[test]
-fn initial_journal_sync_failure_leaves_only_a_recoverable_private_transaction() {
+fn initial_journal_sync_failure_cleans_the_private_transaction() {
     let (directory, destination, staging) = distribution_fixture();
     let file_ops = InjectedFileOps::failing_syncs([1]);
     let prepared = prepared_test_directory(&staging);
@@ -793,19 +838,23 @@ fn initial_journal_sync_failure_leaves_only_a_recoverable_private_transaction() 
             .to_string()
             .contains("injected directory sync failure #1")
     );
-    assert_eq!(transaction_directories(directory.path()).len(), 1);
-    assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
-
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
-
     assert!(transaction_directories(directory.path()).is_empty());
+    assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+}
+
+#[test]
+fn commit_accepts_unicode_host_directories() {
+    let directory = tempfile::tempdir().unwrap();
+    let host = directory.path().join("開発");
+    fs::create_dir(&host).unwrap();
+    let staging = host.join("staging");
+    fs::create_dir(&staging).unwrap();
+    fs::write(staging.join("new.xll"), b"new").unwrap();
+    let destination = host.join("win-x64");
+    crate::PreparedDistribution::new(prepared_test_directory(&staging))
+        .commit(&destination)
+        .unwrap();
+    assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
 }
 
 #[test]

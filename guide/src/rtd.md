@@ -32,6 +32,8 @@ a sampled update when the shared buffering budget is exhausted.
 The optional topic validator runs synchronously during subscription setup.
 Use it for inexpensive validation, with network initialization in the worker.
 A validation failure rejects that subscription without stopping the source.
+If thread creation fails before the producer runs, the next subscription can
+retry startup with the same producer.
 
 The source worker stays available when its last topic disconnects and is
 joined at runtime shutdown. A completed source is terminal: a successful
@@ -62,11 +64,12 @@ bound preserves existing reservations and rejects new subscriptions until
 enough workers are joined. The runtime's worker limit additionally applies
 across all blocking and multiplexed sources.
 
-Both adapters share one publisher and one cleanup worker per runtime
-generation, plus one notification worker per started Excel RTD server on
-Windows. The publisher processes at most 32 values per topic turn before
-yielding to another ready topic. A stalled publication can delay other topics
-on that worker.
+Both adapters share one publisher and up to two cleanup workers per runtime
+generation. Independent disconnects can finish concurrently when two workers
+are available. Windows also uses one notification worker per started Excel RTD
+server. The publisher processes at most 32 values per topic turn before yielding
+to another ready topic. A stalled publication can delay other topics on that
+worker.
 
 ## Register and subscribe
 

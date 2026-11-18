@@ -12,10 +12,11 @@ use crate::subscription::{RtdUpdate, StoredRtdValue};
 use crate::win32::{
     DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_PARAMNOTFOUND, DISP_E_TYPEMISMATCH,
     DISP_E_UNKNOWNINTERFACE, DISP_E_UNKNOWNNAME, DISPID_UNKNOWN, DISPPARAMS, E_FAIL, E_INVALIDARG,
-    E_OUTOFMEMORY, E_POINTER, EXCEPINFO, GUID, S_OK, SAFEARRAY, SAFEARRAYBOUND,
-    SafeArrayAccessData, SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
-    SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayGetVartype, SafeArrayUnaccessData,
-    SysAllocStringLen, SysFreeString, SysStringLen, VARIANT, VARIANT_BOOL, VariantClear,
+    E_OUTOFMEMORY, E_POINTER, EXCEPINFO, FADF_BSTR, FADF_DISPATCH, FADF_HAVEIID, FADF_RECORD,
+    FADF_UNKNOWN, FADF_VARIANT, GUID, S_OK, SAFEARRAY, SAFEARRAYBOUND, SafeArrayAccessData,
+    SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound,
+    SafeArrayGetUBound, SafeArrayGetVartype, SafeArrayUnaccessData, SysAllocStringLen,
+    SysFreeString, SysStringLen, VARIANT, VARIANT_BOOL, VariantClear,
 };
 use crate::{XllError, XllResult};
 use std::ptr::{self, NonNull};
@@ -720,7 +721,9 @@ pub(super) unsafe fn write_value_variant(result: *mut VARIANT, value: &StoredRtd
         }
         StoredRtdValue::Error(value) => {
             variant.Anonymous.Anonymous.vt = VT_ERROR;
-            variant.Anonymous.Anonymous.Anonymous.scode = 2000 + value.code();
+            // Excel Automation expects a failure SCODE in the control facility.
+            variant.Anonymous.Anonymous.Anonymous.scode =
+                (0x800A_0000_u32 | (2000 + value.code()) as u32) as i32;
         }
         StoredRtdValue::Empty => {
             variant.Anonymous.Anonymous.vt = VT_EMPTY;
@@ -883,6 +886,17 @@ pub(super) fn checked_topic_part_length(length: usize) -> XllResult<()> {
     }
 }
 
+pub(super) fn topic_element_type(features: u16, element_size: u32) -> XllResult<u16> {
+    const ELEMENT_FLAGS: i32 =
+        FADF_BSTR | FADF_DISPATCH | FADF_HAVEIID | FADF_RECORD | FADF_UNKNOWN | FADF_VARIANT;
+    let bytes = element_size as usize;
+    match i32::from(features) & ELEMENT_FLAGS {
+        FADF_BSTR if bytes == size_of::<*mut u16>() => Ok(VT_BSTR),
+        FADF_VARIANT if bytes == size_of::<VARIANT>() => Ok(VT_VARIANT),
+        _ => Err(XllError::InvalidHandle),
+    }
+}
+
 pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> XllResult<String> {
     let Some(strings) = NonNull::new(strings) else {
         return Err(XllError::InvalidHandle);
@@ -905,6 +919,14 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
         return Err(XllError::InvalidHandle);
     }
 
+    // SAFETY: COM retains the live array descriptor for this call. Its
+    // one-dimensional layout contains all the fields inspected here.
+    let descriptor = unsafe { array.as_ptr().read() };
+    let element_type = topic_element_type(descriptor.fFeatures, descriptor.cbElements)?;
+    if descriptor.pvData.is_null() {
+        return Err(XllError::InvalidHandle);
+    }
+
     let mut lower = 0;
     let mut upper = 0;
 
@@ -920,7 +942,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
         return Err(XllError::InvalidHandle);
     }
     let count = checked_topic_part_count(lower, upper)?;
-    if count != REQUIRED_RTD_TOPIC_PARTS {
+    if count != REQUIRED_RTD_TOPIC_PARTS || descriptor.rgsabound[0].cElements as usize != count {
         return Err(XllError::InvalidHandle);
     }
 
@@ -930,7 +952,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
     // storage for its element VARTYPE.
     let vt_status = unsafe { SafeArrayGetVartype(array_ptr, &mut vt) };
 
-    if vt_status < 0 {
+    if vt_status < 0 || vt != element_type {
         return Err(XllError::InvalidHandle);
     }
 
@@ -966,7 +988,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
             String::from_utf16(units)
                 .map_err(|_| XllError::validation("RTD topic", InputError::InvalidUtf16))
         }
-        VT_VARIANT | VT_EMPTY => {
+        VT_VARIANT => {
             let mut value = VARIANT::default();
 
             // SAFETY: `index` is within the validated SAFEARRAY bounds and

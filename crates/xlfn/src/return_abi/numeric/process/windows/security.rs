@@ -4,7 +4,7 @@ use super::{invalid_state, os_error};
 use crate::XllResult;
 use crate::win32::*;
 use core::ffi::c_void;
-use std::mem::MaybeUninit;
+use std::mem::{MaybeUninit, offset_of};
 use std::ptr::NonNull;
 
 const OWNER_AND_DACL: u32 = (OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION) as u32;
@@ -20,6 +20,11 @@ impl Drop for LocalAllocation {
 }
 
 pub(super) struct Descriptor(LocalAllocation);
+
+struct MandatoryLabel<'descriptor> {
+    ace: &'descriptor SYSTEM_MANDATORY_LABEL_ACE,
+    sid: PSID,
+}
 
 impl Descriptor {
     pub(super) fn private() -> XllResult<Self> {
@@ -97,17 +102,11 @@ impl Descriptor {
         let expected = self
             .mandatory_label()
             .ok_or_else(|| invalid_state("expected accounting mapping label is invalid"))?;
-        // SAFETY: both SID pointers are into live mandatory label ACEs
-        // returned by Windows. EqualSid does not mutate them.
-        let same_sid = unsafe {
-            EqualSid(
-                (&raw const actual.SidStart).cast_mut().cast(),
-                (&raw const expected.SidStart).cast_mut().cast(),
-            )
-        } != 0;
+        // SAFETY: both SIDs were validated within their live descriptors.
+        let same_sid = unsafe { EqualSid(actual.sid, expected.sid) } != 0;
         if !same_sid
-            || actual.Mask != expected.Mask
-            || actual.Header.AceFlags != expected.Header.AceFlags
+            || actual.ace.Mask != expected.ace.Mask
+            || actual.ace.Header.AceFlags != expected.ace.Header.AceFlags
         {
             return Err(invalid_state(
                 "accounting mapping integrity label does not match",
@@ -116,7 +115,7 @@ impl Descriptor {
         Ok(())
     }
 
-    fn mandatory_label(&self) -> Option<&SYSTEM_MANDATORY_LABEL_ACE> {
+    fn mandatory_label(&self) -> Option<MandatoryLabel<'_>> {
         let mut present = 0;
         let mut defaulted = 0;
         let mut acl = MaybeUninit::<PACL>::uninit();
@@ -131,7 +130,9 @@ impl Descriptor {
         // SAFETY: Success with a present SACL initializes the pointer output.
         let acl = NonNull::new(unsafe { acl.assume_init() })?;
         // SAFETY: A non-null SACL returned by Windows contains its ACL header.
-        if unsafe { acl.as_ref() }.AceCount != 1 {
+        let acl_header = unsafe { acl.as_ref() };
+        let acl_size = usize::from(acl_header.AclSize);
+        if acl_header.AceCount != 1 || acl_size < size_of::<ACL>() + size_of::<ACE_HEADER>() {
             return None;
         }
         let mut ace = MaybeUninit::<*mut c_void>::uninit();
@@ -141,16 +142,43 @@ impl Descriptor {
         }
         // SAFETY: GetAce initialized the pointer output on success.
         let ace = NonNull::new(unsafe { ace.assume_init() })?;
-        // SAFETY: The live entry starts with an ACE header.
+        let ace_offset = ace.as_ptr().addr().checked_sub(acl.as_ptr().addr())?;
+        let available = acl_size.checked_sub(ace_offset)?;
+        if ace_offset < size_of::<ACL>() || available < size_of::<ACE_HEADER>() {
+            return None;
+        }
+        // SAFETY: the ACL contains the ACE header returned by GetAce.
         let header = unsafe { ace.cast::<ACE_HEADER>().as_ref() };
+        let ace_size = usize::from(header.AceSize);
+        const SID_OFFSET: usize = offset_of!(SYSTEM_MANDATORY_LABEL_ACE, SidStart);
+        const SID_HEADER_SIZE: usize = offset_of!(SID, SubAuthority);
         if i32::from(header.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE
-            || usize::from(header.AceSize) < size_of::<SYSTEM_MANDATORY_LABEL_ACE>()
+            || ace_size > available
+            || ace_size < SID_OFFSET + SID_HEADER_SIZE
         {
             return None;
         }
-        // SAFETY: The entry type and size cover the fixed fields. Its storage
-        // is owned by the security descriptor for the lifetime of self.
-        Some(unsafe { ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>().as_ref() })
+        // SAFETY: the validated ACE extent covers the fixed SID header.
+        let sid = unsafe { ace.as_ptr().cast::<u8>().add(SID_OFFSET) };
+        // SAFETY: the count byte is in the fixed header. Check it before
+        // accessing the variable-length tail.
+        let count = unsafe { sid.wrapping_add(offset_of!(SID, SubAuthorityCount)).read() };
+        let sid_size =
+            SID_HEADER_SIZE.checked_add(usize::from(count).checked_mul(size_of::<u32>())?)?;
+        if sid_size > ace_size - SID_OFFSET {
+            return None;
+        }
+        // SAFETY: the full SID extent is inside the ACE.
+        if unsafe { IsValidSid(sid.cast()) } == 0 {
+            return None;
+        }
+        // SAFETY: the validated ACE covers all fixed ACE fields. The
+        // descriptor owns the memory through the returned borrow.
+        let ace = unsafe { ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>().as_ref() };
+        Some(MandatoryLabel {
+            ace,
+            sid: sid.cast(),
+        })
     }
 }
 

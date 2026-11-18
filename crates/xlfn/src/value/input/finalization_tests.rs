@@ -182,63 +182,65 @@ fn miri_finalized_arguments_keep_prepared_capture_cleanup_with_its_owner() {
 
 #[test]
 #[cfg(feature = "handles")]
-fn miri_finalized_formula_inputs_transfer_the_existing_service_permit() {
-    finalized_inputs_transfer_service_permit::<FormulaInputMode>();
+fn miri_finalized_formula_inputs_keep_service_permit_for_the_scope() {
+    finalized_inputs_keep_service_permit::<FormulaInputMode>();
 }
 
 #[test]
 #[cfg(feature = "handles")]
-fn miri_finalized_plain_inputs_transfer_the_existing_service_permit() {
-    finalized_inputs_transfer_service_permit::<PlainInputMode>();
+fn miri_finalized_plain_inputs_keep_service_permit_for_the_scope() {
+    finalized_inputs_keep_service_permit::<PlainInputMode>();
 }
 
 #[cfg(feature = "handles")]
-fn finalized_inputs_transfer_service_permit<M: InputMode>() {
+fn finalized_inputs_keep_service_permit<M: InputMode>() {
     let slot = crate::handle::FormulaHandleServiceSlot::new();
     slot.arm(crate::HandleConfig::default()).unwrap();
     slot.initialize().unwrap();
     let callbacks = crate::host_callback::HostCallbackSession::new();
-    crate::call::with_branded_call_scope_and_state(
-        &(slot, callbacks),
-        |(slot, callbacks), storage, brand| {
-            let resolver = crate::handle::FormulaHandleServiceResolver::new(slot);
-            resolver.get().unwrap(); // acquire the single service permit before finish
-            let mut arguments =
-                ArgumentContext::<M>::from_handle_access(storage, brand, resolver, 1);
-            arguments.native_f64(0, "value", 5.0).unwrap();
-            let finished = arguments.finish_typed().unwrap();
-            std::thread::scope(|threads| {
-                let (started_tx, started_rx) = std::sync::mpsc::channel();
-                let (done_tx, done_rx) = std::sync::mpsc::channel();
-                threads.spawn(move || {
-                    started_tx.send(()).unwrap();
-                    slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
-                        .unwrap()
-                        .finish()
-                        .unwrap();
-                    done_tx.send(()).unwrap();
-                });
-                started_rx.recv().unwrap();
-                // Wait until sealing has withdrawn publication, so completion is
-                // blocked on the retained permit rather than thread scheduling.
+    let state = (slot, callbacks);
+    let slot = &state.0;
+    std::thread::scope(|threads| {
+        let (begin_tx, begin_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        threads.spawn(move || {
+            begin_rx.recv().unwrap();
+            slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
+                .unwrap()
+                .finish()
+                .unwrap();
+            done_tx.send(()).unwrap();
+        });
+        crate::call::with_branded_call_scope_and_state(
+            &state,
+            |(slot, callbacks), storage, brand| {
+                let resolver = storage.handle_resolver(slot);
+                let service = resolver.get().unwrap();
+                let mut arguments =
+                    ArgumentContext::<M>::from_handle_access(storage, brand, resolver, 1);
+                arguments.native_f64(0, "value", 5.0).unwrap();
+                let finished = arguments.finish_typed().unwrap();
+                begin_tx.send(()).unwrap();
+                // Publication has been withdrawn. The invocation's live service
+                // borrow must still stop the slot from reclaiming its payload.
                 while slot.read_if_ready().is_some() {
                     std::thread::yield_now();
                 }
-                assert!(done_rx.try_recv().is_err());
                 let returns = finished
                     .return_context::<(), crate::DynamicRtdSources<()>>(
                         crate::call_return::ReturnFrameAccess {
-                            udf_id: "permit-transfer",
+                            udf_id: "permit-retention",
                             callbacks,
                         },
                     )
                     .unwrap();
-                assert!(done_rx.try_recv().is_err());
                 drop(returns);
-                done_rx.recv().unwrap();
-            });
-        },
-    );
+                assert!(done_rx.try_recv().is_err());
+                std::hint::black_box(service);
+            },
+        );
+        done_rx.recv().unwrap();
+    });
 }
 
 #[test]
@@ -301,7 +303,7 @@ fn miri_failed_finalization_keeps_decoded_handles_safe_through_scope_exit() {
                 let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
                     storage,
                     brand,
-                    crate::handle::FormulaHandleServiceResolver::new(slot),
+                    storage.handle_resolver(slot),
                     2,
                 );
                 let handle = arguments

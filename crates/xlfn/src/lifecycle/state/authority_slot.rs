@@ -255,6 +255,7 @@ mod tests {
             // readers. Complete the unrelated module barrier first, so losing
             // its drained authority cannot leave a live ingress epoch behind.
             let drained = crate::module_runtime::begin_open()
+                .unwrap()
                 .rollback(|| {})
                 .seal_and_drain()
                 .unwrap_or_else(|_| panic!("fixture module drain failed"));

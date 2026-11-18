@@ -123,7 +123,10 @@ impl<'call> RegistrationHost<'call> {
         )
     }
 
-    pub(crate) fn is_registered_name(&self, excel_name: &'static str) -> XllResult<bool> {
+    /// Probes the hidden DLL name namespace that xlfRegister writes. A name
+    /// can already be defined there with any worksheet value, independent of
+    /// the narrower numeric registration-ID contract used during recovery.
+    pub(super) fn is_name_bound(&self, excel_name: &'static str) -> XllResult<bool> {
         let mut name = TemporaryString::new(excel_name)?;
         let arguments = [name.pointer()];
         self.excel.invoke(
@@ -131,15 +134,8 @@ impl<'call> RegistrationHost<'call> {
             ExcelApiFunction::Evaluate,
             &arguments,
             |result| match result.value_type()? {
-                XlValueType::Error => {
-                    let code = error_code(result)?;
-                    Ok(code != XLERR_NAME)
-                }
-                XlValueType::Number => Ok(result
-                    .borrow()
-                    .and_then(|value| f64::from_excel(value, "is_registered_name"))
-                    .is_ok_and(valid_registration_id)),
-                _ => Ok(false),
+                XlValueType::Error => Ok(error_code(result)? != XLERR_NAME),
+                _ => Ok(true),
             },
         )
     }
@@ -1005,7 +1001,7 @@ pub(crate) mod test_support {
                 script.registration_pointers = arguments.to_vec();
             }
             // SAFETY: the callback supplies writable result storage for this
-            // invocation. Test replies contain only immediate scalar values.
+            // invocation. The test retains any payload referenced in a reply.
             unsafe { *result = reply.value };
             reply.status
         })
@@ -1016,6 +1012,26 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::error::ExcelApiFailure;
+
+    #[test]
+    fn registration_name_probe_preserves_excel_namespace_and_utf16_spelling() {
+        use super::test_support::{
+            CallbackScript, RegisterArgument, Reply, read_registration_arguments,
+        };
+
+        const NAME: &str = "計算.Échéance";
+        let script =
+            CallbackScript::install([Reply::success(XLF_EVALUATE, XLOPER12::error(XLERR_NAME))]);
+        script.on_arguments(XLF_EVALUATE, |arguments| {
+            // SAFETY: the probe retains the counted name through the callback.
+            let values = unsafe { read_registration_arguments(arguments) };
+            assert_eq!(values, [RegisterArgument::Text(NAME.to_owned())]);
+        });
+        let callbacks = HostCallbackSession::new();
+        let host = RegistrationHost::new(&callbacks);
+        assert!(!host.is_name_bound(NAME).unwrap());
+        script.assert_calls(&[XLF_EVALUATE]);
+    }
 
     #[test]
     fn registration_arguments_keep_utf16_owners_live_when_pointer_storage_spills() {

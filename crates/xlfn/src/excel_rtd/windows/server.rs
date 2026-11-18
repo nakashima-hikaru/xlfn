@@ -25,6 +25,7 @@ use super::{com_boundary, guid_eq};
 use crate::error::InputError;
 use crate::excel_rtd::counted_string::CountedString;
 use crate::formula_lifetime::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
+use crate::panic_boundary::catch_no_unwind;
 use crate::subscription::ServerGeneration;
 #[cfg(any(test, feature = "rtd"))]
 use crate::subscription::{RuntimeShutdownOutcome, SubscriptionRuntime};
@@ -40,6 +41,7 @@ use std::any::TypeId;
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
+use std::panic::AssertUnwindSafe;
 use std::ptr::{self, NonNull};
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
@@ -1834,13 +1836,25 @@ impl<'server, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 retain_handle_topics && backends.handles.is_some(),
             )
         };
-        let status = match subscription_server.as_ref() {
-            Some(subscription_server) => match subscription_server.terminate() {
-                Ok(()) => S_OK,
-                Err(_) => E_FAIL,
-            },
-            None => S_OK,
+        let terminated = match catch_no_unwind(AssertUnwindSafe(|| {
+            subscription_server
+                .as_ref()
+                .map_or(Ok(()), BackendSubscriptionServer::terminate)
+        })) {
+            Ok(outcome) => outcome,
+            Err(_) => Err(XllError::Panic),
         };
+        if let Err(error) = terminated {
+            // The backend may still own a notifier tied to this server.
+            // Keep the attachment identity and active reference available
+            // for generation shutdown to find and quarantine.
+            crate::diagnostics::report_no_unwind("IRtdServer::subscription termination", &error);
+            return DisposedServerResources {
+                _exclusive: exclusive,
+                keep_active: true,
+                status: E_FAIL,
+            };
+        }
         if let Some(handles) = handles {
             // SAFETY: attached backends stay published through their last use;
             // generation shutdown waits for this exclusive disposal to finish.
@@ -1857,7 +1871,7 @@ impl<'server, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         DisposedServerResources {
             _exclusive: exclusive,
             keep_active,
-            status,
+            status: S_OK,
         }
     }
 }

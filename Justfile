@@ -89,6 +89,7 @@ miri:
     just miri-async
     just miri-async-handles
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
     just miri-cache-ownership
     just miri-cache-endpoints
     just miri-cache-resident-entry

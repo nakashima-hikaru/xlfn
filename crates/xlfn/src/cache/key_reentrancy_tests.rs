@@ -211,3 +211,54 @@ fn nested_key_callbacks_defer_destructors_until_outer_lookup_leaves() {
         }
     }
 }
+
+#[test]
+fn miri_never_published_value_drop_waits_for_outer_key_callback() {
+    struct Probe(StdArc<AtomicUsize>);
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[derive(Clone)]
+    struct NestedKey {
+        cache: StdArc<CalculationCache<u32, Probe>>,
+        drops: StdArc<AtomicUsize>,
+    }
+
+    impl PartialEq for NestedKey {
+        fn eq(&self, other: &Self) -> bool {
+            StdArc::ptr_eq(&self.cache, &other.cache)
+        }
+    }
+    impl Eq for NestedKey {}
+
+    impl Hash for NestedKey {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            let lease = self
+                .cache
+                .get_or_try_insert_weighted(0, |_| 1, || Ok(Probe(StdArc::clone(&self.drops))))
+                .unwrap();
+            drop(lease);
+            assert_eq!(self.drops.load(Ordering::Relaxed), 0);
+            0_u32.hash(state);
+        }
+    }
+
+    let drops = StdArc::new(AtomicUsize::new(0));
+    let cache = StdArc::new(CalculationCache::new(
+        crate::cache::CacheBudget::weight_units(0),
+    ));
+    let outer = CalculationCache::<NestedKey, ()>::new(crate::cache::CacheBudget::weight_units(1));
+    assert!(
+        outer
+            .get(&NestedKey {
+                cache,
+                drops: StdArc::clone(&drops)
+            })
+            .is_none()
+    );
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}

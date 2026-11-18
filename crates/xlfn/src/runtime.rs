@@ -726,30 +726,9 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
 
     #[cfg(test)]
     pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
-        #[cfg(not(feature = "rtd"))]
-        {
-            Ok(crate::excel_rtd_protocol::stopped_subscriptions(
-                self.protocol_generation(),
-            ))
-        }
-        #[cfg(feature = "rtd")]
-        {
-            let generation = self.protocol_generation();
-            let Some(result) = self
-                .lifecycle
-                .with_generation_services(|services| services.close_subscriptions(generation))
-            else {
-                #[cfg(test)]
-                {
-                    return Ok(crate::excel_rtd_protocol::stopped_subscriptions(generation));
-                }
-                #[cfg(not(test))]
-                {
-                    return Err(XllError::Closing);
-                }
-            };
-            result.map(|outcome| outcome.certificate)
-        }
+        self.shutdown_deps()
+            .close_subscriptions()
+            .map(|outcome| outcome.certificate)
     }
 
     #[cfg(all(test, feature = "async"))]
@@ -918,8 +897,11 @@ impl<A: crate::Addin> CallGuard<'_, A> {
 
     #[cfg(feature = "handles")]
     #[must_use]
-    pub(crate) fn handle_call_access(&self) -> crate::handle::FormulaHandleServiceResolver<'_> {
-        self.admission.services().handle_call_access()
+    pub(crate) fn handle_call_access<'call>(
+        &'call self,
+        storage: &'call crate::call::CallStorage<'_, 'call>,
+    ) -> crate::handle::FormulaHandleServiceResolver<'call> {
+        self.admission.services().handle_call_access(storage)
     }
 
     #[cfg(feature = "rtd")]

@@ -13,7 +13,6 @@ use crate::{XllError, XllResult};
 #[cfg(test)]
 use std::cell::Cell;
 use std::panic::AssertUnwindSafe;
-use std::ptr::NonNull;
 use xlfn_kernel::published_owner::PublishedOwner;
 
 #[cfg(test)]
@@ -29,8 +28,6 @@ pub(crate) mod metadata;
 pub(crate) mod numeric;
 pub(crate) mod ownership;
 pub(crate) mod scalar;
-mod slot;
-use slot::{RETURN_BLOCK_SLOT, ReturnBlockSlot};
 pub(crate) mod storage;
 
 pub(crate) use conversion::{CallbackCleanupDebt, ExcelCallbackStatus};
@@ -53,12 +50,6 @@ const MAX_RETURN_BYTES: usize = core::cfg_select! {
     _ => 256 * 1024 * 1024,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReturnBlockBacking {
-    ThreadLocal,
-    Heap,
-}
-
 /// String ownership is selected once when a completed scalar or array is
 /// published. Array builders retain their untagged arena on the per-cell path.
 #[derive(Debug)]
@@ -76,12 +67,9 @@ struct ReturnBlock {
     array: Option<PublishedOwner<[XLOPER12]>>,
     obligation: Option<ReturnObligation<'static>>,
     magic: u64,
-    backing: ReturnBlockBacking,
 }
 
-// The slot contains only non-owning storage. Its TLS value must never run a
-// destructor while a cdylib is being unloaded.
-const _: () = assert!(!std::mem::needs_drop::<ReturnBlockSlot>());
+const _: () = assert!(std::mem::offset_of!(ReturnBlock, oper) == 0);
 
 #[derive(Debug)]
 #[doc(hidden)]
@@ -164,10 +152,13 @@ impl PreparedReturn {
             // the primitive private until those callbacks have completed.
             return ValuePublication::Scalar(self.oper);
         }
-        ValuePublication::Owned(self.publish_owned_excel(producer))
+        match self.publish_owned_excel(producer) {
+            Ok(pointer) => ValuePublication::Owned(pointer),
+            Err(error) => ValuePublication::Scalar(Self::error(&error).oper),
+        }
     }
 
-    fn publish_owned_excel(self, producer: ReturnPublicationTxn) -> *mut XLOPER12 {
+    fn publish_owned_excel(self, producer: ReturnPublicationTxn) -> XllResult<*mut XLOPER12> {
         producer.prepare(self).commit()
     }
 }
@@ -198,7 +189,6 @@ impl PreparedPublication {
             array: prepared.array,
             obligation: Some(obligation),
             magic: RETURN_MAGIC,
-            backing: ReturnBlockBacking::Heap,
         };
 
         #[cfg(test)]
@@ -207,21 +197,14 @@ impl PreparedPublication {
         block
     }
 
-    fn commit(self) -> *mut XLOPER12 {
-        let block = self.into_block();
-        RETURN_BLOCK_SLOT.with(|slot| {
-            if let Some(reserved) = slot.try_reserve() {
-                reserved.initialize(block).publish().into_pointer()
-            } else {
-                ReturnBlock::into_non_null(Box::new(block)).as_ptr()
-            }
-        })
-    }
-}
-
-impl ReturnBlock {
-    fn into_non_null(block: Box<Self>) -> NonNull<XLOPER12> {
-        Box::into_non_null(block).cast()
+    fn commit(self) -> XllResult<*mut XLOPER12> {
+        // Allocate before transferring the producer obligation. Excel
+        // receives a pointer only after the exact block is initialized.
+        let mut root = storage::try_uninit_boxed_slice::<ReturnBlock>(1)?;
+        root[0].write(self.into_block());
+        // The one-element allocation has the same layout as ReturnBlock.
+        // xlAutoFree12 consumes it as a Box<ReturnBlock>.
+        Ok(Box::into_raw(root).cast())
     }
 }
 
@@ -254,9 +237,6 @@ impl Drop for ReturnBlock {
             if let Some(payload) = payload {
                 std::panic::panic_any(payload);
             }
-            if PANIC_ON_RETURN_BLOCK_DROP.swap(false, Ordering::SeqCst) {
-                panic!("injected ReturnBlock drop panic");
-            }
         }
     }
 }
@@ -281,12 +261,14 @@ fn allocate_excel_owned(
     producer: ReturnPublicationTxn,
 ) -> XllResult<*mut XLOPER12> {
     let prepared = PreparedReturn::encode(value)?;
-    Ok(prepared.publish_owned_excel(producer))
+    prepared.publish_owned_excel(producer)
 }
 
 #[cfg(test)]
 fn allocate_excel_error(error: &XllError, producer: ReturnPublicationTxn) -> *mut XLOPER12 {
-    PreparedReturn::error(error).publish_owned_excel(producer)
+    PreparedReturn::error(error)
+        .publish_owned_excel(producer)
+        .unwrap()
 }
 
 static CLOSING_ERROR: std::sync::OnceLock<detached_scalar::PermanentRoot> =
@@ -370,7 +352,7 @@ where
         Ok(Err(error)) => PreparedReturn::error(&error),
         Err(_) => PreparedReturn::error(&XllError::Panic),
     };
-    ownership::commit_publication(|| prepared.publish_owned_excel(producer))
+    ownership::commit_publication(|| prepared.publish_owned_excel(producer)).unwrap()
 }
 
 /// Outermost panic boundary for void-returning `extern "system"` entry points.
@@ -769,69 +751,26 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
         return None;
     }
     let block = pointer.cast::<ReturnBlock>();
-    // SAFETY: caller contract guarantees pointer points to a valid live ReturnBlock.
-    let slot = unsafe { &mut (*block).obligation };
-    slot.as_ref()
-        .expect("Excel return obligation is taken exactly once")
-        .observe_begin_free();
-
-    Some(ReturnFreeGuard {
-        obligation: slot
-            .take()
-            .expect("Excel return obligation is taken exactly once"),
-    })
-}
-
-unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFreeGuard>) {
-    let Some(operation) = operation else {
-        return;
-    };
-    let Some(pointer) = NonNull::new(pointer) else {
-        return;
-    };
-    let mut block_pointer = pointer.cast::<ReturnBlock>();
-    // SAFETY: caller contract guarantees pointer refers to a live
-    // ReturnBlock produced by publish_excel or its heap fallback.
-    let block = unsafe { block_pointer.as_mut() };
+    // SAFETY: the caller supplies the exact live DLL-owned root, with no
+    // concurrent readers. The free bit alone cannot establish that contract.
+    let block = unsafe { &mut *block };
     if block.magic != RETURN_MAGIC {
         xlfn_kernel::invariant::fail_stop();
     }
-
-    debug_assert!(block.obligation.is_none());
-    operation.obligation.observe_release_block();
-
-    let backing = block.backing;
-    destroy_return_block(block_pointer, backing);
+    let Some(obligation) = block.obligation.take() else {
+        xlfn_kernel::invariant::fail_stop();
+    };
+    obligation.observe_begin_free();
+    Some(ReturnFreeGuard { obligation })
 }
 
-fn destroy_return_block(pointer: NonNull<ReturnBlock>, backing: ReturnBlockBacking) {
-    match backing {
-        ReturnBlockBacking::Heap => {
-            // SAFETY: Heap backing was created with Box::into_non_null and is
-            // destroyed exactly once on this path.
-            unsafe { drop(Box::from_non_null(pointer)) };
-        }
-        ReturnBlockBacking::ThreadLocal => destroy_thread_local_return_block(pointer.as_ptr()),
+unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFreeGuard>) {
+    if let Some(operation) = operation {
+        operation.obligation.observe_release_block();
+        // SAFETY: the free guard was acquired for the exact live root.
+        // Publication transferred the Box and this callback consumes it.
+        unsafe { drop(Box::from_raw(pointer.cast::<ReturnBlock>())) };
     }
-}
-
-fn destroy_thread_local_return_block(pointer: *mut ReturnBlock) {
-    RETURN_BLOCK_SLOT.with(|slot| {
-        // SAFETY: the caller reaches this helper only from the exact-once
-        // Excel free boundary, after all reads of this returned root ended.
-        let local = unsafe { slot.claim_free(pointer) };
-        let result = if let Some(freeing) = local {
-            freeing.destroy().map(|reusable| reusable.release())
-        } else {
-            // A defensive cross-thread free cannot touch the producer's TLS
-            // state. Its slot remains ineligible for reuse, as before.
-            // SAFETY: the same free boundary owns the foreign-thread payload.
-            unsafe { slot::destroy_foreign(pointer) }
-        };
-        if let Err(payload) = result {
-            std::panic::resume_unwind(payload);
-        }
-    });
 }
 
 #[cfg(test)]
@@ -842,9 +781,6 @@ static RETURN_BLOCKS_WITH_STORAGE: std::sync::atomic::AtomicUsize =
 #[cfg(test)]
 static RETURN_BLOCKS_WITH_ARRAY: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
-static PANIC_ON_RETURN_BLOCK_DROP: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 #[cfg(test)]
 static PANIC_ON_RETURN_PUBLICATION: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -932,7 +868,7 @@ mod tests {
             }
         }
     }
-    use std::sync::{Arc, Barrier, mpsc};
+    use std::sync::{Arc, mpsc};
     use std::time::Duration;
     use xlfn_sys::{XLTYPE_ERR, XLTYPE_NUM};
 
@@ -1322,11 +1258,6 @@ mod tests {
         allocate_excel_owned(value, producer)
     }
 
-    fn backing_of(pointer: *mut XLOPER12) -> ReturnBlockBacking {
-        // SAFETY: callers pass a live pointer returned by this module.
-        unsafe { (*pointer.cast::<ReturnBlock>()).backing }
-    }
-
     #[test]
     fn oper_is_the_first_field_and_is_freed_once() {
         let _test = test_lock();
@@ -1354,68 +1285,41 @@ mod tests {
     }
 
     #[test]
-    fn excel_returns_reuse_tls_and_fallback_to_heap_when_occupied() {
+    fn miri_excel_return_outlives_producer_and_frees_on_another_thread() {
+        // The transfer carries the exact published pointer and the exclusive
+        // obligation to free it after the recipient finishes reading.
+        struct HostReturn(*mut XLOPER12);
+        // SAFETY: this test transfers a DLL-owned return root without any
+        // concurrent access. All storage behind the root is thread-independent.
+        unsafe impl Send for HostReturn {}
+
         let _test = test_lock();
-        let fixture = open_static_test_runtime();
-        let runtime = fixture.runtime();
-        let worker = std::thread::spawn(move || {
-            let first = ffi_boundary(runtime, || Ok(1.0));
-            assert_eq!(backing_of(first), ReturnBlockBacking::ThreadLocal);
-
-            let second = ffi_boundary(runtime, || Ok(2.0));
-            assert_eq!(backing_of(second), ReturnBlockBacking::Heap);
-
-            // SAFETY: `second` is a live Excel-owned return from this thread.
-            unsafe { free_return(second) };
-            // SAFETY: `first` is a live Excel-owned return from this thread.
-            unsafe { free_return(first) };
-
-            let reused = ffi_boundary(runtime, || Ok(3.0));
-            assert_eq!(backing_of(reused), ReturnBlockBacking::ThreadLocal);
-            assert_eq!(reused, first);
-
-            // SAFETY: `reused` is the live return produced immediately above.
-            unsafe { free_return(reused) };
-        });
-        worker.join().unwrap();
+        static TRACKER: ReturnTracker = ReturnTracker::new_closed();
+        TRACKER.reopen_admission().unwrap();
+        let published = std::thread::spawn(|| {
+            let producer = ReturnPublicationTxn::new(TRACKER.try_enter_producer().unwrap());
+            HostReturn(
+                allocate_excel_owned(ReturnPayload::scalar(42.0).unwrap(), producer).unwrap(),
+            )
+        })
+        .join()
+        .unwrap();
+        assert!(!TRACKER.is_quiescent());
+        let pointer = published.0;
+        // SAFETY: the worker transferred this live numeric root on exit.
+        let root = unsafe { &*pointer };
+        assert_eq!(root.base_type(), XLTYPE_NUM);
+        // SAFETY: the checked root type selects the number member.
+        assert_eq!(unsafe { root.value.number }, 42.0);
+        // SAFETY: the recipient ends all reads before freeing the root once.
+        drop(unsafe { free_return_boundary(pointer) });
+        assert!(TRACKER.is_quiescent());
+        TRACKER.close_admission();
+        TRACKER.wait_for_quiescence();
     }
 
     #[test]
-    fn excel_return_tls_slots_are_isolated_between_threads() {
-        let _test = test_lock();
-        let fixture = open_static_test_runtime();
-        let runtime = fixture.runtime();
-        let barrier = Arc::new(Barrier::new(3));
-        let (pointer_tx, pointer_rx) = mpsc::channel();
-        let mut workers = Vec::new();
-
-        for value in [11.0, 22.0] {
-            let barrier = Arc::clone(&barrier);
-            let pointer_tx = pointer_tx.clone();
-            workers.push(std::thread::spawn(move || {
-                let pointer = ffi_boundary(runtime, || Ok(value));
-                assert_eq!(backing_of(pointer), ReturnBlockBacking::ThreadLocal);
-                pointer_tx.send(pointer.addr()).unwrap();
-                barrier.wait();
-
-                // SAFETY: this worker owns the live pointer it produced.
-                unsafe { free_return(pointer) };
-            }));
-        }
-        drop(pointer_tx);
-
-        let first = pointer_rx.recv().unwrap();
-        let second = pointer_rx.recv().unwrap();
-        assert_ne!(first, second);
-        barrier.wait();
-
-        for worker in workers {
-            worker.join().unwrap();
-        }
-    }
-
-    #[test]
-    fn tls_return_drops_storage_and_array_payloads_before_reuse() {
+    fn excel_return_drops_storage_and_array_payloads() {
         let _test = test_lock();
         let storage_before = RETURN_BLOCKS_WITH_STORAGE.load(Ordering::Relaxed);
         let array_before = RETURN_BLOCKS_WITH_ARRAY.load(Ordering::Relaxed);
@@ -1424,13 +1328,11 @@ mod tests {
         let runtime = fixture.runtime();
         let worker = std::thread::spawn(move || {
             let string_pointer = ffi_boundary(runtime, || Ok("hello".to_owned()));
-            assert_eq!(backing_of(string_pointer), ReturnBlockBacking::ThreadLocal);
             // SAFETY: string_pointer is the live return produced above.
             unsafe { free_return(string_pointer) };
 
             let matrix = Matrix::new(1, 2, vec!["left".to_owned(), "right".to_owned()]).unwrap();
             let array_pointer = ffi_boundary(runtime, || Ok(matrix));
-            assert_eq!(backing_of(array_pointer), ReturnBlockBacking::ThreadLocal);
             // SAFETY: array_pointer is the live return produced above.
             unsafe { free_return(array_pointer) };
         });
@@ -1438,40 +1340,12 @@ mod tests {
 
         assert!(
             RETURN_BLOCKS_WITH_STORAGE.load(Ordering::Relaxed) > storage_before,
-            "TLS return cleanup must drop its string owner"
+            "Excel return cleanup must drop its string owner"
         );
         assert!(
             RETURN_BLOCKS_WITH_ARRAY.load(Ordering::Relaxed) > array_before,
-            "TLS return cleanup must drop array cells"
+            "Excel return cleanup must drop array cells"
         );
-    }
-
-    #[test]
-    fn panicking_tls_drop_poison_falls_back_to_heap() {
-        let _test = test_lock();
-        let fixture = open_static_test_runtime();
-        let runtime = fixture.runtime();
-        let worker = std::thread::spawn(move || {
-            let pointer = ffi_boundary(runtime, || Ok(42.0));
-            assert_eq!(backing_of(pointer), ReturnBlockBacking::ThreadLocal);
-            PANIC_ON_RETURN_BLOCK_DROP.store(true, Ordering::SeqCst);
-
-            // The FFI boundary catches the injected destructor panic and the
-            // slot remains poisoned instead of exposing partially-dropped
-            // storage to a future return.
-            // SAFETY: pointer is the live return produced above.
-            let free_guard = unsafe { free_return_boundary(pointer) };
-            RETURN_BLOCK_SLOT.with(|slot| {
-                assert!(slot.is_poisoned());
-            });
-
-            let fallback = ffi_boundary(runtime, || Ok(43.0));
-            assert_eq!(backing_of(fallback), ReturnBlockBacking::Heap);
-            // SAFETY: fallback is the live heap-backed return produced above.
-            unsafe { free_return(fallback) };
-            drop(free_guard);
-        });
-        worker.join().unwrap();
     }
 
     #[test]
@@ -1494,7 +1368,7 @@ mod tests {
     }
 
     #[test]
-    fn miri_array_cells_remain_readable_in_tls_and_heap_returns() {
+    fn miri_array_cells_remain_readable_in_published_returns() {
         let _test = test_lock();
         let tracker_owner = Box::into_raw(Box::new(ReturnTracker::new_closed()));
         // SAFETY: the tracker is retained until the worker joins and all
@@ -1527,8 +1401,6 @@ mod tests {
                 };
                 let first = matrix();
                 let second = matrix();
-                assert_eq!(backing_of(first), ReturnBlockBacking::ThreadLocal);
-                assert_eq!(backing_of(second), ReturnBlockBacking::Heap);
                 for pointer in [second, first] {
                     // SAFETY: this thread owns both live matrix return blocks.
                     let oper = unsafe { &*pointer };
@@ -1574,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn miri_scalar_strings_remain_readable_in_tls_and_heap_returns() {
+    fn miri_scalar_strings_remain_readable_in_published_returns() {
         let _test = test_lock();
         let tracker_owner = Box::into_raw(Box::new(ReturnTracker::new_closed()));
         // SAFETY: retain this tracker until the worker joins and every
@@ -1611,7 +1483,6 @@ mod tests {
                 let units = unsafe { std::slice::from_raw_parts(payload, length) };
                 assert_eq!(units, expected.encode_utf16().collect::<Vec<_>>());
             };
-            let mut previous_tls = None;
             for (first_text, second_text) in [
                 ("", "a\0z"),
                 ("日本語💡", "ASCII second"),
@@ -1619,26 +1490,20 @@ mod tests {
             ] {
                 let first = publish(first_text.to_owned(), true);
                 let second = publish(second_text.to_owned(), false);
-                assert_eq!(backing_of(first), ReturnBlockBacking::ThreadLocal);
-                assert_eq!(backing_of(second), ReturnBlockBacking::Heap);
                 assert_ne!(first, second);
-                if let Some(previous) = previous_tls {
-                    assert_eq!(first, previous, "the freed TLS slot must be reused");
-                }
                 assert_eq!(tracker.outstanding_obligations(), 2);
                 // Both source Strings have already been destroyed. Read both
                 // allocations while simultaneously published, then free in
                 // reverse order and verify the first allocation again.
                 read(first, first_text);
                 read(second, second_text);
-                // SAFETY: second is the live heap root, freed exactly once.
+                // SAFETY: second is the second live root, freed exactly once.
                 unsafe { free_return(second) };
                 assert_eq!(tracker.outstanding_obligations(), 1);
                 read(first, first_text);
-                // SAFETY: first is the live TLS root, freed exactly once.
+                // SAFETY: first is the first live root, freed exactly once.
                 unsafe { free_return(first) };
                 assert!(tracker.is_quiescent());
-                previous_tls = Some(first);
             }
         })
         .join()
@@ -1801,7 +1666,7 @@ mod tests {
     }
 
     #[test]
-    fn free_boundary_retains_panicking_payload_and_poisons_tls_slot() {
+    fn free_boundary_retains_panicking_payload() {
         use crate::panic_boundary::tests::PanickingPayload;
         use std::sync::atomic::AtomicUsize;
 
@@ -1812,15 +1677,10 @@ mod tests {
         let observed = Arc::clone(&dropped);
         let worker = std::thread::spawn(move || {
             let pointer = ffi_boundary(runtime, || Ok(42.0));
-            assert_eq!(backing_of(pointer), ReturnBlockBacking::ThreadLocal);
             *PANICKING_RETURN_DROP_PAYLOAD.lock().unwrap() = Some(PanickingPayload(observed));
             // SAFETY: pointer is the live return produced above.
             let free_guard = unsafe { free_return_boundary(pointer) };
-            RETURN_BLOCK_SLOT.with(|slot| {
-                assert!(slot.is_poisoned());
-            });
             let next = ffi_boundary(runtime, || Ok(43.0));
-            assert_eq!(backing_of(next), ReturnBlockBacking::Heap);
             // SAFETY: next is a distinct live return and the hook was consumed.
             unsafe { free_return(next) };
             drop(free_guard);
@@ -2202,7 +2062,8 @@ mod tests {
 
         let ptr = PreparedReturn::encode(ReturnPayload::scalar(42.0).unwrap())
             .unwrap()
-            .publish_owned_excel(producer);
+            .publish_owned_excel(producer)
+            .unwrap();
         assert_eq!(tracker.outstanding_obligations(), 1);
         assert_eq!(tracker.outstanding_obligations(), 1);
 
@@ -2276,7 +2137,9 @@ mod tests {
             PANIC_ON_RETURN_PUBLICATION.store(true, Ordering::Release);
             let _ = catch_no_unwind(AssertUnwindSafe(|| {
                 ownership::commit_publication(|| {
-                    PreparedReturn::error(&XllError::Panic).publish_owned_excel(producer)
+                    PreparedReturn::error(&XllError::Panic)
+                        .publish_owned_excel(producer)
+                        .unwrap()
                 });
             }));
             panic!("an unfinished publication must not return to fallback");

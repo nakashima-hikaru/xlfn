@@ -297,9 +297,11 @@ impl<A: crate::Addin> OpeningState<A> for GenerationStaged<A> {
     fn abandon(self, deps: &OpenDeps<'_, A>, _binding: Self::Binding<'_>) {
         let Self {
             core,
-            host: _,
+            host,
             lifecycle,
         } = self;
+        let (_, journal) = host.into_parts();
+        deps.merge_host(journal);
         abandon_open(deps, core, LifecycleOwnership::Owned(lifecycle));
     }
 }
@@ -311,7 +313,9 @@ impl<A: crate::Addin> OpeningState<A> for LifecycleInstalled<A> {
     }
 
     fn abandon(self, deps: &OpenDeps<'_, A>, _binding: Self::Binding<'_>) {
-        let Self { core, host: _ } = self;
+        let Self { core, host } = self;
+        let (_, journal) = host.into_parts();
+        deps.merge_host(journal);
         abandon_open(deps, core, LifecycleOwnership::Installed(_binding));
     }
 }
@@ -323,7 +327,9 @@ impl<A: crate::Addin> OpeningState<A> for HostMutated<A> {
     }
 
     fn abandon(self, deps: &OpenDeps<'_, A>, _binding: Self::Binding<'_>) {
-        let Self { core, host: _ } = self;
+        let Self { core, host } = self;
+        let (_, journal) = host.into_parts();
+        deps.merge_host(journal);
         abandon_open(deps, core, LifecycleOwnership::Installed(_binding));
     }
 }
@@ -461,7 +467,14 @@ impl<'runtime, A: crate::Addin> StartClaimed<'runtime, A> {
         // Until begin_open returns there is no authority to recover a partly
         // changed module epoch.
         let transfer = std::mem::DropGuard::new((), |()| opening_publication_lost());
-        let module = crate::module_runtime::begin_open();
+        let module = match crate::module_runtime::begin_open() {
+            Ok(module) => module,
+            Err(error) => {
+                // The callback gate refused before any module mutation.
+                std::mem::DropGuard::dismiss(transfer);
+                return Err(error);
+            }
+        };
         let PendingStart { deps, start } = self.0.complete();
         let opened = ModuleOpened(RollbackGuard::new(PendingModule {
             deps,

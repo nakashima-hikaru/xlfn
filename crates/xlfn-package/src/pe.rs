@@ -26,7 +26,12 @@ impl PeSnapshot {
 }
 
 pub fn verify_xll(path: &Path, target: &str, required_exports: &[String]) -> PackageResult {
-    verify_xll_bytes(&fs::read(path)?, target, required_exports, path)
+    verify_xll_bytes(
+        &snapshot_file(target, path)?,
+        target,
+        required_exports,
+        path,
+    )
 }
 
 pub(crate) fn verify_xll_bytes(
@@ -647,10 +652,13 @@ impl PeInfo {
     }
 }
 pub fn inspect_pe(path: &Path) -> PackageResult<PeInfo> {
-    parse_pe_bytes(&fs::read(path)?)
+    parse_pe_bytes(&snapshot_file("PE inspection", path)?)
 }
 
 pub fn parse_pe_bytes(b: &[u8]) -> PackageResult<PeInfo> {
+    if b.len() as u64 > MAX_PREPARED_BYTES {
+        return Err("PE image exceeds the package byte budget".into());
+    }
     match FileKind::parse(b)? {
         FileKind::Pe32 => parse_pe_file(PeFile32::parse(b)?),
         FileKind::Pe64 => parse_pe_file(PeFile64::parse(b)?),
@@ -765,8 +773,12 @@ where
             .ok_or("PE symbol budget exceeded")?;
         Ok(())
     };
-    let mapped_sections = validate_mapped_sections(&pe)?;
     let file_header = pe.nt_headers().file_header();
+    // The Windows loader admits at most 96 PE sections.
+    if file_header.number_of_sections.get(LE) > 96 {
+        return Err("PE image exceeds the Windows loader's 96-section limit".into());
+    }
+    let mapped_sections = validate_mapped_sections(&pe)?;
     let machine = file_header.machine.get(LE);
     let characteristics = file_header.characteristics.get(LE);
     let mut exports = BTreeSet::new();

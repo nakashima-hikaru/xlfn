@@ -164,7 +164,7 @@ impl<'runtime, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatal
             Ok(result) => self.runtime.record_cleanup_result(result),
             Err(error) => return Err(self.fail(error)),
         }
-        // Keep the STA dispatchable through the disconnect worker's final
+        // Keep the STA dispatchable through the disconnect workers' final
         // COM teardown; preparation failure retains that worker's owner.
         if let Err(error) = self.runtime.disconnects.stop() {
             return Err(self.fail(error));

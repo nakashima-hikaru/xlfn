@@ -3158,6 +3158,12 @@ fn server_notification_panic_records_cleanup_failure() {
     }));
     assert!(res.is_err());
     assert!(runtime.cleanup_result().is_err());
+    assert_eq!(state.calls.load(Ordering::Acquire), 1);
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::Acquire), 2);
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates()[0].value, StoredRtdValue::Number(1.0));
+    batch.complete(RefreshOutcome::Delivered).unwrap();
 }
 
 #[test]

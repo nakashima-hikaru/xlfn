@@ -1,5 +1,8 @@
-use crate::sync::{Condvar, Mutex};
+use super::event::ManualResetEvent;
+use super::update_event::ComApartmentGuard;
+use crate::sync::Mutex;
 use std::num::NonZeroU32;
+use triomphe::Arc;
 use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -46,6 +49,17 @@ struct ComModuleLifetimeInner {
     /// `state.revocation_debt` count also includes claims temporarily removed
     /// from this queue while a retry is in flight.
     git_revocation_debt: Vec<NonZeroU32>,
+    quiescence_changed: Option<Arc<ManualResetEvent>>,
+}
+
+impl ComModuleLifetimeInner {
+    fn notify_waiter(&self) {
+        if let Some(event) = &self.quiescence_changed {
+            event
+                .set()
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,7 +95,6 @@ impl GitRevocationDebtClaim<'_> {
 
 pub(crate) struct ComModuleLifetime {
     inner: Mutex<ComModuleLifetimeInner>,
-    quiescent: Condvar,
     pub(super) observer: crate::shutdown_trace::ObservationSink,
 }
 
@@ -98,8 +111,8 @@ impl ComModuleLifetime {
                     revocation_debt: 0,
                 },
                 git_revocation_debt: Vec::new(),
+                quiescence_changed: None,
             }),
-            quiescent: Condvar::new(),
             observer: crate::shutdown_trace::ObservationSink::new(),
         }
     }
@@ -145,7 +158,7 @@ impl ComModuleLifetime {
     pub(super) fn git_cookie_revoked(&self) {
         let mut inner = self.inner.lock();
         Self::decrement(&mut inner.state.outstanding_git_cookies);
-        self.quiescent.notify_all();
+        inner.notify_waiter();
     }
 
     pub(super) fn git_cookie_revocation_deferred(&self, cookie: NonZeroU32) {
@@ -153,13 +166,13 @@ impl ComModuleLifetime {
         Self::decrement(&mut inner.state.outstanding_git_cookies);
         Self::increment(&mut inner.state.revocation_debt);
         inner.git_revocation_debt.push(cookie);
-        self.quiescent.notify_all();
+        inner.notify_waiter();
     }
 
     fn git_revocation_debt_resolved(&self) {
         let mut inner = self.inner.lock();
         Self::decrement(&mut inner.state.revocation_debt);
-        self.quiescent.notify_all();
+        inner.notify_waiter();
     }
 
     pub(super) fn claim_git_revocation_debt_batch(&self) -> Vec<GitRevocationDebtClaim<'_>> {
@@ -238,7 +251,7 @@ impl ComModuleLifetime {
             ComObjectKind::Factory => crate::shutdown_trace::ShutdownEvent::RemoveRtdClassFactory,
             ComObjectKind::Server => crate::shutdown_trace::ShutdownEvent::RemoveRtdServer,
         });
-        self.quiescent.notify_all();
+        inner.notify_waiter();
     }
 
     pub(super) fn set_server_lock(&self, lock: bool) -> bool {
@@ -250,7 +263,7 @@ impl ComModuleLifetime {
             false
         } else {
             Self::decrement(&mut inner.state.server_locks);
-            self.quiescent.notify_all();
+            inner.notify_waiter();
             true
         };
         if changed {
@@ -294,19 +307,35 @@ impl ComModuleLifetime {
                 return Err(ComModuleQuiescenceError { state: inner.state });
             }
 
-            #[cfg(test)]
-            {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    return Err(ComModuleQuiescenceError { state: inner.state });
-                }
-                if self.quiescent.wait_for(&mut inner, remaining).timed_out() {
-                    return Err(ComModuleQuiescenceError { state: inner.state });
-                }
+            // The shutdown transaction is the sole waiter. Arm its event
+            // under the call-count lock so the last caller cannot miss it.
+            if inner.quiescence_changed.is_some() {
+                return Err(ComModuleQuiescenceError { state: inner.state });
             }
-
+            let event = ManualResetEvent::new(false)
+                .map(Arc::new)
+                .map_err(|_| ComModuleQuiescenceError { state: inner.state })?;
+            inner.quiescence_changed = Some(Arc::clone(&event));
+            drop(inner);
+            let event = std::mem::DropGuard::new(event, |_| {
+                self.inner.lock().quiescence_changed = None;
+            });
             #[cfg(not(test))]
-            self.quiescent.wait(&mut inner);
+            let timeout_ms = crate::win32::INFINITE;
+            #[cfg(test)]
+            let timeout_ms = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis() as u32;
+            // Preserve a caller's STA and dispatch synchronous COM calls
+            // without the call-count lock. Initialize an MTA on other callers.
+            let result = ComApartmentGuard::enter()
+                .and_then(|_apartment| event.wait_with_com_pumping_for(timeout_ms));
+            drop(event);
+            if result.is_err() {
+                return Err(ComModuleQuiescenceError {
+                    state: self.inner.lock().state,
+                });
+            }
         }
     }
 
@@ -331,8 +360,7 @@ impl Drop for ComModuleCallGuard {
     fn drop(&mut self) {
         let mut inner = self.lifetime.inner.lock();
         ComModuleLifetime::decrement(&mut inner.state.in_flight_calls);
-        self.lifetime.quiescent.notify_all();
-        drop(inner);
+        inner.notify_waiter();
     }
 }
 

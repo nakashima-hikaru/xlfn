@@ -350,12 +350,15 @@ impl ModuleExportsDrained {
 
     pub(crate) fn certify(
         resources: crate::runtime::CompletedResources,
-    ) -> (ModuleQuiescent, ExportsDrained) {
+    ) -> Result<(ModuleQuiescent, ExportsDrained), (crate::XllError, Self)> {
         let (module, resources) = resources.into_module_parts();
         if !module.id.is_current() {
             xlfn_kernel::invariant::fail_stop();
         }
         module.close_callbacks();
+        if !module.module.callback_admission.is_closed_and_quiescent() {
+            return Err((crate::XllError::Closing, module));
+        }
         #[cfg(any(feature = "rtd", feature = "handles"))]
         RtdModuleState::certify_logical_quiescence(LogicalQuiescencePublication {
             epoch: module.id,
@@ -363,7 +366,7 @@ impl ModuleExportsDrained {
         });
         #[cfg(not(any(feature = "rtd", feature = "handles")))]
         let _completed = resources;
-        (ModuleQuiescent { id: module.id }, module.exports)
+        Ok((ModuleQuiescent { id: module.id }, module.exports))
     }
 
     /// Isolated module tests intentionally do not model generation resources.
@@ -422,10 +425,6 @@ impl ModuleRuntime {
         &self.callback_admission
     }
 
-    fn reset_callbacks(&'static self) {
-        self.callback_admission.reset();
-    }
-
     pub(crate) fn rtd(&'static self) -> Option<&'static crate::excel_rtd_protocol::RtdModuleState> {
         #[cfg(any(feature = "rtd", feature = "handles"))]
         {
@@ -443,18 +442,18 @@ impl ModuleRuntime {
     /// Starts the module components for one opening epoch in their canonical
     /// order.  Runtime admission is reopened by `Runtime` immediately before
     /// this transition; this method owns the module-local portion.
-    fn begin_open_internal(&'static self) -> ModuleOpening {
+    fn begin_open_internal(&'static self) -> crate::XllResult<ModuleOpening> {
+        self.callback_admission.try_reopen()?;
         #[cfg(any(feature = "rtd", feature = "handles"))]
         self.rtd.begin_open();
-        self.reset_callbacks();
         self.ingress.begin_opening();
-        ModuleOpening {
+        Ok(ModuleOpening {
             module: self,
             id: ModuleEpochId {
                 module: self,
                 epoch: self.ingress.epoch(),
             },
-        }
+        })
     }
 }
 
@@ -492,13 +491,13 @@ pub(crate) fn global() -> &'static ModuleRuntime {
 
 /// Starts one module opening epoch.  The returned token, rather than the
 /// singleton itself, is the mutation authority for the opening transaction.
-pub(crate) fn begin_open() -> ModuleOpening {
+pub(crate) fn begin_open() -> crate::XllResult<ModuleOpening> {
     MODULE_RUNTIME.begin_open_internal()
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) fn reset_callbacks_for_test() {
-    MODULE_RUNTIME.reset_callbacks();
+    MODULE_RUNTIME.callback_admission.try_reopen().unwrap();
 }
 
 #[cfg(test)]
@@ -508,7 +507,7 @@ pub(crate) fn close_callbacks_for_test() {
 
 #[cfg(all(test, target_os = "windows", any(feature = "rtd", feature = "handles")))]
 pub(crate) fn certify_quiescence_for_test() {
-    let closing = begin_open().rollback(|| {});
+    let closing = begin_open().unwrap().rollback(|| {});
     let drained = closing
         .seal_and_drain()
         .unwrap_or_else(|_| panic!("test module drain preparation failed"));
@@ -525,6 +524,7 @@ pub(crate) fn ingress() -> &'static ExportIngress {
 pub(crate) fn isolated_closing_for_test() -> ModuleClosing {
     Box::leak(Box::new(ModuleRuntime::new()))
         .begin_open_internal()
+        .unwrap()
         .rollback(|| {})
 }
 
@@ -536,10 +536,32 @@ mod tests {
     };
 
     #[test]
+    fn reopening_with_a_retained_callback_preserves_the_previous_epoch() {
+        let module = Box::leak(Box::new(ModuleRuntime::new()));
+        let opening = module.begin_open_internal().unwrap();
+        let callback = module.callback_admission().enter_for_test().unwrap();
+        let drained = opening.rollback(|| {}).seal_and_drain().unwrap();
+        drained.close_callbacks();
+        assert!(!module.callback_admission().is_closed_and_quiescent());
+        assert!(matches!(
+            module.begin_open_internal(),
+            Err(crate::XllError::Closing)
+        ));
+        assert!(drained.id().is_current());
+        assert_eq!(module.ingress().phase(), crate::ingress::PHASE_CLOSED);
+
+        drop(callback);
+        let _ = drained.certify_for_test();
+        let next = module.begin_open_internal().unwrap();
+        let drained = next.rollback(|| {}).seal_and_drain().unwrap();
+        let _ = drained.certify_for_test();
+    }
+
+    #[test]
     fn failed_drain_retains_identity_through_cleanup_handoff_without_retry() {
         for wait in [1, 2] {
             let module = Box::leak(Box::new(ModuleRuntime::new()));
-            let closing = module.begin_open_internal().rollback(|| {});
+            let closing = module.begin_open_internal().unwrap().rollback(|| {});
             let epoch = closing.id();
             let fault = crate::ingress::DrainPreparationFault::at(wait);
             let Err((_, retained)) = closing.seal_and_drain() else {
@@ -568,7 +590,7 @@ mod tests {
     #[test]
     fn drained_cleanup_never_restarts_the_close_or_retries_drain() {
         let module = Box::leak(Box::new(ModuleRuntime::new()));
-        let closing = module.begin_open_internal().rollback(|| {});
+        let closing = module.begin_open_internal().unwrap().rollback(|| {});
         let epoch = closing.id();
         let drained = closing
             .seal_and_drain()
@@ -591,7 +613,7 @@ mod tests {
     fn cleanup_failure_returns_retention_without_a_retry_capability() {
         for wait in [1, 2] {
             let module = Box::leak(Box::new(ModuleRuntime::new()));
-            let closing = module.begin_open_internal().rollback(|| {});
+            let closing = module.begin_open_internal().unwrap().rollback(|| {});
             let epoch = closing.id();
             let fault = crate::ingress::DrainPreparationFault::at(wait);
             let Err((_, authority)) = ModuleCleanupReady::Closing(closing).finish() else {

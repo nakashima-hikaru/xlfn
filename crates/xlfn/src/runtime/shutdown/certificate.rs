@@ -282,8 +282,7 @@ impl<'runtime, A: crate::Addin> RemovalClaimGuard<'runtime, A> {
                     generation,
                     module_epoch,
                 };
-                let mut control = lifecycle.access();
-                if !lifecycle.clear_certified_retirement(&mut control, authorization) {
+                if !lifecycle.clear_certified_retirement(lifecycle.access(), authorization) {
                     return Err((close_certificate_error(), self));
                 }
                 Ok(FinalRemovalCertificate::Committed {
@@ -536,6 +535,41 @@ mod tests {
     }
 
     #[test]
+    fn retiring_service_reader_can_reenter_canonical_state_during_disposal() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let runtime = Runtime::<()>::new();
+        let (owner, generation, epoch) = retired(&runtime);
+        let lifecycle = runtime.lifecycle_control();
+        std::thread::scope(|threads| {
+            let (pinned_tx, pinned_rx) = mpsc::channel();
+            let runtime = &runtime;
+            threads.spawn(move || {
+                runtime
+                    .lifecycle
+                    .with_generation_services(|services| {
+                        pinned_tx.send(()).unwrap();
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        while runtime.lifecycle.access().generation_services().is_some() {
+                            assert!(Instant::now() < deadline, "service was never detached");
+                            std::thread::yield_now();
+                        }
+                        // The canonical state withdrew the service, but this
+                        // operation's pin still retains the exact allocation.
+                        assert!(services.is_none());
+                    })
+                    .unwrap();
+            });
+            pinned_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(lifecycle.clear_certified_retirement(
+                lifecycle.access(),
+                retirement(runtime, &owner, generation, epoch)
+            ));
+        });
+    }
+
+    #[test]
     fn canonical_retirement_and_completion_reject_substituted_and_replayed_authority() {
         let runtime = Runtime::<()>::new();
         let other = Runtime::<()>::new();
@@ -552,19 +586,18 @@ mod tests {
                 2 => authorization.generation = next_generation,
                 _ => unreachable!(),
             }
-            let mut control = lifecycle.access();
-            assert!(!lifecycle.clear_certified_retirement(&mut control, authorization));
+            assert!(!lifecycle.clear_certified_retirement(lifecycle.access(), authorization));
             assert!(matches!(
-                lifecycle.final_removal_ready(&control, owner.attempt()),
+                lifecycle.final_removal_ready(&lifecycle.access(), owner.attempt()),
                 Some(FinalRemovalReady::Committed { .. })
             ));
         }
         {
-            let mut wrong_guard = other.lifecycle.access();
             assert!(!lifecycle.clear_certified_retirement(
-                &mut wrong_guard,
+                other.lifecycle.access(),
                 retirement(&runtime, &owner, generation, epoch)
             ));
+            let mut wrong_guard = other.lifecycle.access();
             assert!(
                 lifecycle
                     .finish_final_removal(
@@ -590,11 +623,11 @@ mod tests {
                     .is_err()
             );
             assert!(lifecycle.clear_certified_retirement(
-                &mut control,
+                control,
                 retirement(&runtime, &owner, generation, epoch)
             ));
             assert!(!lifecycle.clear_certified_retirement(
-                &mut control,
+                lifecycle.access(),
                 retirement(&runtime, &owner, generation, epoch)
             ));
         }
@@ -647,15 +680,15 @@ mod tests {
         let (current_owner, current_generation, current_epoch) = retired(&current);
         assert_ne!(old_epoch, current_epoch);
         let lifecycle = current.lifecycle_control();
-        let mut control = lifecycle.access();
         assert!(!lifecycle.clear_certified_retirement(
-            &mut control,
+            lifecycle.access(),
             retirement(&current, &current_owner, current_generation, old_epoch)
         ));
         assert!(lifecycle.clear_certified_retirement(
-            &mut control,
+            lifecycle.access(),
             retirement(&current, &current_owner, current_generation, current_epoch)
         ));
+        let mut control = lifecycle.access();
         let wrong_proof = QuiescenceProof::for_test(Some(current_generation), old_epoch);
         assert!(
             lifecycle
@@ -672,12 +705,10 @@ mod tests {
         );
         drop(control);
         let lifecycle = old.lifecycle_control();
-        let mut control = lifecycle.access();
         assert!(!lifecycle.clear_certified_retirement(
-            &mut control,
+            lifecycle.access(),
             retirement(&old, &old_owner, old_generation, old_epoch)
         ));
-        drop(control);
         drop(current_owner);
         drop(old_owner);
     }

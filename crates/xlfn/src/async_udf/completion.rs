@@ -228,17 +228,21 @@ where
             Ok(std::task::Poll::Ready(value)) => Ok(value),
             Err(panic) => Err(panic),
         };
-        let evaluated = match future.finish() {
+        let finish = future.finish();
+        let Some(delivery) = this.delivery.take() else {
+            xlfn_kernel::invariant::fail_stop();
+        };
+        let evaluated = match finish {
             Ok(()) => evaluated,
-            Err(panic) => Err(panic),
+            Err(panic) => {
+                drop_evaluation_no_unwind(delivery.owner.get().responder.udf_id(), evaluated);
+                Err(panic)
+            }
         };
         #[cfg(test)]
         if let Some(hook) = *super::boundary::AFTER_ASYNC_EVALUATION_HOOK.lock() {
             hook();
         }
-        let Some(delivery) = this.delivery.take() else {
-            xlfn_kernel::invariant::fail_stop();
-        };
         delivery.complete(evaluated);
         std::task::Poll::Ready(())
     }
@@ -252,6 +256,15 @@ fn deliver_error(responder: ExcelAsyncResponder, error: &XllError) -> OwnedDeliv
     }
 }
 
+fn drop_evaluation_no_unwind<T>(
+    udf_id: &'static str,
+    evaluated: Result<XllResult<T>, CaughtPanic>,
+) {
+    if catch_no_unwind(AssertUnwindSafe(|| drop(evaluated))).is_err() {
+        crate::diagnostics::report_no_unwind(udf_id, &XllError::Panic);
+    }
+}
+
 fn complete_evaluation<
     T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 >(
@@ -260,6 +273,7 @@ fn complete_evaluation<
     evaluated: Result<XllResult<T>, CaughtPanic>,
 ) -> AsyncCompletion {
     if !token.try_start_delivery() {
+        drop_evaluation_no_unwind(responder.udf_id(), evaluated);
         let cancel_error = XllError::ExcelValue(crate::ExcelError::NotAvailable);
         return AsyncCompletion {
             completion: OwnedCompletionOutcome::Cancelled,
@@ -424,6 +438,93 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn miri_abandoned_async_evaluation_contains_value_destructor_panics() {
+        struct Value<'a>(&'a AtomicUsize);
+
+        impl crate::value::IntoExcel for Value<'_> {
+            fn into_excel(self) -> XllResult<crate::value::ExcelCellOutput> {
+                Ok(crate::value::ExcelCellOutput::Number(42.0))
+            }
+        }
+
+        impl Drop for Value<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                panic!("injected evaluation value destructor panic");
+            }
+        }
+
+        struct Ready {
+            drops: &'static AtomicUsize,
+            future_panics_on_drop: bool,
+        }
+
+        impl Future for Ready {
+            type Output = XllResult<Value<'static>>;
+
+            fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+                Poll::Ready(Ok(Value(self.drops)))
+            }
+        }
+
+        impl Drop for Ready {
+            fn drop(&mut self) {
+                assert!(
+                    !self.future_panics_on_drop,
+                    "injected ready future destructor panic"
+                );
+            }
+        }
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        let _runtime = crate::runtime::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _callbacks = crate::test_callback::lock();
+        crate::test_callback::install();
+        for (cancelled, future_panics_on_drop) in [(true, false), (false, true)] {
+            crate::test_callback::reset();
+            DROPS.store(0, Ordering::Relaxed);
+            #[cfg(feature = "async-builtin")]
+            crate::test_callback::set_async_rejected(future_panics_on_drop);
+            let (source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
+            if cancelled {
+                source.cancel();
+            }
+            let mut raw = XLOPER12 {
+                value: XLOPER12Value {
+                    big_data: XLOPER12BigData {
+                        handle: XLOPER12BigDataHandle {
+                            data: std::ptr::null_mut(),
+                        },
+                        byte_count: 0,
+                    },
+                },
+                xltype: XLTYPE_BIG_DATA,
+            };
+            // SAFETY: the responder copies this live, initialized handle.
+            let responder =
+                unsafe { ExcelAsyncResponder::from_raw("DROP.VALUE", &mut raw).unwrap() };
+            let mut task = std::pin::pin!(
+                PendingDelivery::new(responder, token, NoObservation).task(Ready {
+                    drops: &DROPS,
+                    future_panics_on_drop
+                })
+            );
+            assert!(
+                task.as_mut()
+                    .poll(&mut Context::from_waker(
+                        futures_util::task::noop_waker_ref()
+                    ))
+                    .is_ready()
+            );
+            assert_eq!(DROPS.load(Ordering::Relaxed), 1);
+            assert_eq!(crate::test_callback::async_return_calls(), 1);
+        }
+    }
+
     struct Observer {
         callbacks_at_drop: Arc<AtomicUsize>,
         observed: Arc<AtomicUsize>,

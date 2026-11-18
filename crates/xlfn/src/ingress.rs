@@ -397,39 +397,7 @@ impl ExportIngress {
         &self,
         on_accepted: impl FnOnce() -> T,
     ) -> Result<(AdmittedExport<'_>, T), RejectedExport<'_>> {
-        let observed_phase = self.phase.load(Ordering::Acquire);
-        let _opening_guard = (observed_phase == PHASE_OPENING).then(|| {
-            self.opening_lock
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-        });
-        if self.phase.load(Ordering::Acquire) == PHASE_CLOSED {
-            return Err(self.rejected_guard());
-        }
-        let stripe_index = current_ingress_stripe();
-        let permit = match self.exports.try_enter(stripe_index) {
-            Ok(permit) => permit,
-            Err(_) => return Err(self.rejected_guard()),
-        };
-        let phase = self.phase.load(Ordering::Acquire);
-        if phase == PHASE_CLOSED {
-            drop(permit);
-            return Err(self.rejected_guard());
-        }
-        let accepted = phase == PHASE_OPEN;
-        let entry = ExportCallGuard {
-            ingress: self,
-            epoch: self.epoch.load(Ordering::Acquire),
-            stripe: Some(stripe_index),
-            _permit: Some(permit),
-            udf: false,
-        };
-        if accepted {
-            let result = on_accepted();
-            Ok((AdmittedExport { guard: entry }, result))
-        } else {
-            Err(RejectedExport { _guard: entry })
-        }
+        self.enter_observed(self.phase.load(Ordering::Acquire), false, on_accepted)
     }
 
     /// Attempts to enter a UDF export entry and runs `on_accepted` after the
@@ -438,40 +406,52 @@ impl ExportIngress {
     where
         F: FnOnce(),
     {
-        let observed_phase = self.phase.load(Ordering::Acquire);
-        let _opening_guard = (observed_phase == PHASE_OPENING).then(|| {
+        match self.enter_observed(self.phase.load(Ordering::Acquire), true, on_accepted) {
+            Ok((entry, ())) => ExportEntry::Admitted(entry),
+            Err(entry) => ExportEntry::Rejected(entry),
+        }
+    }
+
+    fn enter_observed<T>(
+        &self,
+        observed_phase: u8,
+        udf: bool,
+        on_accepted: impl FnOnce() -> T,
+    ) -> Result<(AdmittedExport<'_>, T), RejectedExport<'_>> {
+        if observed_phase == PHASE_CLOSED {
+            return Err(self.rejected_guard());
+        }
+        let opening_guard = (observed_phase == PHASE_OPENING).then(|| {
             self.opening_lock
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
         });
-        if self.phase.load(Ordering::Acquire) == PHASE_CLOSED {
-            return ExportEntry::Rejected(self.rejected_guard());
-        }
         let stripe_index = current_ingress_stripe();
-        let permit = match self.exports.try_enter(stripe_index) {
-            Ok(permit) => permit,
-            Err(_) => return ExportEntry::Rejected(self.rejected_guard()),
+        let Ok(permit) = self.exports.try_enter(stripe_index) else {
+            return Err(self.rejected_guard());
         };
-        self.udf_stripes[stripe_index].enter();
+        // A late reservation from a previous epoch must not create a live
+        // opening guard outside the publication lock's quiescence check.
         let phase = self.phase.load(Ordering::Acquire);
-        if phase == PHASE_CLOSED {
-            self.udf_stripes[stripe_index].leave();
+        if phase == PHASE_CLOSED || (phase == PHASE_OPENING && opening_guard.is_none()) {
             drop(permit);
-            return ExportEntry::Rejected(self.rejected_guard());
+            return Err(self.rejected_guard());
         }
-        let accepted = phase == PHASE_OPEN;
+        if udf {
+            self.udf_stripes[stripe_index].enter();
+        }
         let entry = ExportCallGuard {
             ingress: self,
             epoch: self.epoch.load(Ordering::Acquire),
             stripe: Some(stripe_index),
             _permit: Some(permit),
-            udf: true,
+            udf,
         };
-        if accepted {
-            on_accepted();
-            ExportEntry::Admitted(AdmittedExport { guard: entry })
+        if phase == PHASE_OPEN {
+            let result = on_accepted();
+            Ok((AdmittedExport { guard: entry }, result))
         } else {
-            ExportEntry::Rejected(RejectedExport { _guard: entry })
+            Err(RejectedExport { _guard: entry })
         }
     }
 
@@ -702,6 +682,25 @@ mod tests {
         assert!(matches!(&closed_entry, ExportEntry::Rejected(_)));
         assert_eq!(ingress.active_calls(), 0);
         drop(closed_entry);
+    }
+
+    #[test]
+    fn a_stale_phase_observation_cannot_reserve_an_opening_export() {
+        let ingress = ExportIngress::new();
+        let closed = ingress.phase();
+        ingress.begin_opening();
+        for udf in [false, true] {
+            for sampled in [closed, PHASE_CLOSING] {
+                let rejected = ingress
+                    .enter_observed(sampled, udf, || panic!("opening export accepted"))
+                    .unwrap_err();
+                assert_eq!(ingress.active_calls(), 0);
+                assert_eq!(ingress.active_udfs(), 0);
+                drop(rejected);
+            }
+        }
+        ingress.complete_open(|| Ok::<_, ()>(())).unwrap().unwrap();
+        assert!(ingress.enter_with_result(|| ()).is_ok());
     }
 
     #[test]

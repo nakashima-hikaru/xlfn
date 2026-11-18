@@ -29,7 +29,8 @@ use crate::XllResult;
 /// Cancellation and disconnection must not synchronously initiate this
 /// add-in's own removal: removal waits for this subscription's cleanup.
 /// These methods may run on different framework-owned threads, including a
-/// Windows MTA cleanup worker. They must not rely on the subscribing thread's
+/// Windows MTA cleanup worker. Independent subscriptions can be cleaned up
+/// concurrently. Implementations must not rely on the subscribing thread's
 /// affinity or pass an apartment-bound COM interface without marshaling.
 ///
 /// The framework contains cleanup panics and may reclaim the publish core

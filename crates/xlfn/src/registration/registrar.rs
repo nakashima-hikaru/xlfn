@@ -71,7 +71,7 @@ impl HostRegistrar {
     ) -> Result<RegistrationId, RegistrationTransactionError> {
         let names = descriptor.descriptor();
         if host
-            .is_registered_name(names.excel_name)
+            .is_name_bound(names.excel_name)
             .map_err(RegistrationTransactionError::new)?
         {
             return Err(RegistrationTransactionError::new(
@@ -270,6 +270,49 @@ mod tests {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRY,
                 })
             ));
+        }
+    }
+
+    #[test]
+    fn registration_refuses_an_existing_hidden_name_with_a_non_id_value() {
+        use crate::registration::host::test_support::{CallbackScript, Reply};
+        use xlfn_sys::{XLERR_REF, XLF_EVALUATE, XLOPER12, XLOPER12Value, XLTYPE_STR};
+
+        const NAME: &str = "計算.Échéance";
+        let descriptor = RegistrationDescriptor {
+            excel_name: NAME,
+            ..test_descriptor()
+        };
+        let prepared = preflight_registration(&[descriptor]).unwrap();
+        let registrar = HostRegistrar {
+            module_path: PathBuf::new(),
+            module: CountedModuleName::from_units(&[]).unwrap(),
+        };
+        let mut text = [1, u16::from(b'x')];
+        for existing in [
+            XLOPER12::boolean(false),
+            XLOPER12::integer(0),
+            XLOPER12::number(0.0),
+            XLOPER12::nil(),
+            XLOPER12::error(XLERR_REF),
+            XLOPER12 {
+                value: XLOPER12Value {
+                    string: text.as_mut_ptr(),
+                },
+                xltype: XLTYPE_STR,
+            },
+        ] {
+            let script = CallbackScript::install([Reply::success(XLF_EVALUATE, existing)]);
+            let callbacks = HostCallbackSession::new();
+            let Err(error) = registrar.register_all(&RegistrationHost::new(&callbacks), &prepared)
+            else {
+                panic!("registration replaced a bound name");
+            };
+            assert!(matches!(
+                *error.source,
+                XllError::RegistrationConflict { name: NAME }
+            ));
+            script.assert_calls(&[XLF_EVALUATE]);
         }
     }
 

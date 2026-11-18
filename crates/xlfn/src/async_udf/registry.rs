@@ -384,12 +384,33 @@ impl TaskRegistry {
         Ok((admission, active, TaskRegistrationId(id)))
     }
 
-    pub(crate) fn cancel_calculation(&self, epoch: CalculationEpoch) -> TaskControlBatch {
-        let control = self.control.lock();
-        let Some(state) = control.calculations.get(&epoch) else {
-            return TaskControlBatch::new();
+    pub(crate) fn cancel_current_calculation(&self) -> TaskControlBatch {
+        let calculation = {
+            let _publication = self.publication.lock();
+            // SAFETY: publication retains the exact current allocation.
+            let current = unsafe { &*self.current.load(Ordering::Acquire) };
+            current.seal_admission();
+            // SAFETY: publication excludes reclamation while pinning, and
+            // this local pin is released before the registry borrow ends.
+            unsafe { CalculationPin::acquire(current) }
         };
-        state.close_admission().wait().drain_tasks()
+        calculation.get().close_admission().wait().drain_tasks()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_calculation(&self, epoch: CalculationEpoch) -> TaskControlBatch {
+        let calculation = {
+            let control = self.control.lock();
+            let _publication = self.publication.lock();
+            let Some(state) = control.calculations.get(&epoch) else {
+                return TaskControlBatch::new();
+            };
+            state.seal_admission();
+            // SAFETY: publication excludes reclamation while pinning, and
+            // this local pin is released before the registry borrow ends.
+            unsafe { CalculationPin::acquire(state) }
+        };
+        calculation.get().close_admission().wait().drain_tasks()
     }
 
     pub(crate) fn close_admission(&self) {
@@ -397,20 +418,31 @@ impl TaskRegistry {
     }
 
     pub(crate) fn request_close(&self) -> XllResult<RegistryClose<'_, CancellationPending>> {
-        let (claim, tasks) = CloseClaim::acquire(self, |control| {
+        let (claim, calculations) = CloseClaim::acquire(self, |control| {
             self.closing.store(true, Ordering::Release);
             drop(self.activity.control().seal());
-            for state in control.calculations.values() {
-                state.seal_admission();
-            }
-            let mut tasks = TaskControlBatch::new();
-            for state in control.calculations.values() {
-                tasks.extend(state.close_admission().wait().drain_tasks());
-            }
-            tasks
+            let _publication = self.publication.lock();
+            control
+                .calculations
+                .values()
+                .map(|state| {
+                    state.seal_admission();
+                    // SAFETY: publication excludes reclamation while pinning.
+                    // These local pins remain within the registry borrow.
+                    unsafe { CalculationPin::acquire(state) }
+                })
+                .collect()
         })?;
+        let mut tasks = CancellationPending {
+            tasks: TaskControlBatch::new(),
+        };
+        for calculation in calculations {
+            tasks
+                .tasks
+                .extend(calculation.get().close_admission().wait().drain_tasks());
+        }
         Ok(RegistryClose {
-            state: CancellationPending { tasks },
+            state: tasks,
             claim,
         })
     }
@@ -566,6 +598,44 @@ mod epoch_projection_tests {
         assert!(!registry.advance());
         assert_epoch(&registry, terminal);
         registry.request_close().unwrap().cancel().wait().finish();
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn miri_cancellation_and_close_drain_outside_registry_control() {
+    for close in [false, true] {
+        let registry = TaskRegistry::new();
+        registry.start(crate::AsyncTaskLimit::DEFAULT).unwrap();
+        let snapshot = registry.snapshot();
+        let calculation = snapshot.calculation.get();
+        let admission = calculation.enter_admission().unwrap();
+
+        std::thread::scope(|scope| {
+            let drainer = scope.spawn(|| {
+                if close {
+                    registry.request_close().unwrap().cancel().wait().finish();
+                } else {
+                    cancel_tasks(registry.cancel_current_calculation());
+                }
+            });
+            while calculation.enter_admission().is_ok() {
+                std::thread::yield_now();
+            }
+            let (acquired, observed) = std::sync::mpsc::channel();
+            let registry = &registry;
+            scope.spawn(move || {
+                drop(registry.control.lock());
+                acquired.send(()).unwrap();
+            });
+            let control_unlocked = observed.recv_timeout(std::time::Duration::from_secs(5));
+            drop(admission);
+            drainer.join().unwrap();
+            control_unlocked.expect("the registry control lock must remain available during drain");
+        });
+        if !close {
+            registry.request_close().unwrap().cancel().wait().finish();
+        }
     }
 }
 

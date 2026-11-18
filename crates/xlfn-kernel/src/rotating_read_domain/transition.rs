@@ -167,8 +167,7 @@ impl<'domain, const N: usize> NewRotation<'domain, N> {
         let next = self.old.index() ^ 1;
         let replacement = self.authority.domain.generations[next]
             .try_control()?
-            .try_drained()
-            .unwrap_or_else(|_| crate::invariant::fail_stop());
+            .try_prepare_reopen()?;
         let old = self.authority.domain.generations[self.old.index()].try_control()?;
         before_seal();
         if idle_only {
@@ -177,17 +176,18 @@ impl<'domain, const N: usize> NewRotation<'domain, N> {
                 *self.authority.pending = Some(self.old),
                 publish_then_release_barrier(barrier, |_| publish_then_reopen(
                     || self.authority.domain.current.store(next, Ordering::Release),
-                    || drop(replacement.reopen()),
+                    || replacement.reopen(),
                     || {}
                 ))
             );
         } else {
+            let sealed = old.try_seal()?;
             protocol::begin_rotation!(
-                drop(old.seal()),
+                drop(sealed),
                 *self.authority.pending = Some(self.old),
                 publish_then_release_barrier(barrier, |_| publish_then_reopen(
                     || self.authority.domain.current.store(next, Ordering::Release),
-                    || drop(replacement.reopen()),
+                    || replacement.reopen(),
                     || {}
                 ))
             );
@@ -235,18 +235,26 @@ impl<'domain, const N: usize> DrainedRotation<'domain, N> {
     }
 
     pub(super) fn run<R>(
-        mut self,
+        self,
         operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> R,
     ) -> (NewRotation<'domain, N>, R) {
+        self.try_run(|certificate| Some(operation(certificate)))
+            .unwrap_or_else(|| crate::invariant::fail_stop())
+    }
+
+    fn try_run<R>(
+        mut self,
+        operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> Option<R>,
+    ) -> Option<(NewRotation<'domain, N>, R)> {
+        // A busy queue leaves the drained generation pending for a later
+        // attempt. This gate is never reused before the batch is extracted.
         let result = protocol::finish_rotation!(result;
-            operation(self.certificate()), *self.authority.pending = None);
-        // Retirement completed and cleared pending under this same lock.
-        // Transfer that exact result rather than reclassifying broad storage.
+            operation(self.certificate())?, *self.authority.pending = None);
         let next = NewRotation {
             old: self.authority.domain.current_generation(),
             authority: self.authority,
         };
-        (next, result)
+        Some((next, result))
     }
 }
 
@@ -333,7 +341,7 @@ impl<const N: usize> RotatingReadDomain<N> {
     pub(crate) fn try_quiesce_if_idle_with_publication_barrier<B, R>(
         &self,
         barrier: impl FnOnce(GenerationIndex) -> Option<B>,
-        operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> R,
+        operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> Option<R>,
     ) -> Option<Result<R, DomainClosed>> {
         self.try_idle_with_barrier_impl(barrier, operation, || {})
     }
@@ -349,7 +357,7 @@ impl<const N: usize> RotatingReadDomain<N> {
     pub(crate) fn poll_quiesce_with_publication_barrier<B, R>(
         &self,
         barrier: impl FnOnce(GenerationIndex) -> Option<B>,
-        operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> R,
+        operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> Option<R>,
     ) -> Option<Result<R, DomainClosed>> {
         let authority = match LockedDomain::try_lock(self)? {
             Ok(authority) => authority,
@@ -359,7 +367,7 @@ impl<const N: usize> RotatingReadDomain<N> {
             RotationStart::Pending(pending) => pending,
             RotationStart::New(new) => new.try_begin(barrier, false, || {})?,
         };
-        let (_, result) = pending.try_wait()?.run(operation);
+        let (_, result) = pending.try_wait()?.try_run(operation)?;
         Some(Ok(result))
     }
 
@@ -368,13 +376,13 @@ impl<const N: usize> RotatingReadDomain<N> {
         operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> R,
         before_seal: impl FnOnce(),
     ) -> Option<Result<R, DomainClosed>> {
-        self.try_idle_with_barrier_impl(|_| Some(()), operation, before_seal)
+        self.try_idle_with_barrier_impl(|_| Some(()), |c| Some(operation(c)), before_seal)
     }
 
     pub(super) fn try_idle_with_barrier_impl<B, R>(
         &self,
         barrier: impl FnOnce(GenerationIndex) -> Option<B>,
-        operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> R,
+        operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> Option<R>,
         before_seal: impl FnOnce(),
     ) -> Option<Result<R, DomainClosed>> {
         let authority = match LockedDomain::try_lock(self)? {
@@ -385,7 +393,7 @@ impl<const N: usize> RotatingReadDomain<N> {
             RotationStart::Pending(pending) => pending,
             RotationStart::New(new) => new.try_begin(barrier, true, before_seal)?,
         };
-        let (_, result) = pending.try_wait()?.run(operation);
+        let (_, result) = pending.try_wait()?.try_run(operation)?;
         Some(Ok(result))
     }
 
@@ -430,7 +438,7 @@ mod tests {
         assert_eq!(
             domain.poll_quiesce_with_publication_barrier(
                 |_| Some(()),
-                |proof| proof.index_for(&domain).unwrap()
+                |proof| proof.index_for(&domain)
             ),
             Some(Ok(0))
         );

@@ -168,30 +168,6 @@
     "reason": "The sole shared consuming implementation immediately passes the raw result to contain_panic."
   },
   {
-    "path": "crates/xlfn/src/return_abi/slot.rs",
-    "context": "# [ inline ] fn destroy",
-    "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
-    "count": 1,
-    "category": "resume",
-    "reason": "The consuming freeing capability poisons partially destroyed TLS storage and returns the original payload only to its resume-or-contain caller; successful destruction alone creates a reusable capability."
-  },
-  {
-    "path": "crates/xlfn/src/return_abi/slot.rs",
-    "context": "module root",
-    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
-    "count": 1,
-    "category": "resume",
-    "reason": "Import for the audited TLS destruction boundaries. Local destruction poisons the slot before returning the payload, and foreign destruction leaves producer TLS state untouched; both callers resume or contain it."
-  },
-  {
-    "path": "crates/xlfn/src/return_abi/slot.rs",
-    "context": "fn destroy_foreign",
-    "code": "catch_unwind(AssertUnwindSafe(|| {",
-    "count": 1,
-    "category": "resume",
-    "reason": "The defensive cross-thread free path leaves producer TLS state untouched and returns the original payload to the free boundary's resume-or-contain path."
-  },
-  {
     "path": "crates/xlfn/src/excel_rtd/windows.rs",
     "context": "# [ cfg ( test ) ]",
     "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",

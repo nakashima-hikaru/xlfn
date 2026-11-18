@@ -287,12 +287,6 @@ impl<N> NotificationAttempt<N> {
     pub(super) fn notifier(&self) -> &N {
         &self.notifier
     }
-    pub(super) fn with_notifier(self, notifier: N) -> Self {
-        Self {
-            ticket: self.ticket,
-            notifier,
-        }
-    }
 }
 
 pub(crate) struct PreparedNotification<N> {
@@ -311,9 +305,9 @@ impl<N> PreparedNotification<N> {
     }
 }
 
-pub(crate) enum NotificationCompletion<N> {
+pub(crate) enum NotificationCompletion {
     Finished,
-    Retry(NotificationAttempt<N>),
+    Retry,
     Failed(XllError),
 }
 
@@ -380,27 +374,15 @@ impl<N> RefreshState<N> {
         }
     }
 
-    pub(crate) fn signal_calling_mut(&mut self, ticket: u64) -> Option<&mut SignalState> {
+    pub(crate) fn signal_calling_mut(&mut self, ticket: u64) -> Option<(&mut SignalState, u8)> {
         let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase else {
             return None;
         };
-        if matches!(signal, SignalState::Calling { ticket: t, .. } if *t == ticket) {
-            Some(signal)
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn signal_for_ticket_mut(&mut self, ticket: u64) -> Option<&mut SignalState> {
-        let DeliveryPhase::BetweenRefreshes { signal } = &mut self.phase else {
-            return None;
-        };
-        match signal {
-            SignalState::Calling { ticket: t, .. } | SignalState::Signaled { ticket: t }
-                if *t == ticket =>
-            {
-                Some(signal)
-            }
+        match *signal {
+            SignalState::Calling {
+                ticket: active,
+                attempt,
+            } if active == ticket => Some((signal, attempt)),
             _ => None,
         }
     }
@@ -420,12 +402,15 @@ impl<N: Clone> RefreshState<N> {
         if !matches!(signal, SignalState::Dormant) {
             return Ok(None);
         }
-        let Some(notifier) = self.notifier.as_ref().cloned() else {
+        let Some(notifier) = self.notifier.as_ref() else {
             return Ok(None);
         };
         let ticket = self.next_notification_ticket;
         self.ensure_notification_ticket()?;
-        Ok(Some(PreparedNotification { ticket, notifier }))
+        Ok(Some(PreparedNotification {
+            ticket,
+            notifier: notifier.clone(),
+        }))
     }
 }
 

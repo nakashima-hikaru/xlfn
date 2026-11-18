@@ -626,26 +626,14 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
             })
         }
         #[cfg(feature = "rtd")]
-        {
-            let generation = self.protocol_generation();
-            let result = self
-                .lifecycle
-                .with_generation_services(|services| services.close_subscriptions(generation));
-            let Some(result) = result else {
-                #[cfg(test)]
-                {
-                    return Ok(crate::shutdown::StopOutcome {
-                        certificate: crate::excel_rtd_protocol::stopped_subscriptions(generation),
-                        issues: Vec::new(),
-                    });
-                }
-                #[cfg(not(test))]
-                {
-                    return Err(crate::XllError::Closing);
-                }
-            };
-            result
-        }
+        self.lifecycle
+            .with_service_snapshot(|services| match services {
+                Ok(services) => services.close_subscriptions(),
+                Err(absent) => Ok(crate::shutdown::StopOutcome {
+                    certificate: crate::shutdown::SubscriptionsStopped::absent_services(&absent),
+                    issues: Vec::new(),
+                }),
+            })
     }
 
     pub(in crate::runtime) fn seal_generation_services(

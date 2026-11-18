@@ -416,6 +416,12 @@ impl SuccessfulRegistrations {
     pub(super) fn from_applied(registrations: Vec<RegistrationId>) -> Self {
         Self(registrations)
     }
+    /// Records the cleanup obligations while retaining the completion
+    /// capability needed for the opening transaction's next transition.
+    pub(crate) fn take_journal(&mut self) -> HostMutationJournal {
+        Self(std::mem::take(&mut self.0)).into_journal()
+    }
+
     pub(crate) fn into_journal(self) -> HostMutationJournal {
         let superseded_metadata = self
             .0

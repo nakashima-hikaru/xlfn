@@ -142,6 +142,8 @@ where
 /// values. Errors and panics also apply the configured producer error policy
 /// to connected topics. A completed source is not restarted. Exited workers
 /// retain their runtime worker reservation until joined at shutdown.
+/// If the operating system rejects thread creation before the producer runs,
+/// a later subscription may retry startup with the same producer.
 ///
 /// Source subscription capacity includes removals not yet consumed by the
 /// producer, bounding the control backlog even under rapid reconnects. Data
@@ -325,15 +327,14 @@ impl<'a, P: Send + 'static> WorkerStart<'a, P> {
             job(producer);
         };
         let builder = Builder::new().name("xlfn-rtd-source".into());
-        if fail_spawn {
-            drop(run);
-            return Err(FailedWorker {
-                restore: self.0.complete().restore(),
-                error: std::io::Error::other("injected RTD source spawn failure"),
-            });
-        }
         let spawning = self.begin_spawn(permit);
-        spawning.finish(builder.spawn(run))
+        let result = if fail_spawn {
+            drop(run);
+            Err(std::io::Error::other("injected RTD source spawn failure"))
+        } else {
+            builder.spawn(run)
+        };
+        spawning.finish(result)
     }
 }
 
@@ -451,6 +452,32 @@ impl<T, D: RtdDeliveryPolicy> Shared<T, D> {
         }
         drop(state);
         self.changed.notify_one();
+    }
+
+    fn rollback_first_registration(&self, id: RtdSubscriptionId) {
+        // The caller retains startup authority, so the worker never started
+        // and a second registration cannot race this rollback. Shutdown can
+        // already have cleared both entries. The caller also still owns the
+        // channel, so dropping these sender references cannot destroy it.
+        let (active, event) = {
+            let mut state = self.state.lock();
+            if state.closed {
+                return;
+            }
+            let active = state
+                .active
+                .remove(&id)
+                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+            let Some(event @ ControlEvent::Subscribe { id: queued, .. }) = state.events.pop_back()
+            else {
+                xlfn_kernel::invariant::fail_stop();
+            };
+            if queued != id {
+                xlfn_kernel::invariant::fail_stop();
+            }
+            (active, event)
+        };
+        drop((active, event));
     }
 
     fn stop(&self) {
@@ -657,7 +684,7 @@ where
         // Reserve before registering control events: a rejected first worker
         // must return the source slot even when no consumer exists yet.
         let permit = ChannelBudget::try_worker(budget)?;
-        let subscription = self.register_channel(topic, channel)?;
+        let mut subscription = self.register_channel(topic, channel)?;
         // Retain ownership outside the spawn closure. Failed OS thread creation
         // drops that closure synchronously; it must not destroy user captures
         // while this source's worker mutex is held.
@@ -677,22 +704,31 @@ where
         let fail_spawn = self.fail_spawn.swap(false, Ordering::Relaxed);
         #[cfg(not(test))]
         let fail_spawn = false;
-        match starting.spawn(permit, run, fail_spawn) {
+        let (pending, error) = match starting.spawn(permit, run, fail_spawn) {
             Ok(running) => {
                 running.install();
                 self.worker.started.store(true, Ordering::Release);
-                Ok(subscription)
+                return Ok(subscription);
             }
             Err(failed) => {
                 let FailedWorker { restore, error } = failed;
+                let pending = subscription
+                    .pending
+                    .take()
+                    .expect("startup owns its first channel");
+                self.worker.shared.rollback_first_registration(pending.id);
                 drop(restore);
-                self.worker.shared.stop();
-                Err(XllError::Native {
-                    code: error.raw_os_error().unwrap_or(0),
-                    message: format!("failed to start RTD source worker: {error}"),
-                })
+                (pending, error)
             }
-        }
+        };
+        drop(worker);
+        // The failed registration was never delivered, so no removal event
+        // is needed. Return its capacity after revoking its sink.
+        drop(pending);
+        Err(XllError::Native {
+            code: error.raw_os_error().unwrap_or(0),
+            message: format!("failed to start RTD source worker: {error}"),
+        })
     }
 }
 

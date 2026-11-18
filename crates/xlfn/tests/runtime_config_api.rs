@@ -105,3 +105,18 @@ fn configuring_one_feature_preserves_the_other_feature_settings() {
     assert_ne!(CONFIG, RuntimeConfig::new().with_handles(HANDLES));
     assert_ne!(CONFIG, RuntimeConfig::new().with_rtd(RTD));
 }
+
+#[test]
+fn diagnostic_file_rotation_has_const_settings() {
+    use std::num::NonZeroU64;
+    use xlfn::diagnostics::DiagnosticFileConfig;
+
+    const DEFAULT: DiagnosticFileConfig = DiagnosticFileConfig::new();
+    const SMALL: DiagnosticFileConfig = DEFAULT
+        .with_maximum_file_bytes(NonZeroU64::new(64 * 1024).unwrap())
+        .with_archives(0);
+    assert_eq!(DEFAULT, DiagnosticFileConfig::default());
+    assert_eq!(DEFAULT.archives(), 3);
+    assert_eq!(SMALL.maximum_file_bytes().get(), 64 * 1024);
+    assert_eq!(SMALL.archives(), 0);
+}

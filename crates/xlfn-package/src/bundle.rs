@@ -98,15 +98,26 @@ pub struct StagedBundle {
 }
 
 impl StagedBundle {
+    /// Adds fallback external imports for DLLs absent from the staged bundle.
+    /// Configured external imports remain subject to dependency graph validation.
     pub fn try_add_external_imports(
         &mut self,
         imports: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> PackageResult {
+        let bundled = self
+            .files
+            .iter()
+            .map(|file| file.name.to_ascii_lowercase())
+            .collect::<BTreeSet<_>>();
         let normalized = imports
             .into_iter()
             .map(|name| windows_dll_name_key("external import", name.as_ref()))
             .collect::<PackageResult<Vec<_>>>()?;
-        self.external_imports.extend(normalized);
+        self.external_imports.extend(
+            normalized
+                .into_iter()
+                .filter(|name| !bundled.contains(name)),
+        );
         Ok(())
     }
 }
@@ -176,7 +187,8 @@ pub(crate) fn resolve_bundle_files_with_policy_impl(
         validate_relative("bundle file", configured_path)?;
         // Windows reparse points may initiate an SMB connection even during
         // canonicalization. Reject them before resolving/opening any source.
-        if strict_paths || cfg!(target_os = "windows") {
+        let disallow_links = strict_paths || cfg!(target_os = "windows");
+        if disallow_links {
             reject_reparse_points(&canonical_root, configured_path)?;
         }
         let unresolved_source = canonical_root.join(configured_path);
@@ -194,12 +206,17 @@ pub(crate) fn resolve_bundle_files_with_policy_impl(
             )
             .into());
         }
-        let mut opened_source = open_bundle_source_for_snapshot(&source)
+        let open_path = if disallow_links {
+            &unresolved_source
+        } else {
+            &source
+        };
+        let mut opened_source = open_bundle_source_for_snapshot(open_path)
             .map_err(|error| map_snapshot_open_error(target, &unresolved_source, error))?;
         observer.after_open();
 
         let opened_metadata = opened_source.metadata()?;
-        if !opened_metadata.is_file() {
+        if !opened_metadata.is_file() || is_reparse_point(&opened_metadata) {
             return Err(format!("{target}: missing {}", source.display()).into());
         }
         let current_source = fs::canonicalize(&unresolved_source)?;
@@ -208,7 +225,11 @@ pub(crate) fn resolve_bundle_files_with_policy_impl(
         }
         let canonical_source = open_bundle_source_for_snapshot(&source)
             .map_err(|error| map_snapshot_open_error(target, &source, error))?;
-        if !same_file_identity(&opened_source, &canonical_source)? {
+        let canonical_metadata = canonical_source.metadata()?;
+        if !canonical_metadata.is_file()
+            || is_reparse_point(&canonical_metadata)
+            || !same_file_identity(&opened_source, &canonical_source)?
+        {
             return Err(unstable_bundle_source(target, &unresolved_source));
         }
         let name = Path::new(configured_path)
@@ -253,7 +274,8 @@ pub fn verify_bundle_files(bundle: &ResolvedBundle, target: &str) -> PackageResu
 pub fn snapshot_file(target: &str, path: &Path) -> PackageResult<SharedBytes> {
     let mut file = open_bundle_source_for_snapshot(path)
         .map_err(|error| map_snapshot_open_error(target, path, error))?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || is_reparse_point(&metadata) {
         return Err(format!("{target}: source is not a file: {}", path.display()).into());
     }
     let snapshot = read_stable_snapshot(target, path, &mut file, &NoopSnapshotObserver)?;

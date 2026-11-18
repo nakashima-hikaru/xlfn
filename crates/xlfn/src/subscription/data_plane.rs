@@ -433,7 +433,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         let wait = self.server_gate.close_and_wait_begin();
         self.lifecycle
             .store(super::delivery::SERVER_LIFECYCLE_CLOSING, Ordering::Release);
-        let notifier = self.refresh.lock().detach_notifier();
+        let notifier = self.detach_update_notifier();
         self.clear_pending();
         PublishTerminationStart {
             publish: self,
@@ -959,44 +959,63 @@ impl<H: SubscriptionHost> PublishCore<H> {
             return Ok(());
         }
         let _operation = self.enter_operation()?;
+        let index = shard_index(topic_id);
         let mut values = values.into_iter();
         while let Some(mut value) = values.next() {
-            let (epoch, notify) = loop {
+            let (epoch, committed_update, outcome) = loop {
                 self.ensure_open()?;
                 let epoch = self.publish_epoch.load(Ordering::Acquire);
-                let mut shard = self.shards[shard_index(topic_id)].lock();
+                let mut shard = self.shards[index].lock();
                 if self.publish_epoch.load(Ordering::Acquire) != epoch {
                     continue;
                 }
-                let notify = loop {
+                let mut committed_update = false;
+                let outcome = loop {
                     if stopping.load(Ordering::Acquire) {
-                        return Ok(());
+                        break Ok(());
                     }
-                    self.ensure_open()?;
-                    let committed = self.commit_value(
+                    if let Err(error) = self.ensure_open() {
+                        break Err(error);
+                    }
+                    match self.commit_value(
                         &mut shard,
                         BufferIndex::from_epoch(epoch),
                         topic_id,
                         generation,
                         value,
-                    )?;
-                    if committed && self.notified_epoch.load(Ordering::Acquire) != epoch {
-                        break true;
+                    ) {
+                        Ok(committed) => committed_update |= committed,
+                        Err(error) => break Err(error),
                     }
                     // Refresh may rotate its epoch without this shard lock.
                     // Reacquire against the new epoch before the next value.
-                    if self.publish_epoch.load(Ordering::Acquire) != epoch {
-                        break false;
+                    if (committed_update && !self.was_notified(epoch))
+                        || self.publish_epoch.load(Ordering::Acquire) != epoch
+                    {
+                        break Ok(());
                     }
                     let Some(next) = values.next() else {
-                        return Ok(());
+                        break Ok(());
                     };
                     value = next;
                 };
-                break (epoch, notify);
+                break (epoch, committed_update, outcome);
             };
-            if notify && let Some(attempt) = self.prepare_notification_for_known_update(epoch)? {
-                attempt.drive();
+            // Every committed prefix participates in the publisher/refresh
+            // handshake, including a prefix followed by cancellation/error.
+            let notification = if committed_update {
+                self.prepare_notification_for_known_update(epoch)
+                    .map(|attempt| {
+                        if let Some(attempt) = attempt {
+                            attempt.drive();
+                        }
+                    })
+            } else {
+                Ok(())
+            };
+            outcome.and(notification)?;
+            if stopping.load(Ordering::Acquire) {
+                break;
             }
         }
         Ok(())
@@ -1007,15 +1026,16 @@ impl<H: SubscriptionHost> PublishCore<H> {
         notifier: H::Notifier,
     ) -> XllResult<Option<H::Notifier>> {
         let _operation = self.enter_operation()?;
-        let (retired, attempt) = {
-            self.ensure_open()?;
+        let retired;
+        let attempt = {
             let mut refresh = self.refresh.lock();
-            let retired = refresh.attach_notifier(notifier);
+            self.ensure_open()?;
+            self.invalidate_notified_epoch();
+            retired = refresh.attach_notifier(notifier);
             let has_updates = self.has_deliverable_updates();
-            let attempt = self.prepare_notification(&mut refresh, has_updates)?;
-            (retired, attempt)
+            self.prepare_notification(&mut refresh, has_updates)
         };
-        if let Some(attempt) = attempt {
+        if let Some(attempt) = attempt? {
             attempt.drive();
         }
         Ok(retired)
@@ -1023,6 +1043,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
     pub(crate) fn detach_update_notifier(&self) -> Option<H::Notifier> {
         let mut refresh = self.refresh.lock();
+        self.invalidate_notified_epoch();
         refresh.detach_notifier()
     }
 
@@ -1042,6 +1063,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
                     signal: signal @ (SignalState::Suppressed { .. } | SignalState::Signaled { .. }),
                 } = &mut refresh.phase
             {
+                self.invalidate_notified_epoch();
                 *signal = SignalState::Dormant;
             }
             self.prepare_notification(&mut refresh, has_updates)?
@@ -1422,7 +1444,10 @@ mod tests {
     }
 
     #[test]
-    fn delayed_publish_notification_uses_the_current_refresh_epoch() {
+    fn miri_publish_after_refresh_sample_rearms_the_old_notification() {
+        use super::{
+            BufferIndex, ConnectionGeneration, StoredRtdValue, SubscriptionId, TopicId, shard_index,
+        };
         use crate::excel_rtd::RtdNotifier;
         use crate::rtd::test_support::TestNotifierState;
         use crate::subscription::RefreshOutcome;
@@ -1435,17 +1460,51 @@ mod tests {
         server
             .attach_update_notifier(RtdNotifier::for_test(std::sync::Arc::clone(&notifier)))
             .unwrap();
+        let generation = ConnectionGeneration::new(1).unwrap();
+        for id in 1..=2 {
+            let topic = TopicId(id);
+            publish
+                .reserve_connection(topic, SubscriptionId(id as u64), generation)
+                .unwrap();
+            assert!(
+                publish
+                    .commit_connection(topic, generation, None)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        publish
+            .publish(TopicId(1), generation, StoredRtdValue::Integer(1))
+            .unwrap();
+        assert!(publish.disconnect_connection(TopicId(1)).unwrap().is_some());
+        assert_eq!(notifier.calls.load(Ordering::Acquire), 1);
+        assert_eq!(publish.ready_shards.load(Ordering::Acquire), 0);
+
+        let topic = TopicId(2);
+        let mut shard = publish.shards[shard_index(topic)].lock();
         let writer_epoch = publish.publish_epoch.load(Ordering::Acquire);
+        assert!(publish.was_notified(writer_epoch));
+        // The publisher has selected its buffer under a shard lock. This
+        // refresh misses that shard because it has no queued updates yet.
         server
             .begin_refresh()
             .unwrap()
             .complete(RefreshOutcome::Delivered)
             .unwrap();
-        assert_eq!(notifier.calls.load(Ordering::Acquire), 0);
+        assert_eq!(notifier.calls.load(Ordering::Acquire), 1);
+        assert!(
+            publish
+                .commit_value(
+                    &mut shard,
+                    BufferIndex::from_epoch(writer_epoch),
+                    topic,
+                    generation,
+                    StoredRtdValue::Integer(2)
+                )
+                .unwrap()
+        );
+        drop(shard);
 
-        // Model a writer delayed between releasing its shard and preparing a
-        // notification. Its observed epoch predates a completed refresh; only
-        // the notification-control lock determines the epoch reserved now.
         let attempt = publish
             .prepare_notification_for_known_update(writer_epoch)
             .unwrap()
@@ -1457,7 +1516,7 @@ mod tests {
             publish.notified_epoch.load(Ordering::Acquire),
             current_epoch
         );
-        assert_eq!(notifier.calls.load(Ordering::Acquire), 1);
+        assert_eq!(notifier.calls.load(Ordering::Acquire), 2);
 
         // Another stale writer cannot overwrite the already reserved epoch.
         assert!(
@@ -1470,6 +1529,93 @@ mod tests {
             publish.notified_epoch.load(Ordering::Acquire),
             current_epoch
         );
+        let batch = server.begin_refresh().unwrap();
+        assert_eq!(batch.updates().len(), 1);
+        assert_eq!(batch.updates()[0].value, StoredRtdValue::Integer(2));
+        batch.complete(RefreshOutcome::Delivered).unwrap();
+    }
+
+    #[test]
+    fn miri_abandoned_and_superseded_notification_tickets_leave_delivery_available() {
+        use super::{ConnectionGeneration, StoredRtdValue, SubscriptionId, TopicId};
+        use crate::excel_rtd::RtdNotifier;
+        use crate::rtd::test_support::TestNotifierState;
+        use crate::subscription::RefreshOutcome;
+        use std::sync::atomic::Ordering;
+
+        for abandoned in [true, false] {
+            let runtime = SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost>::new();
+            let server = runtime.register_test_server(1);
+            let publish = &server.test_server().publish;
+            let notifier = std::sync::Arc::new(TestNotifierState::new());
+            server
+                .attach_update_notifier(RtdNotifier::for_test(std::sync::Arc::clone(&notifier)))
+                .unwrap();
+            let topic = TopicId(1);
+            let generation = ConnectionGeneration::new(1).unwrap();
+            publish
+                .reserve_connection(topic, SubscriptionId(1), generation)
+                .unwrap();
+            publish
+                .publish(topic, generation, StoredRtdValue::Integer(1))
+                .unwrap();
+            let attempt = publish
+                .commit_connection(topic, generation, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(notifier.calls.load(Ordering::Acquire), 0);
+
+            if abandoned {
+                drop(attempt);
+                server.pulse_notification().unwrap();
+            } else {
+                let batch = server.begin_refresh().unwrap();
+                assert_eq!(batch.updates()[0].value, StoredRtdValue::Integer(1));
+                batch.complete(RefreshOutcome::Delivered).unwrap();
+                publish
+                    .publish(topic, generation, StoredRtdValue::Integer(2))
+                    .unwrap();
+                attempt.drive();
+            }
+            assert_eq!(notifier.calls.load(Ordering::Acquire), 1);
+            let batch = server.begin_refresh().unwrap();
+            assert_eq!(
+                batch.updates()[0].value,
+                StoredRtdValue::Integer(if abandoned { 1 } else { 2 })
+            );
+            batch.complete(RefreshOutcome::Delivered).unwrap();
+        }
+    }
+
+    #[test]
+    fn terminal_refresh_epoch_still_notifies_and_terminates() {
+        use crate::excel_rtd::RtdNotifier;
+        use crate::rtd::test_support::TestNotifierState;
+        use crate::subscription::RefreshOutcome;
+        use crate::subscription::tests::connected_sink;
+        use std::sync::atomic::Ordering;
+
+        let (_runtime, server, sink) = connected_sink::<i32>(None, "terminal-refresh-epoch");
+        let publish = &server.test_server().publish;
+        publish.publish_epoch.store(u64::MAX - 1, Ordering::Relaxed);
+        let notifier = std::sync::Arc::new(TestNotifierState::new());
+        server
+            .attach_update_notifier(RtdNotifier::for_test(std::sync::Arc::clone(&notifier)))
+            .unwrap();
+        server
+            .begin_refresh()
+            .unwrap()
+            .complete(RefreshOutcome::Delivered)
+            .unwrap();
+        assert!(server.begin_refresh().is_err());
+        assert_eq!(publish.publish_epoch.load(Ordering::Acquire), u64::MAX);
+        assert_eq!(publish.refresh.lock().next_refresh_id, 1);
+
+        sink.publish(1).unwrap();
+        sink.publish(2).unwrap();
+        assert_eq!(notifier.calls.load(Ordering::Acquire), 1);
+        server.terminate().unwrap();
+        assert!(matches!(sink.publish(3), Err(crate::XllError::Closing)));
     }
 
     #[test]

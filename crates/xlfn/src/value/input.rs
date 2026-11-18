@@ -475,9 +475,9 @@ impl<'call> ExcelInputCells<'call> {
         let mut budget = super::ArrayInputBudget::new::<T>(self.grid.cells().len(), self.argument)?;
         let _prepared_budget =
             super::ArrayInputBudget::new::<P>(self.grid.cells().len(), self.argument)?;
-        let mut values = Vec::with_capacity(self.grid.cells().len());
+        let mut values = super::try_allocate_cells(self.grid.cells().len())?;
         for cell in self.grid.cells() {
-            let value = XlValueRef::from_array_cell(cell)?;
+            let value = super::raw::checked_grid_cell(cell, self.argument)?;
             budget.include(value)?;
             values.push(prepare(value, self.argument)?);
         }
@@ -508,7 +508,7 @@ impl<'call> ExcelInputCells<'call> {
         let mut budget =
             Self::wrapped_budget::<T, P, RETAINED_BUDGET>(self.grid.cells().len(), self.argument)?;
         for cell in self.grid.cells() {
-            let value = XlValueRef::from_array_cell(cell)?;
+            let value = super::raw::checked_grid_cell(cell, self.argument)?;
             budget.include(value)?;
             validate(value, self.argument)?;
         }
@@ -524,7 +524,7 @@ impl<'call> ExcelInputCells<'call> {
     ) -> XllResult<PreparedExcelSequence<'call, T, T::Prepared>> {
         let mut budget = super::ArrayInputBudget::new::<T>(self.grid.cells().len(), self.argument)?;
         for cell in self.grid.cells() {
-            let value = XlValueRef::from_array_cell(cell)?;
+            let value = super::raw::checked_grid_cell(cell, self.argument)?;
             budget.include(value)?;
             // Built-in preparations have no owned resource or side effect.
             T::prepare(value, self.argument, identity)?;
@@ -544,7 +544,7 @@ impl<'call> ExcelInputCells<'call> {
             super::ArrayInputBudget::new::<f64>(self.grid.cells().len(), self.argument)?;
         let argument = self.argument;
         identity.f64_sequence(self.grid.cells().iter().map(|cell| {
-            let value = XlValueRef::from_array_cell(cell)?;
+            let value = super::raw::checked_grid_cell(cell, self.argument)?;
             budget.include(value)?;
             f64::from_excel(value, argument)
         }))?;
@@ -679,10 +679,10 @@ impl<'source, T, P, D: SequenceMaterializer<'source, T, P>>
         match self.state {
             SequenceState::Retained(values) => values.into_iter().map(D::retained).collect(),
             SequenceState::Borrowed(cells) => {
-                let mut values = Vec::with_capacity(cells.grid.cells().len());
+                let mut values = super::try_allocate_cells(cells.grid.cells().len())?;
                 for cell in cells.grid.cells() {
                     values.push(D::borrowed(
-                        XlValueRef::from_array_cell(cell)?,
+                        super::raw::checked_grid_cell(cell, cells.argument)?,
                         cells.argument,
                     )?);
                 }
@@ -712,7 +712,10 @@ impl<'source, T, P, D: SequenceMaterializer<'source, T, P>>
                     .scratch()
                     .collect_copy(cells.grid.cells().len(), |index| {
                         D::borrowed(
-                            XlValueRef::from_array_cell(&cells.grid.cells()[index])?,
+                            super::raw::checked_grid_cell(
+                                &cells.grid.cells()[index],
+                                cells.argument,
+                            )?,
                             cells.argument,
                         )
                     })
@@ -1003,15 +1006,6 @@ impl<'call> CallContext<'call> {
             CallAccess::Plain(_) => None,
         }
     }
-    #[cfg(feature = "handles")]
-    pub(crate) fn into_plain_return_guard(
-        self,
-    ) -> Option<crate::handle::FormulaHandleServiceRead<'call>> {
-        match self.access {
-            CallAccess::Plain(_) => None,
-            CallAccess::Runtime(access) => access.handles.into_read_guard(),
-        }
-    }
 }
 
 /// Exclusive input-decoding authority. Runtime access owns its fresh token by
@@ -1061,7 +1055,7 @@ impl<'brand, 'call> DecodeCallContext<'brand, 'call> {
                 storage,
                 token,
                 #[cfg(feature = "handles")]
-                handles: call.handle_call_access(),
+                handles: call.handle_call_access(storage),
             },
         }
     }
@@ -1142,8 +1136,7 @@ impl<'brand, 'call> DecodeCallContext<'brand, 'call> {
         &mut self,
         token: &str,
     ) -> XllResult<crate::handle::Handle<'call, T>> {
-        // get() returns a borrow anchored in the enclosing generation owner,
-        // not in this short mutable borrow of decoding authority.
+        // The call storage retains this service through domain-permit release.
         let handles = match &self.access {
             DecodeCallAccess::Runtime { handles, .. } => handles.get()?,
             _ => {
@@ -1509,11 +1502,7 @@ where
     T::decode(
         borrowed,
         argument,
-        &mut DecodeCallContext::from_handle_access(
-            storage,
-            token,
-            crate::handle::FormulaHandleServiceResolver::new(slot),
-        ),
+        &mut DecodeCallContext::from_handle_access(storage, token, storage.handle_resolver(slot)),
         &mut (),
     )
 }

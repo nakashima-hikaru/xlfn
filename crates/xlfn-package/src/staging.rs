@@ -134,12 +134,14 @@ pub(crate) fn open_bundle_source_for_snapshot(path: &Path) -> io::Result<std::fs
 
     #[cfg(target_os = "windows")]
     {
-        use crate::win32::FILE_SHARE_READ;
+        use crate::win32::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
         use std::os::windows::fs::OpenOptionsExt;
 
         // Other readers remain allowed, but writers and delete/rename operations
         // are rejected while this handle is alive.
-        options.share_mode(FILE_SHARE_READ as u32);
+        options
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT as u32)
+            .share_mode(FILE_SHARE_READ as u32);
     }
 
     options.open(path)
@@ -157,7 +159,7 @@ pub(crate) fn open_commit_source_file(path: &Path) -> io::Result<std::fs::File> 
     {
         use std::os::unix::fs::OpenOptionsExt;
 
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
 
     #[cfg(target_os = "windows")]
@@ -198,7 +200,7 @@ pub(crate) fn open_staged_path_no_follow_with_kind(
         // O_NOFOLLOW makes the final component an object identity check rather
         // than a path lookup. The staging parent is private and the directory
         // identity is checked again after all entries have been opened.
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
 
     #[cfg(target_os = "windows")]

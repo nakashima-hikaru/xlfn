@@ -577,6 +577,13 @@ impl HandlesQuiescent {
 }
 
 impl FormulaHandleServiceSealed {
+    pub(crate) fn absent_services(absent: crate::lifecycle::AbsentGenerationServices) -> Self {
+        Self {
+            generation: absent.generation(),
+            service: None,
+        }
+    }
+
     fn from_slot(
         generation: RuntimeGeneration,
         slot: &FormulaHandleServiceSlot,
@@ -605,20 +612,6 @@ impl FormulaHandleServiceSealed {
                 generation: self.generation,
             }),
         }
-    }
-
-    pub(crate) fn absent_services<A: crate::Addin>(
-        control: &crate::lifecycle::LifecycleAccess<'_, A>,
-    ) -> XllResult<Self> {
-        if control.generation_services().is_some() {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-            });
-        }
-        Ok(Self {
-            generation: control.protocol_generation(),
-            service: None,
-        })
     }
 }
 
@@ -724,50 +717,48 @@ impl FormulaHandleServiceSlot {
 }
 
 #[cfg(feature = "handles")]
+pub(crate) type ResolvedFormulaHandleService = OnceCell<(
+    std::ptr::NonNull<FormulaHandleServiceSlot>,
+    XllResult<xlfn_kernel::service_slot::DetachedGenerationServiceRead<FormulaHandleService>>,
+)>;
+
+#[cfg(feature = "handles")]
 pub(crate) struct FormulaHandleServiceResolver<'call> {
     slot: &'call FormulaHandleServiceSlot,
-    resolved: OnceCell<XllResult<FormulaHandleServiceRead<'call>>>,
+    resolved: &'call ResolvedFormulaHandleService,
 }
 
 #[cfg(feature = "handles")]
+#[allow(
+    unsafe_code,
+    reason = "The generative call scope owns the detached read permit"
+)]
 impl<'call> FormulaHandleServiceResolver<'call> {
     #[inline]
-    pub(crate) fn new(slot: &'call FormulaHandleServiceSlot) -> Self {
-        Self {
-            slot,
-            resolved: OnceCell::new(),
-        }
+    /// # Safety
+    /// The cache must be destroyed before the slot can move or be dropped.
+    pub(crate) const unsafe fn new(
+        slot: &'call FormulaHandleServiceSlot,
+        resolved: &'call ResolvedFormulaHandleService,
+    ) -> Self {
+        Self { slot, resolved }
     }
 
-    /// Transfers an existing admission without resolving an unused service.
-    pub(crate) fn into_read_guard(self) -> Option<FormulaHandleServiceRead<'call>> {
-        self.resolved.into_inner().and_then(Result::ok)
-    }
-
-    /// Returns a shared reference to the `FormulaHandleService` valid for `'call`.
-    ///
-    /// The first call acquires a read permit; subsequent calls within the same
-    /// UDF invocation return the cached guard without another admission.
+    /// The invocation owns the cached permit until after its binding readers
+    /// have drained, so the returned service can borrow that same invocation.
     #[inline]
-    #[allow(
-        unsafe_code,
-        reason = "Extends FormulaHandleService reference to 'call anchored by OnceCell and StripedDrainPermit"
-    )]
     pub(crate) fn get(&self) -> XllResult<&'call FormulaHandleService> {
-        match self.resolved.get_or_init(|| self.slot.read()) {
-            Ok(runtime) => {
-                let service: &FormulaHandleService = runtime;
-                let ptr = std::ptr::NonNull::from(service);
-                // SAFETY: `self.slot` is borrowed for `'call`. The acquired
-                // `GenerationServiceRead<'call>` is retained in `self.resolved` for the
-                // lifetime of this resolver, keeping the read permit active. Extending
-                // the reference to `'call` also relies on the enclosing admitted
-                // generation/service owner outliving the CallScope and its
-                // permit-release tail. CallContext::with_call borrows that
-                // CallGuard; standalone fixtures retain an equivalent owner.
-                Ok(unsafe { ptr.as_ref() })
-            }
-            Err(error) => Err(error.clone()),
+        let issuer = std::ptr::NonNull::from(self.slot);
+        let (slot, result) = self.resolved.get_or_init(|| {
+            let read = self.slot.read().map(|read| {
+                // SAFETY: new binds this cache to an enclosing slot owner.
+                unsafe { read.detach() }
+            });
+            (issuer, read)
+        });
+        if *slot != issuer {
+            return Err(XllError::Closing);
         }
+        result.as_deref().map_err(Clone::clone)
     }
 }

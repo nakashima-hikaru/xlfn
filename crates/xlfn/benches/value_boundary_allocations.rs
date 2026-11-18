@@ -298,6 +298,13 @@ fn main() {
         enumeration, text,
         "scalar enum labels must use the borrowed writer"
     );
+    if !cfg!(feature = "refinement") {
+        // The counted string and its Excel-owned root each have independent
+        // storage. Primitive scalar results keep the existing borrowed path.
+        assert_eq!(text.allocations, 2 * MEASURED_CALLS);
+        assert_eq!(text.deallocations, 2 * MEASURED_CALLS);
+        assert_eq!(text.reallocations, 0);
+    }
     let numbers = measure("scalar_output/number", || scalar.run_number());
     assert_runtime_allocation_free("scalar_output/number", numbers);
 

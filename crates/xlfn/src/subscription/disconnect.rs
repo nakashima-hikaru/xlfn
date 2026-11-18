@@ -1,5 +1,5 @@
 //! Generation-owned cleanup for COM DisconnectData. The caller revokes the
-//! topic immediately; this worker joins its producers without blocking an STA.
+//! topic immediately; generation-owned workers join producers off the STA.
 
 use super::host::SubscriptionHost;
 use super::server::{OwnedServerOperation, disconnect_one_no_unwind};
@@ -131,13 +131,14 @@ struct DisconnectWorkerResources<
 > {
     queue: Arc<DisconnectQueue<H, E, C>>,
     handle: JoinHandle<()>,
+    helper: Option<JoinHandle<()>>,
 }
 
 impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Rollback
     for DisconnectWorkerResources<H, E, C>
 {
     fn rollback(self) {
-        // Losing the unique join handle would detach a worker that can still
+        // Losing a join handle would detach a worker that can still
         // hold runtime and COM resources.
         xlfn_kernel::invariant::fail_stop();
     }
@@ -148,16 +149,12 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
 {
     fn new(queue: Arc<DisconnectQueue<H, E, C>>, handle: JoinHandle<()>) -> Self {
         Self {
-            pending: RollbackGuard::new(DisconnectWorkerResources { queue, handle }),
+            pending: RollbackGuard::new(DisconnectWorkerResources {
+                queue,
+                handle,
+                helper: None,
+            }),
         }
-    }
-
-    fn join_failed_start(self) {
-        let DisconnectWorkerResources { queue, handle } = self.pending.complete();
-        // The queue was never published, so no job or STA callback can be
-        // waiting on this worker. A returned panic still establishes exit.
-        let _ = join_worker(handle);
-        drop(queue);
     }
 }
 
@@ -167,12 +164,19 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Dra
     type Output = ();
 
     fn run(self) {
-        let DisconnectWorkerResources { queue, handle } = self.pending.complete();
+        let DisconnectWorkerResources {
+            queue,
+            handle,
+            helper,
+        } = self.pending.complete();
         let require_join = std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
         queue.closed.store(true, Ordering::Release);
         queue.ready.lock().stopping = true;
         queue.changed.notify_all();
-        if join_worker(handle).is_err() || queue.outstanding.load(Ordering::Acquire) != 0 {
+        let primary = join_worker(handle);
+        let secondary = helper.map(join_worker).transpose();
+        if primary.is_err() || secondary.is_err() || queue.outstanding.load(Ordering::Acquire) != 0
+        {
             xlfn_kernel::invariant::fail_stop();
         }
         std::mem::DropGuard::dismiss(require_join);
@@ -188,10 +192,10 @@ fn join_worker(handle: JoinHandle<()>) -> Result<(), CaughtPanic> {
     contain_panic(result)
 }
 
-/// One lazy worker per generation. Every live or retiring source owner reserves
-/// capacity before subscription starts, so terminal disconnect never competes
-/// with new connections for cleanup capacity or worker startup. Runtime
-/// admission keeps every queued job alive until its sink-user barrier finishes.
+/// Up to two lazy workers per generation. An independent barrier can complete
+/// while another producer is still exiting. Every live or retiring source
+/// owner reserves cleanup capacity before subscription starts. Runtime
+/// admission keeps each queued job alive until its sink-user barrier finishes.
 pub(super) struct DisconnectPool<
     H: SubscriptionHost,
     E: RtdSubscription,
@@ -204,6 +208,8 @@ pub(super) struct DisconnectPool<
     fail_spawn: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_initialize: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_secondary_initialize: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_stop_preflight: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -222,6 +228,8 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             fail_spawn: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_initialize: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_secondary_initialize: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_stop_preflight: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -284,49 +292,25 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             {
                 return Err(XllError::Overloaded);
             }
-            let shared = Arc::clone(&queue);
-            let (started, startup) = std::sync::mpsc::sync_channel(1);
             #[cfg(test)]
             let fail_initialize = self
                 .fail_initialize
                 .swap(false, std::sync::atomic::Ordering::Relaxed);
-            let builder = Builder::new().name("xlfn-rtd-disconnect".into());
-            let require_spawn_result =
-                std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
-            let spawned = builder.spawn(move || {
+            #[cfg(not(test))]
+            let fail_initialize = false;
+            let handle = Self::start_worker(&queue, fail_initialize)?;
+            let mut running = RunningDisconnect::new(queue, handle);
+            if self.capacity > 1 {
+                // A second worker improves progress but is optional if the OS
+                // cannot start it. The primary still owns the empty queue.
+                let resources = running.pending.get_mut();
                 #[cfg(test)]
-                if fail_initialize {
-                    let _ = started.send(Err(XllError::Overloaded));
-                    return;
-                }
-                #[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
-                let _apartment = match crate::excel_rtd::ComApartmentGuard::enter() {
-                    Ok(apartment) => apartment,
-                    Err(code) => {
-                        let _ = started.send(Err(XllError::Native {
-                            code,
-                            message: "failed to initialize RTD cleanup COM apartment".into(),
-                        }));
-                        return;
-                    }
-                };
-                if started.send(Ok(())).is_ok() {
-                    shared.run();
-                }
-            });
-            std::mem::DropGuard::dismiss(require_spawn_result);
-            let handle = spawned.map_err(|error| XllError::Native {
-                code: error.raw_os_error().unwrap_or(0),
-                message: format!("failed to start RTD disconnect worker: {error}"),
-            })?;
-            let running = RunningDisconnect::new(queue, handle);
-            // Publish the queue only after worker startup succeeds. Failure
-            // joins its empty worker before a source acquires any sink users.
-            if let Err(error) = startup.recv().unwrap_or(Err(XllError::Panic)) {
-                // The failure paths have not acquired a COM apartment or
-                // admitted a job, so this join has no STA dispatch dependency.
-                running.join_failed_start();
-                return Err(error);
+                let fail_initialize = self
+                    .fail_secondary_initialize
+                    .swap(false, Ordering::Relaxed);
+                #[cfg(not(test))]
+                let fail_initialize = false;
+                resources.helper = Self::start_worker(&resources.queue, fail_initialize).ok();
             }
             let _ = self.published.set(Arc::clone(&running.pending.get().queue));
             *worker = DisconnectWorker::Running(running);
@@ -338,6 +322,54 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             .published
             .get()
             .expect("successful startup publishes its queue"))
+    }
+
+    fn start_worker(
+        queue: &Arc<DisconnectQueue<H, E, C>>,
+        fail_initialize: bool,
+    ) -> XllResult<JoinHandle<()>> {
+        let shared = Arc::clone(queue);
+        let (started, startup) = std::sync::mpsc::sync_channel(1);
+        let builder = Builder::new().name("xlfn-rtd-disconnect".into());
+        // A native spawn/handshake unwind could leave a worker alive without
+        // transferring its join owner. A returned initialization failure is
+        // safe to join here: no apartment or published job can wait on the STA.
+        let require_outcome =
+            std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
+        let result = (|| {
+            let handle = builder
+                .spawn(move || {
+                    if fail_initialize {
+                        let _ = started.send(Err(XllError::Overloaded));
+                        return;
+                    }
+                    #[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
+                    let _apartment = match crate::excel_rtd::ComApartmentGuard::enter() {
+                        Ok(apartment) => apartment,
+                        Err(code) => {
+                            let _ = started.send(Err(XllError::Native {
+                                code,
+                                message: "failed to initialize RTD cleanup COM apartment".into(),
+                            }));
+                            return;
+                        }
+                    };
+                    if started.send(Ok(())).is_ok() {
+                        shared.run();
+                    }
+                })
+                .map_err(|error| XllError::Native {
+                    code: error.raw_os_error().unwrap_or(0),
+                    message: format!("failed to start RTD disconnect worker: {error}"),
+                })?;
+            if let Err(error) = startup.recv().unwrap_or(Err(XllError::Panic)) {
+                let _ = join_worker(handle);
+                return Err(error);
+            }
+            Ok(handle)
+        })();
+        std::mem::DropGuard::dismiss(require_outcome);
+        result
     }
 
     pub(super) fn stop(&self) -> XllResult<()> {
@@ -362,7 +394,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         if self.fail_stop_preflight.swap(false, Ordering::Relaxed) {
             return self.retain_worker(drain, XllError::Overloaded);
         }
-        // The final job releases runtime admission before this worker's
+        // The final job releases runtime admission before either worker's
         // CoUninitialize. Keep the closing STA dispatchable through that tail.
         #[cfg(windows)]
         let joined = match crate::excel_rtd::drain_with_com_dispatch(drain)
@@ -645,6 +677,25 @@ mod tests {
     }
 
     #[test]
+    fn miri_secondary_cleanup_start_failure_keeps_primary_available() {
+        let pool = DisconnectPool::<RtdSubscriptionHost, (), crate::DynamicRtdSources<()>>::new(2);
+        pool.fail_secondary_initialize
+            .store(true, Ordering::Relaxed);
+        let reservations = (pool.reserve().unwrap(), pool.reserve().unwrap());
+        {
+            let worker = pool.worker.lock();
+            let DisconnectWorker::Running(running) = &*worker else {
+                panic!("the primary retains cleanup responsibility");
+            };
+            assert!(running.pending.get().helper.is_none());
+        }
+        assert!(matches!(pool.reserve(), Err(XllError::Overloaded)));
+        drop(reservations);
+        pool.stop().unwrap();
+        assert!(matches!(pool.reserve(), Err(XllError::Closing)));
+    }
+
+    #[test]
     fn deferred_disconnect_reenters_from_channel_notification_without_waiting_for_it() {
         let notifier = StdArc::new(TestNotifierState::new());
         let (runtime, server, sender) = channel_runtime(RtdSubscriptionHost::detached());
@@ -708,6 +759,108 @@ mod tests {
         closed_rx.recv_timeout(DEADLINE).unwrap().unwrap();
         closing.join().unwrap();
         assert!(completed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn deferred_disconnect_overlaps_independent_subscription_barriers() {
+        struct BlockedBarrier {
+            started: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        }
+
+        struct Cleanup(Option<BlockedBarrier>);
+
+        // SAFETY: this fixture never retains the sink. Its barrier only
+        // simulates an unrelated worker that can be slow to exit.
+        unsafe impl RtdSubscription for Cleanup {
+            fn request_cancel(&self) {}
+
+            fn disconnect_and_wait(self) -> XllResult<()> {
+                if let Some(barrier) = self.0 {
+                    barrier.started.send(()).unwrap();
+                    barrier.release.recv_timeout(DEADLINE).unwrap();
+                }
+                Ok(())
+            }
+        }
+
+        struct Source(Mutex<Option<BlockedBarrier>>);
+
+        // SAFETY: subscribe drops the unused sink before returning.
+        unsafe impl RtdSource for Source {
+            type Value = i32;
+            type Subscription = Cleanup;
+
+            fn subscribe(&self, _: &RtdTopic, _: RtdSink<i32>) -> XllResult<Cleanup> {
+                Ok(Cleanup(self.0.lock().take()))
+            }
+        }
+
+        struct SignalOnDrop(mpsc::Sender<()>);
+
+        impl Drop for SignalOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        let (started, observed_start) = mpsc::channel();
+        let (release, observed_release) = mpsc::channel();
+        let generation = RuntimeGeneration::new(1).unwrap();
+        let registration = SourceRegistration::new(generation);
+        let slow = registration
+            .register(Source(Mutex::new(Some(BlockedBarrier {
+                started,
+                release: observed_release,
+            }))))
+            .unwrap();
+        let fast = registration.register(Source(Mutex::new(None))).unwrap();
+        let runtime = SubscriptionRuntime::with_host(
+            generation,
+            crate::subscription::RtdLimits::standard(),
+            RtdSubscriptionHost::detached(),
+            registration.finish(),
+        );
+        let server = runtime.register_test_server(1);
+        for (id, source, name) in [(1, slow, "slow-cleanup"), (2, fast, "fast-cleanup")] {
+            let topic = RtdTopic::single(name).unwrap();
+            let prepared = runtime.prepare(&source, topic.borrowed()).unwrap();
+            let subscription = prepared.id();
+            prepared.commit();
+            server
+                .connect_transaction(TopicId(id), subscription)
+                .unwrap()
+                .commit()
+                .unwrap();
+        }
+
+        let first_completed = StdArc::new(AtomicBool::new(false));
+        server
+            .disconnect_deferred(
+                TopicId(1),
+                Box::new(Completion(StdArc::clone(&first_completed))),
+            )
+            .unwrap();
+        observed_start.recv_timeout(DEADLINE).unwrap();
+        let (completed, observed_completion) = mpsc::channel();
+        let start = std::time::Instant::now();
+        server
+            .disconnect_deferred(TopicId(2), Box::new(SignalOnDrop(completed)))
+            .unwrap();
+        let independent_completion = observed_completion.recv_timeout(Duration::from_millis(250));
+        let elapsed = start.elapsed();
+        // Release the first cleanup before any assertions so even a serial
+        // worker implementation can finish shutdown in this regression case.
+        let first_still_blocked = !first_completed.load(Ordering::Acquire);
+        release.send(()).unwrap();
+        runtime.close().unwrap();
+        assert!(first_still_blocked);
+        eprintln!("independent deferred disconnect: {elapsed:?}");
+        assert!(
+            independent_completion.is_ok(),
+            "the second disconnect waited for the blocked first cleanup"
+        );
     }
 
     struct FixtureSource {
@@ -1136,7 +1289,7 @@ mod tests {
             let DisconnectWorker::Running(running) = &*worker else {
                 panic!("failed preflight must retain the worker's unique owner");
             };
-            let DisconnectWorkerResources { queue, handle } = running.pending.get();
+            let DisconnectWorkerResources { queue, handle, .. } = running.pending.get();
             assert_eq!(handle.thread().id(), worker_id);
             assert!(
                 !handle.is_finished(),
@@ -1197,7 +1350,7 @@ mod tests {
             let DisconnectWorker::Running(running) = &*worker else {
                 panic!("COM preparation must return the unstarted drain");
             };
-            let DisconnectWorkerResources { queue, handle } = running.pending.get();
+            let DisconnectWorkerResources { queue, handle, .. } = running.pending.get();
             assert_eq!(handle.thread().id(), worker_id);
             assert!(!handle.is_finished());
             assert!(Arc::ptr_eq(queue, original_queue));
