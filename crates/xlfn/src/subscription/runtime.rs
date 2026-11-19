@@ -429,6 +429,14 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             .publish
             .commit_connection(topic_id, generation, observed_sequence)?;
 
+        // A notifier may unwind or synchronously disconnect this connection.
+        // Keep the catalog reservation rollback-capable until it returns. A
+        // reentrant disconnect invalidates this exact ticket, so the final
+        // transition cannot resurrect it or overwrite a successor connection.
+        if let Some(attempt) = attempt {
+            attempt.drive();
+        }
+
         {
             let mut catalog = self.catalog.lock();
             if !catalog
@@ -437,10 +445,6 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             {
                 return Err(XllError::Closing);
             }
-        }
-
-        if let Some(attempt) = attempt {
-            attempt.drive();
         }
 
         Ok(())
@@ -624,6 +628,10 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     }
 
     pub(crate) fn close_for_shutdown(&self) -> XllResult<RuntimeShutdownOutcome> {
+        run_shutdown_with_dispatch(|| self.close_after_dispatch())
+    }
+
+    fn close_after_dispatch(&self) -> XllResult<RuntimeShutdownOutcome> {
         match RuntimeTermination::begin(self) {
             RuntimeTerminationAdmission::Owner(owner) => owner
                 .request_stop()
@@ -638,6 +646,14 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             return Ok(RuntimeShutdownOutcome::PublisherPanicked);
         }
         Ok(RuntimeShutdownOutcome::Clean)
+    }
+
+    /// Revoke background admission and signal shared sources before an outer
+    /// host barrier waits for deferred disconnects. Those jobs retain both
+    /// host and runtime admission until their sink-user barriers complete.
+    pub(crate) fn request_stop_before_host_drain(&self) {
+        let _closing = self.services.runtime_gate.close_and_wait_begin();
+        self.record_cleanup_result(self.sources.request_stop());
     }
 
     #[cfg(all(test, feature = "rtd"))]
@@ -678,7 +694,29 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
 
     pub(crate) fn terminate_server(&self, generation: ServerGeneration) -> XllResult<()> {
         let server = self.resolve_server(generation).ok_or(XllError::Closing)?;
-        server.begin_termination(self).request_cancel().finish()
+        run_shutdown_with_dispatch(|| server.begin_termination(self).request_cancel().finish())
+    }
+}
+
+/// Prepare dispatch before claiming a completion owner. If apartment, event,
+/// or helper startup fails, no terminal transition or subscription barrier has
+/// begun. Once started, preserve STA COM dispatch through all joins, including
+/// per-subscription disconnects and runtime/server operation-gate waits.
+fn run_shutdown_with_dispatch<T: Send>(
+    operation: impl FnOnce() -> XllResult<T> + Send,
+) -> XllResult<T> {
+    #[cfg(windows)]
+    {
+        use crate::excel_rtd::drain_wait::UnstartedDrain;
+
+        let prepared = crate::excel_rtd::drain_with_com_dispatch(UnstartedDrain::new(operation))
+            .map_err(|(error, _unstarted)| error)?;
+        let joined = prepared.run().map_err(|(error, _unstarted)| error)?;
+        joined.into_output()
+    }
+    #[cfg(not(windows))]
+    {
+        operation()
     }
 }
 

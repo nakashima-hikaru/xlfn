@@ -624,12 +624,12 @@ impl ShutdownTraceRecorder {
         let observation = event.into_observation();
         #[cfg(any(test, feature = "refinement"))]
         let mut lifted_certificate = None;
-        let mut terminal_outcome = None;
         {
             let mut state = self.state.lock();
             let RecorderState::Recording(session) = &mut *state else {
                 return;
             };
+            let mut terminal_outcome = None;
             match observation {
                 ShutdownObservation::Activity(activity) => {
                     if session.activities.len() < MAX_TRACE_EVENTS {
@@ -657,13 +657,14 @@ impl ShutdownTraceRecorder {
             }
             if let Some(outcome) = terminal_outcome {
                 session.outcome = outcome;
-            }
-        }
-        if terminal_outcome.is_some() {
-            let mut state = self.state.lock();
-            let previous = std::mem::replace(&mut *state, RecorderState::Idle);
-            if let RecorderState::Recording(session) = previous {
-                *state = RecorderState::Terminal(session);
+                // Recording the terminal certificate and sealing its session
+                // are one transition. Releasing this lock between them lets
+                // another terminal observer consume the same session, or lets
+                // an old observer seal a newly begun generation.
+                let previous = std::mem::replace(&mut *state, RecorderState::Idle);
+                if let RecorderState::Recording(session) = previous {
+                    *state = RecorderState::Terminal(session);
+                }
             }
         }
         #[cfg(any(test, feature = "refinement"))]
@@ -792,6 +793,49 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&recorder.trace_json().unwrap()).unwrap()["outcome"],
             "quarantined"
         );
+    }
+
+    #[test]
+    fn concurrent_terminal_observations_preserve_the_first_complete_trace() {
+        let recorder = recorder();
+        for generation in 1..=32 {
+            recorder
+                .begin(generation, ShutdownResources::opened(0, 0, false))
+                .unwrap();
+            let barrier = std::sync::Barrier::new(8);
+            std::thread::scope(|scope| {
+                for index in 0..8 {
+                    let recorder = &recorder;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        recorder.record(if index % 2 == 0 {
+                            ShutdownEvent::Quarantine(ShutdownFailure::BoundaryPanic)
+                        } else {
+                            ShutdownEvent::FailStop(ShutdownFailure::InvariantViolation)
+                        });
+                    });
+                }
+            });
+            let Some(ShutdownTrace::Committed {
+                generation: recorded_generation,
+                certificates,
+                outcome,
+                ..
+            }) = recorder.trace()
+            else {
+                panic!("terminal observations must retain the completed trace");
+            };
+            assert_eq!(recorded_generation, generation);
+            assert_eq!(certificates.len(), 1);
+            let expected = match certificates[0] {
+                CertificateEvent::Quarantine(_) => "quarantined",
+                CertificateEvent::FailStop(_) => "fail_stopped",
+                ref other => panic!("unexpected terminal certificate: {other:?}"),
+            };
+            assert_eq!(outcome, expected);
+            assert!(!recorder.active());
+        }
     }
 
     #[test]

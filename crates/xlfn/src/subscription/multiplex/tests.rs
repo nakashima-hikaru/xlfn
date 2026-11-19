@@ -55,27 +55,41 @@ fn miri_prepared_and_failed_spawn_restore_the_original_producer() {
 }
 
 #[test]
-#[cfg_attr(
-    miri,
-    ignore = "unknown OS result deliberately retains producer and quota"
-)]
-fn unknown_spawn_outcome_preserves_the_capture_and_quota_on_unwind() {
-    let budget = Arc::new(ChannelBudget::runtime(
-        RtdLimits::standard().with_max_workers(RtdCapacity::disabled_if_zero(1)),
-    ));
-    let drops = StdArc::new(AtomicUsize::new(0));
-    let mut worker = Worker::Joining;
-    let permit = ChannelBudget::try_worker(&budget).unwrap();
-    let outcome = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+#[cfg_attr(miri, ignore = "requires a child process to observe fail-stop")]
+fn unknown_spawn_outcome_cannot_leave_an_unowned_join_barrier() {
+    const CHILD: &str = "XLFN_TEST_MULTIPLEX_UNKNOWN_SPAWN";
+    if std::env::var_os(CHILD).is_some() {
+        let budget = Arc::new(ChannelBudget::runtime(
+            RtdLimits::standard().with_max_workers(RtdCapacity::disabled_if_zero(1)),
+        ));
+        let drops = StdArc::new(AtomicUsize::new(0));
+        let mut worker = Worker::Joining;
+        let permit = ChannelBudget::try_worker(&budget).unwrap();
         let _spawning = UnstartedWorker::new(&mut worker, CountedProducer(StdArc::clone(&drops)))
             .capture()
             .begin_spawn(permit);
         panic!("injected unknown OS startup result");
-    }));
-    assert!(outcome.is_err());
-    assert!(matches!(worker, Worker::Joining));
-    assert_eq!(drops.load(Ordering::Relaxed), 0);
-    assert!(ChannelBudget::try_worker(&budget).is_err());
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "subscription::multiplex::tests::unknown_spawn_outcome_cannot_leave_an_unowned_join_barrier",
+        ])
+        .env(CHILD, "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(status.signal(), Some(6), "expected fail-stop SIGABRT");
+    }
+    #[cfg(not(unix))]
+    {
+        assert!(!status.success());
+        assert_ne!(status.code(), Some(101), "expected fail-stop");
+    }
 }
 
 #[test]

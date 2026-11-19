@@ -116,15 +116,14 @@ pub open spec fn step_release_manual(s: OperationGateState) -> Option<OperationG
     }
 }
 
-/// State transition on completion of close_and_wait_begin().wait().
-pub open spec fn step_wait_until_quiescent(s: OperationGateState) -> OperationGateState
-    recommends s.is_closing,
-{
-    OperationGateState {
-        is_closing: true,
-        active: 0,
-        outstanding_guards: 0,
-        outstanding_owned_guards: 0,
+/// Observes completion of close_and_wait_begin().wait(). Waiting cannot
+/// discharge another owner's permit: release transitions must first make the
+/// sealed gate idle. This is a safety condition, not a termination theorem.
+pub open spec fn step_wait_until_quiescent(s: OperationGateState) -> Option<OperationGateState> {
+    if s.is_closing && s.active == 0 {
+        Some(s)
+    } else {
+        None
     }
 }
 
@@ -148,19 +147,20 @@ pub proof fn og1_closed_gate_precludes_admission(s: OperationGateState)
 /// **[OG-2] Operation Quiescence on Termination Wait**:
 /// Completion of `close_and_wait_begin().wait()` guarantees that the gate is closing
 /// and all operations have drained (`active == 0` and zero outstanding guards).
-pub proof fn og2_termination_wait_establishes_quiescence(s: OperationGateState)
+pub proof fn og2_termination_wait_establishes_quiescence(
+    s: OperationGateState,
+    completed: OperationGateState,
+)
     requires
         operation_gate_inv(s),
+        step_wait_until_quiescent(s) == Some(completed),
     ensures
-        ({
-            let s_closed = step_begin_close(s);
-            let s_idle = step_wait_until_quiescent(s_closed);
-            &&& s_idle.is_closing
-            &&& s_idle.active == 0
-            &&& s_idle.outstanding_guards == 0
-            &&& s_idle.outstanding_owned_guards == 0
-            &&& operation_gate_inv(s_idle)
-        }),
+        completed == s,
+        completed.is_closing,
+        completed.active == 0,
+        completed.outstanding_guards == 0,
+        completed.outstanding_owned_guards == 0,
+        operation_gate_inv(completed),
 {
 }
 
@@ -172,6 +172,7 @@ pub proof fn og3_guard_implies_active(s: OperationGateState)
         s.outstanding_guards > 0,
     ensures
         s.active > 0,
+        step_wait_until_quiescent(step_begin_close(s)) == None::<OperationGateState>,
 {
 }
 
@@ -186,6 +187,7 @@ pub proof fn og4_owned_guard_prevents_premature_reclamation(s: OperationGateStat
     ensures
         s.active > 0,
         s.active != 0,
+        step_wait_until_quiescent(step_begin_close(s)) == None::<OperationGateState>,
 {
 }
 

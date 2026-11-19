@@ -482,7 +482,6 @@ impl HandleRegistry {
             let phase = self.phase();
             match phase {
                 HandleRegistryPhase::Closed => {
-                    self.cleanup_result()?;
                     return Ok(HandleRegistrySealed { registry: self });
                 }
                 HandleRegistryPhase::Sealing => return Err(XllError::Closing),
@@ -507,7 +506,6 @@ impl HandleRegistry {
         self.bindings.read_domain().seal();
         self.phase
             .store(HandleRegistryPhase::Closed as u8, Ordering::Release);
-        self.cleanup_result()?;
         Ok(HandleRegistrySealed { registry: self })
     }
 }

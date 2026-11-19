@@ -4,7 +4,7 @@ use crate::{AsyncTaskLimit, ExcelError, XllError, XllResult};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Default)]
 struct ExecutorState {
@@ -16,6 +16,8 @@ struct ExecutorState {
     submitted: AtomicUsize,
     permit_drops: AtomicUsize,
     executor_drops: AtomicUsize,
+    panic_before_submit: AtomicBool,
+    panic_after_submit: AtomicBool,
 }
 
 struct HoldingExecutor(Arc<ExecutorState>);
@@ -55,8 +57,16 @@ impl AsyncExecutor for HoldingExecutor {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        assert!(
+            !self.0.panic_before_submit.load(Ordering::Relaxed),
+            "submit panic before task transfer"
+        );
         self.0.submitted.fetch_add(1, Ordering::Relaxed);
         self.0.tasks.lock().push(Box::pin(task));
+        assert!(
+            !self.0.panic_after_submit.load(Ordering::Relaxed),
+            "submit panic after task transfer"
+        );
     }
 
     fn shutdown(&self) -> XllResult<()> {
@@ -92,6 +102,100 @@ fn assert_cancelled<T>(result: XllResult<T>) {
 fn assert_unregistered(runtime: &AsyncRuntime<HoldingExecutor>) {
     assert_eq!(runtime.registry().active_tasks.load(Ordering::Acquire), 0);
     assert_eq!(runtime.registry().next_task_id(), 1);
+}
+
+#[test]
+fn unsaturated_preflight_rejects_a_canceled_or_retired_snapshot() {
+    let (runtime, state) = start_runtime(AsyncTaskLimit::DEFAULT);
+    let retired = runtime.snapshot_calculation();
+    assert!(runtime.advance_calculation());
+    assert_cancelled(retired.preflight());
+    drop(retired);
+
+    let canceled = runtime.snapshot_calculation();
+    runtime.cancel_current_calculation();
+    assert_cancelled(canceled.preflight());
+    drop(canceled);
+    assert_eq!(state.reserves.load(Ordering::Relaxed), 0);
+    assert_unregistered(&runtime);
+    assert!(runtime.close().is_ok());
+}
+
+#[test]
+fn executor_reservation_panic_is_a_single_recoverable_launch_error() {
+    let (runtime, state) = start_runtime(AsyncTaskLimit::DEFAULT);
+    *state.reserve_hook.lock() = Some(Arc::new(|| panic!("reservation panic")));
+    assert!(matches!(
+        runtime.snapshot_calculation().reserve(),
+        Err(XllError::Panic)
+    ));
+    assert_unregistered(&runtime);
+    assert_eq!(state.submitted.load(Ordering::Relaxed), 0);
+    *state.reserve_hook.lock() = None;
+    drop(runtime.snapshot_calculation().reserve().unwrap());
+    assert_eq!(runtime.registry().active_tasks.load(Ordering::Acquire), 0);
+    assert!(runtime.close().is_ok());
+}
+
+#[test]
+fn sealed_registry_activity_is_closing_not_capacity_exhaustion() {
+    let (runtime, _) = start_runtime(AsyncTaskLimit::new(1).unwrap());
+    let registry = runtime.registry();
+    let reserved = super::task::ActiveReservation::try_acquire(registry).unwrap();
+    assert!(matches!(
+        super::task::ActiveReservation::try_acquire(registry),
+        Err(XllError::Overloaded)
+    ));
+    drop(registry.activity.control().seal());
+    assert!(matches!(
+        super::task::ActiveReservation::try_acquire(registry),
+        Err(XllError::Closing)
+    ));
+    drop(reserved);
+    assert_eq!(registry.active_tasks.load(Ordering::Acquire), 0);
+    assert!(runtime.close().is_ok());
+}
+
+#[test]
+fn executor_submit_panic_preserves_exact_task_ownership() {
+    struct Capture(Arc<AtomicUsize>);
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    for retained in [false, true] {
+        let (runtime, state) = start_runtime(AsyncTaskLimit::DEFAULT);
+        state
+            .panic_before_submit
+            .store(!retained, Ordering::Relaxed);
+        state.panic_after_submit.store(retained, Ordering::Relaxed);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let capture = Capture(Arc::clone(&drops));
+        let (cancellation, _) = crate::cancellation::TaskCancellationOwner::new(
+            crate::cancellation::CancellationGuarantee::BestEffort,
+        );
+        runtime
+            .snapshot_calculation()
+            .reserve()
+            .unwrap()
+            .commit_owned(
+                async move {
+                    let _capture = capture;
+                    std::future::pending::<()>().await;
+                },
+                cancellation,
+            );
+        assert_eq!(
+            runtime.registry().active_tasks.load(Ordering::Acquire),
+            usize::from(retained)
+        );
+        assert_eq!(drops.load(Ordering::Relaxed), usize::from(!retained));
+        drop(std::mem::take(&mut *state.tasks.lock()));
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(runtime.registry().active_tasks.load(Ordering::Acquire), 0);
+        assert!(runtime.close().is_ok());
+    }
 }
 
 #[test]

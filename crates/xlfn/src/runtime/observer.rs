@@ -16,6 +16,13 @@ use std::marker::PhantomData;
 #[cfg(any(test, feature = "refinement"))]
 use triomphe::Arc;
 
+#[cfg(test)]
+std::thread_local! {
+    static AFTER_OPEN_TRACE_CONNECTED: std::cell::Cell<Option<fn()>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
 pub(crate) struct RuntimeObserver {
     #[cfg(any(test, feature = "refinement"))]
     formal: crate::runtime_components::FormalState,
@@ -235,6 +242,16 @@ impl RuntimeObserver {
                     resources.rtd_class_factories = snapshot.rtd_class_factories;
                     resources.rtd_servers = snapshot.rtd_servers;
                     resources.rtd_server_locks = snapshot.rtd_server_locks;
+                    // Publish the parent session before the recorder can
+                    // accept any lifted certificate. In particular, a
+                    // concurrent diagnostic reconfiguration can report one
+                    // as soon as these trace handoff locks are released.
+                    self.record_composition_event(
+                        crate::composition_refinement::CompositionEvent::CommitOpen {
+                            attempt: attempt.get(),
+                            resources: resources.clone(),
+                        },
+                    );
                     trace
                         .begin(attempt.get(), resources.clone())
                         .expect("open trace begins before ingress publication");
@@ -242,6 +259,12 @@ impl RuntimeObserver {
                 })
             })
             .expect("diagnostic and RTD trace initialization succeeds");
+            #[cfg(test)]
+            AFTER_OPEN_TRACE_CONNECTED.with(|hook| {
+                if let Some(hook) = hook.take() {
+                    hook();
+                }
+            });
             deps.returns().set_trace_sink(Arc::clone(&trace));
             #[cfg(any(feature = "handles", feature = "rtd"))]
             _control
@@ -255,12 +278,6 @@ impl RuntimeObserver {
                 .expect("committed open generation publishes its services");
             #[cfg(feature = "async")]
             deps.async_runtime().set_trace_sink(Arc::clone(&trace));
-            self.record_composition_event(
-                crate::composition_refinement::CompositionEvent::CommitOpen {
-                    attempt: attempt.get(),
-                    resources,
-                },
-            );
         }
         #[cfg(not(any(test, feature = "refinement")))]
         let _ = (deps, attempt);

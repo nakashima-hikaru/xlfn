@@ -320,16 +320,60 @@ impl CrtObservation {
 }
 
 fn is_dynamic_crt_import(name: &str) -> bool {
+    // This observation also feeds the external-import allowlist. Keep exact
+    // known DLL names: accepting arbitrary msvcp/vcruntime prefixes would let
+    // unrelated dependencies bypass closed-world package verification.
     const DYNAMIC_CRT_IMPORTS: &[&str] = &[
         "ucrtbase.dll",
         "ucrtbased.dll",
+        "msvcrt.dll",
+        "msvcrtd.dll",
+        "msvcr70.dll",
+        "msvcr70d.dll",
+        "msvcr71.dll",
+        "msvcr71d.dll",
+        "msvcr80.dll",
+        "msvcr80d.dll",
+        "msvcr90.dll",
+        "msvcr90d.dll",
+        "msvcr100.dll",
+        "msvcr100d.dll",
+        "msvcr110.dll",
+        "msvcr110d.dll",
+        "msvcr120.dll",
+        "msvcr120d.dll",
+        "msvcp60.dll",
+        "msvcp60d.dll",
+        "msvcp70.dll",
+        "msvcp70d.dll",
+        "msvcp71.dll",
+        "msvcp71d.dll",
+        "msvcp80.dll",
+        "msvcp80d.dll",
+        "msvcp90.dll",
+        "msvcp90d.dll",
+        "msvcp100.dll",
+        "msvcp100d.dll",
+        "msvcp110.dll",
+        "msvcp110d.dll",
+        "msvcp120.dll",
+        "msvcp120d.dll",
         "vcruntime140.dll",
+        "vcruntime140d.dll",
         "vcruntime140_1.dll",
+        "vcruntime140_1d.dll",
         "msvcp140.dll",
+        "msvcp140d.dll",
         "msvcp140_1.dll",
+        "msvcp140_1d.dll",
         "msvcp140_2.dll",
+        "msvcp140_2d.dll",
         "msvcp140_atomic_wait.dll",
+        "msvcp140d_atomic_wait.dll",
         "msvcp140_codecvt_ids.dll",
+        "msvcp140d_codecvt_ids.dll",
+        "concrt140.dll",
+        "concrt140d.dll",
         "api-ms-win-crt-conio-l1-1-0.dll",
         "api-ms-win-crt-convert-l1-1-0.dll",
         "api-ms-win-crt-environment-l1-1-0.dll",
@@ -480,6 +524,49 @@ mod tests {
     }
 
     #[test]
+    fn static_rejects_debug_and_legacy_crt_in_normal_and_delay_imports() {
+        for name in [
+            "VCRUNTIME140D.DLL",
+            "vcruntime140_1d.dll",
+            "msvcp140d.dll",
+            "msvcp140_1d.dll",
+            "msvcp140_2d.dll",
+            "msvcp140d_atomic_wait.dll",
+            "msvcp140d_codecvt_ids.dll",
+            "concrt140d.dll",
+            "msvcrt.dll",
+            "msvcr100.dll",
+            "msvcr120d.dll",
+            "msvcp120.dll",
+        ] {
+            for delayed in [false, true] {
+                let mut info = PeInfo {
+                    crt_policy: Some(EffectiveCrtPolicy::Static),
+                    ..PeInfo::default()
+                };
+                if delayed {
+                    info.delay_imports.insert(name.to_owned());
+                } else {
+                    info.imports.insert(name.to_owned());
+                }
+                let error = CrtObservation::inspect(
+                    &info,
+                    ResolvedCrtPolicy::resolve(Some(CrtPolicy::Static), None),
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains(name));
+                let inherited = CrtObservation::inspect(
+                    &info,
+                    ResolvedCrtPolicy::resolve(Some(CrtPolicy::Inherit), None),
+                )
+                .unwrap();
+                assert_eq!(inherited.consistency, "potentially-mixed");
+                assert_eq!(inherited.observed_dynamic_crt_imports, [name]);
+            }
+        }
+    }
+
+    #[test]
     fn explicit_policy_rejects_non_msvc_targets() {
         assert!(
             validate_explicit_policy_target(CrtPolicy::Static, "x86_64-unknown-linux-gnu").is_err()
@@ -497,6 +584,9 @@ mod tests {
         assert!(!is_dynamic_crt_import("kernel32.dll"));
         assert!(!is_dynamic_crt_import("msvcp_private.dll"));
         assert!(!is_dynamic_crt_import("vcruntime_payload.dll"));
+        assert!(!is_dynamic_crt_import("vcruntime140d_payload.dll"));
+        assert!(!is_dynamic_crt_import("msvcr120_payload.dll"));
+        assert!(!is_dynamic_crt_import("msvcp999.dll"));
         assert!(!is_dynamic_crt_import("api-ms-win-crt-untrusted.dll"));
         assert!(is_dynamic_crt_import("ucrtbased.dll"));
     }

@@ -185,13 +185,28 @@ fn forget_untrusted_lifecycle_state<A: crate::Addin>(state: A::LifecycleState) {
     std::mem::forget(state);
 }
 
+fn discard_open_inputs<I>(inputs: I) -> bool {
+    if crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(inputs)))
+        .is_err()
+    {
+        crate::boundary::report_boundary_error("xlAutoOpen service inputs", &XllError::Panic);
+        false
+    } else {
+        true
+    }
+}
+
 fn abandon_open<A: crate::Addin, I>(
     deps: &OpenDeps<'_, A>,
     core: OpenCore<A, I>,
     lifecycle: LifecycleOwnership<'_, A>,
 ) {
     deps.returns().close_admission();
-    let (_, module_opening, _service_inputs) = core.into_parts();
+    let (_, module_opening, service_inputs) = core.into_parts();
+    // Source catalog destruction is application code. Keep the module and
+    // opening responsibility until it finishes, and contain its panic even
+    // when abandonment itself is running during an unwind.
+    discard_open_inputs(service_inputs);
     return_open_module(deps, module_opening.rollback(|| {}));
     let control_api = deps.lifecycle_control();
     let mut control = control_api.access();
@@ -601,7 +616,7 @@ impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
         // Release callback and lifecycle capabilities before either rollback
         // guard reenters the issuer on unwind.
         let quarantine;
-        let return_module;
+        let mut return_module;
         let installed = match self.pending.get_mut().lifecycle.take() {
             Some(LifecycleOwnership::Installed(binding)) => Some(binding),
             Some(LifecycleOwnership::Owned(state)) => {
@@ -639,6 +654,16 @@ impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
                 return;
             }
         };
+        // A final-removal waiter can claim the module as soon as it is
+        // returned. No application-owned service input may outlive that
+        // handoff, including a source destructor that reenters lifecycle code.
+        let service_inputs = return_module.get_mut().core.service_inputs.take();
+        if !discard_open_inputs(service_inputs) {
+            drop(request);
+            drop(return_module);
+            recovery.quarantine(None);
+            return;
+        }
         let disposition =
             super::orchestration::LifecycleOrchestrator::new(deps).mark_open_failed(attempt);
         let (_, module, _service_inputs) = return_module.complete().core.into_parts();
@@ -1710,6 +1735,79 @@ mod owner_tests {
     }
 
     #[test]
+    #[cfg(all(feature = "rtd", any(feature = "handles", not(target_os = "windows"))))]
+    fn miri_rollback_keeps_module_authority_until_sources_are_disposed() {
+        use crate::subscription::{RtdSink, RtdSource, RtdTopic, SourceRegistration};
+
+        struct ReenterOnDrop {
+            runtime: std::sync::Weak<Runtime<()>>,
+            attempt: OpenAttemptId,
+            drops: Arc<AtomicUsize>,
+            panic: bool,
+        }
+        impl Drop for ReenterOnDrop {
+            fn drop(&mut self) {
+                let runtime = self.runtime.upgrade().unwrap();
+                let mut control = runtime.lifecycle.access();
+                assert_eq!(control.phase(), LifecyclePhase::Closing);
+                assert_eq!(control.open_attempt(), Some(self.attempt));
+                let crate::lifecycle::FinalCloseDecision::Closing(closing) =
+                    control.final_close_decision()
+                else {
+                    panic!("close waiter lost its pending state");
+                };
+                assert!(closing.try_claim().is_none());
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                assert!(!self.panic, "injected source destructor panic");
+            }
+        }
+        // SAFETY: this source starts no work and never retains a sink.
+        #[allow(unsafe_code, reason = "test source never retains a subscription sink")]
+        unsafe impl RtdSource for ReenterOnDrop {
+            type Value = i32;
+            type Subscription = ();
+            fn subscribe(&self, _: &RtdTopic, _: RtdSink<i32>) -> XllResult<()> {
+                Err(XllError::Closing)
+            }
+        }
+
+        for rollback in [false, true] {
+            for panic in [false, true] {
+                let runtime = Arc::new(Runtime::<()>::new());
+                let opening = runtime.begin_open().unwrap();
+                let attempt = opening.attempt_id();
+                let registration = SourceRegistration::new(attempt.into_runtime_generation());
+                let drops = Arc::new(AtomicUsize::new(0));
+                let _source = registration
+                    .register(ReenterOnDrop {
+                        runtime: Arc::downgrade(&runtime),
+                        attempt,
+                        drops: Arc::clone(&drops),
+                        panic,
+                    })
+                    .unwrap();
+                let opening = runtime.publish_with_sources(opening, (), (), registration.finish());
+                runtime.lifecycle.access().request_closing_for_test();
+                if rollback {
+                    let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+                    opening.into_rollback().run(&lifecycle);
+                } else {
+                    drop(opening);
+                }
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    runtime.phase(),
+                    if rollback && !panic {
+                        LifecyclePhase::Closing
+                    } else {
+                        LifecyclePhase::Quarantined
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
     #[allow(
         clippy::mem_forget,
         reason = "a forgotten publication cannot certify success"
@@ -1779,6 +1877,64 @@ mod owner_tests {
             RetainedLifecycle(Arc::clone(drops)),
             crate::runtime_components::GenerationServiceInputs::empty_for_generation(generation),
         )
+    }
+
+    #[test]
+    fn removal_during_initialization_retains_the_shared_root_for_cleanup() {
+        let runtime = Runtime::<Probe>::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let transaction = initialized(&runtime, &drops);
+        runtime.lifecycle.access().request_closing_for_test();
+        let failure = match transaction.stage_generation(OpeningGeneration {
+            shared_state: (),
+            layers: (),
+            init_config: crate::addin_impl::RuntimeConfig::default(),
+        }) {
+            Ok(_) => panic!("closing attempt proceeded to publication"),
+            Err(failure) => failure,
+        };
+        assert!(runtime.has_opening_generation());
+        let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+        assert!(matches!(failure.recover(&lifecycle), XllError::Closing));
+        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(crate::boundary::host::host_auto_remove(&runtime), 1);
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(runtime.quarantine_snapshot().is_empty());
+    }
+
+    #[test]
+    fn abandoned_inputs_are_disposed_before_module_return_even_on_panic() {
+        struct Inputs<'a> {
+            runtime: &'a Runtime<()>,
+            observed: &'a std::cell::Cell<bool>,
+            panic: bool,
+        }
+        impl Drop for Inputs<'_> {
+            fn drop(&mut self) {
+                // Reentry must run outside the canonical lock, while the
+                // unique opening transaction still excludes final removal.
+                assert_eq!(self.runtime.phase(), LifecyclePhase::Opening);
+                assert!(self.runtime.lifecycle.access().open_attempt().is_some());
+                self.observed.set(true);
+                assert!(!self.panic, "injected source catalog destructor panic");
+            }
+        }
+        for panic in [false, true] {
+            let runtime = Runtime::<()>::new();
+            let observed = std::cell::Cell::new(false);
+            let transaction = runtime.begin_open().unwrap();
+            let (deps, Begun { core }, ()) = transaction.into_parts();
+            let core = core.map_inputs(|()| Inputs {
+                runtime: &runtime,
+                observed: &observed,
+                panic,
+            });
+            abandon_open(&deps, core, LifecycleOwnership::Uninstalled);
+            assert!(observed.get());
+            assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        }
     }
 
     #[test]

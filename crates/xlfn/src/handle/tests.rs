@@ -1054,7 +1054,9 @@ fn close_contains_panicking_destructors_and_continues_dropping() {
     insert_production(&registry, Arc::new(PanicOnDrop(Arc::clone(&payload_drops)))).unwrap();
     insert_production(&registry, Arc::new(CountOnDrop(Arc::clone(&drops)))).unwrap();
 
-    assert!(matches!(registry.seal().map(|_| ()), Err(XllError::Panic)));
+    let sealed = registry.seal().unwrap();
+    sealed.finish_quiescence().unwrap();
+    assert!(matches!(registry.cleanup_result(), Err(XllError::Panic)));
     assert_eq!(registry.len(), 0);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert_eq!(payload_drops.load(Ordering::Acquire), 0);

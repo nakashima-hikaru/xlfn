@@ -436,9 +436,13 @@ while a cleanup owner is still present is an `in_progress` observation until its
 release, rather than a terminal outcome.
 
 The positive composition fixtures include pending-open, owner-released, and
-unowned committed quarantine. `fixtures/composition-negative` rejects forged
-success for each path, active owners, zero pending diagnostics, a missing
-retention event, and a general close lift from the open publication marker.
+unowned committed quarantine, plus a committed fail-stop with its cleanup
+owner still present. A `fail_stopped` outcome requires the committed shutdown
+session to have reached its fail-stop phase; owner release is not required.
+`fixtures/composition-negative` rejects forged success for these terminal
+paths, a fail-stop outcome without its event, active quarantine owners, zero
+pending diagnostics, a missing retention event, and a general close lift from
+the open publication marker.
 Each negative has a paired `.stderr` file checked exactly by the replay step,
 so an unrelated parse failure cannot satisfy the regression. The forged-success
 cases change only the corresponding valid fixture's outcome.

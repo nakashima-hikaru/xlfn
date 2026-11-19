@@ -235,3 +235,64 @@ fn stripe_collision_does_not_suppress_blocking_writer_quiescence() {
     assert_eq!(domain.stats().pending_nodes, 0);
     // Queue-only sentinel ownership is never passed to a node destructor.
 }
+
+#[test]
+fn miri_cache_recovers_and_drops_after_resident_equality_panics() {
+    #[derive(Clone)]
+    struct Key {
+        id: u32,
+        panic_on_eq: Arc<AtomicBool>,
+    }
+    impl Hash for Key {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            // Force comparison with the first resident during insertion.
+            0_u8.hash(state);
+        }
+    }
+    impl PartialEq for Key {
+        fn eq(&self, other: &Self) -> bool {
+            assert!(
+                !self.panic_on_eq.swap(false, Ordering::Relaxed),
+                "injected resident equality panic",
+            );
+            self.id == other.id
+        }
+    }
+    impl Eq for Key {}
+
+    let panic_on_eq = Arc::new(AtomicBool::new(false));
+    let key = |id| Key {
+        id,
+        panic_on_eq: Arc::clone(&panic_on_eq),
+    };
+    // A broken poisoning backend must fail this assertion without entering an
+    // already-broken Drop path during test unwinding. Successful runs explicitly
+    // drop the cache below, exercising the complete reclamation protocol.
+    let cache = std::mem::ManuallyDrop::new(CalculationCache::<Key, u32>::new(
+        CacheBudget::weight_units(4),
+    ));
+    drop(cache.get_or_try_insert_with(key(1), || Ok(1)).unwrap());
+    let result = catch_no_unwind(AssertUnwindSafe(|| {
+        drop(
+            cache
+                .get_or_try_insert_with(key(2), || {
+                    panic_on_eq.store(true, Ordering::Relaxed);
+                    Ok(2)
+                })
+                .unwrap(),
+        );
+    }));
+    assert!(result.is_err());
+    let usable = catch_no_unwind(AssertUnwindSafe(|| {
+        assert_eq!(*cache.get(&key(1)).unwrap(), 1);
+        cache.clear();
+        assert!(cache.get(&key(1)).is_none());
+        drop(cache.get_or_try_insert_with(key(2), || Ok(2)).unwrap());
+        assert_eq!(*cache.get(&key(2)).unwrap(), 2);
+    }));
+    assert!(
+        usable.is_ok(),
+        "a key panic must not poison later cache access"
+    );
+    drop(std::mem::ManuallyDrop::into_inner(cache));
+}

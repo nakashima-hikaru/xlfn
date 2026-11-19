@@ -164,8 +164,9 @@ libc.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-link.workspace = true
 
-# Linux is only exercised for CI portability and Miri; avoid `parking_lot_core` 0.9.12's
-# Linux `futex` syscall under newer Miri while keeping `quick_cache/parking_lot` everywhere else.
+# Linux portability/Miri uses Quick Cache's unsynchronized policy behind the
+# kernel's non-poisoning mutex. Other hosts use the concurrent parking_lot backend.
+# This avoids both the old backend's Miri limitations and std RwLock poisoning.
 [target.'cfg(target_os = "linux")'.dependencies]
 quick_cache = { workspace = true, optional = true }
 

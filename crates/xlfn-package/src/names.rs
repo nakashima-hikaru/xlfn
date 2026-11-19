@@ -1,5 +1,20 @@
 use super::*;
 
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_path_wide(path: &Path) -> io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if wide.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows path contains an interior NUL",
+        ));
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
 pub(crate) fn validate_relative(field: &str, value: &str) -> PackageResult {
     let path = Path::new(value);
     if value.is_empty()

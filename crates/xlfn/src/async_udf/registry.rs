@@ -109,13 +109,24 @@ impl<'a> CalculationSnapshot<'a> {
     }
 
     pub(crate) fn preflight(&self) -> XllResult<()> {
-        if self.registry.preflight_available()? {
+        if self.preflight_available()? {
             return Ok(());
         }
         let (admission, active, _) = self.registry.admit(self.calculation.get())?;
         drop(active);
         drop(admission);
         Ok(())
+    }
+
+    pub(super) fn preflight_available(&self) -> XllResult<bool> {
+        let available = self.registry.preflight_available()?;
+        // A pinned allocation can already belong to a canceled/retired
+        // calculation even when the registry has ample capacity. Reject it
+        // before invoking user preparation; final reserve still rechecks.
+        if self.calculation.get().is_closing() {
+            return Err(cancelled_calculation_error());
+        }
+        Ok(available)
     }
 
     pub(crate) fn reserve(self) -> XllResult<TaskReservation<'a>> {
@@ -376,7 +387,7 @@ impl TaskRegistry {
                 hook();
             }
         }
-        let active = ActiveReservation::try_acquire(self).ok_or(XllError::Overloaded)?;
+        let active = ActiveReservation::try_acquire(self)?;
         let id = self
             .next_id
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))

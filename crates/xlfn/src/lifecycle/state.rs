@@ -2545,6 +2545,27 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     };
                     (Ok(()), TransitionEffect::Keep)
                 }
+                LifecycleState::Closing(ClosingState::OpeningActive {
+                    attempt,
+                    quarantine_requested,
+                    resources:
+                        ActiveOpeningClose::AwaitingAbort {
+                            payload: OpenAbortPayload::Empty,
+                        },
+                }) => {
+                    // A removal request may arrive while Addin::open runs.
+                    // Its still-active transaction owns this state and must
+                    // hand the shared payload to the same cleanup owner as
+                    // its lifecycle value, even though publication is denied.
+                    core.state = LifecycleState::Closing(ClosingState::OpeningActive {
+                        attempt,
+                        quarantine_requested,
+                        resources: ActiveOpeningClose::AwaitingAbort {
+                            payload: OpenAbortPayload::Staged(opening),
+                        },
+                    });
+                    (Ok(()), TransitionEffect::Keep)
+                }
                 other => {
                     core.state = other;
                     (

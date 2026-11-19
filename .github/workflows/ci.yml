@@ -642,6 +642,17 @@ jobs:
                   for trace in formal/fixtures/shutdown/*.json; do
                     formal/.lake/build/bin/shutdown_trace_checker < "$trace"
                   done
+                  for trace in formal/fixtures/shutdown-negative/*.json; do
+                    if actual=$(formal/.lake/build/bin/shutdown_trace_checker < "$trace" 2>&1); then
+                      echo "Invalid shutdown trace was accepted: $trace" >&2
+                      exit 1
+                    fi
+                    expected=$(cat "${trace%.json}.stderr")
+                    if [[ "$actual" != "$expected" ]]; then
+                      printf 'Unexpected rejection for %s\nExpected: %s\nActual: %s\n' "$trace" "$expected" "$actual" >&2
+                      exit 1
+                    fi
+                  done
 
             - name: Validate Windows RTD shutdown traces
               shell: bash

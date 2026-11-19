@@ -5,8 +5,29 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields};
 
+fn crate_path(attributes: &[syn::Attribute]) -> syn::Result<syn::Path> {
+    let mut explicit = None;
+    for attribute in attributes {
+        if !attribute.path().is_ident("excel_input") {
+            continue;
+        }
+        attribute.parse_nested_meta(|meta| {
+            if !meta.path.is_ident("crate") {
+                return Err(meta.error("expected `crate = \"...\"`"));
+            }
+            if explicit.is_some() {
+                return Err(meta.error("duplicate `crate` option"));
+            }
+            let expression: syn::Expr = meta.value()?.parse()?;
+            explicit = Some(crate::options::parse_expr_path(&expression)?);
+            Ok(())
+        })?;
+    }
+    Ok(resolve_crate_path(explicit.as_ref()))
+}
+
 pub(super) fn identity(input: DeriveInput) -> syn::Result<TokenStream> {
-    let krate = resolve_crate_path(None);
+    let krate = crate_path(&input.attrs)?;
     let name = input.ident;
     let mut generics = input.generics;
     let mut field_types = Vec::new();
@@ -18,7 +39,7 @@ pub(super) fn identity(input: DeriveInput) -> syn::Result<TokenStream> {
                     || syn::Member::Unnamed(syn::Index::from(index)),
                     syn::Member::Named,
                 );
-                quote!(#krate::value::ExcelInputIdentity::encode_input_identity(&self.#member, encoder);)
+                quote!(#krate::value::ExcelInputIdentity::encode_input_identity(&self.#member, _encoder);)
             }).collect::<Vec<_>>();
             quote!(#(#fields)*)
         }
@@ -41,8 +62,8 @@ pub(super) fn identity(input: DeriveInput) -> syn::Result<TokenStream> {
                 let tag = index as u64;
                 quote! {
                     Self::#variant_name #pattern => {
-                        encoder.u64(#tag);
-                        #(#krate::value::ExcelInputIdentity::encode_input_identity(#names, encoder);)*
+                        _encoder.u64(#tag);
+                        #(#krate::value::ExcelInputIdentity::encode_input_identity(#names, _encoder);)*
                     }
                 }
             }).collect::<Vec<_>>();
@@ -66,7 +87,7 @@ pub(super) fn identity(input: DeriveInput) -> syn::Result<TokenStream> {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     Ok(quote! {
         impl #impl_generics #krate::value::ExcelInputIdentity for #name #ty_generics #where_clause {
-            fn encode_input_identity(&self, encoder: &mut #krate::value::InputIdentityEncoder) {
+            fn encode_input_identity(&self, _encoder: &mut #krate::value::InputIdentityEncoder) {
                 #body
             }
         }
@@ -74,7 +95,7 @@ pub(super) fn identity(input: DeriveInput) -> syn::Result<TokenStream> {
 }
 
 pub(super) fn prepare(input: DeriveInput) -> syn::Result<TokenStream> {
-    let krate = resolve_crate_path(None);
+    let krate = crate_path(&input.attrs)?;
     let name = input.ident;
     let mut generics = input.generics.clone();
     let mut lifetime_name = "__xlfn_call".to_owned();
@@ -106,4 +127,48 @@ pub(super) fn prepare(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_input_derives_accept_an_explicit_facade_crate() {
+        for expand in [identity, prepare] {
+            let input = syn::parse_quote!(
+                #[excel_input(crate = "facade::api")]
+                struct Input;
+            );
+            let tokens = expand(input).unwrap().to_string();
+            assert!(tokens.contains("facade :: api :: value"));
+        }
+    }
+
+    #[test]
+    fn input_derive_options_reject_duplicates_and_unknown_fields() {
+        for expand in [identity, prepare] {
+            let duplicate = syn::parse_quote!(
+                #[excel_input(crate = "first")]
+                #[excel_input(crate = "second")]
+                struct Input;
+            );
+            assert!(
+                expand(duplicate)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("duplicate")
+            );
+            let unknown = syn::parse_quote!(
+                #[excel_input(unknown = "value")]
+                struct Input;
+            );
+            assert!(
+                expand(unknown)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("expected")
+            );
+        }
+    }
 }

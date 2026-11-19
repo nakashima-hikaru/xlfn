@@ -10,7 +10,12 @@ namespace XlFnFormal.TemporalOwnership
     In Rust, readers first acquire a permit from `DrainGate` before loading the
     `AtomicPtr<R>`.  `seal()` seals the gate, stores a null pointer, waits for
     all active readers to drain (`readers == 0`), and only then transfers the
-    unique `Box<R>` ownership. -/
+    unique `Box<R>` ownership.
+
+    These lemmas establish properties of the explicitly defined projection and
+    transfer relation. They do not prove correspondence to native atomics,
+    initialization/destructor callbacks, or the separate two-lane
+    `ReplaceableServiceSlot` implementation. -/
 
 inductive ServiceSlotPhase where
   | closed

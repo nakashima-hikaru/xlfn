@@ -318,9 +318,12 @@ mod tests {
         assert_eq!(owner.debt(), 0);
         assert!(!owner.is_reclaiming_here());
         assert!(matches!(
-            registry.objects.finish_quiescence(),
+            registry.objects.cleanup_result(),
             Err(crate::XllError::Panic)
         ));
+        // Disposal failed only after the payload's fields and retirement
+        // debt were discharged. That issue must not erase quiescence.
+        registry.objects.finish_quiescence().unwrap();
     }
 
     #[test]

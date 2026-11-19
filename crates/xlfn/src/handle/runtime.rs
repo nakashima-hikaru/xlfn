@@ -577,6 +577,20 @@ impl HandlesQuiescent {
 }
 
 impl FormulaHandleServiceSealed {
+    pub(crate) fn cleanup_issue(&self) -> Option<crate::shutdown::CleanupIssue> {
+        self.service
+            .as_ref()?
+            .store
+            .registry
+            .cleanup_result()
+            .err()
+            .map(|error| crate::shutdown::CleanupIssue {
+                component: "handle object disposal",
+                kind: crate::shutdown::CleanupIssueKind::DisposalPanicked,
+                error,
+            })
+    }
+
     pub(crate) fn absent_services(absent: crate::lifecycle::AbsentGenerationServices) -> Self {
         Self {
             generation: absent.generation(),

@@ -319,11 +319,15 @@ private def countActivity (predicate : Activity → Bool) : List Activity → Na
   | head :: tail =>
       (if predicate head then 1 else 0) + countActivity predicate tail
 
-private def checkCountPair (label : String) (starts stops : Nat) : Except String Unit := do
+private def checkCountPair (label : String) (starts stops : Nat)
+    (requireDrained : Bool := false) : Except String Unit := do
   if stops > starts then
     throw s!"{label} activity balance underflow"
+  if requireDrained && starts != stops then
+    throw s!"{label} activity remains at successful shutdown"
 
-private def checkActivities (initial : Resources) (activities : Array Activity) :
+private def checkActivities (initial : Resources) (activities : Array Activity)
+    (returnedSuccess : Bool := false) (moduleResidencyHeld : Bool := false) :
     Except String Unit := do
   let externalEnters := idsFor (fun activity =>
     match activity with
@@ -343,53 +347,64 @@ private def checkActivities (initial : Resources) (activities : Array Activity) 
     | _ => none) activities
   checkActivityPair "external entry" externalEnters externalLeaves
   checkActivityPair "call" callEnters callLeaves
+  checkCountPair "external entry" (initial.externalEntries + externalEnters.length)
+    externalLeaves.length returnedSuccess
+  checkCountPair "call" (initial.activeCalls + callEnters.length)
+    callLeaves.length returnedSuccess
   let observations := activities.toList
   checkCountPair "return block" 
-    (countActivity (fun activity => match activity with
+    (initial.returnBlocks + initial.returnBlocksInFree + countActivity (fun activity => match activity with
       | .createReturnBlock => true
       | _ => false) observations)
     (countActivity (fun activity => match activity with
       | .releaseReturnBlock => true
       | _ => false) observations)
+    returnedSuccess
   checkCountPair "return free" 
-    (countActivity (fun activity => match activity with
+    (initial.returnFreeOperations + countActivity (fun activity => match activity with
       | .beginReturnFree => true
       | _ => false) observations)
     (countActivity (fun activity => match activity with
       | .endReturnFree => true
       | _ => false) observations)
+    returnedSuccess
   checkCountPair "async task" 
-    (countActivity (fun activity => match activity with
+    (initial.asyncTasks + countActivity (fun activity => match activity with
       | .startAsyncTask => true
       | _ => false) observations)
     (countActivity (fun activity => match activity with
       | .endAsyncTask _ => true
       | _ => false) observations)
+    returnedSuccess
   checkCountPair "RTD operation" 
-    (countActivity (fun activity => match activity with
+    (initial.rtdOperations + countActivity (fun activity => match activity with
       | .beginRtdOperation => true
       | _ => false) observations)
     (countActivity (fun activity => match activity with
       | .endRtdOperation => true
       | _ => false) observations)
+    returnedSuccess
   checkCountPair "subscription" 
-    (countActivity (fun activity => match activity with
+    (initial.subscriptions + countActivity (fun activity => match activity with
       | .addSubscription => true
       | _ => false) observations)
     (countActivity (fun activity => match activity with
       | .removeSubscription => true
       | _ => false) observations)
+    returnedSuccess
   checkCountPair "callback" 
-    (countActivity (fun activity => match activity with
+    (initial.callbacks + countActivity (fun activity => match activity with
       | .beginCallback => true
       | _ => false) observations)
     (countActivity (fun activity => match activity with
       | .endCallback => true
       | _ => false) observations)
+    returnedSuccess
   -- A new generation can inherit terminal COM roots from the previous one.
   -- Their creation precedes this trace, so releases spend the initial snapshot
-  -- as well as this generation's additions. Only these module-lived counts
-  -- carry over; generation-local activity pairs retain their original checks.
+  -- as well as this generation's additions. Successful logical teardown may
+  -- retain these shells only while the final certificate keeps the module
+  -- resident; generation-local activities must always drain completely.
   checkCountPair "RTD class factory" 
     (initial.rtdClassFactories + countActivity (fun activity => match activity with
       | .addRtdClassFactory => true
@@ -397,6 +412,7 @@ private def checkActivities (initial : Resources) (activities : Array Activity) 
     (countActivity (fun activity => match activity with
       | .removeRtdClassFactory => true
       | _ => false) observations)
+    (returnedSuccess && !moduleResidencyHeld)
   checkCountPair "RTD server" 
     (initial.rtdServers + countActivity (fun activity => match activity with
       | .addRtdServer => true
@@ -404,6 +420,7 @@ private def checkActivities (initial : Resources) (activities : Array Activity) 
     (countActivity (fun activity => match activity with
       | .removeRtdServer => true
       | _ => false) observations)
+    (returnedSuccess && !moduleResidencyHeld)
   checkCountPair "RTD server lock" 
     (initial.rtdServerLocks + countActivity (fun activity => match activity with
       | .lockRtdServer => true
@@ -411,27 +428,39 @@ private def checkActivities (initial : Resources) (activities : Array Activity) 
     (countActivity (fun activity => match activity with
       | .unlockRtdServer => true
       | _ => false) observations)
+    (returnedSuccess && !moduleResidencyHeld)
   checkCountPair "handle" 
-    (countActivity (fun activity => match activity with
+    (initial.handles + countActivity (fun activity => match activity with
       | .addHandle => true
       | _ => false) observations)
     (countActivity (fun activity => match activity with
       | .removeHandle => true
       | _ => false) observations)
+    returnedSuccess
   checkCountPair "handle object" 
-    (countActivity (fun activity => match activity with
+    (initial.handleObjects + countActivity (fun activity => match activity with
       | .addHandleObject => true
       | _ => false) observations)
     (countActivity (fun activity => match activity with
       | .removeHandleObject => true
       | _ => false) observations)
+    returnedSuccess
   checkCountPair "handle pin" 
-    (countActivity (fun activity => match activity with
+    (initial.handlePins + countActivity (fun activity => match activity with
       | .addHandlePin => true
       | _ => false) observations)
     (countActivity (fun activity => match activity with
       | .removeHandlePin => true
       | _ => false) observations)
+    returnedSuccess
+  checkCountPair "diagnostic"
+    (initial.diagnosticsPending + countActivity (fun activity => match activity with
+      | .enqueueDiagnostic => true
+      | _ => false) observations)
+    (countActivity (fun activity => match activity with
+      | .flushDiagnostic | .discardDiagnostic => true
+      | _ => false) observations)
+    returnedSuccess
 
 private def retainedComInitial : Resources := {
   rtdClassFactories := 1
@@ -486,6 +515,42 @@ example : checkActivities {} #[.removeRtdClassFactory, .addRtdClassFactory] =
 
 example : checkActivities retainedComInitial #[.removeHandle] =
     .error "handle activity balance underflow" := by rfl
+
+-- Certificate replay alone must not erase independently observed live work.
+-- Append order is still irrelevant: balance is checked only at success.
+example : checkActivities {} #[.enterCall 7] = .ok () := by rfl
+example : checkActivities {} #[.enterCall 7] true =
+    .error "call activity remains at successful shutdown" := by rfl
+example : checkActivities {} #[.leaveCall 7, .enterCall 7] true = .ok () := by rfl
+example : checkActivities {} #[.enterExternal 8] true =
+    .error "external entry activity remains at successful shutdown" := by rfl
+example : checkActivities {} #[.createReturnBlock] true =
+    .error "return block activity remains at successful shutdown" := by rfl
+example : checkActivities {} #[.beginReturnFree] true =
+    .error "return free activity remains at successful shutdown" := by rfl
+example : checkActivities {} #[.startAsyncTask] true =
+    .error "async task activity remains at successful shutdown" := by rfl
+example : checkActivities {} #[.beginRtdOperation] true =
+    .error "RTD operation activity remains at successful shutdown" := by rfl
+example : checkActivities {} #[.addSubscription] true =
+    .error "subscription activity remains at successful shutdown" := by rfl
+example : checkActivities {} #[.beginCallback] true =
+    .error "callback activity remains at successful shutdown" := by rfl
+example : checkActivities {} #[.addHandle] true =
+    .error "handle activity remains at successful shutdown" := by rfl
+example : checkActivities {} #[.addHandleObject] true =
+    .error "handle object activity remains at successful shutdown" := by rfl
+example : checkActivities {} #[.addHandlePin] true =
+    .error "handle pin activity remains at successful shutdown" := by rfl
+example : checkActivities {} #[.enqueueDiagnostic] true =
+    .error "diagnostic activity remains at successful shutdown" := by rfl
+example : checkActivities {} #[.flushDiagnostic] =
+    .error "diagnostic activity balance underflow" := by rfl
+example : checkActivities { diagnosticsPending := 1 }
+    #[.enqueueDiagnostic, .flushDiagnostic, .discardDiagnostic] true = .ok () := by rfl
+example : checkActivities retainedComInitial #[] true true = .ok () := by rfl
+example : checkActivities retainedComInitial #[] true false =
+    .error "RTD class factory activity remains at successful shutdown" := by rfl
 
 private def checkEventWithProof (current : WireState) (event : Event) :
     Except String (Subtype fun next => wireRefinement.concreteStep current event next) := do
@@ -565,6 +630,7 @@ private def checkTrace (json : Json) : Except String Unit := do
     match trace.outcome with
     | "in_progress" => return ()
     | "returned_success" =>
+        checkActivities trace.initial trace.activities true final.state.resources.moduleResidencyHeld
         checkReturnedSuccess initial final trace.certificates.toList hInitialOpen hSteps
     | "fail_stopped" =>
         match final.state.phase with

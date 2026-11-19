@@ -127,9 +127,7 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         opening: OpeningGeneration<A>,
     ) -> Result<(), (XllError, OpeningGeneration<A>)> {
         let mut control = self.coordinator.access();
-        if control.open_attempt() != Some(attempt_id)
-            || control.phase() != crate::lifecycle::LifecyclePhase::Opening
-        {
+        if control.open_attempt() != Some(attempt_id) {
             return Err((XllError::Closing, opening));
         }
         self.coordinator

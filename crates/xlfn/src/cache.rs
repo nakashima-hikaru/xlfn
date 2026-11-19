@@ -38,7 +38,7 @@ use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 #[cfg(any(test, feature = "bench-internals"))]
 use std::time::Instant;
 use triomphe::Arc;
@@ -175,6 +175,40 @@ fn unit_weight<V>(_: &V) -> usize {
     1
 }
 
+/// A named resource accounting policy shared by cache endpoint descriptors.
+///
+/// Declare this as a `static` and pass the same reference to every descriptor
+/// for one endpoint identity. Separate policy objects remain distinct even
+/// when their functions have identical machine code. This avoids relying on
+/// function addresses, which Rust may merge or duplicate during code generation.
+///
+/// ```
+/// use xlfn::cache::{CacheEndpoint, CacheWeightPolicy};
+/// static BYTES: CacheWeightPolicy<String> = CacheWeightPolicy::new(String::len);
+/// static TEXT: CacheEndpoint<u32, String> =
+///     CacheEndpoint::new("text-v1").with_weigher(&BYTES);
+/// ```
+pub struct CacheWeightPolicy<V> {
+    weigher: fn(&V) -> usize,
+    // Interior mutability prevents constant promotion from manufacturing a
+    // shared identity for separate declarations. No writes are needed: the
+    // address of this non-zero-sized static token is the policy identity.
+    identity: AtomicU8,
+}
+
+impl<V> CacheWeightPolicy<V> {
+    /// Creates a policy. Store it in a `static` before attaching it to endpoints.
+    #[must_use]
+    pub const fn new(weigher: fn(&V) -> usize) -> Self {
+        Self {
+            weigher,
+            identity: AtomicU8::new(0),
+        }
+    }
+}
+
+type IdentifiedWeigher<V> = (&'static AtomicU8, fn(&V) -> usize);
+
 /// A reusable typed descriptor for one cache in a [`CacheRegistry`].
 ///
 /// Identity includes `K`, `V`, `Marker`, and the static ID. Descriptors with
@@ -183,7 +217,7 @@ fn unit_weight<V>(_: &V) -> usize {
 /// are invariant because endpoint memoization pairs them with concrete caches.
 pub struct CacheEndpoint<K, V, Marker = ()> {
     id: &'static str,
-    weigher: Option<fn(&V) -> usize>,
+    weigher: Option<IdentifiedWeigher<V>>,
     _key: Invariant<K>,
     _value: Invariant<V>,
     _marker: Invariant<Marker>,
@@ -302,11 +336,12 @@ impl<K, V, Marker> CacheEndpoint<K, V, Marker> {
 
     /// Fixes the resource accounting policy for this endpoint.
     ///
-    /// Without a policy each entry weighs one. Reuse the same descriptor for
-    /// every caller; a conflicting policy for the same identity is rejected.
+    /// Without a policy each entry weighs one. Reuse the same static policy
+    /// object for every caller; a distinct policy for the same endpoint identity
+    /// is rejected, even if it uses the same function.
     #[must_use]
-    pub const fn with_weigher(mut self, weigher: fn(&V) -> usize) -> Self {
-        self.weigher = Some(weigher);
+    pub const fn with_weigher(mut self, policy: &'static CacheWeightPolicy<V>) -> Self {
+        self.weigher = Some((&policy.identity, policy.weigher));
         self
     }
 
@@ -330,7 +365,7 @@ where
     V: Send + Sync + 'static,
 {
     cache: CalculationCache<K, V>,
-    weigher: Option<fn(&V) -> usize>,
+    weight_policy: Option<&'static AtomicU8>,
     _marker: Invariant<(Marker, K, V)>,
 }
 
@@ -445,9 +480,12 @@ impl CacheRegistry {
     {
         // SAFETY: resolution returned the exact boxed type retained by this registry.
         let stored = unsafe { cache.as_ref() };
-        let matches = match (endpoint.weigher, stored.weigher) {
+        let matches = match (
+            endpoint.weigher.map(|(identity, _)| identity),
+            stored.weight_policy,
+        ) {
             (None, None) => true,
-            (Some(a), Some(b)) => std::ptr::fn_addr_eq(a, b),
+            (Some(a), Some(b)) => std::ptr::eq(a, b),
             _ => false,
         };
         if matches {
@@ -486,9 +524,11 @@ impl CacheRegistry {
         let cache = Box::new(StoredCache::<Marker, K, V> {
             cache: CalculationCache::with_weigher(
                 crate::cache::CacheBudget::weight_units(self.weight_budget_per_endpoint),
-                endpoint.weigher.unwrap_or(unit_weight::<V>),
+                endpoint
+                    .weigher
+                    .map_or(unit_weight::<V>, |(_, weigher)| weigher),
             ),
-            weigher: endpoint.weigher,
+            weight_policy: endpoint.weigher.map(|(identity, _)| identity),
             _marker: PhantomData,
         });
         let erased: Box<dyn ErasedCache> = cache;

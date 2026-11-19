@@ -307,6 +307,13 @@ private def checkTrace (json : Json) : Except String Unit := do
   let ⟨final, hSteps⟩ := replayed
   match trace.outcome with
   | "in_progress" => return ()
+  | "fail_stopped" =>
+      match final.currentShutdown with
+      | some session =>
+          match session.state.phase with
+          | .failStopped _ => return ()
+          | _ => throw "fail-stopped composition trace lacks a terminal fail-stop"
+      | none => throw "fail-stopped composition trace lacks a committed shutdown session"
   | "quarantined" =>
       if h : final.logicalQuiescenceCertified = false ∧
           final.lifecycle.openAttempt = none ∧ final.lifecycle.cleanupOwner = none ∧

@@ -117,6 +117,8 @@ owned inputs, derive both contracts with `#[derive(ExcelInputIdentity,
 ExcelPrepare)]`. Implement only `FromExcel` to validate and convert the input.
 `ExcelPrepare` validates eagerly before the handle lookup, retains the converted
 value, and returns it on a miss. A hit drops that value without materialization.
+Both derives support `#[excel_input(crate = "facade::xlfn")]` when a facade
+re-exports the library; renamed direct dependencies are detected automatically.
 
 `ExcelInputIdentity` delegates to fields in declaration order, preserving the
 built-in floating-point bit representation, collection shape, and presence

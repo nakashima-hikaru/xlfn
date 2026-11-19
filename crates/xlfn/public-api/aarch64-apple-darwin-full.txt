@@ -1,4 +1,4 @@
-# nightly-2026-09-28; cargo-public-api 0.52.0; features=async-builtin,rtd,handles,cache,serde,jiff
+# nightly-2026-09-28; cargo-public-api 0.52.0; features=async-builtin,rtd,handles,cache,serde,jiff,blake3/pure
 pub mod xlfn
 pub use xlfn::ExcelEnum
 pub use xlfn::ExcelHandleObject
@@ -59,6 +59,7 @@ impl<'a> !core::panic::unwind_safe::UnwindSafe for xlfn::addin::CleanupReporter<
 pub struct xlfn::addin::DiagnosticsSetup<'a, A: xlfn::Addin>
 impl<A: xlfn::Addin> xlfn::addin::DiagnosticsSetup<'_, A>
 pub fn xlfn::addin::DiagnosticsSetup<'_, A>::install_file_sink(&self) -> core::result::Result<std::path::PathBuf, xlfn::diagnostics::DiagnosticInitError>
+pub fn xlfn::addin::DiagnosticsSetup<'_, A>::install_file_sink_with(&self, xlfn::diagnostics::DiagnosticFileConfig) -> core::result::Result<std::path::PathBuf, xlfn::diagnostics::DiagnosticInitError>
 pub fn xlfn::addin::DiagnosticsSetup<'_, A>::install_sink<S>(&self, S) -> core::result::Result<(), xlfn::diagnostics::DiagnosticInitError> where S: xlfn::diagnostics::DiagnosticSink
 pub fn xlfn::addin::DiagnosticsSetup<'_, A>::replace_sink<S>(&self, S) -> core::result::Result<(), xlfn::diagnostics::DiagnosticInitError> where S: xlfn::diagnostics::DiagnosticSink
 impl<A: xlfn::Addin> core::clone::Clone for xlfn::addin::DiagnosticsSetup<'_, A>
@@ -146,6 +147,7 @@ pub struct xlfn::addin::RuntimeConfig
 impl xlfn::addin::RuntimeConfig
 pub const fn xlfn::addin::RuntimeConfig::new() -> Self
 pub const fn xlfn::addin::RuntimeConfig::with_async(self, xlfn::task::AsyncConfig) -> Self
+pub const fn xlfn::addin::RuntimeConfig::with_calculation_end_notifications(self, bool) -> Self
 pub const fn xlfn::addin::RuntimeConfig::with_handles(self, xlfn::handle::HandleConfig) -> Self
 pub const fn xlfn::addin::RuntimeConfig::with_rtd(self, xlfn::rtd::RtdConfig) -> Self
 impl core::clone::Clone for xlfn::addin::RuntimeConfig
@@ -221,19 +223,19 @@ pub struct xlfn::cache::CacheEndpoint<K, V, Marker>
 impl<K, V, Marker> xlfn::cache::CacheEndpoint<K, V, Marker>
 pub const fn xlfn::cache::CacheEndpoint<K, V, Marker>::id(&self) -> &'static str
 pub const fn xlfn::cache::CacheEndpoint<K, V, Marker>::new(&'static str) -> Self
-pub const fn xlfn::cache::CacheEndpoint<K, V, Marker>::with_weigher(self, fn(&V) -> usize) -> Self
+pub const fn xlfn::cache::CacheEndpoint<K, V, Marker>::with_weigher(self, &'static xlfn::cache::CacheWeightPolicy<V>) -> Self
 impl<K, V, Marker> core::clone::Clone for xlfn::cache::CacheEndpoint<K, V, Marker>
 pub fn xlfn::cache::CacheEndpoint<K, V, Marker>::clone(&self) -> Self
 impl<K, V, Marker> core::fmt::Debug for xlfn::cache::CacheEndpoint<K, V, Marker>
 pub fn xlfn::cache::CacheEndpoint<K, V, Marker>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<K, V, Marker> core::marker::Copy for xlfn::cache::CacheEndpoint<K, V, Marker>
-impl<K, V, Marker> core::marker::Freeze for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<fn(&V) -> usize>: core::marker::Freeze, core::marker::PhantomData<fn(K) -> K>: core::marker::Freeze, core::marker::PhantomData<fn(V) -> V>: core::marker::Freeze, core::marker::PhantomData<fn(Marker) -> Marker>: core::marker::Freeze
-impl<K, V, Marker> core::marker::Send for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<fn(&V) -> usize>: core::marker::Send, core::marker::PhantomData<fn(K) -> K>: core::marker::Send, core::marker::PhantomData<fn(V) -> V>: core::marker::Send, core::marker::PhantomData<fn(Marker) -> Marker>: core::marker::Send
-impl<K, V, Marker> core::marker::Sync for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<fn(&V) -> usize>: core::marker::Sync, core::marker::PhantomData<fn(K) -> K>: core::marker::Sync, core::marker::PhantomData<fn(V) -> V>: core::marker::Sync, core::marker::PhantomData<fn(Marker) -> Marker>: core::marker::Sync
-impl<K, V, Marker> core::marker::Unpin for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<fn(&V) -> usize>: core::marker::Unpin, core::marker::PhantomData<fn(K) -> K>: core::marker::Unpin, core::marker::PhantomData<fn(V) -> V>: core::marker::Unpin, core::marker::PhantomData<fn(Marker) -> Marker>: core::marker::Unpin
-impl<K, V, Marker> core::marker::UnsafeUnpin for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<fn(&V) -> usize>: core::marker::UnsafeUnpin, core::marker::PhantomData<fn(K) -> K>: core::marker::UnsafeUnpin, core::marker::PhantomData<fn(V) -> V>: core::marker::UnsafeUnpin, core::marker::PhantomData<fn(Marker) -> Marker>: core::marker::UnsafeUnpin
-impl<K, V, Marker> core::panic::unwind_safe::RefUnwindSafe for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<fn(&V) -> usize>: core::panic::unwind_safe::RefUnwindSafe, core::marker::PhantomData<fn(K) -> K>: core::panic::unwind_safe::RefUnwindSafe, core::marker::PhantomData<fn(V) -> V>: core::panic::unwind_safe::RefUnwindSafe, core::marker::PhantomData<fn(Marker) -> Marker>: core::panic::unwind_safe::RefUnwindSafe
-impl<K, V, Marker> core::panic::unwind_safe::UnwindSafe for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<fn(&V) -> usize>: core::panic::unwind_safe::UnwindSafe, core::marker::PhantomData<fn(K) -> K>: core::panic::unwind_safe::UnwindSafe, core::marker::PhantomData<fn(V) -> V>: core::panic::unwind_safe::UnwindSafe, core::marker::PhantomData<fn(Marker) -> Marker>: core::panic::unwind_safe::UnwindSafe
+impl<K, V, Marker> core::marker::Freeze for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<(&'static core::sync::atomic::Atomic<u8>, fn(&V) -> usize)>: core::marker::Freeze, core::marker::PhantomData<fn(K) -> K>: core::marker::Freeze, core::marker::PhantomData<fn(V) -> V>: core::marker::Freeze, core::marker::PhantomData<fn(Marker) -> Marker>: core::marker::Freeze
+impl<K, V, Marker> core::marker::Send for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<(&'static core::sync::atomic::Atomic<u8>, fn(&V) -> usize)>: core::marker::Send, core::marker::PhantomData<fn(K) -> K>: core::marker::Send, core::marker::PhantomData<fn(V) -> V>: core::marker::Send, core::marker::PhantomData<fn(Marker) -> Marker>: core::marker::Send
+impl<K, V, Marker> core::marker::Sync for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<(&'static core::sync::atomic::Atomic<u8>, fn(&V) -> usize)>: core::marker::Sync, core::marker::PhantomData<fn(K) -> K>: core::marker::Sync, core::marker::PhantomData<fn(V) -> V>: core::marker::Sync, core::marker::PhantomData<fn(Marker) -> Marker>: core::marker::Sync
+impl<K, V, Marker> core::marker::Unpin for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<(&'static core::sync::atomic::Atomic<u8>, fn(&V) -> usize)>: core::marker::Unpin, core::marker::PhantomData<fn(K) -> K>: core::marker::Unpin, core::marker::PhantomData<fn(V) -> V>: core::marker::Unpin, core::marker::PhantomData<fn(Marker) -> Marker>: core::marker::Unpin
+impl<K, V, Marker> core::marker::UnsafeUnpin for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<(&'static core::sync::atomic::Atomic<u8>, fn(&V) -> usize)>: core::marker::UnsafeUnpin, core::marker::PhantomData<fn(K) -> K>: core::marker::UnsafeUnpin, core::marker::PhantomData<fn(V) -> V>: core::marker::UnsafeUnpin, core::marker::PhantomData<fn(Marker) -> Marker>: core::marker::UnsafeUnpin
+impl<K, V, Marker> core::panic::unwind_safe::RefUnwindSafe for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<(&'static core::sync::atomic::Atomic<u8>, fn(&V) -> usize)>: core::panic::unwind_safe::RefUnwindSafe, core::marker::PhantomData<fn(K) -> K>: core::panic::unwind_safe::RefUnwindSafe, core::marker::PhantomData<fn(V) -> V>: core::panic::unwind_safe::RefUnwindSafe, core::marker::PhantomData<fn(Marker) -> Marker>: core::panic::unwind_safe::RefUnwindSafe
+impl<K, V, Marker> core::panic::unwind_safe::UnwindSafe for xlfn::cache::CacheEndpoint<K, V, Marker> where core::option::Option<(&'static core::sync::atomic::Atomic<u8>, fn(&V) -> usize)>: core::panic::unwind_safe::UnwindSafe, core::marker::PhantomData<fn(K) -> K>: core::panic::unwind_safe::UnwindSafe, core::marker::PhantomData<fn(V) -> V>: core::panic::unwind_safe::UnwindSafe, core::marker::PhantomData<fn(Marker) -> Marker>: core::panic::unwind_safe::UnwindSafe
 pub struct xlfn::cache::CacheLease<'a, V>
 impl<V: core::cmp::Eq> core::cmp::Eq for xlfn::cache::CacheLease<'_, V>
 impl<V: core::cmp::PartialEq> core::cmp::PartialEq for xlfn::cache::CacheLease<'_, V>
@@ -268,6 +270,16 @@ impl core::marker::Unpin for xlfn::cache::CacheRegistry
 impl core::marker::UnsafeUnpin for xlfn::cache::CacheRegistry
 impl !core::panic::unwind_safe::RefUnwindSafe for xlfn::cache::CacheRegistry
 impl !core::panic::unwind_safe::UnwindSafe for xlfn::cache::CacheRegistry
+pub struct xlfn::cache::CacheWeightPolicy<V>
+impl<V> xlfn::cache::CacheWeightPolicy<V>
+pub const fn xlfn::cache::CacheWeightPolicy<V>::new(fn(&V) -> usize) -> Self
+impl<V> !core::marker::Freeze for xlfn::cache::CacheWeightPolicy<V>
+impl<V> core::marker::Send for xlfn::cache::CacheWeightPolicy<V> where fn(&V) -> usize: core::marker::Send
+impl<V> core::marker::Sync for xlfn::cache::CacheWeightPolicy<V> where fn(&V) -> usize: core::marker::Sync
+impl<V> core::marker::Unpin for xlfn::cache::CacheWeightPolicy<V> where fn(&V) -> usize: core::marker::Unpin
+impl<V> core::marker::UnsafeUnpin for xlfn::cache::CacheWeightPolicy<V> where fn(&V) -> usize: core::marker::UnsafeUnpin
+impl<V> core::panic::unwind_safe::RefUnwindSafe for xlfn::cache::CacheWeightPolicy<V> where fn(&V) -> usize: core::panic::unwind_safe::RefUnwindSafe
+impl<V> core::panic::unwind_safe::UnwindSafe for xlfn::cache::CacheWeightPolicy<V> where fn(&V) -> usize: core::panic::unwind_safe::UnwindSafe
 pub struct xlfn::cache::CalculationCache<K, V> where K: core::clone::Clone + core::cmp::Eq + core::hash::Hash + core::marker::Send + core::marker::Sync + 'static, V: core::marker::Send + core::marker::Sync + 'static
 impl<K, V> xlfn::cache::CalculationCache<K, V> where K: core::clone::Clone + core::cmp::Eq + core::hash::Hash + core::marker::Send + core::marker::Sync + 'static, V: core::marker::Send + core::marker::Sync + 'static
 pub fn xlfn::cache::CalculationCache<K, V>::clear(&self)
@@ -420,6 +432,31 @@ impl<'a> core::marker::Unpin for xlfn::diagnostics::DiagnosticEvent<'a>
 impl<'a> core::marker::UnsafeUnpin for xlfn::diagnostics::DiagnosticEvent<'a>
 impl<'a> core::panic::unwind_safe::RefUnwindSafe for xlfn::diagnostics::DiagnosticEvent<'a>
 impl<'a> core::panic::unwind_safe::UnwindSafe for xlfn::diagnostics::DiagnosticEvent<'a>
+pub struct xlfn::diagnostics::DiagnosticFileConfig
+impl xlfn::diagnostics::DiagnosticFileConfig
+pub const fn xlfn::diagnostics::DiagnosticFileConfig::archives(self) -> u8
+pub const fn xlfn::diagnostics::DiagnosticFileConfig::maximum_file_bytes(self) -> core::num::nonzero::NonZeroU64
+pub const fn xlfn::diagnostics::DiagnosticFileConfig::new() -> Self
+pub const fn xlfn::diagnostics::DiagnosticFileConfig::with_archives(self, u8) -> Self
+pub const fn xlfn::diagnostics::DiagnosticFileConfig::with_maximum_file_bytes(self, core::num::nonzero::NonZeroU64) -> Self
+impl core::clone::Clone for xlfn::diagnostics::DiagnosticFileConfig
+pub fn xlfn::diagnostics::DiagnosticFileConfig::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::diagnostics::DiagnosticFileConfig
+impl core::cmp::PartialEq for xlfn::diagnostics::DiagnosticFileConfig
+pub fn xlfn::diagnostics::DiagnosticFileConfig::eq(&self, &Self) -> bool
+impl core::default::Default for xlfn::diagnostics::DiagnosticFileConfig
+pub fn xlfn::diagnostics::DiagnosticFileConfig::default() -> Self
+impl core::fmt::Debug for xlfn::diagnostics::DiagnosticFileConfig
+pub fn xlfn::diagnostics::DiagnosticFileConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::diagnostics::DiagnosticFileConfig
+impl core::marker::StructuralPartialEq for xlfn::diagnostics::DiagnosticFileConfig
+impl core::marker::Freeze for xlfn::diagnostics::DiagnosticFileConfig
+impl core::marker::Send for xlfn::diagnostics::DiagnosticFileConfig
+impl core::marker::Sync for xlfn::diagnostics::DiagnosticFileConfig
+impl core::marker::Unpin for xlfn::diagnostics::DiagnosticFileConfig
+impl core::marker::UnsafeUnpin for xlfn::diagnostics::DiagnosticFileConfig
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::diagnostics::DiagnosticFileConfig
+impl core::panic::unwind_safe::UnwindSafe for xlfn::diagnostics::DiagnosticFileConfig
 pub struct xlfn::diagnostics::DiagnosticHistory
 impl xlfn::diagnostics::DiagnosticHistory
 pub fn xlfn::diagnostics::DiagnosticHistory::errors_since(&self, xlfn::diagnostics::DiagnosticCursor, usize) -> xlfn::diagnostics::DiagnosticPage
@@ -1925,8 +1962,10 @@ pub fn xlfn::value::Matrix<T>::from_fn(usize, usize, impl core::ops::function::F
 pub fn xlfn::value::Matrix<T>::get(&self, usize, usize) -> core::option::Option<&T>
 pub fn xlfn::value::Matrix<T>::get_mut(&mut self, usize, usize) -> core::option::Option<&mut T>
 pub fn xlfn::value::Matrix<T>::into_vec(self) -> alloc::vec::Vec<T>
+pub const fn xlfn::value::Matrix<T>::is_empty(&self) -> bool
 pub fn xlfn::value::Matrix<T>::iter(&self) -> core::slice::iter::Iter<'_, T>
 pub fn xlfn::value::Matrix<T>::iter_mut(&mut self) -> core::slice::iter::IterMut<'_, T>
+pub const fn xlfn::value::Matrix<T>::len(&self) -> usize
 pub fn xlfn::value::Matrix<T>::new(usize, usize, alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
 pub fn xlfn::value::Matrix<T>::row(&self, usize) -> core::option::Option<&[T]>
 pub fn xlfn::value::Matrix<T>::row_mut(&mut self, usize) -> core::option::Option<&mut [T]>
@@ -1982,7 +2021,9 @@ pub const fn xlfn::value::MatrixRef<'call, T>::as_slice(&self) -> &'call [T]
 pub fn xlfn::value::MatrixRef<'call, T>::column(&self, usize) -> core::option::Option<impl core::iter::traits::iterator::Iterator<Item = &'call T>>
 pub const fn xlfn::value::MatrixRef<'call, T>::columns(&self) -> usize
 pub fn xlfn::value::MatrixRef<'call, T>::get(&self, usize, usize) -> core::option::Option<&'call T>
+pub const fn xlfn::value::MatrixRef<'call, T>::is_empty(&self) -> bool
 pub fn xlfn::value::MatrixRef<'call, T>::iter(&self) -> core::slice::iter::Iter<'call, T>
+pub const fn xlfn::value::MatrixRef<'call, T>::len(&self) -> usize
 pub fn xlfn::value::MatrixRef<'call, T>::row(&self, usize) -> core::option::Option<&'call [T]>
 pub const fn xlfn::value::MatrixRef<'call, T>::rows(&self) -> usize
 pub const fn xlfn::value::MatrixRef<'call, T>::shape(&self) -> xlfn::value::Shape
@@ -2048,7 +2089,9 @@ impl<'call> xlfn::value::NumericMatrixRef<'call>
 pub const fn xlfn::value::NumericMatrixRef<'call>::as_slice(self) -> &'call [f64]
 pub const fn xlfn::value::NumericMatrixRef<'call>::columns(self) -> usize
 pub fn xlfn::value::NumericMatrixRef<'call>::get(self, usize, usize) -> core::option::Option<&'call f64>
+pub const fn xlfn::value::NumericMatrixRef<'call>::is_empty(self) -> bool
 pub fn xlfn::value::NumericMatrixRef<'call>::iter(self) -> core::slice::iter::Iter<'call, f64>
+pub const fn xlfn::value::NumericMatrixRef<'call>::len(self) -> usize
 pub fn xlfn::value::NumericMatrixRef<'call>::row(self, usize) -> core::option::Option<&'call [f64]>
 pub const fn xlfn::value::NumericMatrixRef<'call>::rows(self) -> usize
 pub const fn xlfn::value::NumericMatrixRef<'call>::shape(self) -> xlfn::value::Shape
@@ -3781,8 +3824,10 @@ pub fn xlfn::value::Matrix<T>::from_fn(usize, usize, impl core::ops::function::F
 pub fn xlfn::value::Matrix<T>::get(&self, usize, usize) -> core::option::Option<&T>
 pub fn xlfn::value::Matrix<T>::get_mut(&mut self, usize, usize) -> core::option::Option<&mut T>
 pub fn xlfn::value::Matrix<T>::into_vec(self) -> alloc::vec::Vec<T>
+pub const fn xlfn::value::Matrix<T>::is_empty(&self) -> bool
 pub fn xlfn::value::Matrix<T>::iter(&self) -> core::slice::iter::Iter<'_, T>
 pub fn xlfn::value::Matrix<T>::iter_mut(&mut self) -> core::slice::iter::IterMut<'_, T>
+pub const fn xlfn::value::Matrix<T>::len(&self) -> usize
 pub fn xlfn::value::Matrix<T>::new(usize, usize, alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
 pub fn xlfn::value::Matrix<T>::row(&self, usize) -> core::option::Option<&[T]>
 pub fn xlfn::value::Matrix<T>::row_mut(&mut self, usize) -> core::option::Option<&mut [T]>
@@ -3838,7 +3883,9 @@ pub const fn xlfn::value::MatrixRef<'call, T>::as_slice(&self) -> &'call [T]
 pub fn xlfn::value::MatrixRef<'call, T>::column(&self, usize) -> core::option::Option<impl core::iter::traits::iterator::Iterator<Item = &'call T>>
 pub const fn xlfn::value::MatrixRef<'call, T>::columns(&self) -> usize
 pub fn xlfn::value::MatrixRef<'call, T>::get(&self, usize, usize) -> core::option::Option<&'call T>
+pub const fn xlfn::value::MatrixRef<'call, T>::is_empty(&self) -> bool
 pub fn xlfn::value::MatrixRef<'call, T>::iter(&self) -> core::slice::iter::Iter<'call, T>
+pub const fn xlfn::value::MatrixRef<'call, T>::len(&self) -> usize
 pub fn xlfn::value::MatrixRef<'call, T>::row(&self, usize) -> core::option::Option<&'call [T]>
 pub const fn xlfn::value::MatrixRef<'call, T>::rows(&self) -> usize
 pub const fn xlfn::value::MatrixRef<'call, T>::shape(&self) -> xlfn::value::Shape
@@ -3878,7 +3925,9 @@ impl<'call> xlfn::value::NumericMatrixRef<'call>
 pub const fn xlfn::value::NumericMatrixRef<'call>::as_slice(self) -> &'call [f64]
 pub const fn xlfn::value::NumericMatrixRef<'call>::columns(self) -> usize
 pub fn xlfn::value::NumericMatrixRef<'call>::get(self, usize, usize) -> core::option::Option<&'call f64>
+pub const fn xlfn::value::NumericMatrixRef<'call>::is_empty(self) -> bool
 pub fn xlfn::value::NumericMatrixRef<'call>::iter(self) -> core::slice::iter::Iter<'call, f64>
+pub const fn xlfn::value::NumericMatrixRef<'call>::len(self) -> usize
 pub fn xlfn::value::NumericMatrixRef<'call>::row(self, usize) -> core::option::Option<&'call [f64]>
 pub const fn xlfn::value::NumericMatrixRef<'call>::rows(self) -> usize
 pub const fn xlfn::value::NumericMatrixRef<'call>::shape(self) -> xlfn::value::Shape

@@ -38,7 +38,12 @@ pub(super) struct TemporaryRegistration {
 impl TemporaryRegistration {
     pub(super) fn new(active: &ActiveServer, module_path: &str) -> XllResult<Self> {
         let identity = &active.identity;
-        let maintenance = REGISTRATION_MAINTENANCE.lock();
+        // Excel can reenter observation while the outer RTD call owns this
+        // registration. Keep lifetime-wide scavenging exclusion, but reject a
+        // nested/concurrent attempt instead of blocking its callback forever.
+        let maintenance = REGISTRATION_MAINTENANCE
+            .try_lock()
+            .ok_or(XllError::ReentrantCall)?;
         let cross_process = CrossProcessRegistrationGuard::acquire()?;
 
         if let Err(error) = scavenge_owned_registrations(module_path, Some(identity.prog_id())) {
@@ -84,45 +89,38 @@ impl TemporaryRegistration {
     }
 
     fn close_internal(&mut self) -> XllResult<()> {
-        let mut first_error = None;
-        // SAFETY: both paths are valid NUL-terminated HKCU subkeys created and
-        // owned by this guard.
-        unsafe {
-            let class_status = RegDeleteTreeW(HKEY_CURRENT_USER, self.class_key.as_ptr());
-            if !matches!(class_status, ERROR_SUCCESS | ERROR_FILE_NOT_FOUND) {
-                first_error = Some(registry_error("RegDeleteTreeW (CLSID)", class_status));
-                record_registry_key_debt(String::from_utf16_lossy(&self.class_key));
-            }
-
-            let prog_status = RegDeleteTreeW(HKEY_CURRENT_USER, self.prog_key.as_ptr());
-            if !matches!(prog_status, ERROR_SUCCESS | ERROR_FILE_NOT_FOUND) {
-                if first_error.is_none() {
-                    first_error = Some(registry_error("RegDeleteTreeW (ProgID)", prog_status));
-                }
-                record_registry_key_debt(String::from_utf16_lossy(&self.prog_key));
-            }
-        }
-
-        if let Some(err) = first_error {
-            Err(err)
-        } else {
-            Ok(())
-        }
+        delete_registration_keys(&self.prog_key, &self.class_key, |path| {
+            // SAFETY: each path is a NUL-terminated HKCU subkey created and
+            // owned by this guard, whose lifetime still excludes scavengers.
+            unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, path.as_ptr()) }
+        })
     }
 }
 
-static REGISTRY_KEY_DEBT: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-fn record_registry_key_debt(key_path: String) {
-    let mut debt = REGISTRY_KEY_DEBT.lock();
-    if !debt.contains(&key_path) {
-        debt.push(key_path);
+fn delete_registration_keys(
+    prog_key: &[u16],
+    class_key: &[u16],
+    mut delete: impl FnMut(&[u16]) -> i32,
+) -> XllResult<()> {
+    // The marked ProgID is the discovery root for a subsequent cleanup. Never
+    // remove it when class deletion fails, or the remaining CLSID is orphaned.
+    for (key, function) in [
+        (class_key, "RegDeleteTreeW (CLSID)"),
+        (prog_key, "RegDeleteTreeW (ProgID)"),
+    ] {
+        let status = delete(key);
+        if !matches!(status, ERROR_SUCCESS | ERROR_FILE_NOT_FOUND) {
+            return Err(registry_error(function, status));
+        }
     }
+    Ok(())
 }
 
 impl Drop for TemporaryRegistration {
     fn drop(&mut self) {
-        let _ = self.close_internal();
+        if let Err(error) = self.close_internal() {
+            crate::diagnostics::report_no_unwind("RTD temporary registration cleanup", &error);
+        }
     }
 }
 
@@ -230,14 +228,24 @@ pub(super) fn scavenge_owned_registrations(
             };
             let class_key = format!("Software\\Classes\\CLSID\\{class_id}");
             let prog_class = read_registry_string(&format!("{prog_key}\\CLSID"), "")?;
-            let class_prog = read_registry_string(&format!("{class_key}\\ProgID"), "")?;
-            let class_module = read_registry_string(&format!("{class_key}\\InProcServer32"), "")?;
             if !prog_class
                 .as_deref()
                 .is_some_and(|value| value.eq_ignore_ascii_case(&class_id))
-                || !class_prog
-                    .as_deref()
-                    .is_some_and(|value| value.eq_ignore_ascii_case(&prog_id))
+            {
+                report_unowned_registration();
+                return Ok(());
+            }
+            if !registry_key_exists(&class_key)? {
+                // A previous attempt removed the class but could not remove
+                // its marked ProgID. Its identity is still fully validated;
+                // there is no remaining CLSID to validate or delete.
+                return delete_registry_tree(&prog_key);
+            }
+            let class_prog = read_registry_string(&format!("{class_key}\\ProgID"), "")?;
+            let class_module = read_registry_string(&format!("{class_key}\\InProcServer32"), "")?;
+            if !class_prog
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case(&prog_id))
                 || !class_module.as_deref().is_some_and(|value| {
                     owner_module
                         .as_deref()
@@ -272,6 +280,30 @@ fn delete_registry_tree(path: &str) -> XllResult<()> {
         Ok(())
     } else {
         Err(registry_error("RegDeleteTreeW", status))
+    }
+}
+
+fn registry_key_exists(path: &str) -> XllResult<bool> {
+    let path = wide_nul(path);
+    let mut key = ptr::null_mut();
+    // SAFETY: path is NUL terminated and key is writable handle storage.
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            path.as_ptr(),
+            0,
+            KEY_READ as u32,
+            &mut key,
+        )
+    };
+    match status {
+        ERROR_FILE_NOT_FOUND => Ok(false),
+        ERROR_SUCCESS => {
+            // SAFETY: the successful open issued this uniquely owned handle.
+            unsafe { RegCloseKey(key) };
+            Ok(true)
+        }
+        error => Err(registry_error("RegOpenKeyExW", error)),
     }
 }
 
@@ -592,6 +624,26 @@ pub(super) fn guid_braced(guid: GUID) -> String {
 #[cfg(test)]
 mod registry_prefix_tests {
     use super::*;
+
+    #[test]
+    fn failed_class_deletion_retains_the_discovery_key_for_retry() {
+        let prog = wide_nul("owned-prog");
+        let class = wide_nul("owned-class");
+        let mut deleted = Vec::new();
+        let result = delete_registration_keys(&prog, &class, |path| {
+            deleted.push(path.to_vec());
+            5 // ERROR_ACCESS_DENIED
+        });
+        assert!(result.is_err());
+        assert_eq!(deleted, [class.clone()]);
+        deleted.clear();
+        delete_registration_keys(&prog, &class, |path| {
+            deleted.push(path.to_vec());
+            ERROR_SUCCESS
+        })
+        .unwrap();
+        assert_eq!(deleted, [class, prog]);
+    }
 
     #[test]
     fn new_shared_ancestors_accept_persistent_children_after_temporary_registration() {

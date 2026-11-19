@@ -98,6 +98,16 @@ pub enum PackageError {
     StagedArtifactChanged { target: String, path: PathBuf },
     #[error("private staging directory path was replaced: {path}")]
     StagingDirectoryReplaced { path: PathBuf },
+    /// Creation succeeded but the new directory could not be validated. Its
+    /// identity is untrusted, so it is retained rather than deleted by path.
+    #[error(
+        "new private staging directory could not be initialized at {path}; directory retained: {source}"
+    )]
+    StagingInitialization {
+        path: PathBuf,
+        #[source]
+        source: Box<PackageError>,
+    },
     #[error("invalid build manifest: {0}")]
     InvalidBuildManifest(String),
     #[error(transparent)]

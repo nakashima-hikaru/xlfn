@@ -19,7 +19,7 @@ use crate::return_abi::AsyncReturnValue;
 use crate::runtime::Runtime;
 use crate::sync::Mutex;
 use crate::{Addin, OpenContext, XllError, XllResult};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -2651,6 +2651,25 @@ fn close_preempts_in_progress_advance_calculation() {
 
 #[test]
 fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
+    struct TraceCounter(Arc<std::sync::atomic::AtomicUsize>);
+    impl tracing::Subscriber for TraceCounter {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == crate::execution::UDF_TRACE_TARGET
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if event.metadata().target() == crate::execution::UDF_TRACE_TARGET {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
     struct PanickingLayer(Arc<std::sync::atomic::AtomicUsize>);
     struct PanickingGuard;
 
@@ -2720,16 +2739,19 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
         xltype: XLTYPE_BIG_DATA,
     };
 
-    // SAFETY: handle is a valid, stack-local XLOPER12 constructed above.
-    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
-        async_udf_boundary_named(
-            runtime,
-            "test_async_panic_boundary",
-            "TEST.ASYNC.PANIC",
-            &mut handle,
-            |_, _, _| Ok(async { Ok::<_, XllError>(42.0) }),
-        );
-    }));
+    let traced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let result = tracing::subscriber::with_default(TraceCounter(Arc::clone(&traced)), || {
+        // SAFETY: handle is a valid, stack-local XLOPER12 constructed above.
+        crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| unsafe {
+            async_udf_boundary_named(
+                runtime,
+                "test_async_panic_boundary",
+                "TEST.ASYNC.PANIC",
+                &mut handle,
+                |_, _, _| Ok(async { Ok::<_, XllError>(42.0) }),
+            );
+        }))
+    });
 
     assert!(
         result.is_ok(),
@@ -2737,6 +2759,7 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
     );
     assert!(runtime.close_async().unwrap().issues.is_empty());
     assert_eq!(payload_dropped.load(Ordering::Acquire), 0);
+    assert_eq!(traced.load(Ordering::Relaxed), 1);
 }
 
 #[test]

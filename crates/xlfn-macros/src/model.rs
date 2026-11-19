@@ -424,6 +424,12 @@ pub(super) fn parse_udf(
         let mut excel_arg_attribute = None;
         let mut argument_options = ParsedArgumentOptions::default();
         for attribute in std::mem::take(&mut argument.attrs) {
+            if !extract_gating_attributes(std::slice::from_ref(&attribute)).is_empty() {
+                return Err(syn::Error::new_spanned(
+                    attribute,
+                    "Excel function parameters cannot be conditionally compiled; gate the entire function instead",
+                ));
+            }
             if attribute.path().is_ident("excel_context") {
                 if explicit_context.is_some() {
                     return Err(syn::Error::new_spanned(

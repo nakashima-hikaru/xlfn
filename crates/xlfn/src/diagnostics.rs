@@ -193,8 +193,10 @@ impl DiagnosticRouter {
             return Err(DiagnosticInitError::AlreadyInstalled);
         }
         let sink = make_sink()?;
-        let previous = crate::ingress::with_diagnostic_linearization(|| {
-            self.sink.replace_with(sink, |had_previous, old_service| {
+        let previous = self
+            .sink
+            .replace_with_guard(sink, |had_previous, old_service| {
+                let linearization = crate::ingress::diagnostic_linearization();
                 if let Some(old) = old_service {
                     self.mark_retiring(old);
                 }
@@ -204,9 +206,8 @@ impl DiagnosticRouter {
                     }
                     return Err(error);
                 }
-                Ok(())
-            })
-        })?;
+                Ok(linearization)
+            })?;
 
         let Some(previous) = previous else {
             return Ok(());
@@ -292,7 +293,9 @@ impl DiagnosticRouter {
             id
         });
 
-        let previous = crate::ingress::with_diagnostic_linearization(|| self.sink.close());
+        let previous = self
+            .sink
+            .close_with_guard(crate::ingress::diagnostic_linearization);
 
         let result = match previous {
             None => Ok(None),
@@ -358,7 +361,9 @@ impl DiagnosticRouter {
             id
         });
 
-        let previous = crate::ingress::with_diagnostic_linearization(|| self.sink.close());
+        let previous = self
+            .sink
+            .close_with_guard(crate::ingress::diagnostic_linearization);
         let mut issues = Vec::new();
         if let Some(previous) = previous {
             let old_sink = previous.into_inner();

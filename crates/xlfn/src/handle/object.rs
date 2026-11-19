@@ -394,7 +394,10 @@ impl ObjectArena {
             });
         }
         drop(states);
-        self.cleanup.result()
+        // Disposal panics are recorded separately. The exact allocation has
+        // already been freed and its final-release guard has completed; only
+        // live objects, pins or release operations prevent quiescence.
+        Ok(())
     }
 
     /// Validate while allocation access is still shared, before its unique
@@ -1444,7 +1447,8 @@ mod tests {
             assert_eq!(drops.load(Ordering::Relaxed), 1);
             assert_eq!(field_drops.load(Ordering::Relaxed), 1);
             if panic {
-                assert!(matches!(arena.finish_quiescence(), Err(XllError::Panic)));
+                assert!(matches!(arena.cleanup_result(), Err(XllError::Panic)));
+                arena.finish_quiescence().unwrap();
             } else {
                 arena.finish_quiescence().unwrap();
             }
@@ -1706,7 +1710,8 @@ mod tests {
                 assert_eq!((state.active_pins, state.active_releases), (0, 0));
             }
             if panic {
-                assert!(matches!(arena.finish_quiescence(), Err(XllError::Panic)));
+                assert!(matches!(arena.cleanup_result(), Err(XllError::Panic)));
+                arena.finish_quiescence().unwrap();
             } else {
                 assert!(arena.finish_quiescence().is_ok());
             }

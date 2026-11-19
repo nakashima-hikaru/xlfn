@@ -579,6 +579,10 @@ impl ExecutionDrained {
             crate::module_runtime::ModuleCleanupAuthority,
         ),
     > {
+        // Deferred RTD disconnect jobs can retain an enclosing export permit
+        // while they wait for a shared source to stop. Signal those sources
+        // before this outer barrier, without joining or sealing their owners.
+        deps.request_subscription_stop_before_export_drain();
         let module = match module.seal_and_drain() {
             Ok(module) => module,
             Err((error, closing)) => {
@@ -732,6 +736,9 @@ impl<'runtime, A: Addin> ServicesSealed<'runtime, A> {
             addin,
             host_callbacks,
         } = self;
+        if let Some(issue) = sealed.cleanup_issue() {
+            report.push(issue.component, issue.kind, issue.error);
+        }
         match addin.cleanup(lifecycle, report, installed) {
             Ok((addin, empty)) => Ok((
                 ServicesCleaned {
@@ -2170,6 +2177,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "handles")]
+    #[test]
+    fn handle_disposal_panic_is_reported_without_skipping_addin_cleanup() {
+        struct PanicOnDrop;
+        impl crate::handle::ExcelHandleObject for PanicOnDrop {}
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                panic!("injected handle destructor panic");
+            }
+        }
+
+        let runtime = Runtime::<RollbackProbe>::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime.publish_with_lifecycle(
+            opening,
+            ObservedState(Arc::clone(&drops)),
+            Failure::None,
+            (),
+        );
+        runtime.finish_open(opening, Vec::new()).unwrap();
+        runtime
+            .with_formula_handle_service(|service| {
+                service.prepare(crate::handle::test_topic_key("cleanup-panic"), || {
+                    Ok(PanicOnDrop)
+                })
+            })
+            .unwrap()
+            .unwrap();
+        let teardown = runtime
+            .begin_final_removal()
+            .unwrap()
+            .drain()
+            .unwrap_or_else(|_| panic!("drain"))
+            .stop_producers(|_| {})
+            .unwrap_or_else(|_| panic!("producers"))
+            .close_module_callbacks()
+            .detach_host()
+            .unwrap_or_else(|_| panic!("host detach"));
+        let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+        let teardown = teardown
+            .quiesce_addin(&runtime, &lifecycle)
+            .unwrap_or_else(|_| panic!("quiesce"))
+            .seal_services()
+            .unwrap_or_else(|_| panic!("disposal panic must not fail seal"));
+        let mut report = crate::shutdown::CloseReport::default();
+        let teardown = teardown.cleanup_addin(&lifecycle, &mut report).unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(report.issues().len(), 1);
+        assert_eq!(report.issues()[0].component, "handle object disposal");
+        assert_eq!(
+            report.issues()[0].kind,
+            crate::shutdown::CleanupIssueKind::DisposalPanicked
+        );
+        let teardown = teardown.finish_services().unwrap();
+        // This fixture stops before global diagnostics/reclamation; its guard
+        // retains the finished resources through the normal fallback path.
+        drop(teardown);
     }
 
     #[test]

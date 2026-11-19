@@ -126,18 +126,19 @@ pub(crate) struct ActiveReservation<'a> {
 }
 
 impl<'a> ActiveReservation<'a> {
-    pub(crate) fn try_acquire(registry: &'a TaskRegistry) -> Option<Self> {
+    pub(crate) fn try_acquire(registry: &'a TaskRegistry) -> crate::XllResult<Self> {
         // SAFETY: this reservation borrows the registry. Once committed, close
         // waits for both task accounting and the notification tail before
         // reclaiming the allocation.
-        let tail = unsafe { registry.activity.try_enter_detached() }.ok()?;
+        let tail = unsafe { registry.activity.try_enter_detached() }
+            .map_err(|_| crate::XllError::Closing)?;
         registry
             .active_tasks
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
                 (active < registry.capacity()).then(|| active + 1)
             })
-            .ok()?;
-        Some(Self {
+            .map_err(|_| crate::XllError::Overloaded)?;
+        Ok(Self {
             activity: RollbackGuard::new(ReservedRegistryActivity { registry, tail }),
         })
     }

@@ -100,6 +100,15 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SubscriptionServiceSlot<
         self.service.is_none()
     }
 
+    /// Signal an existing runtime without initializing a cold slot or waiting
+    /// for any service readers. Deferred disconnects may still retain those
+    /// readers and an enclosing module-export admission.
+    pub(crate) fn request_stop_before_export_drain(&self) {
+        if let Some(runtime) = self.service.read_if_ready() {
+            runtime.request_stop_before_host_drain();
+        }
+    }
+
     pub(crate) fn seal(
         &self,
         generation: Option<RuntimeGeneration>,

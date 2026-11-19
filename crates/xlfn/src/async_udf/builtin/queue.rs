@@ -10,6 +10,7 @@ use xlfn_kernel::drain_gate::DrainGate;
 trait IdlePollerMask {
     fn publish_work(&self) -> u64;
     fn announce_idle(&self, bits: u64);
+    fn clear_all(&self);
     fn try_claim(&self, current: u64, next: u64) -> Result<u64, u64>;
 }
 
@@ -20,6 +21,10 @@ impl IdlePollerMask for AtomicU64 {
 
     fn announce_idle(&self, bits: u64) {
         self.fetch_or(bits, Ordering::Acquire);
+    }
+
+    fn clear_all(&self) {
+        self.swap(0, Ordering::Release);
     }
 
     fn try_claim(&self, current: u64, next: u64) -> Result<u64, u64> {
@@ -94,7 +99,10 @@ impl RunnableQueue {
     }
 
     pub(crate) fn wake_all(&self) {
-        self.idle_pollers.store(0, Ordering::Release);
+        // A failed poller also calls this while scheduling is still open.
+        // Preserve earlier producers' release sequences even if another
+        // poller consumes this wake before announcing its next idle state.
+        self.idle_pollers.clear_all();
         for unparker in self.unparkers.iter() {
             unparker.unpark();
         }
@@ -244,6 +252,10 @@ mod tests {
             self.fetch_or(bits, Ordering::Acquire);
         }
 
+        fn clear_all(&self) {
+            self.swap(0, Ordering::Release);
+        }
+
         fn try_claim(&self, current: u64, next: u64) -> Result<u64, u64> {
             self.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
         }
@@ -299,6 +311,47 @@ mod tests {
             let found_work = worker.join().unwrap();
             assert!(found_work || notified == Some(0));
             clearing_worker.join().unwrap();
+        });
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn loom_wake_all_preserves_work_after_its_park_token_is_consumed() {
+        let mut model = loom::model::Builder::new();
+        model.preemption_bound = Some(2);
+        model.check(|| {
+            let idle = Arc::new(AtomicU64::new(0));
+            let queued = Arc::new(AtomicBool::new(false));
+            let published = Arc::new(AtomicBool::new(false));
+            let woke = Arc::new(AtomicBool::new(false));
+            let producer_idle = Arc::clone(&idle);
+            let producer_queue = Arc::clone(&queued);
+            let producer_published = Arc::clone(&published);
+            let producer = loom::thread::spawn(move || {
+                producer_queue.store(true, Ordering::Relaxed);
+                let _ = claim_idle_poller(&*producer_idle);
+                producer_published.store(true, Ordering::Relaxed);
+            });
+            let waking_idle = Arc::clone(&idle);
+            let waking_woke = Arc::clone(&woke);
+            let waking = loom::thread::spawn(move || {
+                // Arrange the reset after publication without supplying an
+                // acquire edge that would hide a broken idle-mask handshake.
+                if !published.load(Ordering::Relaxed) {
+                    return;
+                }
+                waking_idle.clear_all();
+                waking_woke.store(true, Ordering::Release);
+            });
+            // The worker has consumed wake_all's park token and is entering
+            // its next idle iteration. That wake cannot rescue a missed item
+            // now: the subsequent acquire announcement must see its producer.
+            if woke.load(Ordering::Acquire) {
+                idle.announce_idle(1);
+                assert!(queued.load(Ordering::Relaxed));
+            }
+            producer.join().unwrap();
+            waking.join().unwrap();
         });
     }
 }

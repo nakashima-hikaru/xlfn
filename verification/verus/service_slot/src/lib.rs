@@ -1,6 +1,8 @@
 //! Verus formal verification of ServiceSlot concurrent protocol, publication, and linear Box recovery.
 //!
-//! Models and verifies the generation-scoped lazy service publication lifecycle of `crates/xlfn-kernel/src/service_slot.rs`.
+//! Models the generation-scoped lazy service lifecycle in `service_slot.rs`.
+//! The two-lane ReplaceableServiceSlot is not modeled here; native pointer,
+//! guard and callback correspondence remains a separate validation obligation.
 //! Formally proves invariants [SS-1] through [SS-5].
 //! All proofs ensure zero verification failures, zero assumes, and zero runtime overhead.
 
@@ -103,6 +105,17 @@ pub open spec fn step_arm(s: ServiceSlotState) -> Option<ServiceSlotState> {
         })
     } else {
         None
+    }
+}
+
+/// Disarm only configuration/fault-only states. A live or retiring service
+/// must pass through withdrawal and reader drain instead.
+pub open spec fn step_disarm(s: ServiceSlotState) -> Option<ServiceSlotState> {
+    match s.phase {
+        SlotPhase::Closed | SlotPhase::Cold | SlotPhase::InitFaulted => {
+            Some(ServiceSlotState { phase: SlotPhase::Closed, ..s })
+        },
+        _ => None,
     }
 }
 
@@ -328,6 +341,28 @@ pub proof fn ss_step_arm_preserves_inv(s: ServiceSlotState, s_next: ServiceSlotS
         step_arm(s) == Some(s_next),
     ensures
         service_slot_inv(s_next),
+{
+}
+
+pub proof fn ss_step_disarm_preserves_inv(s: ServiceSlotState, s_next: ServiceSlotState)
+    requires
+        service_slot_inv(s),
+        step_disarm(s) == Some(s_next),
+    ensures
+        service_slot_inv(s_next),
+        s_next.phase is Closed,
+        s_next.published.is_none(),
+        s_next.extracted_box == s.extracted_box,
+        s_next.readers_active == s.readers_active,
+        s_next.readers_permits == s.readers_permits,
+{
+}
+
+pub proof fn ss_disarm_cannot_bypass_service_reclamation(s: ServiceSlotState)
+    requires
+        s.phase is Ready || s.phase is Sealing || s.phase is TeardownFaulted,
+    ensures
+        step_disarm(s).is_none(),
 {
 }
 

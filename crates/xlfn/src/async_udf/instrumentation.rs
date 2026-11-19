@@ -105,21 +105,7 @@ fn finish_active<G: UdfLayerGuard>(
         cancellation: _,
     } = active;
 
-    let completion_outcome = match &completion.completion {
-        OwnedCompletionOutcome::Success => UdfCompletionOutcome::Success,
-        OwnedCompletionOutcome::Error(error) => UdfCompletionOutcome::from_error(error),
-        OwnedCompletionOutcome::Cancelled => UdfCompletionOutcome::Cancelled,
-    };
-    let delivery_outcome = match &completion.delivery {
-        OwnedDeliveryOutcome::Delivered => UdfDeliveryOutcome::Delivered,
-        OwnedDeliveryOutcome::Failed(error) => UdfDeliveryOutcome::Failed { error },
-        OwnedDeliveryOutcome::Unobserved => UdfDeliveryOutcome::Unobserved,
-    };
-    let outcome = CallOutcome {
-        completion: completion_outcome,
-        delivery: delivery_outcome,
-        duration: timer.elapsed(),
-    };
+    let outcome = call_outcome(completion, timer.elapsed());
 
     if let Some(layers) = layers {
         safe_exit(layers, &outcome);
@@ -133,6 +119,42 @@ fn finish_active<G: UdfLayerGuard>(
             concurrent_calls,
         };
         trace(&metadata, &outcome);
+    }
+}
+
+/// A layer can reject a launch before cancellation or layer-guard ownership
+/// exists. That invocation still has an observed response and trace outcome.
+pub(crate) fn trace_rejected_launch(
+    metadata: &CallMetadata,
+    timer: CallTimer,
+    completion: &AsyncCompletion,
+) {
+    let outcome = call_outcome(completion, timer.elapsed());
+    let metadata = UdfTraceMetadata {
+        udf_id: metadata.udf_id,
+        excel_name: metadata.excel_name,
+        call_id: metadata.call_id,
+        calculation_id: metadata.calculation_id,
+        concurrent_calls: metadata.concurrent_calls,
+    };
+    trace(&metadata, &outcome);
+}
+
+fn call_outcome(completion: &AsyncCompletion, duration: std::time::Duration) -> CallOutcome<'_> {
+    let completion_outcome = match &completion.completion {
+        OwnedCompletionOutcome::Success => UdfCompletionOutcome::Success,
+        OwnedCompletionOutcome::Error(error) => UdfCompletionOutcome::from_error(error),
+        OwnedCompletionOutcome::Cancelled => UdfCompletionOutcome::Cancelled,
+    };
+    let delivery_outcome = match &completion.delivery {
+        OwnedDeliveryOutcome::Delivered => UdfDeliveryOutcome::Delivered,
+        OwnedDeliveryOutcome::Failed(error) => UdfDeliveryOutcome::Failed { error },
+        OwnedDeliveryOutcome::Unobserved => UdfDeliveryOutcome::Unobserved,
+    };
+    CallOutcome {
+        completion: completion_outcome,
+        delivery: delivery_outcome,
+        duration,
     }
 }
 
