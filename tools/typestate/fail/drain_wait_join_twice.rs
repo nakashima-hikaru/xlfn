@@ -1,5 +1,5 @@
-// module: excel_rtd/windows
-use crate::excel_rtd::drain_wait::UnstartedDrain;
+// module: drain_wait/windows
+use crate::drain_wait::UnstartedDrain;
 
 fn invalid() {
     std::thread::scope(|scope| {

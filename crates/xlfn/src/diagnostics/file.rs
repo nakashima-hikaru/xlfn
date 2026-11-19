@@ -593,9 +593,10 @@ mod bounded_text_tests {
     #[test]
     fn log_rotation_keeps_the_directory_pinned_until_unlock() {
         let directory = test_log_directory();
-        let parent = directory.path().join("original");
+        let ancestor = directory.path().join("ancestor");
+        let parent = ancestor.join("original");
         let moved = directory.path().join("moved");
-        fs::create_dir(&parent).unwrap();
+        fs::create_dir_all(&parent).unwrap();
         let path = parent.join("diagnostics.log");
         fs::write(&path, "original").unwrap();
         let lock = LogLock::acquire(&path).unwrap();
@@ -607,7 +608,10 @@ mod bounded_text_tests {
             fs::write(&path, "replacement").unwrap();
         }
         #[cfg(target_os = "windows")]
-        assert!(fs::rename(&parent, &moved).is_err());
+        {
+            assert!(fs::rename(&parent, &moved).is_err());
+            assert!(fs::rename(&ancestor, directory.path().join("moved-ancestor")).is_err());
+        }
 
         lock.rotate(1).unwrap();
         drop(lock);
@@ -618,6 +622,34 @@ mod bounded_text_tests {
         assert_eq!(
             fs::read_to_string(moved.join("diagnostics.log.1")).unwrap(),
             "original"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn log_rotation_supports_long_unicode_directory_paths() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let directory = test_log_directory();
+        let mut parent = directory.path().to_path_buf();
+        for index in 0..3 {
+            parent.push(format!("{index}-{}", "ログ🦀".repeat(20)));
+            fs::create_dir(&parent).unwrap();
+        }
+        let path = parent.join("診断🦀.log");
+        assert!(path.as_os_str().encode_wide().count() > 256);
+        let mut log = RotatingLog::open_with_policy(path.clone(), 8, 2).unwrap();
+        for line in ["first", "next", "last", "done"] {
+            log.write_line(line).unwrap();
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "done\n");
+        assert_eq!(
+            fs::read_to_string(parent.join("診断🦀.log.1")).unwrap(),
+            "last\n"
+        );
+        assert_eq!(
+            fs::read_to_string(parent.join("診断🦀.log.2")).unwrap(),
+            "next\n"
         );
     }
 

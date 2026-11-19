@@ -7,11 +7,10 @@ use crate::win32::{
     BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_INFO_BY_HANDLE_CLASS,
     FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
-    FileDispositionInfo, FileRenameInfo, GetFileInformationByHandle, HANDLE,
-    SetFileInformationByHandle,
+    FileDispositionInfo, FileRenameInfo, GetFileInformationByHandle, SetFileInformationByHandle,
 };
 use std::ffi::OsStr;
-use std::mem::{MaybeUninit, offset_of};
+use std::mem::{MaybeUninit, align_of, offset_of};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
@@ -41,6 +40,9 @@ impl LogDirectory {
         let directory = ancestors
             .pop()
             .ok_or_else(|| io::Error::other("log path has no root"))?;
+        // Every component has been checked and remains pinned. Resolve the
+        // spelling while those handles also prevent directory replacement.
+        let path = path.canonicalize()?;
         Ok(Self {
             path,
             directory,
@@ -97,7 +99,12 @@ impl LogDirectory {
             return Err(io::Error::other("log rotation source must have one link"));
         }
         match destination {
-            Some(name) => FileChange::Rename(&RenameInfo::new(&self.directory, name)?).apply(file),
+            Some(name) => {
+                // Use SetFileInformationByHandle's absolute-path form with a
+                // NULL root. Every ancestor remains pinned without delete
+                // sharing, and the source is still changed by handle.
+                FileChange::Rename(&RenameInfo::new(&self.path, name)?).apply(file)
+            }
             None => FileChange::Delete.apply(file),
         }
     }
@@ -136,43 +143,71 @@ fn file_information(file: &fs::File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
     Ok(info)
 }
 
-// FILE_RENAME_INFO ends in a variable-length UTF-16 name. A bounded buffer
-// suffices for one basename and avoids a dynamically aligned FFI allocation.
-#[repr(C)]
+// FILE_RENAME_INFO ends in a variable-length UTF-16 path. Pointer-sized words
+// keep the header aligned while allowing paths longer than one basename.
 struct RenameInfo {
-    flags: u32,
-    root_directory: HANDLE,
-    name_length: u32,
-    name: [u16; 256],
+    storage: Vec<usize>,
+    bytes: u32,
 }
 
 const _: () = {
-    assert!(offset_of!(RenameInfo, flags) == offset_of!(FILE_RENAME_INFO, Anonymous));
-    assert!(offset_of!(RenameInfo, root_directory) == offset_of!(FILE_RENAME_INFO, RootDirectory));
-    assert!(offset_of!(RenameInfo, name_length) == offset_of!(FILE_RENAME_INFO, FileNameLength));
-    assert!(offset_of!(RenameInfo, name) == offset_of!(FILE_RENAME_INFO, FileName));
+    assert!(align_of::<usize>() >= align_of::<FILE_RENAME_INFO>());
+    assert!(offset_of!(FILE_RENAME_INFO, FileName).is_multiple_of(align_of::<u16>()));
 };
 
 impl RenameInfo {
-    fn new(directory: &fs::File, name: &OsStr) -> io::Result<Self> {
-        let mut info = Self {
-            flags: 0,
-            root_directory: directory.as_raw_handle(),
-            name_length: 0,
-            name: [0; 256],
-        };
+    fn new(directory: &Path, name: &OsStr) -> io::Result<Self> {
         let count = name.encode_wide().count();
-        if count == 0 || count >= info.name.len() {
+        if count == 0
+            || count >= 256
+            || name
+                .encode_wide()
+                .any(|unit| matches!(unit, 0 | 47 | 58 | 92))
+            || matches!(name.to_str(), Some("." | ".."))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid log archive name",
             ));
         }
-        for (out, unit) in info.name[..count].iter_mut().zip(name.encode_wide()) {
+        let path = directory.join(name);
+        let count = path.as_os_str().encode_wide().count();
+        if count >= 32768 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "log archive path exceeds the Windows path limit",
+            ));
+        }
+        let name_offset = offset_of!(FILE_RENAME_INFO, FileName);
+        let bytes =
+            (name_offset + (count + 1) * size_of::<u16>()).max(size_of::<FILE_RENAME_INFO>());
+        let mut storage = vec![0_usize; bytes.div_ceil(size_of::<usize>())];
+        // SAFETY: storage is aligned for the header and covers the whole name
+        // plus its terminator. The checked path bound keeps both lengths in
+        // u32. Zero initialization leaves RootDirectory NULL and replacement
+        // disabled.
+        unsafe {
+            (*storage.as_mut_ptr().cast::<FILE_RENAME_INFO>()).FileNameLength =
+                (count * size_of::<u16>()) as u32;
+        }
+        // SAFETY: the checked name offset and length are aligned and contained
+        // in storage. Derive the slice from the allocation, not FileName[1].
+        let units = unsafe {
+            std::slice::from_raw_parts_mut(
+                storage
+                    .as_mut_ptr()
+                    .wrapping_byte_add(name_offset)
+                    .cast::<u16>(),
+                count + 1,
+            )
+        };
+        for (out, unit) in units.iter_mut().zip(path.as_os_str().encode_wide()) {
             *out = unit;
         }
-        info.name_length = (count * size_of::<u16>()) as u32;
-        Ok(info)
+        Ok(Self {
+            storage,
+            bytes: bytes as u32,
+        })
     }
 }
 
@@ -186,11 +221,7 @@ impl FileChange<'_> {
         let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
         let (class, buffer, bytes): (FILE_INFO_BY_HANDLE_CLASS, *const core::ffi::c_void, u32) =
             match self {
-                Self::Rename(info) => (
-                    FileRenameInfo,
-                    std::ptr::from_ref(info).cast(),
-                    size_of::<RenameInfo>() as u32,
-                ),
+                Self::Rename(info) => (FileRenameInfo, info.storage.as_ptr().cast(), info.bytes),
                 Self::Delete => (
                     FileDispositionInfo,
                     std::ptr::from_ref(&disposition).cast(),
