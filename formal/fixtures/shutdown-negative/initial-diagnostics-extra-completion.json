@@ -1,0 +1,62 @@
+{
+  "generation": 1,
+  "initial": {
+    "ingressOpen": true,
+    "externalEntries": 0,
+    "registrations": 0,
+    "residentEventRegistrations": 2,
+    "moduleResidencyHeld": true,
+    "registrationStateKnown": true,
+    "callbackGateOpen": true,
+    "activeCalls": 0,
+    "returnBlocks": 0,
+    "returnBlocksInFree": 0,
+    "returnFreeOperations": 0,
+    "asyncTasks": 0,
+    "asyncExecutorRunning": false,
+    "rtdOperations": 0,
+    "subscriptions": 0,
+    "callbacks": 0,
+    "rtdClassFactories": 0,
+    "rtdServers": 0,
+    "rtdServerLocks": 0,
+    "handles": 0,
+    "handlePins": 0,
+    "handleObjects": 0,
+    "generationUnique": false,
+    "addinQuiesced": false,
+    "generationOwnedByRuntime": true,
+    "diagnosticsPending": 1,
+    "diagnosticsRunning": true,
+    "cleanupIssues": 0
+  },
+  "activities": [
+    "flushDiagnostic",
+    "flushDiagnostic"
+  ],
+  "certificates": [
+    "beginClose",
+    "callsDrained",
+    "returnsDrained",
+    "asyncDrained",
+    "subscriptionsDrained",
+    "closeCallbackGate",
+    "hostDetached",
+    "proveGenerationUnique",
+    "proveAddinQuiesced",
+    "generationReclaimed",
+    "handlesDrained",
+    {
+      "stopDiagnostics": {
+        "enqueued": 0,
+        "flushed": 2,
+        "discarded": 0
+      }
+    },
+    "diagnosticsDrained",
+    "rtdDrained",
+    "finishClose"
+  ],
+  "trace_truncated": false,
+  "outcome": "returned_success"
+}

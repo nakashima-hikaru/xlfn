@@ -1,5 +1,6 @@
 import XlFnFormal.Composition.Checker
 import XlFnFormal.Composition.Refinement
+import XlFnFormal.Shutdown.DiagnosticActivity
 import Lean.Data.Json
 
 set_option autoImplicit false
@@ -102,7 +103,6 @@ private def simpleShutdownEvent : String → Option Shutdown.Event
   | "enqueueDiagnostic" => some .enqueueDiagnostic
   | "flushDiagnostic" => some .flushDiagnostic
   | "discardDiagnostic" => some .discardDiagnostic
-  | "stopDiagnostics" => some .stopDiagnostics
   | "recordCleanupIssue" => some .recordCleanupIssue
   | "beginClose" => some .beginClose
   | "callsDrained" => some .callsDrained
@@ -237,15 +237,28 @@ private def parseCompositionEvent : Json → Except String Event
       | none =>
           throw s!"composition event must be a string or tagged object: {json}"
 
+/-- A native stop carries the same passive diagnostic interval as the shutdown
+    trace. Expand it before replay, so composition retains the initial debt and
+    proves the original diagnostic transitions, including the zero-debt stop. -/
+private def parseCompositionEvents (json : Json) : Except String (Array Event) := do
+  if json.getTag? == some "liftShutdown" then
+    let shutdown ← json.getObjVal? "liftShutdown"
+    if shutdown.getTag? == some "stopDiagnostics" then
+      let activity ← Shutdown.DiagnosticActivity.parse
+        (← shutdown.getObjVal? "stopDiagnostics")
+      return activity.events.map Event.liftShutdown
+  return #[← parseCompositionEvent json]
+
 private def parseInitial : Json → Except String State
   | .str "initial" => return State.initialState
   | json => throw s!"composition trace initial must be \"initial\": {json}"
 
 private def parseTrace (json : Json) : Except String WireTrace := do
   let eventsJson : Array Json ← field json "events"
+  let events ← eventsJson.mapM parseCompositionEvents
   return {
     initial := (← parseInitial (← json.getObjVal? "initial"))
-    events := (← eventsJson.mapM parseCompositionEvent)
+    events := events.flatten
     traceTruncated := (← field json "trace_truncated")
     outcome := (← field json "outcome")
   }

@@ -835,6 +835,9 @@ struct TerminationWorkerState {
     phase: TerminationWorkerPhase,
     // Closed before joining, including when no worker has ever started.
     sealed: bool,
+    // COM dispatch may reenter a waiting caller. Such a nested join must not
+    // wait for the outer invocation that is currently dispatching it.
+    joiners: Vec<ThreadId>,
 }
 
 #[derive(Default)]
@@ -877,6 +880,51 @@ impl TerminationWorker {
 
     pub(super) fn join(&self) -> Result<(), ServerCloseError> {
         let current = std::thread::current().id();
+        {
+            let mut state = self.state.lock();
+            let worker_thread = match &state.phase {
+                TerminationWorkerPhase::Starting { owner } => Some(*owner),
+                TerminationWorkerPhase::Running(handle) => Some(handle.thread().id()),
+                TerminationWorkerPhase::Joining { worker_thread } => Some(*worker_thread),
+                TerminationWorkerPhase::Idle => {
+                    if state.sealed {
+                        state.phase = TerminationWorkerPhase::Joined;
+                    }
+                    return Ok(());
+                }
+                TerminationWorkerPhase::Joined => return Ok(()),
+            };
+            if worker_thread == Some(current) || state.joiners.contains(&current) {
+                return Err(ServerCloseError::Reentrant);
+            }
+            state.joiners.push(current);
+        }
+        let _joining = std::mem::DropGuard::new(current, |caller| {
+            self.state.lock().joiners.retain(|joiner| *joiner != caller);
+        });
+
+        // Both the owner of the JoinHandle and other concurrent callers may
+        // depend on COM work on this STA. Keep the mutex/Condvar join protocol
+        // on a helper and dispatch until its native exit has been observed.
+        // Preparation failure leaves the coordinator handle in its state slot.
+        use crate::drain_wait::{UnstartedDrain, drain_with_com_dispatch};
+        let prepared = drain_with_com_dispatch(UnstartedDrain::new(|| self.join_blocking(current)))
+            .map_err(|(error, _unstarted)| Self::dispatch_error(error))?;
+        prepared
+            .run()
+            .map_err(|(error, _unstarted)| Self::dispatch_error(error))?
+            .into_output()
+    }
+
+    fn dispatch_error(error: crate::XllError) -> ServerCloseError {
+        let code = match error {
+            crate::XllError::Native { code, .. } | crate::XllError::WindowsApi { code, .. } => code,
+            _ => crate::win32::E_UNEXPECTED,
+        };
+        ServerCloseError::WaitFailed(code)
+    }
+
+    fn join_blocking(&self, current: ThreadId) -> Result<(), ServerCloseError> {
         loop {
             let handle = {
                 let mut state = self.state.lock();

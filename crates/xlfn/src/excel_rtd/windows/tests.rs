@@ -4226,8 +4226,8 @@ fn sta_subscription_shutdown_dispatches_during_each_disconnect_barrier() {
         // SAFETY: the STA owns the live interface throughout its registration.
         let git = unsafe { super::global_interface_table::get_git() }.unwrap();
         let mut cookie = 0;
-        // SAFETY: the interface, IID, and writable cookie remain live here.
         assert_eq!(
+            // SAFETY: the interface, IID, and writable cookie remain live here.
             unsafe { git.register(probe.as_ptr(), &IID_IUNKNOWN, &mut cookie) },
             S_OK
         );
@@ -4263,6 +4263,252 @@ fn sta_subscription_shutdown_dispatches_during_each_disconnect_barrier() {
         // SAFETY: the disconnect barrier joined the only proxy user.
         assert_eq!(unsafe { git.revoke(cookie) }, S_OK);
     }
+}
+
+#[test]
+#[cfg(all(feature = "rtd", feature = "handles"))]
+fn sta_failed_connect_dispatches_during_rollback_and_rejected_install() {
+    use super::subscription_backend::FAIL_NEXT_SUBSCRIPTION_WRITE;
+
+    const CHILD: &str = "XLFN_TEST_STA_CONNECT_ROLLBACK";
+    if std::env::var_os(CHILD).is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(CHILD, "1")
+            .args([
+                "--exact",
+                "excel_rtd::windows::tests::sta_failed_connect_dispatches_during_rollback_and_rejected_install",
+            ])
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "ConnectData STA probe failed: {status}");
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                child.wait().unwrap();
+                panic!("ConnectData rollback stopped STA COM dispatch");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    struct CallsStaOnRollback {
+        request: mpsc::Sender<()>,
+        worker: thread::JoinHandle<()>,
+        disconnected: Arc<AtomicBool>,
+    }
+    // SAFETY: the fixture never retains its sink, and the consuming barrier
+    // joins the complete worker before reporting quiescence or its panic.
+    unsafe impl RtdSubscription for CallsStaOnRollback {
+        fn request_cancel(&self) {
+            let _ = self.request.send(());
+        }
+
+        fn disconnect_and_wait(self) -> XllResult<()> {
+            let _ = self.request.send(());
+            let result = crate::panic_boundary::contain_panic(self.worker.join())
+                .map_err(|_| XllError::Panic);
+            self.disconnected.store(true, Ordering::Release);
+            result
+        }
+    }
+    struct RollbackSource {
+        cancel_cookie: Option<u32>,
+        cleanup_cookie: u32,
+        disconnected: Arc<AtomicBool>,
+    }
+    // SAFETY: no sink is retained. The returned owner joins its worker, and
+    // the test keeps both registered COM interfaces live through that join.
+    unsafe impl RtdSource for RollbackSource {
+        type Value = i32;
+        type Subscription = CallsStaOnRollback;
+
+        fn subscribe(&self, _: &RtdTopic, _: RtdSink<i32>) -> XllResult<CallsStaOnRollback> {
+            if let Some(cookie) = self.cancel_cookie {
+                // ConnectData's helper must have initialized COM before it
+                // calls user hooks; this reenters DisconnectData on the STA.
+                sta_probe::call(&sta_probe::interface(cookie));
+            }
+            let cookie = self.cleanup_cookie;
+            let (request, received) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                received.recv().unwrap();
+                let _apartment = TestComApartment::enter();
+                sta_probe::call(&sta_probe::interface(cookie));
+            });
+            Ok(CallsStaOnRollback {
+                request,
+                worker,
+                disconnected: Arc::clone(&self.disconnected),
+            })
+        }
+    }
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _apartment = TestComApartment::enter_sta();
+    let _reset_failure = std::mem::DropGuard::new((), |()| {
+        FAIL_NEXT_SUBSCRIPTION_WRITE.store(false, Ordering::Release);
+    });
+    for cancel_before_install in [false, true] {
+        let sta = thread::current().id();
+        let cleaned_up = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&cleaned_up);
+        let cleanup_probe = sta_probe::new(move || {
+            assert_eq!(thread::current().id(), sta);
+            observed.store(true, Ordering::Release);
+        });
+        let server_address = Arc::new(AtomicUsize::new(0));
+        let callback_server = Arc::clone(&server_address);
+        let canceled = Arc::new(AtomicBool::new(false));
+        let observed_cancel = Arc::clone(&canceled);
+        let cancel_probe = sta_probe::new(move || {
+            assert_eq!(thread::current().id(), sta);
+            let server =
+                callback_server.load(Ordering::Acquire) as *mut RtdServer<CallsStaOnRollback>;
+            assert!(!server.is_null());
+            // SAFETY: ensured retains this exact typed COM server and its
+            // original ConnectData admission during reentrant cancellation.
+            assert_eq!(unsafe { disconnect_data(server, 1) }, S_OK);
+            observed_cancel.store(true, Ordering::Release);
+        });
+        // SAFETY: the STA retains both live interfaces throughout the calls.
+        let git = unsafe { super::global_interface_table::get_git() }.unwrap();
+        let mut cleanup_cookie = 0;
+        let mut cancel_cookie = 0;
+        // SAFETY: live IUnknowns, IID, and writable cookie slots are retained.
+        unsafe {
+            assert_eq!(
+                git.register(cleanup_probe.as_ptr(), &IID_IUNKNOWN, &mut cleanup_cookie),
+                S_OK
+            );
+            assert_eq!(
+                git.register(cancel_probe.as_ptr(), &IID_IUNKNOWN, &mut cancel_cookie),
+                S_OK
+            );
+        }
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let (arena, source) = crate::subscription::SourceArena::with_source(
+            crate::generation::RuntimeGeneration::new(1).unwrap(),
+            RollbackSource {
+                cancel_cookie: cancel_before_install.then_some(cancel_cookie),
+                cleanup_cookie,
+                disconnected: Arc::clone(&disconnected),
+            },
+        )
+        .unwrap();
+        let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
+        let ensured =
+            ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+        server_address.store(ensured.pointer() as usize, Ordering::Release);
+        let prepared = subscriptions
+            .prepare(
+                &source,
+                RtdTopic::single("sta-connect-rollback").unwrap().borrowed(),
+            )
+            .unwrap();
+        let key = *prepared.key();
+        prepared.commit();
+        FAIL_NEXT_SUBSCRIPTION_WRITE.store(!cancel_before_install, Ordering::Release);
+        // SAFETY: ensured retains the COM server during the admitted call.
+        let operation = unsafe { (*ensured.pointer()).operations.enter() }.unwrap();
+        let mut initial = VARIANT::default();
+        // SAFETY: this exclusive output and COM admission remain live until
+        // the scoped ConnectData work, including rollback, fully joins.
+        let status = unsafe {
+            ensured.subscription_server.unwrap().connect_data(
+                crate::subscription::TopicId(1),
+                key,
+                &mut initial,
+            )
+        };
+        drop(operation);
+        assert_eq!(status, E_FAIL);
+        assert!(!FAIL_NEXT_SUBSCRIPTION_WRITE.load(Ordering::Acquire));
+        // SAFETY: neither rejected installation nor injected write failure
+        // initialized a VARIANT payload, so output must still be empty.
+        unsafe { assert_eq!(initial.Anonymous.Anonymous.vt, VT_EMPTY) };
+        assert_eq!(canceled.load(Ordering::Acquire), cancel_before_install);
+        assert!(disconnected.load(Ordering::Acquire));
+        assert!(cleaned_up.load(Ordering::Acquire));
+        shutdown_subscriptions(&subscriptions).unwrap();
+        drop(ensured);
+        // SAFETY: all proxy users finished before the connection returned.
+        unsafe {
+            assert_eq!(git.revoke(cleanup_cookie), S_OK);
+            assert_eq!(git.revoke(cancel_cookie), S_OK);
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "rtd")]
+fn connect_dispatch_preflight_failure_never_starts_a_source() {
+    struct CountingSource(Arc<AtomicUsize>);
+    // SAFETY: the fixture does not retain its sink or start background work.
+    unsafe impl RtdSource for CountingSource {
+        type Value = i32;
+        type Subscription = ();
+
+        fn subscribe(&self, _: &RtdTopic, _: RtdSink<i32>) -> XllResult<()> {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _apartment = TestComApartment::enter();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (arena, source) = crate::subscription::SourceArena::<()>::with_source(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        CountingSource(Arc::clone(&calls)),
+    )
+    .unwrap();
+    let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
+    let ensured =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let prepared = subscriptions
+        .prepare(
+            &source,
+            RtdTopic::single("connect-preflight").unwrap().borrowed(),
+        )
+        .unwrap();
+    let key = *prepared.key();
+    for failure in 0..3 {
+        match failure {
+            0 => fail_next_drain_preparation(DrainPreparationStage::Apartment),
+            1 => fail_next_drain_preparation(DrainPreparationStage::Event),
+            _ => crate::excel_rtd::drain_wait::fail_next_drain_spawn(),
+        }
+        // SAFETY: ensured retains the COM server through this admitted call.
+        let operation = unsafe { (*ensured.pointer()).operations.enter() }.unwrap();
+        let mut initial = VARIANT::default();
+        assert_eq!(
+            // SAFETY: the empty output and admission remain live until the
+            // failed dispatch returns its still-unstarted connection work.
+            unsafe {
+                ensured.subscription_server.unwrap().connect_data(
+                    crate::subscription::TopicId(1),
+                    key,
+                    &mut initial,
+                )
+            },
+            E_FAIL
+        );
+        drop(operation);
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        // SAFETY: preflight failure never entered the VARIANT writer.
+        unsafe { assert_eq!(initial.Anonymous.Anonymous.vt, VT_EMPTY) };
+    }
+    let mut initial = connect_subscription_backend(&ensured, 1, key);
+    prepared.commit();
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    // SAFETY: the successful retry initialized this owned VARIANT.
+    assert_eq!(unsafe { VariantClear(&mut initial) }, S_OK);
+    shutdown_subscriptions(&subscriptions).unwrap();
+    drop(ensured);
 }
 
 #[test]
@@ -5490,3 +5736,6 @@ fn typed_handle_observer_uses_registered_nonunit_server_and_rolls_back() {
     shutdown(&handles).unwrap();
     super::server_type::register_server_type::<(), crate::DynamicRtdSources<()>>().unwrap();
 }
+
+#[cfg(all(feature = "rtd", feature = "handles"))]
+mod close_dispatch;

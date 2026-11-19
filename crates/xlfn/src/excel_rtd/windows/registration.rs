@@ -10,12 +10,16 @@ use crate::win32::{
 use crate::{XllError, XllResult};
 use std::ptr;
 
-// Schema 2 registrations are protected by one cross-process mutex for the
-// complete temporary registration lifetime. Do not scavenge schema 1 entries:
-// an older live XLL does not participate in that protocol, so its registration
-// cannot be proven stale.
+mod security;
+#[cfg(test)]
+mod tests;
+
+// Schema 3 registrations are protected for their complete lifetime by one
+// per-user mutex shared across Windows sessions. Preserve schema 1 and 2:
+// schema 2 used a session-local mutex, so its owner may still be live in
+// another session even while this process owns the new mutex.
 pub(super) const RTD_REGISTRATION_OWNER: &str = "xlfn";
-pub(super) const RTD_REGISTRATION_SCHEMA: &str = "2";
+pub(super) const RTD_REGISTRATION_SCHEMA: &str = "3";
 pub(super) const RTD_PROG_ID_PREFIX: &str = "XlFnRtd_";
 pub(super) static REGISTRATION_MAINTENANCE: Mutex<()> = Mutex::new(());
 const REGISTRATION_MUTEX_TIMEOUT_MS: u32 = 1_000;
@@ -125,27 +129,50 @@ impl Drop for TemporaryRegistration {
 }
 
 pub(super) struct CrossProcessRegistrationGuard {
-    handle: HANDLE,
+    handle: MutexHandle,
+}
+
+struct MutexHandle(HANDLE);
+
+impl Drop for MutexHandle {
+    fn drop(&mut self) {
+        // SAFETY: this owner closes its successfully created handle once,
+        // including when security validation or acquisition fails.
+        unsafe { CloseHandle(self.0) };
+    }
 }
 
 impl CrossProcessRegistrationGuard {
     fn acquire() -> XllResult<Self> {
         // The registry location is shared by all xlfn modules for one user, so
-        // use one session-wide acquisition order rather than deriving a name
-        // from a path string that may have aliases (case, short names, or symlinks).
-        Self::acquire_named("Local\\XlFnRtdRegistration_v1")
+        // neither a Windows session nor an aliased module path belongs in its
+        // lock identity. TokenUser identifies the same user in every session.
+        let security = security::MutexSecurity::current_user()?;
+        Self::acquire_with_security(security.name(), REGISTRATION_MUTEX_TIMEOUT_MS, &security)
     }
 
+    #[cfg(test)]
     pub(super) fn acquire_named(name: &str) -> XllResult<Self> {
         Self::acquire_named_with_timeout(name, REGISTRATION_MUTEX_TIMEOUT_MS)
     }
 
+    #[cfg(test)]
     pub(super) fn acquire_named_with_timeout(name: &str, timeout_ms: u32) -> XllResult<Self> {
-        let name = wide_nul(name);
+        let security = security::MutexSecurity::current_user()?;
+        Self::acquire_with_security(name, timeout_ms, &security)
+    }
 
-        // SAFETY: the security attributes are optional, initial ownership is
-        // false, and `name` is a live NUL-terminated UTF-16 buffer.
-        let handle = unsafe { CreateMutexW(ptr::null(), 0, name.as_ptr()) };
+    fn acquire_with_security(
+        name: &str,
+        timeout_ms: u32,
+        security: &security::MutexSecurity,
+    ) -> XllResult<Self> {
+        let name = wide_nul(name);
+        let attributes = security.attributes();
+
+        // SAFETY: security retains the explicit descriptor through creation,
+        // initial ownership is false, and name is NUL-terminated UTF-16.
+        let handle = unsafe { CreateMutexW(&attributes, 0, name.as_ptr()) };
         if handle.is_null() {
             // SAFETY: GetLastError has no preconditions and is read immediately
             // after the failed CreateMutexW call.
@@ -155,9 +182,13 @@ impl CrossProcessRegistrationGuard {
                 code,
             });
         }
+        let handle = MutexHandle(handle);
+        // CreateMutexW ignores the requested descriptor for an existing
+        // object. Validate it before trusting that object for exclusion.
+        security.validate(handle.0)?;
 
         // SAFETY: `handle` is a live mutex handle returned by CreateMutexW.
-        let wait = unsafe { WaitForSingleObject(handle, timeout_ms) };
+        let wait = unsafe { WaitForSingleObject(handle.0, timeout_ms) };
         if wait != (WAIT_OBJECT_0 as u32) && wait != (WAIT_ABANDONED as u32) {
             let code = if wait == WAIT_FAILED {
                 // SAFETY: GetLastError is read immediately after WAIT_FAILED.
@@ -165,8 +196,6 @@ impl CrossProcessRegistrationGuard {
             } else {
                 wait as i32
             };
-            // SAFETY: this function owns the handle but acquired no mutex ownership.
-            unsafe { CloseHandle(handle) };
             return Err(XllError::WindowsApi {
                 function: "WaitForSingleObject(RTD registration mutex)",
                 code,
@@ -179,12 +208,9 @@ impl CrossProcessRegistrationGuard {
 
 impl Drop for CrossProcessRegistrationGuard {
     fn drop(&mut self) {
-        // SAFETY: this guard owns the mutex after a successful wait and closes
-        // the handle exactly once after releasing ownership.
-        unsafe {
-            ReleaseMutex(self.handle);
-            CloseHandle(self.handle);
-        }
+        // SAFETY: only a successful wait constructs this thread-affine guard.
+        // The handle field closes the object after ownership is released.
+        unsafe { ReleaseMutex(self.handle.0) };
     }
 }
 
@@ -635,7 +661,7 @@ mod registry_prefix_tests {
             5 // ERROR_ACCESS_DENIED
         });
         assert!(result.is_err());
-        assert_eq!(deleted, [class.clone()]);
+        assert_eq!(deleted.as_slice(), std::slice::from_ref(&class));
         deleted.clear();
         delete_registration_keys(&prog, &class, |path| {
             deleted.push(path.to_vec());

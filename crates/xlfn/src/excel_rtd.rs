@@ -22,7 +22,7 @@ mod counted_string;
 #[cfg(all(feature = "bench-internals", feature = "handles", feature = "rtd"))]
 pub use counted_string::RtdObservationArgumentsBenchmark;
 
-pub(crate) mod drain_wait;
+pub(crate) use crate::drain_wait;
 
 mod host;
 #[cfg(any(test, all(windows, any(feature = "rtd", feature = "handles"))))]

@@ -384,6 +384,24 @@ lake exe shutdown_trace_checker < shutdown-trace.json
 
 Validates ordered lifecycle certificates and order-independent activity
 ownership observations against the independent shutdown specification.
+The initial resource snapshot retains pending diagnostics accepted during
+initialization. Each native `stopDiagnostics` observation carries the counts of
+enqueued, flushed, and discarded diagnostics since the preceding stop (or the
+initial snapshot). Both wire checkers expand those counts into a canonical
+accounting order before the existing stop transition. This discharges initial
+and newly enqueued debt through the original flush/discard guards; stopping
+still requires zero pending diagnostics. The expansion does not claim that
+concurrent activity appends occurred in that order, and the recorder does not
+derive permission to stop from the counts.
+
+The shutdown checker also checks these counts against the independent activity
+ledger: a stop cannot spend unrecorded observations, and successful shutdown
+must project all diagnostic observations. Multiple stop/start intervals spend
+each observation once. Truncating that ledger also truncates the composition
+trace rather than allowing an incomplete projection to certify success. The
+paired `initial-diagnostics-*` fixtures exercise initial debt, both completion
+paths, unordered observations, and missing or fabricated completion credit.
+
 An `initial: "opening"` record instead describes an initialization quarantine
 with an attempt ID and failure reason. It is checked against the lifecycle
 `quarantineOpen` transition: no generation was committed, no resource snapshot

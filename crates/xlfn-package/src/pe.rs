@@ -778,8 +778,13 @@ where
     if file_header.number_of_sections.get(LE) > 96 {
         return Err("PE image exceeds the Windows loader's 96-section limit".into());
     }
-    let mapped_sections = validate_mapped_sections(&pe)?;
     let machine = file_header.machine.get(LE);
+    if (machine == IMAGE_FILE_MACHINE_I386 && pe.nt_headers().is_type_64())
+        || (machine == IMAGE_FILE_MACHINE_AMD64 && !pe.nt_headers().is_type_64())
+    {
+        return Err("PE machine does not match its optional header format".into());
+    }
+    let mapped_sections = validate_mapped_sections(&pe)?;
     let characteristics = file_header.characteristics.get(LE);
     let mut exports = BTreeSet::new();
     let mut executable_exports = BTreeSet::new();

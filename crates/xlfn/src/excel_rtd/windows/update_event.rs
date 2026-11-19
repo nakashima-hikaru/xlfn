@@ -4,13 +4,11 @@ use super::module_lifetime;
 use super::server_gate::ServerOperationBarrier;
 use crate::excel_rtd::notification::NotificationPump;
 use crate::sync::{Mutex, MutexGuard};
-use crate::win32::{COINIT_MULTITHREADED, RPC_E_CHANGED_MODE, S_FALSE, S_OK};
+use crate::win32::S_OK;
 use crate::{XllError, XllResult};
 use std::ffi::c_void;
-use std::marker::PhantomData;
 use std::num::NonZeroU32;
-use std::ptr::{self, NonNull};
-use std::rc::Rc;
+use std::ptr::NonNull;
 #[cfg(test)]
 use std::sync::Arc;
 use xlfn_kernel::published_owner::PublishedOwner;
@@ -29,46 +27,7 @@ unsafe impl Send for CallbackPtr {}
 // SAFETY: RetainedUpdateCallback is Send and Sync, and its address is stable on heap.
 unsafe impl Sync for CallbackPtr {}
 
-pub(crate) struct ComApartmentGuard {
-    should_uninit: bool,
-    _not_send_or_sync: PhantomData<Rc<()>>,
-}
-
-impl ComApartmentGuard {
-    pub(crate) fn enter() -> Result<Self, i32> {
-        use crate::win32::CoInitializeEx;
-
-        // SAFETY: the reserved pointer is null as required by CoInitializeEx.
-        let status = unsafe { CoInitializeEx(ptr::null_mut(), COINIT_MULTITHREADED as u32) };
-
-        match status {
-            S_OK | S_FALSE => Ok(Self {
-                should_uninit: true,
-                _not_send_or_sync: PhantomData,
-            }),
-            RPC_E_CHANGED_MODE => Ok(Self {
-                // The thread already owns a different COM apartment. This
-                // call did not add an initialization reference to balance.
-                should_uninit: false,
-                _not_send_or_sync: PhantomData,
-            }),
-            error => Err(error),
-        }
-    }
-}
-
-impl Drop for ComApartmentGuard {
-    fn drop(&mut self) {
-        if self.should_uninit {
-            use crate::win32::CoUninitialize;
-
-            // SAFETY: `should_uninit` is set only after a successful
-            // CoInitializeEx call, and this guard performs exactly one matching
-            // CoUninitialize call while being used on the initializing thread.
-            unsafe { CoUninitialize() };
-        }
-    }
-}
+pub(crate) use crate::drain_wait::windows::ComApartmentGuard;
 
 pub(super) struct GitCookieLease {
     cookie: NonZeroU32,

@@ -3242,6 +3242,193 @@ fn connection_notification_reentrant_refresh_observes_committed_publication() {
 }
 
 #[test]
+fn subscribe_reentrant_disconnect_revokes_the_provisional_connection() {
+    for deferred in [false, true] {
+        type DisconnectHook = Box<dyn Fn() -> XllResult<()> + Send + Sync>;
+        let hook = Arc::new(Mutex::new(None::<DisconnectHook>));
+        let on_subscribe = Arc::clone(&hook);
+        let sink_slot = Arc::new(Mutex::new(None));
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let (arena, source) = SourceArena::with_source(
+            RuntimeGeneration::new(1).unwrap(),
+            PublishingSource {
+                initial: None::<i32>,
+                sink_slot: Arc::clone(&sink_slot),
+                canceled: Arc::new(AtomicBool::new(false)),
+                disconnected: Arc::clone(&disconnected),
+                on_subscribe: Some(move || on_subscribe.lock().as_ref().unwrap()()),
+            },
+        )
+        .unwrap();
+        let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+        let server = runtime.register_test_server(1);
+        *hook.lock() = Some(Box::new(move || {
+            if deferred {
+                server.disconnect_deferred(TopicId(1), Box::new(()))
+            } else {
+                server.disconnect(TopicId(1))
+            }
+        }));
+        let prepared = runtime
+            .prepare(
+                &source,
+                RtdTopic::single("subscribe-disconnect").unwrap().borrowed(),
+            )
+            .unwrap();
+        let id = prepared.id();
+        prepared.commit();
+
+        assert!(matches!(
+            server.connect_transaction(TopicId(1), id),
+            Err(XllError::Closing)
+        ));
+        assert!(disconnected.load(Ordering::Acquire));
+        assert!(sink_slot.lock().is_none());
+        assert!(
+            !server
+                .test_server()
+                .subscriptions
+                .lock()
+                .contains_key(&TopicId(1))
+        );
+        assert!(!runtime.catalog.lock().entries.contains_key(&id));
+        assert_eq!(runtime.services.active_quota.used(), 0);
+        assert_eq!(runtime.services.queued_update_quota.used(), 0);
+        assert_eq!(runtime.disconnects.retained_source_count(), 0);
+    }
+}
+
+#[test]
+fn concurrent_provisional_disconnect_preserves_a_replacement_connection() {
+    struct BlockingSource {
+        entered: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        sink_slot: Arc<Mutex<Option<RtdSink<i32>>>>,
+        disconnected: Arc<AtomicBool>,
+    }
+    // SAFETY: the fixture retains its sink only until the returned owner's
+    // consuming barrier clears the slot; it starts no background sink users.
+    unsafe impl RtdSource for BlockingSource {
+        type Value = i32;
+        type Subscription = TestSubscription;
+
+        fn subscribe(&self, _: &RtdTopic, sink: RtdSink<i32>) -> XllResult<TestSubscription> {
+            *self.sink_slot.lock() = Some(sink);
+            self.entered.send(()).unwrap();
+            // The test drops this sender during unwinding too, so a failing
+            // assertion cannot leave the scoped connection thread blocked.
+            let _ = self.release.lock().recv();
+            let sink_slot = Arc::clone(&self.sink_slot);
+            Ok(TestSubscription {
+                canceled: Arc::new(AtomicBool::new(false)),
+                disconnected: Arc::clone(&self.disconnected),
+                on_disconnect: Some(Box::new(move || {
+                    sink_slot.lock().take();
+                })),
+            })
+        }
+    }
+
+    let (entered, entering) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let old_sink = Arc::new(Mutex::new(None));
+    let old_disconnected = Arc::new(AtomicBool::new(false));
+    let fixture = SourceFixture::new();
+    let blocked = fixture
+        .registration
+        .register(BlockingSource {
+            entered,
+            release: Mutex::new(released),
+            sink_slot: Arc::clone(&old_sink),
+            disconnected: Arc::clone(&old_disconnected),
+        })
+        .unwrap();
+    let (replacement, replacement_sink, replacement_disconnected) = fixture.add::<i32>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(fixture.finish());
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(
+            &blocked,
+            RtdTopic::single("blocked-subscribe").unwrap().borrowed(),
+        )
+        .unwrap();
+    let old_id = prepared.id();
+    prepared.commit();
+
+    std::thread::scope(|scope| {
+        let connection = scope.spawn(|| server.connect_transaction(TopicId(1), old_id));
+        // Keep the release sender inside the scope body. It must be dropped
+        // before scope joins the blocked connection if an assertion unwinds.
+        let release_before_join = release;
+        entering
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        old_sink.lock().as_ref().unwrap().publish(1).unwrap();
+        assert!(
+            !server
+                .test_server()
+                .subscriptions
+                .lock()
+                .contains_key(&TopicId(1))
+        );
+        server
+            .disconnect_deferred(TopicId(1), Box::new(()))
+            .unwrap();
+        assert!(matches!(
+            old_sink.lock().as_ref().unwrap().publish(2),
+            Err(XllError::Closing)
+        ));
+        assert!(!runtime.catalog.lock().entries.contains_key(&old_id));
+        assert_eq!(runtime.services.active_quota.used(), 0);
+        assert_eq!(runtime.disconnects.retained_source_count(), 1);
+
+        let prepared = runtime
+            .prepare(
+                &replacement,
+                RtdTopic::single("replacement").unwrap().borrowed(),
+            )
+            .unwrap();
+        let replacement_id = prepared.id();
+        prepared.commit();
+        server
+            .connect_transaction(TopicId(1), replacement_id)
+            .unwrap()
+            .commit()
+            .unwrap();
+        release_before_join.send(()).unwrap();
+        assert!(matches!(connection.join().unwrap(), Err(XllError::Closing)));
+
+        assert!(old_disconnected.load(Ordering::Acquire));
+        assert!(old_sink.lock().is_none());
+        assert!(!replacement_disconnected.load(Ordering::Acquire));
+        assert!(runtime.catalog.lock().entries[&replacement_id].is_active());
+        assert!(
+            server
+                .test_server()
+                .subscriptions
+                .lock()
+                .contains_key(&TopicId(1))
+        );
+        assert_eq!(runtime.services.active_quota.used(), 1);
+        assert_eq!(runtime.disconnects.retained_source_count(), 1);
+        replacement_sink
+            .lock()
+            .as_ref()
+            .unwrap()
+            .publish(42)
+            .unwrap();
+        let refresh = server.begin_refresh().unwrap();
+        assert_eq!(refresh.updates()[0].value, StoredRtdValue::Integer(42));
+        refresh.complete(RefreshOutcome::Delivered).unwrap();
+    });
+    server.disconnect(TopicId(1)).unwrap();
+    assert!(replacement_disconnected.load(Ordering::Acquire));
+    assert_eq!(runtime.services.active_quota.used(), 0);
+    assert_eq!(runtime.services.queued_update_quota.used(), 0);
+    assert_eq!(runtime.disconnects.retained_source_count(), 0);
+}
+
+#[test]
 fn connection_notification_reentrant_disconnect_cannot_resurrect_connection() {
     let (arena, source, sink_slot, disconnected) = publishing_source::<i32>(None);
     let runtime = SubscriptionRuntime::with_sources_for_internal(arena);

@@ -327,6 +327,41 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
     }
 
     pub(crate) fn close(&self) -> XllResult<crate::shutdown::StopOutcome<AsyncStopped>> {
+        #[cfg(windows)]
+        {
+            use crate::drain_wait::{UnstartedDrain, drain_with_com_dispatch};
+
+            // Prepare before taking any executor or registry owner. A failure
+            // leaves those obligations in the runtime for a later close. The
+            // helper covers reader/task drain, executor shutdown, destruction,
+            // and native poller exit while the lifecycle STA dispatches COM.
+            let prepared =
+                drain_with_com_dispatch(UnstartedDrain::new(|| self.close_after_dispatch()))
+                    .map_err(|(error, unstarted)| {
+                        let _unused = unstarted.into_work();
+                        error
+                    })?;
+            prepared
+                .run()
+                .map_err(|(error, unstarted)| {
+                    let _unused = unstarted.into_work();
+                    error
+                })?
+                .into_output()
+        }
+        #[cfg(not(windows))]
+        self.close_after_dispatch()
+    }
+
+    fn close_after_dispatch(&self) -> XllResult<crate::shutdown::StopOutcome<AsyncStopped>> {
+        #[cfg(windows)]
+        let _apartment =
+            crate::drain_wait::windows::ComApartmentGuard::enter().map_err(|code| {
+                XllError::WindowsApi {
+                    function: "CoInitializeEx(async shutdown)",
+                    code,
+                }
+            })?;
         let Some(closing) = self.take_for_close() else {
             return Ok(crate::shutdown::StopOutcome {
                 certificate: AsyncStopped::new(),
@@ -577,6 +612,30 @@ mod close_tests {
         assert!(runtime.is_stopped());
         assert_eq!(counters.stops.load(Ordering::Relaxed), 2);
         assert_eq!(counters.drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn async_dispatch_preparation_failure_keeps_executor_for_retry() {
+        use crate::drain_wait::windows::{DrainPreparationStage, fail_next_drain_preparation};
+
+        for failure in 0..3 {
+            let (runtime, counters) = start();
+            match failure {
+                0 => fail_next_drain_preparation(DrainPreparationStage::Apartment),
+                1 => fail_next_drain_preparation(DrainPreparationStage::Event),
+                _ => crate::drain_wait::fail_next_drain_spawn(),
+            }
+            assert!(runtime.close().is_err());
+            assert!(runtime.is_running());
+            assert!(!runtime.is_stopped());
+            assert_eq!(counters.stops.load(Ordering::Relaxed), 0);
+            assert_eq!(counters.drops.load(Ordering::Relaxed), 0);
+            assert!(runtime.close().unwrap().issues.is_empty());
+            assert!(runtime.is_stopped());
+            assert_eq!(counters.stops.load(Ordering::Relaxed), 1);
+            assert_eq!(counters.drops.load(Ordering::Relaxed), 1);
+        }
     }
 
     #[test]

@@ -74,6 +74,7 @@ struct InjectedFileOps {
     failed_syncs: BTreeSet<usize>,
     fail_sync_after_backup: bool,
     fail_sync_after_install: bool,
+    fail_sync_after_recovery_move: bool,
     rename_count: Cell<usize>,
     remove_count: Cell<usize>,
     sync_count: Cell<usize>,
@@ -137,10 +138,14 @@ impl DistributionFileOps for InjectedFileOps {
         if let Some(FileOperation::Rename { to, .. }) = self.operations.borrow().last() {
             let backup = to.file_name().is_some_and(|name| name == "previous");
             let install = to.file_name().is_some_and(|name| name == "win-x64");
+            let recovery_move = to
+                .file_name()
+                .is_some_and(|name| name == "recovery-install");
             let rename_succeeded = !self.failed_renames.contains(&self.rename_count.get());
             if rename_succeeded
                 && ((self.fail_sync_after_backup && backup)
-                    || (self.fail_sync_after_install && install))
+                    || (self.fail_sync_after_install && install)
+                    || (self.fail_sync_after_recovery_move && recovery_move))
             {
                 return Err(io::Error::other(
                     "injected sync failure after namespace change",
@@ -1117,7 +1122,10 @@ fn stale_recovery_sync_failure_reports_interruption_and_can_be_retried() {
     assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
 
     let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    let file_ops = InjectedFileOps::failing_syncs([1]);
+    let file_ops = InjectedFileOps {
+        fail_sync_after_recovery_move: true,
+        ..InjectedFileOps::default()
+    };
     let recovery_error =
         recover_stale_transactions(directory.path(), "win-x64", &guard, &file_ops).unwrap_err();
     let DistributionError::Interrupted {
@@ -1150,6 +1158,76 @@ fn stale_recovery_sync_failure_reports_interruption_and_can_be_retried() {
     assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
     assert!(!destination.join("new.xll").exists());
     assert!(transaction_directories(directory.path()).is_empty());
+}
+
+#[test]
+fn stale_recovery_after_restoring_backup_can_be_retried() {
+    for state in [
+        TransactionState::Prepared,
+        TransactionState::PreviousSaved,
+        TransactionState::InstallPending,
+        TransactionState::Installed,
+    ] {
+        let (directory, destination, staging) = distribution_fixture();
+        let original_identity = directory_identity(&destination).unwrap();
+        let transaction = directory.path().join(".win-x64.transaction-stale-restore");
+        let transaction_directory = PrivateStagingDirectory::create(&transaction).unwrap();
+        let previous = transaction.join("previous");
+        fs::rename(&destination, &previous).unwrap();
+        let installed_identity = if matches!(
+            state,
+            TransactionState::InstallPending | TransactionState::Installed
+        ) {
+            fs::create_dir(&destination).unwrap();
+            fs::write(destination.join("interrupted.xll"), b"interrupted").unwrap();
+            Some(directory_identity(&destination).unwrap())
+        } else {
+            None
+        };
+        write_stale_journal(
+            directory.path(),
+            &transaction,
+            "win-x64",
+            Some(original_identity),
+            state,
+            (state != TransactionState::Prepared).then_some(original_identity),
+            installed_identity,
+        );
+        drop(transaction_directory);
+
+        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        let file_ops = InjectedFileOps {
+            fail_sync_after_install: true,
+            ..InjectedFileOps::default()
+        };
+        let error =
+            recover_stale_transactions(directory.path(), "win-x64", &guard, &file_ops).unwrap_err();
+        assert!(
+            matches!(error, DistributionError::Interrupted { .. }),
+            "{state:?}"
+        );
+        assert_eq!(directory_identity(&destination).unwrap(), original_identity);
+        assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+        assert!(!previous.exists());
+        assert_eq!(
+            read_transaction_journal(&transaction.join(TRANSACTION_JOURNAL))
+                .unwrap()
+                .state,
+            TransactionState::RollbackPending,
+            "{state:?} must record intent before consuming its backup"
+        );
+        drop(guard);
+
+        // The public commit path must finish the interrupted recovery before
+        // it publishes the next package, without requiring manual cleanup.
+        let outcome = PreparedDistribution::new(prepared_test_directory(&staging))
+            .commit(&destination)
+            .unwrap();
+        assert!(matches!(outcome.cleanup(), CleanupOutcome::Complete));
+        assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
+        assert!(!destination.join("old.xll").exists());
+        assert!(transaction_directories(directory.path()).is_empty());
+    }
 }
 
 #[test]

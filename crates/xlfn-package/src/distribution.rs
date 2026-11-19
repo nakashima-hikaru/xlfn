@@ -1904,12 +1904,13 @@ fn recover_distribution_transaction(
                             transaction.display()
                         )));
                     }
-                    file_ops.rename(&previous, destination)?;
-                    sync_rename_parents(&previous, destination, file_ops)?;
-                    require_directory_identity(
+                    restore_previous_distribution(
+                        parent,
                         destination,
-                        expected_previous,
-                        "restored destination",
+                        transaction,
+                        &previous,
+                        &mut journal_state,
+                        file_ops,
                     )?;
                 } else if let Some(expected) = journal_state.destination_identity {
                     require_directory_identity(destination, expected, "original destination")?;
@@ -1937,10 +1938,11 @@ fn recover_distribution_transaction(
             TransactionState::InstallPending => {
                 if optional_directory_identity(&previous)?.is_some() {
                     restore_previous_distribution(
+                        parent,
                         destination,
                         transaction,
                         &previous,
-                        &journal_state,
+                        &mut journal_state,
                         file_ops,
                     )?;
                 } else {
@@ -1963,10 +1965,11 @@ fn recover_distribution_transaction(
             TransactionState::PreviousSaved => {
                 if optional_directory_identity(&previous)?.is_some() {
                     restore_previous_distribution(
+                        parent,
                         destination,
                         transaction,
                         &previous,
-                        &journal_state,
+                        &mut journal_state,
                         file_ops,
                     )?;
                 } else {
@@ -1979,10 +1982,11 @@ fn recover_distribution_transaction(
             TransactionState::Installed | TransactionState::RollbackPending => {
                 if optional_directory_identity(&previous)?.is_some() {
                     restore_previous_distribution(
+                        parent,
                         destination,
                         transaction,
                         &previous,
-                        &journal_state,
+                        &mut journal_state,
                         file_ops,
                     )?;
                 } else if journal_state.state == TransactionState::RollbackPending {
@@ -2008,10 +2012,11 @@ fn recover_distribution_transaction(
             TransactionState::RolledBack => {
                 if optional_directory_identity(&previous)?.is_some() {
                     restore_previous_distribution(
+                        parent,
                         destination,
                         transaction,
                         &previous,
-                        &journal_state,
+                        &mut journal_state,
                         file_ops,
                     )?;
                 } else {
@@ -2120,10 +2125,11 @@ fn remove_installed_distribution_with(
 }
 
 fn restore_previous_distribution(
+    parent: &Path,
     destination: &Path,
     transaction: &Path,
     previous: &Path,
-    journal: &TransactionJournal,
+    journal: &mut TransactionJournal,
     file_ops: &impl DistributionFileOps,
 ) -> DistributionResult {
     validate_output_destination(destination)?;
@@ -2138,6 +2144,21 @@ fn restore_previous_distribution(
     require_directory_identity(previous, expected_previous, "previous backup")?;
     let recovery_install = transaction.join("recovery-install");
     crate::validate_path_components(&recovery_install)?;
+    if !matches!(
+        journal.state,
+        TransactionState::RollbackPending | TransactionState::RolledBack
+    ) {
+        // Restoring `previous` consumes its pathname. Record the recovery
+        // intent first so an interrupted sync or cleanup can resume by checking
+        // the original destination identity instead of requiring that backup.
+        write_transaction_state(
+            &transaction.join(TRANSACTION_JOURNAL),
+            parent,
+            journal,
+            TransactionState::RollbackPending,
+            file_ops,
+        )?;
+    }
     if optional_directory_identity(destination)?.is_some() {
         let expected_installed = journal.installed_identity.ok_or_else(|| {
             DistributionError::Invalid(

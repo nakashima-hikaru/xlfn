@@ -323,6 +323,34 @@ pub(crate) enum ActivityEvent {
     RecordCleanupIssue,
 }
 
+/// Diagnostic observations since the preceding stop (or the initial snapshot).
+///
+/// This is a passive summary, not authority to stop the worker. The checker
+/// spends these observations against the unchanged initial pending count before
+/// checking the separately observed stop certificate.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "refinement"), derive(Serialize))]
+pub(crate) struct DiagnosticActivity {
+    enqueued: u64,
+    flushed: u64,
+    discarded: u64,
+}
+
+impl DiagnosticActivity {
+    fn from_activities(activities: &[ActivityEvent]) -> Self {
+        let mut diagnostic = Self::default();
+        for activity in activities {
+            match activity {
+                ActivityEvent::EnqueueDiagnostic => diagnostic.enqueued += 1,
+                ActivityEvent::FlushDiagnostic => diagnostic.flushed += 1,
+                ActivityEvent::DiscardDiagnostic => diagnostic.discarded += 1,
+                _ => {}
+            }
+        }
+        diagnostic
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "refinement"), derive(Serialize))]
 #[cfg_attr(any(test, feature = "refinement"), serde(rename_all = "camelCase"))]
@@ -332,7 +360,7 @@ pub(crate) enum CertificateEvent {
     StartAsyncExecutor,
     StopAsyncExecutor,
     StartDiagnostics,
-    StopDiagnostics,
+    StopDiagnostics(DiagnosticActivity),
     BeginClose,
     CallsDrained,
     ReturnsDrained,
@@ -387,9 +415,9 @@ impl ShutdownEvent {
             Self::StartDiagnostics => {
                 ShutdownObservation::Certificate(CertificateEvent::StartDiagnostics)
             }
-            Self::StopDiagnostics => {
-                ShutdownObservation::Certificate(CertificateEvent::StopDiagnostics)
-            }
+            Self::StopDiagnostics => ShutdownObservation::Certificate(
+                CertificateEvent::StopDiagnostics(DiagnosticActivity::default()),
+            ),
             Self::BeginClose => ShutdownObservation::Certificate(CertificateEvent::BeginClose),
             Self::CallsDrained => ShutdownObservation::Certificate(CertificateEvent::CallsDrained),
             Self::ReturnsDrained => {
@@ -545,6 +573,7 @@ struct TraceSession {
     generation: u64,
     initial: ShutdownResources,
     activities: Vec<ActivityEvent>,
+    diagnostic_checkpoint: usize,
     certificates: Vec<CertificateEvent>,
     trace_truncated: bool,
     outcome: TraceOutcome,
@@ -600,6 +629,7 @@ impl ShutdownTraceRecorder {
             generation,
             initial,
             activities: Vec::new(),
+            diagnostic_checkpoint: 0,
             certificates: Vec::new(),
             trace_truncated: false,
             outcome: TraceOutcome::InProgress,
@@ -624,6 +654,8 @@ impl ShutdownTraceRecorder {
         let observation = event.into_observation();
         #[cfg(any(test, feature = "refinement"))]
         let mut lifted_certificate = None;
+        #[cfg(any(test, feature = "refinement"))]
+        let trace_truncated;
         {
             let mut state = self.state.lock();
             let RecorderState::Recording(session) = &mut *state else {
@@ -638,7 +670,16 @@ impl ShutdownTraceRecorder {
                         session.trace_truncated = true;
                     }
                 }
-                ShutdownObservation::Certificate(certificate) => {
+                ShutdownObservation::Certificate(mut certificate) => {
+                    if let CertificateEvent::StopDiagnostics(diagnostic) = &mut certificate {
+                        // Worker joining is observed by the operational caller.
+                        // Summarize the completed interval without assigning a
+                        // protocol order to concurrent activity appends.
+                        *diagnostic = DiagnosticActivity::from_activities(
+                            &session.activities[session.diagnostic_checkpoint..],
+                        );
+                        session.diagnostic_checkpoint = session.activities.len();
+                    }
                     if session.certificates.len() < MAX_TRACE_EVENTS {
                         session.certificates.push(certificate.clone());
                     } else {
@@ -655,6 +696,10 @@ impl ShutdownTraceRecorder {
                     }
                 }
             }
+            #[cfg(any(test, feature = "refinement"))]
+            {
+                trace_truncated = session.trace_truncated;
+            }
             if let Some(outcome) = terminal_outcome {
                 session.outcome = outcome;
                 // Recording the terminal certificate and sealing its session
@@ -668,11 +713,17 @@ impl ShutdownTraceRecorder {
             }
         }
         #[cfg(any(test, feature = "refinement"))]
-        if let Some(certificate) = lifted_certificate
+        if (trace_truncated || lifted_certificate.is_some())
             && let Some(composition) = self.composition.lock().as_ref().cloned()
         {
-            composition
-                .record(crate::composition_refinement::CompositionEvent::LiftShutdown(certificate));
+            if trace_truncated {
+                composition.mark_truncated();
+            }
+            if let Some(certificate) = lifted_certificate {
+                composition.record(
+                    crate::composition_refinement::CompositionEvent::LiftShutdown(certificate),
+                );
+            }
         }
     }
 
@@ -855,6 +906,92 @@ mod tests {
                 ActivityEvent::EnterCall { id }
             ]
         );
+    }
+
+    #[test]
+    fn diagnostic_stop_preserves_initial_credit_and_unordered_observations() {
+        let recorder = recorder();
+        let composition = Arc::new(crate::composition_refinement::CompositionTrace::new());
+        recorder.set_composition(Arc::clone(&composition));
+        let mut initial = ShutdownResources::opened(0, 0, false);
+        initial.diagnostics_pending = 1;
+        initial.diagnostics_running = true;
+        recorder.begin(42, initial).unwrap();
+        recorder.record(ShutdownEvent::FlushDiagnostic);
+        recorder.record(ShutdownEvent::DiscardDiagnostic);
+        recorder.record(ShutdownEvent::EnqueueDiagnostic);
+        recorder.record(ShutdownEvent::StopDiagnostics);
+
+        assert_eq!(
+            recorder.activities(),
+            [
+                ActivityEvent::FlushDiagnostic,
+                ActivityEvent::DiscardDiagnostic,
+                ActivityEvent::EnqueueDiagnostic,
+            ]
+        );
+        let document: serde_json::Value =
+            serde_json::from_str(&recorder.trace_json().unwrap()).unwrap();
+        assert_eq!(document["initial"]["diagnosticsPending"], 1);
+        let expected = serde_json::json!({
+            "stopDiagnostics": { "enqueued": 1, "flushed": 1, "discarded": 1 }
+        });
+        assert_eq!(document["certificates"][0], expected);
+        let composition: serde_json::Value =
+            serde_json::from_str(&composition.trace_json().unwrap()).unwrap();
+        assert_eq!(composition["events"][0]["liftShutdown"], expected);
+    }
+
+    #[test]
+    fn diagnostic_stop_summaries_only_spend_each_interval_once() {
+        let recorder = recorder();
+        let mut initial = ShutdownResources::opened(0, 0, false);
+        initial.diagnostics_pending = 1;
+        initial.diagnostics_running = true;
+        recorder.begin(42, initial).unwrap();
+        // The recorder must not manufacture completion credit even for an
+        // invalid stop. The independent checker rejects this observation.
+        recorder.record(ShutdownEvent::StopDiagnostics);
+        recorder.record(ShutdownEvent::StartDiagnostics);
+        recorder.record(ShutdownEvent::FlushDiagnostic);
+        recorder.record(ShutdownEvent::StopDiagnostics);
+        recorder.record(ShutdownEvent::StartDiagnostics);
+        recorder.record(ShutdownEvent::EnqueueDiagnostic);
+        recorder.record(ShutdownEvent::DiscardDiagnostic);
+        recorder.record(ShutdownEvent::StopDiagnostics);
+        assert_eq!(
+            recorder.certificates(),
+            [
+                CertificateEvent::StopDiagnostics(DiagnosticActivity::default()),
+                CertificateEvent::StartDiagnostics,
+                CertificateEvent::StopDiagnostics(DiagnosticActivity {
+                    flushed: 1,
+                    ..DiagnosticActivity::default()
+                }),
+                CertificateEvent::StartDiagnostics,
+                CertificateEvent::StopDiagnostics(DiagnosticActivity {
+                    enqueued: 1,
+                    discarded: 1,
+                    ..DiagnosticActivity::default()
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn truncated_activity_cannot_supply_a_complete_composition_projection() {
+        let recorder = recorder();
+        let composition = Arc::new(crate::composition_refinement::CompositionTrace::new());
+        recorder.set_composition(Arc::clone(&composition));
+        recorder
+            .begin(42, ShutdownResources::opened(0, 0, false))
+            .unwrap();
+        for _ in 0..=MAX_TRACE_EVENTS {
+            recorder.record(ShutdownEvent::EnqueueDiagnostic);
+        }
+        let document: serde_json::Value =
+            serde_json::from_str(&composition.trace_json().unwrap()).unwrap();
+        assert_eq!(document["trace_truncated"], true);
     }
 
     #[test]

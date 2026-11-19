@@ -5,12 +5,15 @@
 use super::automation::write_value_variant;
 use super::server::DeferredDisconnectLease;
 use super::update_event::RtdNotifier;
+use crate::excel_rtd::drain_wait::{DrainWork, UnstartedDrain};
+use crate::excel_rtd::{ComApartmentGuard, drain_with_com_dispatch};
 use crate::subscription::{
     RtdRefreshBatch, ServerGeneration, SubscriptionKey, SubscriptionRuntime,
     SubscriptionServerHandle, TopicId,
 };
 use crate::win32::{E_FAIL, S_OK, VARIANT, VariantClear};
 use crate::{RtdSubscription, XllResult};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
 
 #[cfg(test)]
@@ -77,6 +80,40 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> BackendSubscriptionServe
         key: SubscriptionKey,
         result: *mut VARIANT,
     ) -> i32 {
+        // Prepare dispatch and start the helper before a source receives its
+        // sink. All install, write, commit, and unwinding rollback barriers
+        // then run while this COM caller continues to dispatch STA calls.
+        // Startup refusal owns no subscription and leaves the output empty.
+        let work = UnstartedDrain::new(ConnectDataWork {
+            server: self,
+            topic_id,
+            key,
+            result,
+        });
+        let joined = match drain_with_com_dispatch(work).and_then(|prepared| prepared.run()) {
+            Ok(joined) => joined,
+            Err((error, _unstarted)) => {
+                crate::diagnostics::report_no_unwind("IRtdServer::ConnectData dispatch", &error);
+                return E_FAIL;
+            }
+        };
+        match joined.into_output() {
+            Ok(status) => status,
+            // Preserve the existing COM panic boundary after the helper and
+            // every rollback barrier have finished with STA dispatch alive.
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    /// # Safety
+    /// The calling dispatch work exclusively retains writable output storage
+    /// and COM/server admission until this operation and its rollback finish.
+    unsafe fn connect_after_dispatch(
+        &self,
+        topic_id: TopicId,
+        key: SubscriptionKey,
+        result: *mut VARIANT,
+    ) -> i32 {
         let connection = self
             .0
             .resolve_transport_key(key)
@@ -135,6 +172,53 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> BackendSubscriptionServe
     #[cfg(all(test, feature = "rtd"))]
     pub(super) fn pending_update_count(&self) -> usize {
         self.0.pending_update_count()
+    }
+}
+
+/// Scoped work keeps the caller's exclusive output capability together with
+/// its typed backend borrow. It has no producer or rollback obligation until
+/// the dispatch helper has successfully started.
+struct ConnectDataWork<'a, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> {
+    server: &'a BackendSubscriptionServer<E, C>,
+    topic_id: TopicId,
+    key: SubscriptionKey,
+    result: *mut VARIANT,
+}
+
+// SAFETY: ConnectData grants exclusive writable output storage for the whole
+// call. Its caller retains COM/server admission and does not access the output
+// until the scoped dispatch helper has fully joined. Only the helper writes
+// scalar/BSTR RTD values, which require no apartment-bound interface transfer.
+unsafe impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Send for ConnectDataWork<'_, E, C> {}
+
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> DrainWork for ConnectDataWork<'_, E, C> {
+    type Output = std::thread::Result<i32>;
+
+    fn run(self) -> Self::Output {
+        catch_unwind(AssertUnwindSafe(|| {
+            // User source hooks may use COM. The helper enters an MTA before
+            // acquiring any connection obligation, and keeps it through all
+            // rollback work, including cleanup during an unwind.
+            let _apartment = match ComApartmentGuard::enter() {
+                Ok(apartment) => apartment,
+                Err(code) => {
+                    crate::diagnostics::report_no_unwind(
+                        "IRtdServer::ConnectData apartment",
+                        &crate::XllError::Native {
+                            code,
+                            message: "failed to initialize COM connection apartment".into(),
+                        },
+                    );
+                    return E_FAIL;
+                }
+            };
+            // SAFETY: scoped dispatch retains exclusive writable output and
+            // the caller's runtime/server lifetime until this helper joins.
+            unsafe {
+                self.server
+                    .connect_after_dispatch(self.topic_id, self.key, self.result)
+            }
+        }))
     }
 }
 

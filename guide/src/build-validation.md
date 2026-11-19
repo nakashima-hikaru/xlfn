@@ -24,6 +24,8 @@ A successful command builds the `cdylib`, stages its bundle files, and checks
 the PE architecture, required exports, embedded framework metadata, CRT
 policy, and import closure. It leaves no persistent deployment package.
 `cargo check` alone does not perform these linked-artifact checks.
+Architecture validation checks that the COFF machine and PE32/PE32+ optional
+header agree with each other and the selected target.
 
 Omit `--target` to validate both architectures. Add the same feature and lock
 options that you intend to distribute:

@@ -49,7 +49,7 @@
     {"liftShutdown": "proveAddinQuiesced"},
     {"liftShutdown": "generationReclaimed"},
     {"liftShutdown": "handlesDrained"},
-    {"liftShutdown": "stopDiagnostics"},
+    {"liftShutdown": {"stopDiagnostics": {"enqueued": 0, "flushed": 0, "discarded": 0}}},
     {"liftShutdown": "diagnosticsDrained"},
     {"liftShutdown": "rtdDrained"},
     "finishCommittedShutdown",
