@@ -166,7 +166,8 @@ pub fn derive_excel_enum(item: TokenStream) -> TokenStream {
 /// `ExcelInputIdentity` implementation in declaration order. Enum variants
 /// include a declaration-order tag. Container fields retain their standard
 /// shape/presence framing and floating-point fields retain their Rust bits.
-#[proc_macro_derive(ExcelInputIdentity)]
+/// Use `#[excel_input(crate = "path::to::xlfn")]` when accessed through a facade.
+#[proc_macro_derive(ExcelInputIdentity, attributes(excel_input))]
 pub fn derive_excel_input_identity(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     input_derive::identity(input)
@@ -177,7 +178,8 @@ pub fn derive_excel_input_identity(item: TokenStream) -> TokenStream {
 /// Derives eager handle-input preparation through `FromExcel` and
 /// `ExcelInputIdentity`. Conversion and validation happen before lookup;
 /// materialization simply returns the retained converted value.
-#[proc_macro_derive(ExcelPrepare)]
+/// Accepts the same `#[excel_input(crate = "...")]` override as `ExcelInputIdentity`.
+#[proc_macro_derive(ExcelPrepare, attributes(excel_input))]
 pub fn derive_excel_prepare(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     input_derive::prepare(input)
@@ -1872,6 +1874,37 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("cannot be marked `thread_safe`"));
+    }
+
+    #[test]
+    fn parameter_gates_are_rejected_before_abi_planning() {
+        for attribute in [
+            quote!(#[cfg(any())]),
+            quote!(#[cfg_attr(feature = "optional", cfg(any()))]),
+            quote!(#[cfg_attr(all(), cfg_attr(any(), cfg(all())))]),
+        ] {
+            for ty in [quote!(f64), quote!(MainThreadContext<'_, State>)] {
+                let error = expand_excel_function(
+                    quote!(),
+                    function(quote!(fn gated(#attribute value: #ty) -> f64 { 1.0 })),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "Excel function parameters cannot be conditionally compiled; gate the entire function instead",
+                );
+            }
+        }
+        // Attributes which do not change the signature remain valid.
+        expand_excel_function(
+            quote!(),
+            function(quote!(
+                fn allowed(#[cfg_attr(all(), allow(unused_variables))] value: f64) -> f64 {
+                    1.0
+                }
+            )),
+        )
+        .unwrap();
     }
 
     #[test]

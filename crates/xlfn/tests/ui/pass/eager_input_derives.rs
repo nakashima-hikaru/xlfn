@@ -1,3 +1,5 @@
+#![deny(unused_variables)]
+
 use xlfn::prelude::*;
 use xlfn::value::{FromExcel};
 use xlfn::value::raw::{XlValueRef};
@@ -9,7 +11,12 @@ impl Addin for TestAddin {
     fn open(_: &OpenContext<Self>) -> OpenResult<Self> { Ok(Opened::new(())) }
 }
 
+mod facade {
+    pub use xlfn as api;
+}
+
 #[derive(ExcelInputIdentity, ExcelPrepare)]
+#[excel_input(crate = "facade::api")]
 struct Positive(f64);
 impl<'call> FromExcel<'call> for Positive {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
@@ -24,6 +31,12 @@ impl<'call> FromExcel<'call> for Positive {
 struct Shape<T> { values: Matrix<T>, label: String }
 #[derive(ExcelInputIdentity)]
 enum Choice<T> { Empty, Value(T), Named { value: T } }
+#[derive(ExcelInputIdentity)]
+struct Unit;
+#[derive(ExcelInputIdentity)]
+struct EmptyNamed {}
+#[derive(ExcelInputIdentity)]
+struct EmptyTuple();
 #[derive(ExcelInputIdentity, ExcelPrepare)]
 struct Generic<T>(T);
 impl<'call, T: FromExcel<'call>> FromExcel<'call> for Generic<T> {

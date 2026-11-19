@@ -49,6 +49,30 @@ async fn elided_context(context: AsyncContext<TestAddin>, value: f64) -> f64 {
     value
 }
 
+fn __frame() -> f64 {
+    1.0
+}
+fn __call() -> f64 {
+    2.0
+}
+fn __lease() -> f64 {
+    3.0
+}
+fn __cancellation() -> f64 {
+    4.0
+}
+fn __async_handle() -> f64 {
+    5.0
+}
+
+#[excel_function]
+async fn default_expression_hygiene(
+    #[excel_arg(default = __frame() + __call() + __lease() + __cancellation() + __async_handle())]
+    value: f64,
+) -> f64 {
+    value
+}
+
 fn main() {
     type AsyncExport = unsafe extern "system" fn(
         *mut xlfn::__private::v1::XLOPER12,
