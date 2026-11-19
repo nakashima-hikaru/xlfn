@@ -154,6 +154,9 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
                     delivery,
                 };
                 report_completion(udf_id, &completion);
+                if instrumentation.trace_enabled() {
+                    super::instrumentation::trace_rejected_launch(&metadata, timer, &completion);
+                }
                 return;
             }
         }
@@ -363,6 +366,9 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
                     delivery,
                 };
                 report_completion(udf_id, &completion);
+                if instrumentation.trace_enabled() {
+                    super::instrumentation::trace_rejected_launch(&metadata, timer, &completion);
+                }
                 return;
             }
         }

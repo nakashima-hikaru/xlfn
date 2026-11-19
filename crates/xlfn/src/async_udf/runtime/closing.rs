@@ -95,7 +95,13 @@ impl<E: AsyncExecutor> ExecutorClose<'_, E, ExecutorTasksDrained<'_>> {
 
 impl<E: AsyncExecutor> AsyncRuntime<E> {
     pub(super) fn take_for_close(&self) -> Option<ExecutorClose<'_, E, PublicationsSealed>> {
-        self.registry().close_admission();
+        self.take_for_close_with_wait(|| {})
+    }
+
+    fn take_for_close_with_wait(
+        &self,
+        mut before_wait: impl FnMut(),
+    ) -> Option<ExecutorClose<'_, E, PublicationsSealed>> {
         // Recovery is declared first so unwind unlocks state before restoration.
         let owner;
         let mut state = self.state.lock();
@@ -106,6 +112,11 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
                     return None;
                 }
                 ExecutorSlot::Running(executor) | ExecutorSlot::Closing(Some(executor)) => {
+                    // Startup reopens the task registry before publishing
+                    // Running under this same lock. Seal only after acquiring
+                    // that publication; an earlier seal can be overwritten
+                    // while this closer waits for Starting to finish.
+                    self.registry().close_admission();
                     owner = RollbackGuard::new(RetiringExecutor {
                         runtime: self,
                         executor,
@@ -121,9 +132,67 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
                 }
                 waiting @ (ExecutorSlot::Starting | ExecutorSlot::Closing(None)) => {
                     *state = waiting;
+                    before_wait();
                     self.state_changed.wait(&mut state);
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Executor;
+
+    impl AsyncExecutor for Executor {
+        type Reservation = ();
+
+        fn start(&self) -> XllResult<()> {
+            Ok(())
+        }
+
+        fn reserve(&self) -> XllResult<()> {
+            Ok(())
+        }
+
+        fn submit<F: Future<Output = ()> + Send + 'static>(
+            &self,
+            (): (),
+            task: crate::async_udf::AsyncTask<F>,
+        ) {
+            drop(task);
+        }
+
+        fn shutdown(&self) -> XllResult<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn close_waiting_for_startup_seals_the_published_registry() {
+        let runtime = AsyncRuntime::new();
+        let startup = super::super::startup::StartupClaim::acquire(&runtime, Executor).unwrap();
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let runtime = &runtime;
+            let closer = scope.spawn(move || {
+                let closing = runtime
+                    .take_for_close_with_wait(|| waiting_tx.send(()).unwrap())
+                    .unwrap();
+                // request_close() in drain_readers would seal it again and
+                // mask this race; inspect the owner handoff before that call.
+                assert!(matches!(
+                    runtime.registry().preflight_available(),
+                    Err(XllError::Closing)
+                ));
+                closing.drain_readers().unwrap().wait().shutdown().unwrap();
+            });
+            waiting_rx.recv().unwrap();
+            startup.publish(crate::AsyncTaskLimit::DEFAULT).unwrap();
+            closer.join().unwrap();
+        });
+        assert!(runtime.is_stopped());
     }
 }

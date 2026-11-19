@@ -85,7 +85,7 @@ impl<'a, E: AsyncExecutor> RuntimeCalculationSnapshot<'a, E> {
         if runtime.publication.load(Ordering::Acquire).is_null() {
             return Err(XllError::Closing);
         }
-        if runtime.registry().preflight_available()? {
+        if self.calculation.preflight_available()? {
             return Ok(());
         }
         // The executor reader preserves the existing saturation/close ordering.
@@ -103,7 +103,10 @@ impl<'a, E: AsyncExecutor> RuntimeCalculationSnapshot<'a, E> {
                 hook();
             }
         }
-        let permit = executor.reserve()?;
+        let permit = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            executor.reserve()
+        }))
+        .unwrap_or(Err(XllError::Panic))?;
         // A snapshot pins storage only; it does not pre-admit the calculation.
         // Final reservation must re-enter admission and check capacity.
         let task = self.calculation.reserve()?;
@@ -139,7 +142,14 @@ impl<E: AsyncExecutor> RuntimeReservation<'_, E> {
                 hook();
             }
         }
-        self.executor.submit(self.permit, task);
+        // The transferred task owns completion, diagnostics and response
+        // fallback. Contain an executor unwind here so the launch boundary
+        // cannot report the same failed invocation a second time. If submit
+        // retained the task before panicking, its registry ownership remains
+        // live and shutdown still waits for its final destruction.
+        let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            self.executor.submit(self.permit, task);
+        }));
     }
 
     #[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
@@ -155,7 +165,9 @@ impl<E: AsyncExecutor> RuntimeReservation<'_, E> {
                 hook();
             }
         }
-        self.executor.submit(self.permit, task);
+        let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            self.executor.submit(self.permit, task);
+        }));
     }
 
     #[cfg(all(feature = "handles", test, feature = "async-builtin"))]
@@ -260,7 +272,10 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
                 hook();
             }
         }
-        let permit = executor.reserve()?;
+        let permit = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            executor.reserve()
+        }))
+        .unwrap_or(Err(XllError::Panic))?;
         let task = self.registry().reserve(epoch)?;
         Ok(RuntimeReservation {
             task,

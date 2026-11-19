@@ -97,6 +97,10 @@ impl CalculationState {
         self.admission.begin_close();
     }
 
+    pub(crate) fn is_closing(&self) -> bool {
+        self.admission.is_closing()
+    }
+
     /// Seals future admissions immediately. Waiting is a separate transition,
     /// so callers can seal every calculation before waiting for any of them.
     pub(crate) fn close_admission(&self) -> ClosingCalculation<'_> {
