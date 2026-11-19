@@ -20,10 +20,20 @@ impl PrivateStagingDirectory {
     /// Creates a new private directory with its private attributes applied as
     /// part of the create operation itself.
     pub fn create(path: &Path) -> PackageResult<Self> {
+        Self::create_with(path, Self::open)
+    }
+
+    fn create_with(
+        path: &Path,
+        open: impl FnOnce(&Path) -> PackageResult<Self>,
+    ) -> PackageResult<Self> {
         if fs::symlink_metadata(path).is_ok() {
-            return Err(format!(
-                "private staging directory already exists: {}",
-                path.display()
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "private staging directory already exists: {}",
+                    path.display()
+                ),
             )
             .into());
         }
@@ -36,7 +46,13 @@ impl PrivateStagingDirectory {
         fs::create_dir_all(parent)?;
         validate_directory_path(parent)?;
         create_private_directory(path)?;
-        Self::open(path)
+        // A failed open/validation does not establish ownership of the current
+        // pathname. Preserve the original failure and its location rather than
+        // deleting a possibly replaced directory or retrying as a name collision.
+        open(path).map_err(|source| PackageError::StagingInitialization {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        })
     }
 
     /// Adopts an already-created directory after verifying its identity and
@@ -437,7 +453,10 @@ pub(crate) fn create_private_windows_directory(path: &Path) -> PackageResult {
         ConvertStringSecurityDescriptorToSecurityDescriptorW, CreateDirectoryW, HLOCAL, LocalFree,
         SDDL_REVISION_1, SECURITY_ATTRIBUTES,
     };
-    use std::os::windows::ffi::OsStrExt;
+
+    // Reject embedded terminators before allocating a descriptor or creating
+    // anything: the raw API would otherwise act on a truncated pathname.
+    let path_wide = windows_path_wide(path)?;
 
     // Do not inherit permissions from the temporary directory. Explicitly set
     // the current user as owner and grant access only to that SID and SYSTEM;
@@ -462,11 +481,6 @@ pub(crate) fn create_private_windows_directory(path: &Path) -> PackageResult {
         return Err(io::Error::last_os_error().into());
     }
 
-    let path_wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
     let security_attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor,
@@ -1063,5 +1077,60 @@ mod acl_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod creation_tests {
+    use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn embedded_nul_does_not_create_a_truncated_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("stage\0suffix");
+        let error = create_private_windows_directory(&path).unwrap_err();
+        assert!(matches!(error, PackageError::Io(ref error)
+            if error.kind() == io::ErrorKind::InvalidInput));
+        assert!(!parent.path().join("stage").exists());
+    }
+
+    #[test]
+    fn initialization_failure_is_distinct_from_a_name_collision() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("stage");
+        let error = PrivateStagingDirectory::create_with(&path, |_| {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected open failure").into())
+        })
+        .unwrap_err();
+        let PackageError::StagingInitialization {
+            path: retained,
+            source,
+        } = error
+        else {
+            panic!("initialization failure must retain its path and cause");
+        };
+        assert_eq!(retained, path);
+        assert!(path.is_dir());
+        assert!(matches!(*source, PackageError::Io(ref error)
+            if error.kind() == io::ErrorKind::PermissionDenied));
+        let collision = PrivateStagingDirectory::create(&path).unwrap_err();
+        assert!(matches!(collision, PackageError::Io(ref error)
+            if error.kind() == io::ErrorKind::AlreadyExists));
+    }
+
+    #[test]
+    fn initialization_failure_does_not_remove_a_replacement() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("stage");
+        let error = PrivateStagingDirectory::create_with(&path, |path| {
+            fs::remove_dir(path)?;
+            fs::create_dir(path)?;
+            fs::write(path.join("unrelated"), b"preserve")?;
+            Err("injected validation failure".into())
+        })
+        .unwrap_err();
+        assert!(matches!(error, PackageError::StagingInitialization { .. }));
+        assert_eq!(fs::read(path.join("unrelated")).unwrap(), b"preserve");
     }
 }

@@ -3,6 +3,64 @@ use super::*;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 
+#[cfg(target_os = "windows")]
+#[test]
+fn raw_windows_move_rejects_embedded_nul_without_mutating_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let destination = directory.path().join("destination");
+    fs::write(&source, b"original").unwrap();
+    for (from, to) in [
+        (directory.path().join("source\0suffix"), destination.clone()),
+        (source.clone(), directory.path().join("destination\0suffix")),
+    ] {
+        let error = move_file_ex_with_retry(&from, &to, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(&source).unwrap(), b"original");
+        assert!(!destination.exists());
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn repeated_distribution_commits_clean_up_readonly_xll_and_dll_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("win-x64");
+    for (revision, contents) in [b"first".as_slice(), b"second", b"third"]
+        .into_iter()
+        .enumerate()
+    {
+        let staging = directory.path().join(format!("staging-{revision}"));
+        // Keep the private directory capability alive across the commit,
+        // matching the packaging pipeline's open-handle lifetime.
+        let _staging = crate::PrivateStagingDirectory::create(&staging).unwrap();
+        for name in ["addin.xll", "vendor.dll"] {
+            let path = staging.join(name);
+            fs::write(&path, contents).unwrap();
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(path, permissions).unwrap();
+        }
+        let prepared =
+            crate::PreparedDirectoryCommit::prepare(&staging, &["addin.xll", "vendor.dll"])
+                .unwrap();
+        let outcome = crate::PreparedDistribution::new(prepared)
+            .commit(&destination)
+            .unwrap();
+        assert!(matches!(outcome.cleanup(), CleanupOutcome::Complete));
+        for name in ["addin.xll", "vendor.dll"] {
+            assert_eq!(fs::read(destination.join(name)).unwrap(), contents);
+            assert!(
+                fs::metadata(destination.join(name))
+                    .unwrap()
+                    .permissions()
+                    .readonly()
+            );
+        }
+        assert!(transaction_directories(directory.path()).is_empty());
+    }
+}
+
 #[derive(Debug, PartialEq)]
 enum FileOperation {
     Rename { from: PathBuf, to: PathBuf },
@@ -1092,4 +1150,89 @@ fn stale_recovery_sync_failure_reports_interruption_and_can_be_retried() {
     assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
     assert!(!destination.join("new.xll").exists());
     assert!(transaction_directories(directory.path()).is_empty());
+}
+
+#[test]
+fn staging_initialization_failure_is_not_retried_as_a_collision() {
+    let parent = tempfile::tempdir().unwrap();
+    let attempts = Cell::new(0);
+    let error = DistributionTransactionDirectory::create_with_staging(
+        parent.path(),
+        "win-x64",
+        None,
+        &InjectedFileOps::default(),
+        |path| {
+            attempts.set(attempts.get() + 1);
+            drop(PrivateStagingDirectory::create(path)?);
+            Err(crate::PackageError::StagingInitialization {
+                path: path.to_path_buf(),
+                source: Box::new("injected initialization failure".into()),
+            })
+        },
+    )
+    .err()
+    .expect("staging initialization must fail");
+    assert_eq!(attempts.get(), 1);
+    assert_eq!(transaction_directories(parent.path()).len(), 1);
+    assert!(matches!(
+        error,
+        DistributionError::Package(crate::PackageError::StagingInitialization { .. })
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("injected initialization failure")
+    );
+}
+
+#[test]
+fn verification_failure_survives_failed_rollback_cleanup() {
+    for had_previous in [true, false] {
+        // With a previous distribution, remove #1 deletes the failed install
+        // and #2 deletes the transaction. Without one, remove #1 deletes the
+        // installed directory and #2 deletes the transaction.
+        let failures: &[usize] = if had_previous { &[1, 2] } else { &[2] };
+        for &failed_remove in failures {
+            let (directory, destination, staging) = distribution_fixture();
+            if !had_previous {
+                fs::remove_dir_all(&destination).unwrap();
+            }
+            let prepared = prepared_test_directory(&staging);
+            let file_ops = InjectedFileOps::failing_removes([failed_remove]);
+            let error = commit_prepared_directory_with(
+                &prepared,
+                &destination,
+                |_| Ok(()),
+                |_| {
+                    Err(DistributionError::Invalid(
+                        "injected verification failure".to_owned(),
+                    ))
+                },
+                &file_ops,
+            )
+            .unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("injected verification failure"),
+                "{message}"
+            );
+            assert!(
+                message.contains("injected directory removal failure"),
+                "{message}"
+            );
+            let DistributionError::Interrupted { source, .. } = error else {
+                panic!("cleanup failure must retain the transaction location");
+            };
+            let DistributionError::CleanupFailure { primary, .. } = *source else {
+                panic!("cleanup failure must preserve the primary error");
+            };
+            assert!(matches!(*primary, DistributionError::Invalid(_)));
+            if had_previous {
+                assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+            } else {
+                assert!(!destination.exists());
+            }
+            assert_eq!(transaction_directories(directory.path()).len(), 1);
+        }
+    }
 }

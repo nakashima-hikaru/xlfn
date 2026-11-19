@@ -361,18 +361,9 @@ fn retry_path_operation(
 #[cfg(target_os = "windows")]
 fn move_file_ex_with_retry(from: &Path, to: &Path, flags: u32) -> io::Result<()> {
     use crate::win32::MoveFileExW;
-    use std::os::windows::ffi::OsStrExt;
 
-    let from_wide = from
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let to_wide = to
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+    let from_wide = crate::windows_path_wide(from)?;
+    let to_wide = crate::windows_path_wide(to)?;
     retry_windows_path_operation(|| {
         // SAFETY: both paths are live, NUL-terminated buffers for this call.
         if unsafe { MoveFileExW(from_wide.as_ptr(), to_wide.as_ptr(), flags) } != 0 {
@@ -759,6 +750,13 @@ pub enum DistributionError {
         #[source]
         source: Box<DistributionError>,
     },
+    #[error("{phase}: {primary}; cleanup failed: {cleanup}")]
+    CleanupFailure {
+        phase: &'static str,
+        primary: Box<DistributionError>,
+        #[source]
+        cleanup: Box<DistributionError>,
+    },
     #[error("{phase}: {primary}; recording state failed: {state}")]
     StateRecordingFailure {
         phase: &'static str,
@@ -1020,6 +1018,22 @@ impl DistributionTransactionDirectory {
         destination_identity: Option<DirectoryIdentity>,
         file_ops: &impl DistributionFileOps,
     ) -> DistributionResult<(Self, TransactionJournal)> {
+        Self::create_with_staging(
+            parent,
+            destination_name,
+            destination_identity,
+            file_ops,
+            crate::PrivateStagingDirectory::create,
+        )
+    }
+
+    fn create_with_staging(
+        parent: &Path,
+        destination_name: &str,
+        destination_identity: Option<DirectoryIdentity>,
+        file_ops: &impl DistributionFileOps,
+        create_staging: impl Fn(&Path) -> PackageResult<PrivateStagingDirectory>,
+    ) -> DistributionResult<(Self, TransactionJournal)> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1038,14 +1052,16 @@ impl DistributionTransactionDirectory {
                 continue;
             }
 
-            let capability = match crate::PrivateStagingDirectory::create(&private_path) {
+            let capability = match create_staging(&private_path) {
                 Ok(capability) => capability,
-                Err(_error)
-                    if fs::symlink_metadata(&private_path).is_ok()
-                        || fs::symlink_metadata(&final_path).is_ok() =>
+                Err(crate::PackageError::Io(error))
+                    if error.kind() == io::ErrorKind::AlreadyExists =>
                 {
                     continue;
                 }
+                // Once create succeeded, an open/ACL/identity failure is not a
+                // collision. Retrying would leave up to 64 private directories
+                // and replace the useful initialization error with exhaustion.
                 Err(error) => return Err(error.into()),
             };
             let transaction_identity = capability.identity;
@@ -1434,8 +1450,15 @@ fn commit_prepared_directory_with(
                         state: Box::new(state_error.into()),
                     });
                 }
-                remove_installed_distribution_with(&failed, &journal_state, file_ops)?;
-                transaction.cleanup_now(parent, file_ops)?;
+                if let Err(cleanup) =
+                    remove_installed_distribution_with(&failed, &journal_state, file_ops)
+                {
+                    return Err(DistributionError::CleanupFailure {
+                        phase: "post-commit verification rollback",
+                        primary: Box::new(verification_error),
+                        cleanup: Box::new(cleanup),
+                    });
+                }
             } else if let Err(rollback_error) = validate_commit_location(parent, destination)
                 .map_err(error_as_io)
                 .and_then(|_| {
@@ -1450,8 +1473,13 @@ fn commit_prepared_directory_with(
                     rollback_error,
                 )
                 .into());
-            } else {
-                transaction.cleanup_now(parent, file_ops)?;
+            }
+            if let Err(cleanup) = transaction.cleanup_now(parent, file_ops) {
+                return Err(DistributionError::CleanupFailure {
+                    phase: "post-commit verification rollback",
+                    primary: Box::new(verification_error),
+                    cleanup: Box::new(cleanup.into()),
+                });
             }
             output_changed = false;
             return Err(verification_error);
