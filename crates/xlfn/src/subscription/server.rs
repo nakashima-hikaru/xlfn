@@ -194,9 +194,12 @@ pub(crate) struct SubscriptionServer<
     C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
 > {
     pub(crate) generation: ServerGeneration,
-    pub(crate) publish: xlfn_kernel::published_owner::PublishedOwner<PublishCore<H>>,
     pub(super) subscriptions: Mutex<FxHashMap<TopicId, OwnedSubscription<H, E, C>>>,
     pub(super) termination_coordinator: TerminationCoordinator,
+    // An interrupted close can leave owners in this server. Their fallback
+    // disconnect barriers may still use raw sinks, so declaration-order drop
+    // must keep the publish allocation alive until every owner is gone.
+    pub(crate) publish: xlfn_kernel::published_owner::PublishedOwner<PublishCore<H>>,
 }
 
 impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> std::fmt::Debug

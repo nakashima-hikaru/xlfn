@@ -670,6 +670,34 @@ mod tests {
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
     }
 
+    #[test]
+    fn uncommitted_final_close_after_reopen_preserves_generation_history() {
+        let runtime = Runtime::<CleanClose>::new();
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
+        let committed = runtime.last_committed_generation();
+        assert!(committed.is_some());
+        assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
+
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime.publish(opening, (), ());
+        assert!(opening.fail_for_test().requires_rollback());
+        // A final close takes over the uncommitted attempt's cleanup.
+        let owner = runtime.begin_final_removal().unwrap();
+        drop(owner);
+        assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+        assert_eq!(runtime.last_committed_generation(), committed);
+
+        // The close did not poison this coordinator or erase its history.
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime.publish(opening, (), ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
+        assert_ne!(runtime.last_committed_generation(), committed);
+        assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
+    }
+
     struct CleanClose;
 
     impl Addin for CleanClose {

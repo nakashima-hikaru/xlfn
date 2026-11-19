@@ -186,6 +186,10 @@ fn duplicate_current_thread() -> OwnedHandle {
 }
 
 fn wait_with_com_pumping(handle: BorrowedHandle<'_>, timeout_ms: u32) -> Result<(), i32> {
+    // Server drains can originate on framework threads with no apartment.
+    // Preserve an existing STA, and keep a new MTA initialized for the whole
+    // CoWait call rather than assuming every caller arrived through COM.
+    let _apartment = ComApartmentGuard::enter()?;
     let raw = handle.as_raw_handle();
     let mut index = u32::MAX;
     // SAFETY: the borrow keeps the handle live; one readable HANDLE is
@@ -312,6 +316,16 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static_assertions::assert_not_impl_any!(DispatchPrepared<fn()>: Send, Sync);
+
+    #[test]
+    fn com_wait_initializes_an_uninitialized_framework_thread() {
+        std::thread::spawn(|| {
+            let completed = ManualResetEvent::new(true).unwrap();
+            completed.wait_with_com_pumping_for(1_000).unwrap();
+        })
+        .join()
+        .unwrap();
+    }
 
     struct DropObserved(Arc<AtomicUsize>);
 

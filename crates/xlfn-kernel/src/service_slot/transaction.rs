@@ -359,17 +359,49 @@ impl<R> ReplaceableServiceSlot<R> {
         candidate: Box<R>,
         precommit: impl FnOnce(bool, Option<&R>) -> Result<(), E>,
     ) -> Result<Option<RetiredService<R>>, E> {
-        Ok(ReplacementTxn::new(self, candidate)
-            .prepare(precommit)?
-            .publish()
-            .wait()
-            .reclaim())
+        self.replace_with_guard(candidate, precommit)
+    }
+
+    /// Replaces the service while retaining a caller-supplied guard only
+    /// through validation and publication, never through reader drain.
+    ///
+    /// `precommit` acquires and returns the guard after the slot's transition
+    /// lock is acquired. Its error and panic behavior matches [`Self::replace_with`].
+    /// The guard may serialize publication with external observations, but
+    /// must not borrow the retiring service. Readers may acquire that external
+    /// lock before releasing their read capabilities.
+    pub fn replace_with_guard<E, G>(
+        &self,
+        candidate: Box<R>,
+        precommit: impl FnOnce(bool, Option<&R>) -> Result<G, E>,
+    ) -> Result<Option<RetiredService<R>>, E> {
+        let mut guard = None;
+        let prepared = ReplacementTxn::new(self, candidate).prepare(|had_previous, previous| {
+            guard = Some(precommit(had_previous, previous)?);
+            Ok::<(), E>(())
+        })?;
+        let retiring = prepared.publish();
+        drop(guard);
+        Ok(retiring.wait().reclaim())
     }
 
     /// Closes the active lane, drains all active readers, unlinks the service,
     /// and returns the retired `Box<R>` if any was active.
     pub fn close(&self) -> Option<RetiredService<R>> {
-        ClosingTxn::new(self).withdraw().wait().reclaim()
+        self.close_with_guard(|| ())
+    }
+
+    /// Withdraws publication while holding a caller-supplied guard, then
+    /// releases that guard before waiting for any admitted readers.
+    ///
+    /// The closure acquires the guard after the slot's transition lock. Use
+    /// the same lock order as [`Self::replace_with_guard`].
+    pub fn close_with_guard<G>(&self, acquire: impl FnOnce() -> G) -> Option<RetiredService<R>> {
+        let closing = ClosingTxn::new(self);
+        let guard = acquire();
+        let retiring = closing.withdraw();
+        drop(guard);
+        retiring.wait().reclaim()
     }
 }
 
@@ -377,6 +409,60 @@ impl<R> ReplaceableServiceSlot<R> {
 mod tests {
     use super::*;
     use std::sync::{Arc as StdArc, atomic::AtomicUsize};
+
+    #[test]
+    fn external_publication_guard_is_released_before_reader_drain() {
+        use std::sync::{Mutex as StdMutex, mpsc};
+        use std::time::{Duration, Instant};
+
+        for replace in [false, true] {
+            let slot = ReplaceableServiceSlot::new();
+            let external = StdMutex::new(());
+            slot.replace_with(Box::new(1), |_, _| Ok::<_, ()>(()))
+                .unwrap();
+            std::thread::scope(|scope| {
+                let (pinned_tx, pinned_rx) = mpsc::channel();
+                let slot = &slot;
+                let external = &external;
+                let reader = scope.spawn(move || {
+                    let read = slot.read_if_ready().unwrap();
+                    pinned_tx.send(()).unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while slot.read_if_ready().is_some_and(|current| *current == 1) {
+                        assert!(Instant::now() < deadline, "publication never changed");
+                        std::thread::yield_now();
+                    }
+                    // Publication can become visible just before the guard
+                    // is released. A reader must acquire it while still pinned,
+                    // so the transition must never retain it through drain.
+                    loop {
+                        if let Ok(guard) = external.try_lock() {
+                            assert_eq!(*read, 1);
+                            drop(guard);
+                            break;
+                        }
+                        assert!(
+                            Instant::now() < deadline,
+                            "drain retained the external guard"
+                        );
+                        std::thread::yield_now();
+                    }
+                });
+                pinned_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                let old = if replace {
+                    slot.replace_with_guard(Box::new(2), |_, _| {
+                        Ok::<_, ()>(external.lock().unwrap())
+                    })
+                    .unwrap()
+                } else {
+                    slot.close_with_guard(|| external.lock().unwrap())
+                }
+                .unwrap();
+                assert_eq!(*old, 1);
+                reader.join().unwrap();
+            });
+        }
+    }
 
     struct Counted {
         value: usize,

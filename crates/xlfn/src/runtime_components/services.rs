@@ -199,6 +199,11 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
     }
 
     #[cfg(feature = "rtd")]
+    pub(crate) fn request_subscription_stop_before_export_drain(&self) {
+        self.rtd.subscriptions.request_stop_before_export_drain();
+    }
+
+    #[cfg(feature = "rtd")]
     pub(crate) fn close_subscriptions(
         &self,
     ) -> crate::XllResult<crate::shutdown::StopOutcome<crate::shutdown::SubscriptionsStopped>> {
@@ -253,6 +258,17 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
 }
 
 impl SealedGenerationServices {
+    pub(crate) fn cleanup_issue(&self) -> Option<crate::shutdown::CleanupIssue> {
+        #[cfg(feature = "handles")]
+        {
+            self.handles.cleanup_issue()
+        }
+        #[cfg(not(feature = "handles"))]
+        {
+            None
+        }
+    }
+
     /// Seals the canonical service owner, or certifies the generation observed
     /// without an owner. Slot shutdown may wait or run user code.
     pub(crate) fn seal_lifecycle<A: crate::Addin>(

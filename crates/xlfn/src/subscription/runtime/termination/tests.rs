@@ -78,6 +78,85 @@ fn claim<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
 }
 
 #[test]
+fn miri_failed_runtime_server_owner_keeps_publish_core_through_fallback_disconnect() {
+    struct Subscription {
+        sink: RtdSink<i32>,
+        disconnected: Arc<AtomicUsize>,
+    }
+
+    // SAFETY: the only sink is owned here and used synchronously before the
+    // consuming barrier returns. No worker or external sink copy exists.
+    unsafe impl RtdSubscription for Subscription {
+        fn request_cancel(&self) {}
+
+        fn disconnect_and_wait(self) -> XllResult<()> {
+            assert!(matches!(self.sink.publish(99), Err(XllError::Closing)));
+            self.disconnected.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    struct SinkSource(Arc<AtomicUsize>);
+
+    // SAFETY: subscribe transfers its entire sink lifetime to Subscription.
+    unsafe impl RtdSource for SinkSource {
+        type Value = i32;
+        type Subscription = Subscription;
+
+        fn subscribe(
+            &self,
+            _: &crate::subscription::RtdTopic,
+            sink: RtdSink<i32>,
+        ) -> XllResult<Subscription> {
+            Ok(Subscription {
+                sink,
+                disconnected: Arc::clone(&self.0),
+            })
+        }
+    }
+
+    let disconnected = Arc::new(AtomicUsize::new(0));
+    let (sources, source) = SourceArena::with_source(
+        RuntimeGeneration::new(1).unwrap(),
+        SinkSource(Arc::clone(&disconnected)),
+    )
+    .unwrap();
+    let runtime =
+        SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost, _>::with_sources_for_internal(
+            sources,
+        );
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(
+            &source,
+            crate::subscription::RtdTopic::single("abandoned-runtime")
+                .unwrap()
+                .borrowed(),
+        )
+        .unwrap();
+    server
+        .connect_transaction(TopicId(1), prepared.id())
+        .unwrap()
+        .commit()
+        .unwrap();
+    prepared.commit();
+
+    // No server cleanup has run when the runtime completion owner is lost.
+    // Its terminal failure makes Drop use each field's fallback ownership.
+    drop(claim(&runtime));
+    assert_eq!(
+        runtime.termination_coordinator.phase(),
+        TerminationPhase::Failed
+    );
+    let server_owner = runtime.servers.lock().remove(&server.generation()).unwrap();
+    drop(server_owner);
+    // Its cleanup reservation is returned before the runtime's worker pool
+    // drops; that pool deliberately fail-stops on outstanding source owners.
+    drop(runtime);
+    assert_eq!(disconnected.load(Ordering::Relaxed), 1);
+}
+
+#[test]
 fn miri_runtime_completion_remains_pending_until_catalog_finalization() {
     let (runtime, stopped, joined) = runtime_with_sources(false, false);
     let claimed = claim(&runtime);
@@ -103,6 +182,103 @@ fn miri_runtime_completion_remains_pending_until_catalog_finalization() {
     );
     runtime.close().unwrap();
     assert_eq!(joined.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn production_disconnect_releases_export_admission_after_source_stop() {
+    use crate::excel_rtd::RtdSubscriptionHost;
+    use crate::ingress::ExportIngress;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    struct StopSource {
+        stop: mpsc::Sender<()>,
+        receive: Mutex<Option<mpsc::Receiver<()>>>,
+        entered: mpsc::Sender<()>,
+    }
+    struct StopSubscription {
+        stop: mpsc::Receiver<()>,
+        entered: mpsc::Sender<()>,
+    }
+    // SAFETY: this ordering fixture owns no sink or worker. The bounded wait
+    // models a shared producer that exits after its source receives stop.
+    unsafe impl RtdSubscription for StopSubscription {
+        fn request_cancel(&self) {}
+        fn disconnect_and_wait(self) -> XllResult<()> {
+            self.entered.send(()).unwrap();
+            self.stop
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| XllError::Closing)
+        }
+    }
+    // SAFETY: subscribe retains no sink; the returned subscription owns every
+    // obligation. Repeated stop requests are harmless and never block.
+    unsafe impl RtdSource for StopSource {
+        type Value = i32;
+        type Subscription = StopSubscription;
+        fn subscribe(
+            &self,
+            _: &crate::subscription::RtdTopic,
+            _: RtdSink<i32>,
+        ) -> XllResult<StopSubscription> {
+            Ok(StopSubscription {
+                stop: self.receive.lock().take().unwrap(),
+                entered: self.entered.clone(),
+            })
+        }
+        fn request_stop(&self) {
+            let _ = self.stop.send(());
+        }
+    }
+
+    static INGRESS: ExportIngress = ExportIngress::new();
+    INGRESS.begin_opening();
+    INGRESS.complete_open(|| Ok::<_, ()>(())).unwrap().unwrap();
+    let (stop, receive) = mpsc::channel();
+    let (entered, entered_rx) = mpsc::channel();
+    let generation = RuntimeGeneration::new(1).unwrap();
+    let (sources, source) = SourceArena::with_source(
+        generation,
+        StopSource {
+            stop,
+            receive: Mutex::new(Some(receive)),
+            entered,
+        },
+    )
+    .unwrap();
+    let runtime = SubscriptionRuntime::with_host(
+        generation,
+        RtdLimits::standard(),
+        RtdSubscriptionHost::production(&INGRESS),
+        sources,
+    );
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(
+            &source,
+            crate::subscription::RtdTopic::single("stop-before-export-drain")
+                .unwrap()
+                .borrowed(),
+        )
+        .unwrap();
+    server
+        .connect_transaction(TopicId(1), prepared.id())
+        .unwrap()
+        .commit()
+        .unwrap();
+    prepared.commit();
+    server
+        .disconnect_deferred(TopicId(1), Box::new(()))
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(INGRESS.active_calls(), 1);
+
+    INGRESS.begin_close_with(|| {});
+    runtime.request_stop_before_host_drain();
+    assert!(runtime.services.runtime_gate.is_closing());
+    let _exports_drained = INGRESS.seal_and_drain().unwrap();
+    assert_eq!(INGRESS.active_calls(), 0);
+    runtime.close().unwrap();
 }
 
 #[test]

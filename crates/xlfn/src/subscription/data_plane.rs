@@ -417,24 +417,14 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }
     }
 
-    fn clear_pending(&self) {
-        for shard_mutex in self.shards.iter() {
-            let mut shard = shard_mutex.lock();
-            shard.pending[0].clear();
-            shard.pending[1].clear();
-            shard.deliverable_count = 0;
-        }
-        self.pending_updates.store(0, Ordering::Release);
-        self.deliverable_pending.store(0, Ordering::Release);
-        self.ready_shards.store(0, Ordering::Release);
-    }
-
     pub(crate) fn begin_termination(&self) -> PublishTerminationStart<'_, H> {
         let wait = self.server_gate.close_and_wait_begin();
         self.lifecycle
             .store(super::delivery::SERVER_LIFECYCLE_CLOSING, Ordering::Release);
         let notifier = self.detach_update_notifier();
-        self.clear_pending();
+        // Admitted publishers and refreshes can still own shard entries and
+        // their accounting. Only finish_termination, after this gate drains,
+        // may discard the tables and reset the aggregate counters.
         PublishTerminationStart {
             publish: self,
             wait,
@@ -480,7 +470,9 @@ impl<H: SubscriptionHost> PublishCore<H> {
     pub(crate) fn close_on_server_drop(&self) {
         self.lifecycle
             .store(super::delivery::SERVER_LIFECYCLE_CLOSING, Ordering::Release);
-        self.clear_pending();
+        // Subscription owners are dropped before this core. Retain its tables
+        // while their sink-user barriers run; field destruction reclaims the
+        // remaining entries after those barriers have completed.
     }
 
     pub(crate) fn has_deliverable_updates(&self) -> bool {
@@ -1250,6 +1242,29 @@ mod tests {
     use crate::subscription::runtime::SubscriptionRuntime;
     use triomphe::Arc;
     use xlfn_kernel::operation_gate::OperationGate;
+
+    #[test]
+    fn miri_termination_retains_pending_accounting_until_refresh_drains() {
+        use crate::subscription::RefreshOutcome;
+        use crate::subscription::tests::connected_sink;
+
+        let (_runtime, server, sink) = connected_sink::<i32>(None, "termination-accounting");
+        sink.publish(42).unwrap();
+        let publish = &server.test_server().publish;
+        let refresh = server.begin_refresh().unwrap();
+        let closing = publish.begin_termination();
+
+        assert_eq!(publish.queued_update_count(), 1);
+        assert_eq!(publish.pending_update_count(), 1);
+        assert!(matches!(sink.publish(43), Err(XllError::Closing)));
+        refresh.complete(RefreshOutcome::Delivered).unwrap();
+        assert_eq!(publish.queued_update_count(), 0);
+        assert_eq!(publish.pending_update_count(), 0);
+
+        closing.wait().finish();
+        assert_eq!(publish.queued_update_count(), 0);
+        assert_eq!(publish.pending_update_count(), 0);
+    }
 
     #[cfg(not(windows))]
     #[test]

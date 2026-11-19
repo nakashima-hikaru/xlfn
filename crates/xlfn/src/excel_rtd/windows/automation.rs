@@ -998,11 +998,11 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
                 return Err(XllError::InvalidHandle);
             }
 
-            let _value = VariantGuard(NonNull::from_mut(&mut value));
+            let value = VariantGuard(value);
 
             // SAFETY: SafeArrayGetElement successfully initialized `value`,
             // so its VARIANT header and discriminated payload may be read.
-            let variant = unsafe { value.Anonymous.Anonymous };
+            let variant = unsafe { value.0.Anonymous.Anonymous };
 
             if variant.vt != VT_BSTR {
                 return Err(XllError::InvalidHandle);
@@ -1015,12 +1015,12 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
             };
 
             // SAFETY: `bstr` is owned by the live VARIANT and remains valid
-            // until `_value` clears that VARIANT.
+            // until `value` clears that VARIANT.
             let length = unsafe { SysStringLen(bstr.as_ptr()) } as usize;
             checked_topic_part_length(length)?;
 
             // SAFETY: the BSTR contains at least `length` UTF-16 code units
-            // and `_value` keeps the owning VARIANT alive.
+            // and `value` keeps the owning VARIANT alive.
             let units = unsafe { std::slice::from_raw_parts(bstr.as_ptr(), length) };
 
             String::from_utf16(units)
@@ -1040,12 +1040,12 @@ impl Drop for BstrGuard {
     }
 }
 
-struct VariantGuard(NonNull<VARIANT>);
+struct VariantGuard(VARIANT);
 
 impl Drop for VariantGuard {
     fn drop(&mut self) {
-        // SAFETY: `self.0` points to an initialized VARIANT exclusively owned by
-        // the surrounding stack frame and not previously cleared.
-        let _ = unsafe { VariantClear(self.0.as_ptr()) };
+        // SAFETY: this guard owns the initialized VARIANT and clears it once.
+        // No raw exclusive capability is retained across reads of its payload.
+        let _ = unsafe { VariantClear(&raw mut self.0) };
     }
 }

@@ -85,7 +85,14 @@ impl<'runtime, A: Addin> OpeningTxn<'runtime, A, Initialized<A>> {
         opening: OpeningGeneration<A>,
     ) -> Result<OpeningTxn<'runtime, A, GenerationStaged<A>>, OpenFailure<'runtime, A>> {
         match self.stage_opening_generation(opening) {
-            Ok(transaction) => Ok(transaction),
+            Ok(transaction) => {
+                if transaction.deps().lifecycle_access().phase()
+                    != crate::lifecycle::LifecyclePhase::Opening
+                {
+                    return Err(transaction.failure(XllError::Closing));
+                }
+                Ok(transaction)
+            }
             Err((error, transaction, opening)) => {
                 transaction.deps().quarantine_opening_generation(
                     transaction.deps().protocol_generation(),

@@ -263,16 +263,25 @@ impl AdmittedExport<'_> {
 #[cfg(any(test, feature = "refinement"))]
 static DIAGNOSTIC_LINEARIZATION: Mutex<()> = Mutex::new(());
 
+pub(crate) fn diagnostic_linearization() -> impl Drop {
+    // A concrete guard in instrumented builds, a zero-sized scope otherwise.
+    // Callers may release this scope before waiting for diagnostic readers.
+    #[cfg(any(test, feature = "refinement"))]
+    let guard = DIAGNOSTIC_LINEARIZATION
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    #[cfg(not(any(test, feature = "refinement")))]
+    let guard = std::mem::DropGuard::new((), |()| {});
+    guard
+}
+
 pub(crate) fn with_diagnostic_linearization<F, R>(operation: F) -> R
 where
     F: FnOnce() -> R,
 {
     // Only refinement observations need to order enqueue/flush with close.
     // Production queue ownership and shutdown are synchronized independently.
-    #[cfg(any(test, feature = "refinement"))]
-    let _guard = DIAGNOSTIC_LINEARIZATION
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let _guard = diagnostic_linearization();
     operation()
 }
 
@@ -479,12 +488,13 @@ impl ExportIngress {
         G: FnOnce(),
     {
         on_attempt();
-        let observed_phase = self.phase.load(Ordering::Acquire);
-        let _opening_guard = (observed_phase == PHASE_OPENING).then(|| {
-            self.opening_lock
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-        });
+        // Close is a cold path. Always serialize it with opening publication:
+        // an initial OPEN/CLOSED observation can become stale across an epoch
+        // rollover before the later compare-exchange observes OPENING.
+        let _opening_guard = self
+            .opening_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         with_diagnostic_linearization(|| {
             let mut observed = self.phase.load(Ordering::Acquire);
             loop {
@@ -701,6 +711,38 @@ mod tests {
         }
         ingress.complete_open(|| Ok::<_, ()>(())).unwrap().unwrap();
         assert!(ingress.enter_with_result(|| ()).is_ok());
+    }
+
+    #[test]
+    fn close_serializes_with_epoch_publication_from_every_initial_phase() {
+        for open in [false, true] {
+            let ingress = ExportIngress::new();
+            if open {
+                ingress.begin_opening();
+                ingress.complete_open(|| Ok::<_, ()>(())).unwrap().unwrap();
+            }
+            let publication = ingress.opening_lock.lock().unwrap();
+            std::thread::scope(|scope| {
+                let (attempted_tx, attempted_rx) = mpsc::channel();
+                let (finished_tx, finished_rx) = mpsc::channel();
+                let ingress = &ingress;
+                let closing = scope.spawn(move || {
+                    ingress.begin_close_with_attempt_hook(|| attempted_tx.send(()).unwrap(), || {});
+                    finished_tx.send(()).unwrap();
+                });
+                attempted_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                // Even OPEN/CLOSED is just a sampled projection. The epoch
+                // publication guard, rather than that sample, orders close.
+                let premature = finished_rx.recv_timeout(Duration::from_millis(20)).is_ok();
+                drop(publication);
+                closing.join().unwrap();
+                assert!(!premature, "close bypassed the epoch publication guard");
+            });
+            assert_eq!(
+                ingress.phase(),
+                if open { PHASE_CLOSING } else { PHASE_CLOSED }
+            );
+        }
     }
 
     #[test]

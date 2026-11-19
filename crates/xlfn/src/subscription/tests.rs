@@ -3167,6 +3167,109 @@ fn server_notification_panic_records_cleanup_failure() {
 }
 
 #[test]
+fn connection_notification_panic_rolls_back_catalog_and_allows_retry() {
+    let (arena, source, sink_slot, disconnected) = publishing_source::<i32>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let server = runtime.register_test_server(1);
+    let notifier = Arc::new(TestNotifierState::new());
+    notifier.outcomes.lock().push_back(TestNotifyOutcome::Panic);
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&notifier)))
+        .unwrap();
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("commit-panic").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    let connection = server.connect_transaction(TopicId(1), id).unwrap();
+    sink_slot.lock().as_ref().unwrap().publish(1).unwrap();
+
+    assert!(
+        crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| connection.commit())).is_err()
+    );
+    assert!(disconnected.load(Ordering::Acquire));
+    assert!(sink_slot.lock().is_none());
+    assert!(!runtime.catalog.lock().entries[&id].is_active());
+    assert_eq!(runtime.services.active_quota.used(), 0);
+    assert_eq!(runtime.services.queued_update_quota.used(), 0);
+    runtime.catalog.lock().assert_identity_invariants();
+
+    server
+        .connect_transaction(TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert!(runtime.catalog.lock().entries[&id].is_active());
+    sink_slot.lock().as_ref().unwrap().publish(2).unwrap();
+    let refresh = server.begin_refresh().unwrap();
+    assert_eq!(refresh.updates()[0].value, StoredRtdValue::Integer(2));
+    refresh.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn connection_notification_reentrant_refresh_observes_committed_publication() {
+    let (arena, source, sink_slot, _) = publishing_source::<i32>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let notifier = Arc::new(TestNotifierState::new());
+    let refreshed = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&refreshed);
+    *notifier.callback.lock() = Some(Box::new(move || {
+        let refresh = server.begin_refresh().unwrap();
+        assert_eq!(refresh.updates()[0].value, StoredRtdValue::Integer(42));
+        refresh.complete(RefreshOutcome::Delivered).unwrap();
+        observed.store(true, Ordering::Release);
+    }));
+    server
+        .attach_update_notifier(RtdNotifier::for_test(notifier))
+        .unwrap();
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("commit-refresh").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    let connection = server.connect_transaction(TopicId(1), id).unwrap();
+    sink_slot.lock().as_ref().unwrap().publish(42).unwrap();
+    connection.commit().unwrap();
+    assert!(refreshed.load(Ordering::Acquire));
+    assert!(runtime.catalog.lock().entries[&id].is_active());
+}
+
+#[test]
+fn connection_notification_reentrant_disconnect_cannot_resurrect_connection() {
+    let (arena, source, sink_slot, disconnected) = publishing_source::<i32>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let server = runtime.register_test_server(1);
+    let notifier = Arc::new(TestNotifierState::new());
+    *notifier.callback.lock() = Some(Box::new(move || server.disconnect(TopicId(1)).unwrap()));
+    server
+        .attach_update_notifier(RtdNotifier::for_test(notifier))
+        .unwrap();
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("commit-disconnect").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    let connection = server.connect_transaction(TopicId(1), id).unwrap();
+    sink_slot.lock().as_ref().unwrap().publish(42).unwrap();
+    assert!(matches!(connection.commit(), Err(XllError::Closing)));
+    assert!(disconnected.load(Ordering::Acquire));
+    assert!(sink_slot.lock().is_none());
+    assert!(!runtime.catalog.lock().entries.contains_key(&id));
+    assert_eq!(runtime.services.active_quota.used(), 0);
+    assert_eq!(runtime.services.queued_update_quota.used(), 0);
+}
+
+#[test]
 fn runtime_close_causes_fail_closed_on_server() {
     let runtime = Arc::new(SubscriptionRuntime::<()>::new());
     let server = runtime.register_test_server(1);

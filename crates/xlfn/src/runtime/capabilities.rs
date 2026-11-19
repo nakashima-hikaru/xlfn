@@ -646,6 +646,13 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         )
     }
 
+    pub(in crate::runtime) fn request_subscription_stop_before_export_drain(&self) {
+        #[cfg(feature = "rtd")]
+        let _ = self.lifecycle.with_generation_services(
+            GenerationServices::request_subscription_stop_before_export_drain,
+        );
+    }
+
     pub(in crate::runtime) fn shutdown_handle_topics(&self) -> crate::XllResult<()> {
         self.lifecycle
             .with_generation_services(GenerationServices::shutdown_handle_topics)

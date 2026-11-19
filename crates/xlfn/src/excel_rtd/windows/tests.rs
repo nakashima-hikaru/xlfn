@@ -4154,6 +4154,119 @@ fn sta_drain_pumps_com_during_helper_thread_exit() {
 
 #[test]
 #[cfg(all(feature = "rtd", feature = "handles"))]
+fn sta_subscription_shutdown_dispatches_during_each_disconnect_barrier() {
+    const CHILD: &str = "XLFN_TEST_STA_SUBSCRIPTION_DISCONNECT";
+    if std::env::var_os(CHILD).is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(CHILD, "1")
+            .args([
+                "--exact",
+                "excel_rtd::windows::tests::sta_subscription_shutdown_dispatches_during_each_disconnect_barrier",
+            ])
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "subscription STA probe failed: {status}");
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                child.wait().unwrap();
+                panic!("subscription disconnect stopped STA COM dispatch");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    struct CallsStaOnDisconnect {
+        request: mpsc::Sender<()>,
+        worker: thread::JoinHandle<()>,
+    }
+    // SAFETY: the fixture never retains a sink. Its worker is always joined
+    // before the consuming barrier returns or reports its worker's panic.
+    unsafe impl RtdSubscription for CallsStaOnDisconnect {
+        fn request_cancel(&self) {
+            let _ = self.request.send(());
+        }
+        fn disconnect_and_wait(self) -> XllResult<()> {
+            let _ = self.request.send(());
+            crate::panic_boundary::contain_panic(self.worker.join()).map_err(|_| XllError::Panic)
+        }
+    }
+    struct ComSource(u32);
+    // SAFETY: no sink is retained, and the returned owner owns and joins the
+    // complete worker. The GIT cookie is kept registered by the test runtime.
+    unsafe impl RtdSource for ComSource {
+        type Value = i32;
+        type Subscription = CallsStaOnDisconnect;
+        fn subscribe(&self, _: &RtdTopic, _: RtdSink<i32>) -> XllResult<CallsStaOnDisconnect> {
+            let cookie = self.0;
+            let (request, received) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                received.recv().unwrap();
+                let _apartment = TestComApartment::enter();
+                sta_probe::call(&sta_probe::interface(cookie));
+            });
+            Ok(CallsStaOnDisconnect { request, worker })
+        }
+    }
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _apartment = TestComApartment::enter_sta();
+    for close_runtime in [false, true] {
+        let sta = thread::current().id();
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&dispatched);
+        let probe = sta_probe::new(move || {
+            assert_eq!(thread::current().id(), sta);
+            observed.store(true, Ordering::Release);
+        });
+        // SAFETY: the STA owns the live interface throughout its registration.
+        let git = unsafe { super::global_interface_table::get_git() }.unwrap();
+        let mut cookie = 0;
+        // SAFETY: the interface, IID, and writable cookie remain live here.
+        assert_eq!(
+            unsafe { git.register(probe.as_ptr(), &IID_IUNKNOWN, &mut cookie) },
+            S_OK
+        );
+        let (arena, source) = crate::subscription::SourceArena::with_source(
+            crate::generation::RuntimeGeneration::new(1).unwrap(),
+            ComSource(cookie),
+        )
+        .unwrap();
+        let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
+        let ensured =
+            ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+        let prepared = subscriptions
+            .prepare(
+                &source,
+                RtdTopic::single("sta-disconnect").unwrap().borrowed(),
+            )
+            .unwrap();
+        let mut initial = connect_subscription_backend(&ensured, 1, *prepared.key());
+        prepared.commit();
+        // SAFETY: the connection initialized this owned VARIANT.
+        assert_eq!(unsafe { VariantClear(&mut initial) }, S_OK);
+
+        if close_runtime {
+            subscriptions.close().unwrap();
+        } else {
+            // SAFETY: ensured retains the COM server with no admitted methods;
+            // this deliberately exercises synchronous ServerTerminate cleanup.
+            assert_eq!(unsafe { server_terminate(ensured.pointer()) }, S_OK);
+        }
+        assert!(dispatched.load(Ordering::Acquire));
+        shutdown_subscriptions(&subscriptions).unwrap();
+        drop(ensured);
+        // SAFETY: the disconnect barrier joined the only proxy user.
+        assert_eq!(unsafe { git.revoke(cookie) }, S_OK);
+    }
+}
+
+#[test]
+#[cfg(all(feature = "rtd", feature = "handles"))]
 fn logical_rtd_close_dispatches_com_until_inflight_calls_return() {
     let _guard = TEST_LOCK.lock().unwrap();
     close_test_ingress();
@@ -4618,6 +4731,154 @@ fn temporary_registration_mutex_serializes_other_threads() {
         .recv_timeout(std::time::Duration::from_secs(1))
         .unwrap();
     waiter.join().unwrap();
+}
+
+#[test]
+fn temporary_registration_rejects_contention_before_entering_host_callbacks() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let ensured = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    let active = &ensured.active;
+    let maintenance = REGISTRATION_MAINTENANCE.lock();
+    let early = thread::scope(|scope| {
+        let (sent, received) = mpsc::channel();
+        scope.spawn(move || {
+            let result = super::registration::TemporaryRegistration::new(
+                active,
+                r"C:\xlfn-tests\registration-reentry.xll",
+            )
+            .map(drop);
+            sent.send(result).unwrap();
+        });
+        let early = received.recv_timeout(Duration::from_secs(1));
+        // Release on a regression too, so the test can report a failure
+        // without stranding the competing registration thread.
+        drop(maintenance);
+        early
+    });
+    discard_unpublished_server(ensured.active.pointer, true);
+    drop(ensured);
+    assert!(matches!(early, Ok(Err(XllError::ReentrantCall))));
+}
+
+#[test]
+fn heartbeat_rejects_a_null_server_and_initializes_output() {
+    let mut alive = -1;
+    // SAFETY: the null server exercises validation; alive is writable output.
+    let status =
+        unsafe { heartbeat::<(), crate::DynamicRtdSources<()>>(ptr::null_mut(), &mut alive) };
+    assert_eq!(status, E_POINTER);
+    assert_eq!(alive, 0);
+}
+
+#[test]
+fn scavenger_finishes_a_marked_progid_after_its_class_was_deleted() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _maintenance = REGISTRATION_MAINTENANCE.lock();
+    let mut id = GUID::default();
+    // SAFETY: id is writable GUID storage.
+    assert_eq!(unsafe { CoCreateGuid(&mut id) }, S_OK);
+    let class = guid_braced(id);
+    let prog = format!("{RTD_PROG_ID_PREFIX}{}", guid_compact(id));
+    let key = format!("Software\\Classes\\{prog}");
+    let cleanup_key = wide_nul(&key);
+    let _cleanup = std::mem::DropGuard::new(cleanup_key, |key| {
+        // SAFETY: this GUID-derived key is owned only by this test.
+        unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) };
+    });
+    let module = r"C:\xlfn-tests\partial-registration-cleanup.xll";
+    for (name, value) in [
+        ("XlFnOwner", RTD_REGISTRATION_OWNER),
+        ("XlFnRegistrationSchema", RTD_REGISTRATION_SCHEMA),
+        ("XlFnOwnerModule", module),
+        ("XlFnClassId", class.as_str()),
+    ] {
+        set_registry_value(&key, Some(name), value).unwrap();
+    }
+    set_registry_value(&format!("{key}\\CLSID"), None, &class).unwrap();
+    scavenge_owned_registrations(module, None).unwrap();
+    assert!(read_registry_string(&key, "XlFnOwner").unwrap().is_none());
+}
+
+#[cfg(feature = "rtd")]
+#[test]
+fn subscription_shutdown_signals_sources_before_draining_deferred_com_disconnects() {
+    struct StopSource {
+        stopped: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+        entered: mpsc::Sender<()>,
+        observed_stop: Arc<AtomicBool>,
+    }
+    struct StopSubscription {
+        stopped: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+        entered: mpsc::Sender<()>,
+        observed_stop: Arc<AtomicBool>,
+    }
+    // SAFETY: the fixture retains no sink or background producer. Its bounded
+    // wait models a disconnect dependency on the source's stop notification.
+    unsafe impl RtdSubscription for StopSubscription {
+        fn request_cancel(&self) {}
+        fn disconnect_and_wait(self) -> XllResult<()> {
+            self.entered.send(()).unwrap();
+            let (lock, changed) = &*self.stopped;
+            let (stopped, _) = changed
+                .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(2), |stopped| {
+                    !*stopped
+                })
+                .unwrap();
+            self.observed_stop.store(*stopped, Ordering::Release);
+            Ok(())
+        }
+    }
+    // SAFETY: subscribe does not retain its sink; all fixture state is owned by
+    // the returned subscription and request_stop only sends its notification.
+    unsafe impl RtdSource for StopSource {
+        type Value = i32;
+        type Subscription = StopSubscription;
+        fn subscribe(&self, _: &RtdTopic, _: RtdSink<i32>) -> XllResult<StopSubscription> {
+            Ok(StopSubscription {
+                stopped: Arc::clone(&self.stopped),
+                entered: self.entered.clone(),
+                observed_stop: Arc::clone(&self.observed_stop),
+            })
+        }
+        fn request_stop(&self) {
+            let (lock, changed) = &*self.stopped;
+            *lock.lock().unwrap() = true;
+            changed.notify_all();
+        }
+    }
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let (entered, receiver) = mpsc::channel();
+    let observed_stop = Arc::new(AtomicBool::new(false));
+    let (arena, source) = crate::subscription::SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        StopSource {
+            stopped: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
+            entered,
+            observed_stop: Arc::clone(&observed_stop),
+        },
+    )
+    .unwrap();
+    let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
+    let ensured =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let prepared = subscriptions
+        .prepare(
+            &source,
+            RtdTopic::single("stop-before-drain").unwrap().borrowed(),
+        )
+        .unwrap();
+    let mut initial = connect_subscription_backend(&ensured, 1, *prepared.key());
+    prepared.commit();
+    // SAFETY: the connection returned this initialized VARIANT, and ensured
+    // retains the concrete COM server through the disconnection and shutdown.
+    unsafe {
+        assert_eq!(VariantClear(&mut initial), S_OK);
+        assert_eq!(disconnect_data(ensured.pointer(), 1), S_OK);
+    }
+    receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    shutdown_subscriptions(&subscriptions).unwrap();
+    assert!(observed_stop.load(Ordering::Acquire));
 }
 
 #[test]

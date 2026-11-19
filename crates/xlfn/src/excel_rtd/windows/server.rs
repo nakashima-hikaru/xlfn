@@ -770,6 +770,10 @@ pub(crate) fn shutdown<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
 pub(crate) fn shutdown_subscriptions<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     subscriptions: &SubscriptionRuntime<E, C>,
 ) -> XllResult<RuntimeShutdownOutcome> {
+    // A deferred DisconnectData job retains a COM operation until its source
+    // barrier finishes. Shared source work must be signaled before draining
+    // that outer operation gate, not only later inside close_for_shutdown.
+    subscriptions.request_stop_before_host_drain();
     let mut shutdown_error = None;
     let retained = {
         let active = ACTIVE_SERVER.lock();
@@ -1682,26 +1686,19 @@ pub(super) unsafe extern "system" fn heartbeat<
         unsafe { result.write(0) };
     }
     com_boundary("IRtdServer::Heartbeat", || {
-        if result.is_null() {
+        if this.is_null() || result.is_null() {
             return E_POINTER;
         }
 
-        let _server_operation = if this.is_null() {
-            None
-        } else {
-            // SAFETY: `this` was checked as non-null.
-            match unsafe { (*this).operations.enter() } {
-                Some(operation) => Some(operation),
-                None => return E_FAIL,
-            }
+        // SAFETY: `this` was checked as non-null.
+        let Some(_server_operation) = (unsafe { (*this).operations.enter() }) else {
+            return E_FAIL;
         };
 
-        if !this.is_null() {
-            // SAFETY: `this` was checked as non-null.
-            let subscription_server = unsafe { (*this).backends.lock().subscription_server() };
-            if let Some(subscription_server) = subscription_server {
-                let _ = subscription_server.pulse_notification();
-            }
+        // SAFETY: `this` was checked as non-null and admission retains its backends.
+        let subscription_server = unsafe { (*this).backends.lock().subscription_server() };
+        if let Some(subscription_server) = subscription_server {
+            let _ = subscription_server.pulse_notification();
         }
 
         // SAFETY: `result` was validated as non-null and points to writable COM

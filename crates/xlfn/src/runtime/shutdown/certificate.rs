@@ -412,15 +412,19 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
         {
             return Err((close_certificate_error(), Box::new(self)));
         }
+        // Uncommitted describes this opening attempt, not the complete
+        // history of the coordinator. A reopened attempt can be removed
+        // before publication while retaining an earlier committed generation.
+        let last_committed_generation = deps.last_committed_generation();
         let authorization = CanonicalCompletion::<A, FinalRemoval> {
             coordinator: deps.lifecycle(),
             returns: deps.returns(),
             attempt: owner.attempt(),
             proof,
-            last_committed_generation: expected_generation,
+            last_committed_generation,
             _kind: std::marker::PhantomData,
         };
-        if expected_generation != deps.last_committed_generation() {
+        if expected_generation.is_some() && expected_generation != last_committed_generation {
             return Err((
                 XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_LEASE_GATE,

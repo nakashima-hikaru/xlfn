@@ -15,7 +15,6 @@ use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
-use std::mem::ManuallyDrop;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{Builder, JoinHandle};
@@ -220,12 +219,19 @@ impl<P> Rollback for PreparedCapture<'_, P> {
 }
 
 /// Without an OS result, neither destroying the producer nor returning the
-/// worker quota is safe. Unwinding retains both and leaves the slot Joining.
-struct SpawningWorker<'a, P>(ManuallyDrop<SpawnResources<'a, P>>);
+/// worker quota is safe. An unresolved spawn must fail-stop rather than leave
+/// Joining without an owner that can ever complete its barrier.
+struct SpawningWorker<'a, P>(RollbackGuard<SpawnResources<'a, P>>);
 
 struct SpawnResources<'a, P> {
     capture: PreparedCapture<'a, P>,
     permit: WorkerPermit,
+}
+
+impl<P> Rollback for SpawnResources<'_, P> {
+    fn rollback(self) {
+        xlfn_kernel::invariant::fail_stop();
+    }
 }
 
 impl<'a, P> SpawningWorker<'a, P> {
@@ -233,7 +239,7 @@ impl<'a, P> SpawningWorker<'a, P> {
         self,
         result: std::io::Result<JoinHandle<()>>,
     ) -> Result<RunningWorker<'a, P>, FailedWorker<'a, P>> {
-        let SpawnResources { capture, permit } = ManuallyDrop::into_inner(self.0);
+        let SpawnResources { capture, permit } = self.0.complete();
         match result {
             Ok(handle) => {
                 let PreparedCapture { worker, producer } = capture;
@@ -305,7 +311,7 @@ struct FailedWorker<'a, P> {
 
 impl<'a, P> WorkerStart<'a, P> {
     fn begin_spawn(self, permit: WorkerPermit) -> SpawningWorker<'a, P> {
-        SpawningWorker(ManuallyDrop::new(SpawnResources {
+        SpawningWorker(RollbackGuard::new(SpawnResources {
             capture: self.0.complete(),
             permit,
         }))
