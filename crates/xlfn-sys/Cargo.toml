@@ -9,6 +9,10 @@ repository.workspace = true
 description = "Raw Excel 12 XLL ABI definitions and callback trampoline"
 readme = "README.md"
 
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["i686-pc-windows-msvc"]
+
 [features]
 abi-probe = []
 

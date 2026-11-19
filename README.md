@@ -23,11 +23,15 @@ xlfn is pre-1.0. Public APIs may change between minor releases.
 Enable optional capabilities with Cargo features:
 
 - `async` — Run asynchronous calculations and return results to Excel when ready.
+- `async-builtin` — Use the framework's built-in executor for asynchronous calculations.
 - `rtd` — Stream live updates to worksheet cells through Excel's Real-Time Data API.
 - `handles` — Keep Rust objects between calls and pass references to them through worksheet cells.
 - `cache` — Cache calculation results for reuse across calls.
 - `serde` — Serialize and deserialize owned worksheet values and collections.
 - `jiff` — Convert serial dates to and from `jiff::civil::Date`.
+
+The `serde` feature adds serialization implementations for worksheet values.
+Structured diagnostic logging uses `serde` and `serde_json` even without this feature.
 
 ## Quick start
 
@@ -35,6 +39,9 @@ You need Windows 10 or 11, Rust **1.100.0 or later**, and Visual Studio Build To
 with **Desktop development with C++**. Choose the target to match your Excel
 installation: `x86_64-pc-windows-msvc` for 64-bit Excel or
 `i686-pc-windows-msvc` for 32-bit Excel.
+
+See the [Rust version support policy](guide/src/requirements.md#rust-version-support)
+when planning compiler upgrades.
 
 Create a project and install the tools for 64-bit Excel:
 

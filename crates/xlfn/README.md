@@ -22,4 +22,11 @@ boundary; diagnostics receive bounded snapshots of those causes.
 `bench-internals`, `refinement`, and hidden exports are unsupported developer
 interfaces and carry no semantic-versioning guarantees.
 
+The `serde` feature adds serialization implementations for owned worksheet values
+and collections. Structured diagnostic logging uses `serde` and `serde_json`
+independently of that feature.
+
+For compiler requirements and the pre-1.0 MSRV policy, see
+[Rust version support](https://nakashima-hikaru.github.io/xlfn/requirements.html#rust-version-support).
+
 To learn more, read the [User Guide](https://nakashima-hikaru.github.io/xlfn/). See the [API docs](https://docs.rs/xlfn) or [crates.io](https://crates.io/crates/xlfn) for the published crate.
