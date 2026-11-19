@@ -1,6 +1,6 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use xlfn::cache::{CacheEndpoint, CacheRegistry, CanonicalF64};
+use xlfn::cache::{CacheEndpoint, CacheRegistry, CacheWeightPolicy, CanonicalF64};
 
 struct MarkerA;
 struct MarkerB;
@@ -63,8 +63,9 @@ fn registry_clear_clears_all_endpoints() {
 
 #[test]
 fn endpoint_fixes_resource_units_for_all_callers_and_rejects_conflicts() {
+    static BYTE_WEIGHT: CacheWeightPolicy<String> = CacheWeightPolicy::new(String::len);
     static BYTES: CacheEndpoint<u32, String> =
-        CacheEndpoint::new("accounting-v1").with_weigher(String::len);
+        CacheEndpoint::new("accounting-v1").with_weigher(&BYTE_WEIGHT);
     let registry = CacheRegistry::new(xlfn::cache::CacheBudget::weight_units(4));
     drop(
         registry
@@ -97,6 +98,37 @@ fn endpoint_fixes_resource_units_for_all_callers_and_rejects_conflicts() {
     registry.clear();
     assert!(registry.get(&units, &1).is_err());
     assert!(registry.get(&BYTES, &1).unwrap().is_none());
+}
+
+#[test]
+fn endpoint_policy_identity_is_independent_of_function_addresses() {
+    static BYTES: CacheWeightPolicy<String> = CacheWeightPolicy::new(String::len);
+    static DISTINCT_BYTES: CacheWeightPolicy<String> = CacheWeightPolicy::new(String::len);
+    let first = CacheEndpoint::<u32, String>::new("policy-identity").with_weigher(&BYTES);
+    let same = CacheEndpoint::<u32, String>::new("policy-identity").with_weigher(&BYTES);
+    let distinct =
+        CacheEndpoint::<u32, String>::new("policy-identity").with_weigher(&DISTINCT_BYTES);
+    let registry = CacheRegistry::new(xlfn::cache::CacheBudget::weight_units(4));
+    drop(
+        registry
+            .get_or_try_insert(&first, 1, || Ok("four".into()))
+            .unwrap(),
+    );
+    assert_eq!(&*registry.get(&same, &1).unwrap().unwrap(), "four");
+    assert!(registry.get(&distinct, &1).is_err());
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                // Cold lookup in another thread uses the same stable policy identity.
+                assert_eq!(&*registry.get(&same, &1).unwrap().unwrap(), "four");
+                assert!(registry.get(&distinct, &1).is_err());
+            })
+            .join()
+            .unwrap();
+    });
+    registry.clear();
+    assert!(registry.get(&distinct, &1).is_err());
+    assert!(registry.get(&same, &1).unwrap().is_none());
 }
 
 #[test]

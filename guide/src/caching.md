@@ -74,8 +74,10 @@ collection indices and admission-domain counters retain their existing types.
 
 ```rust
 # use xlfn::prelude::*;
-# use xlfn::cache::{CacheEndpoint, CacheLease, CacheRegistry};
-static UPPERCASE: CacheEndpoint<String, String> = CacheEndpoint::new("uppercase-v1").with_weigher(String::len);
+# use xlfn::cache::{CacheEndpoint, CacheLease, CacheRegistry, CacheWeightPolicy};
+static TEXT_BYTES: CacheWeightPolicy<String> = CacheWeightPolicy::new(String::len);
+static UPPERCASE: CacheEndpoint<String, String> =
+    CacheEndpoint::new("uppercase-v1").with_weigher(&TEXT_BYTES);
 
 struct State {
     caches: CacheRegistry,
@@ -101,7 +103,19 @@ registry, so it can be a `static` while each add-in state owns a `CacheRegistry`
 
 An endpoint identity includes its marker type, key type, value type, and static ID. By default, `Marker = ()`. When multiple endpoints share key and value types, an optional marker type (e.g. `CacheEndpoint<DatasetKey, Dataset, LookupMarker>`) provides semantic disambiguation.
 
-Declare a custom weigher once on the shared endpoint. A conflicting policy for the same endpoint identity returns an error, including on warm lookup paths; use another marker or ID for a different budget measure. Reuse the same descriptor rather than independently constructing descriptors with function pointers.
+`CacheEndpoint::with_weigher` now accepts `&'static CacheWeightPolicy<V>`.
+To migrate an existing `.with_weigher(weight)` call, declare
+`static POLICY: CacheWeightPolicy<Value> = CacheWeightPolicy::new(weight)` once
+and pass `.with_weigher(&POLICY)` to every descriptor for the same endpoint.
+
+A different policy object for the same endpoint identity returns an error,
+including on warm lookup paths, even if both objects use the same function.
+Function addresses cannot reliably identify a policy because code generation
+may merge distinct functions or duplicate one function. Use another marker or
+endpoint ID for a different budget measure.
+
+`CalculationCache::with_weigher` still accepts a function directly because
+that cache fixes its policy at construction and never compares descriptors.
 
 A registry keeps its endpoint caches for its own lifetime. Clearing values
 does not change endpoint identity. Endpoints in different registries do not

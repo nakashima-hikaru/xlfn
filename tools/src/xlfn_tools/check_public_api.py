@@ -27,8 +27,9 @@ def main() -> int:
     failed = False
     for target in TARGETS:
         for configuration, features in FEATURES.items():
-            # Rust-only BLAKE3 avoids requiring an MSVC assembler for rustdoc on macOS.
-            if features and target.endswith("windows-msvc"):
+            # Rust-only BLAKE3 lets rustdoc extract either target from any host,
+            # without requiring an MSVC assembler or the macOS C toolchain.
+            if features:
                 features += ",blake3/pure"
             command = [
                 "cargo",

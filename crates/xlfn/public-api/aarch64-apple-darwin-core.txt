@@ -58,6 +58,7 @@ impl<'a> !core::panic::unwind_safe::UnwindSafe for xlfn::addin::CleanupReporter<
 pub struct xlfn::addin::DiagnosticsSetup<'a, A: xlfn::Addin>
 impl<A: xlfn::Addin> xlfn::addin::DiagnosticsSetup<'_, A>
 pub fn xlfn::addin::DiagnosticsSetup<'_, A>::install_file_sink(&self) -> core::result::Result<std::path::PathBuf, xlfn::diagnostics::DiagnosticInitError>
+pub fn xlfn::addin::DiagnosticsSetup<'_, A>::install_file_sink_with(&self, xlfn::diagnostics::DiagnosticFileConfig) -> core::result::Result<std::path::PathBuf, xlfn::diagnostics::DiagnosticInitError>
 pub fn xlfn::addin::DiagnosticsSetup<'_, A>::install_sink<S>(&self, S) -> core::result::Result<(), xlfn::diagnostics::DiagnosticInitError> where S: xlfn::diagnostics::DiagnosticSink
 pub fn xlfn::addin::DiagnosticsSetup<'_, A>::replace_sink<S>(&self, S) -> core::result::Result<(), xlfn::diagnostics::DiagnosticInitError> where S: xlfn::diagnostics::DiagnosticSink
 impl<A: xlfn::Addin> core::clone::Clone for xlfn::addin::DiagnosticsSetup<'_, A>
@@ -141,6 +142,7 @@ impl<S, L, U, E> core::panic::unwind_safe::UnwindSafe for xlfn::addin::Opened<S,
 pub struct xlfn::addin::RuntimeConfig
 impl xlfn::addin::RuntimeConfig
 pub const fn xlfn::addin::RuntimeConfig::new() -> Self
+pub const fn xlfn::addin::RuntimeConfig::with_calculation_end_notifications(self, bool) -> Self
 impl core::clone::Clone for xlfn::addin::RuntimeConfig
 pub fn xlfn::addin::RuntimeConfig::clone(&self) -> Self
 impl core::cmp::Eq for xlfn::addin::RuntimeConfig
@@ -296,6 +298,31 @@ impl<'a> core::marker::Unpin for xlfn::diagnostics::DiagnosticEvent<'a>
 impl<'a> core::marker::UnsafeUnpin for xlfn::diagnostics::DiagnosticEvent<'a>
 impl<'a> core::panic::unwind_safe::RefUnwindSafe for xlfn::diagnostics::DiagnosticEvent<'a>
 impl<'a> core::panic::unwind_safe::UnwindSafe for xlfn::diagnostics::DiagnosticEvent<'a>
+pub struct xlfn::diagnostics::DiagnosticFileConfig
+impl xlfn::diagnostics::DiagnosticFileConfig
+pub const fn xlfn::diagnostics::DiagnosticFileConfig::archives(self) -> u8
+pub const fn xlfn::diagnostics::DiagnosticFileConfig::maximum_file_bytes(self) -> core::num::nonzero::NonZeroU64
+pub const fn xlfn::diagnostics::DiagnosticFileConfig::new() -> Self
+pub const fn xlfn::diagnostics::DiagnosticFileConfig::with_archives(self, u8) -> Self
+pub const fn xlfn::diagnostics::DiagnosticFileConfig::with_maximum_file_bytes(self, core::num::nonzero::NonZeroU64) -> Self
+impl core::clone::Clone for xlfn::diagnostics::DiagnosticFileConfig
+pub fn xlfn::diagnostics::DiagnosticFileConfig::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::diagnostics::DiagnosticFileConfig
+impl core::cmp::PartialEq for xlfn::diagnostics::DiagnosticFileConfig
+pub fn xlfn::diagnostics::DiagnosticFileConfig::eq(&self, &Self) -> bool
+impl core::default::Default for xlfn::diagnostics::DiagnosticFileConfig
+pub fn xlfn::diagnostics::DiagnosticFileConfig::default() -> Self
+impl core::fmt::Debug for xlfn::diagnostics::DiagnosticFileConfig
+pub fn xlfn::diagnostics::DiagnosticFileConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::diagnostics::DiagnosticFileConfig
+impl core::marker::StructuralPartialEq for xlfn::diagnostics::DiagnosticFileConfig
+impl core::marker::Freeze for xlfn::diagnostics::DiagnosticFileConfig
+impl core::marker::Send for xlfn::diagnostics::DiagnosticFileConfig
+impl core::marker::Sync for xlfn::diagnostics::DiagnosticFileConfig
+impl core::marker::Unpin for xlfn::diagnostics::DiagnosticFileConfig
+impl core::marker::UnsafeUnpin for xlfn::diagnostics::DiagnosticFileConfig
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::diagnostics::DiagnosticFileConfig
+impl core::panic::unwind_safe::UnwindSafe for xlfn::diagnostics::DiagnosticFileConfig
 pub struct xlfn::diagnostics::DiagnosticHistory
 impl xlfn::diagnostics::DiagnosticHistory
 pub fn xlfn::diagnostics::DiagnosticHistory::errors_since(&self, xlfn::diagnostics::DiagnosticCursor, usize) -> xlfn::diagnostics::DiagnosticPage
@@ -1478,8 +1505,10 @@ pub fn xlfn::value::Matrix<T>::from_fn(usize, usize, impl core::ops::function::F
 pub fn xlfn::value::Matrix<T>::get(&self, usize, usize) -> core::option::Option<&T>
 pub fn xlfn::value::Matrix<T>::get_mut(&mut self, usize, usize) -> core::option::Option<&mut T>
 pub fn xlfn::value::Matrix<T>::into_vec(self) -> alloc::vec::Vec<T>
+pub const fn xlfn::value::Matrix<T>::is_empty(&self) -> bool
 pub fn xlfn::value::Matrix<T>::iter(&self) -> core::slice::iter::Iter<'_, T>
 pub fn xlfn::value::Matrix<T>::iter_mut(&mut self) -> core::slice::iter::IterMut<'_, T>
+pub const fn xlfn::value::Matrix<T>::len(&self) -> usize
 pub fn xlfn::value::Matrix<T>::new(usize, usize, alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
 pub fn xlfn::value::Matrix<T>::row(&self, usize) -> core::option::Option<&[T]>
 pub fn xlfn::value::Matrix<T>::row_mut(&mut self, usize) -> core::option::Option<&mut [T]>
@@ -1531,7 +1560,9 @@ pub const fn xlfn::value::MatrixRef<'call, T>::as_slice(&self) -> &'call [T]
 pub fn xlfn::value::MatrixRef<'call, T>::column(&self, usize) -> core::option::Option<impl core::iter::traits::iterator::Iterator<Item = &'call T>>
 pub const fn xlfn::value::MatrixRef<'call, T>::columns(&self) -> usize
 pub fn xlfn::value::MatrixRef<'call, T>::get(&self, usize, usize) -> core::option::Option<&'call T>
+pub const fn xlfn::value::MatrixRef<'call, T>::is_empty(&self) -> bool
 pub fn xlfn::value::MatrixRef<'call, T>::iter(&self) -> core::slice::iter::Iter<'call, T>
+pub const fn xlfn::value::MatrixRef<'call, T>::len(&self) -> usize
 pub fn xlfn::value::MatrixRef<'call, T>::row(&self, usize) -> core::option::Option<&'call [T]>
 pub const fn xlfn::value::MatrixRef<'call, T>::rows(&self) -> usize
 pub const fn xlfn::value::MatrixRef<'call, T>::shape(&self) -> xlfn::value::Shape
@@ -1590,7 +1621,9 @@ impl<'call> xlfn::value::NumericMatrixRef<'call>
 pub const fn xlfn::value::NumericMatrixRef<'call>::as_slice(self) -> &'call [f64]
 pub const fn xlfn::value::NumericMatrixRef<'call>::columns(self) -> usize
 pub fn xlfn::value::NumericMatrixRef<'call>::get(self, usize, usize) -> core::option::Option<&'call f64>
+pub const fn xlfn::value::NumericMatrixRef<'call>::is_empty(self) -> bool
 pub fn xlfn::value::NumericMatrixRef<'call>::iter(self) -> core::slice::iter::Iter<'call, f64>
+pub const fn xlfn::value::NumericMatrixRef<'call>::len(self) -> usize
 pub fn xlfn::value::NumericMatrixRef<'call>::row(self, usize) -> core::option::Option<&'call [f64]>
 pub const fn xlfn::value::NumericMatrixRef<'call>::rows(self) -> usize
 pub const fn xlfn::value::NumericMatrixRef<'call>::shape(self) -> xlfn::value::Shape
@@ -2351,8 +2384,10 @@ pub fn xlfn::value::Matrix<T>::from_fn(usize, usize, impl core::ops::function::F
 pub fn xlfn::value::Matrix<T>::get(&self, usize, usize) -> core::option::Option<&T>
 pub fn xlfn::value::Matrix<T>::get_mut(&mut self, usize, usize) -> core::option::Option<&mut T>
 pub fn xlfn::value::Matrix<T>::into_vec(self) -> alloc::vec::Vec<T>
+pub const fn xlfn::value::Matrix<T>::is_empty(&self) -> bool
 pub fn xlfn::value::Matrix<T>::iter(&self) -> core::slice::iter::Iter<'_, T>
 pub fn xlfn::value::Matrix<T>::iter_mut(&mut self) -> core::slice::iter::IterMut<'_, T>
+pub const fn xlfn::value::Matrix<T>::len(&self) -> usize
 pub fn xlfn::value::Matrix<T>::new(usize, usize, alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
 pub fn xlfn::value::Matrix<T>::row(&self, usize) -> core::option::Option<&[T]>
 pub fn xlfn::value::Matrix<T>::row_mut(&mut self, usize) -> core::option::Option<&mut [T]>
@@ -2404,7 +2439,9 @@ pub const fn xlfn::value::MatrixRef<'call, T>::as_slice(&self) -> &'call [T]
 pub fn xlfn::value::MatrixRef<'call, T>::column(&self, usize) -> core::option::Option<impl core::iter::traits::iterator::Iterator<Item = &'call T>>
 pub const fn xlfn::value::MatrixRef<'call, T>::columns(&self) -> usize
 pub fn xlfn::value::MatrixRef<'call, T>::get(&self, usize, usize) -> core::option::Option<&'call T>
+pub const fn xlfn::value::MatrixRef<'call, T>::is_empty(&self) -> bool
 pub fn xlfn::value::MatrixRef<'call, T>::iter(&self) -> core::slice::iter::Iter<'call, T>
+pub const fn xlfn::value::MatrixRef<'call, T>::len(&self) -> usize
 pub fn xlfn::value::MatrixRef<'call, T>::row(&self, usize) -> core::option::Option<&'call [T]>
 pub const fn xlfn::value::MatrixRef<'call, T>::rows(&self) -> usize
 pub const fn xlfn::value::MatrixRef<'call, T>::shape(&self) -> xlfn::value::Shape
@@ -2444,7 +2481,9 @@ impl<'call> xlfn::value::NumericMatrixRef<'call>
 pub const fn xlfn::value::NumericMatrixRef<'call>::as_slice(self) -> &'call [f64]
 pub const fn xlfn::value::NumericMatrixRef<'call>::columns(self) -> usize
 pub fn xlfn::value::NumericMatrixRef<'call>::get(self, usize, usize) -> core::option::Option<&'call f64>
+pub const fn xlfn::value::NumericMatrixRef<'call>::is_empty(self) -> bool
 pub fn xlfn::value::NumericMatrixRef<'call>::iter(self) -> core::slice::iter::Iter<'call, f64>
+pub const fn xlfn::value::NumericMatrixRef<'call>::len(self) -> usize
 pub fn xlfn::value::NumericMatrixRef<'call>::row(self, usize) -> core::option::Option<&'call [f64]>
 pub const fn xlfn::value::NumericMatrixRef<'call>::rows(self) -> usize
 pub const fn xlfn::value::NumericMatrixRef<'call>::shape(self) -> xlfn::value::Shape

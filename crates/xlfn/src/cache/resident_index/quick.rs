@@ -11,13 +11,16 @@
 //! this boundary must preserve destruction of all keys before the queue owner.
 
 use super::{Entry, ResidentEntry, ResidentKey, VersionedKey, VersionedKeyRef};
-use quick_cache::{
-    OptionsBuilder, Weighter,
-    sync::{Cache, DefaultLifecycle},
-};
+#[cfg(not(target_os = "linux"))]
+use quick_cache::sync::{Cache, DefaultLifecycle};
+#[cfg(target_os = "linux")]
+use quick_cache::unsync::{Cache, DefaultLifecycle};
+use quick_cache::{OptionsBuilder, Weighter};
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::hash::Hash;
+#[cfg(target_os = "linux")]
+use std::hash::{BuildHasher, Hasher};
 
 #[derive(Clone)]
 struct EntryWeight;
@@ -28,8 +31,66 @@ impl<K, V> Weighter<K, ResidentEntry<V>> for EntryWeight {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+type PolicyCache<K, V> = Cache<ResidentKey<K>, ResidentEntry<V>, EntryWeight, RandomState>;
+#[cfg(target_os = "linux")]
+type PolicyCache<K, V> =
+    Cache<HashedKey<ResidentKey<K>>, ResidentEntry<V>, EntryWeight, RandomState>;
+
+/// Preserve the concurrent backend's hash-before-lock behavior. User Hash
+/// callbacks may reenter this cache; all hashing inside the mutex uses only
+/// this precomputed scalar, including backend rehashing during growth.
+#[cfg(target_os = "linux")]
+struct HashedKey<K> {
+    hash: u64,
+    key: K,
+}
+
+#[cfg(target_os = "linux")]
+impl<K> Hash for HashedKey<K> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.hash.hash(state);
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl<K: PartialEq> PartialEq for HashedKey<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.key == other.key
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl<K: Eq> Eq for HashedKey<K> {}
+
+#[cfg(target_os = "linux")]
+impl<K, Q> quick_cache::Equivalent<HashedKey<ResidentKey<K>>> for HashedKey<&VersionedKeyRef<'_, Q>>
+where
+    K: Borrow<Q>,
+    Q: Eq + ?Sized,
+{
+    fn equivalent(&self, owned: &HashedKey<ResidentKey<K>>) -> bool {
+        self.hash == owned.hash && quick_cache::Equivalent::equivalent(self.key, &owned.key)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl<K: Eq> quick_cache::Equivalent<HashedKey<ResidentKey<K>>> for HashedKey<&VersionedKey<K>> {
+    fn equivalent(&self, owned: &HashedKey<ResidentKey<K>>) -> bool {
+        self.hash == owned.hash && self.key == owned.key.get()
+    }
+}
+
 pub(super) struct QuickResidentIndex<K, V> {
-    cache: Cache<ResidentKey<K>, ResidentEntry<V>, EntryWeight, RandomState>,
+    #[cfg(not(target_os = "linux"))]
+    cache: PolicyCache<K, V>,
+    // Linux/Miri cannot use Quick Cache's older parking_lot backend. Its std
+    // fallback poisons after key equality panics, including during final clear.
+    // Own synchronization with the same non-poisoning lock as the rest of xlfn.
+    #[cfg(target_os = "linux")]
+    cache: crate::sync::Mutex<PolicyCache<K, V>>,
+    #[cfg(target_os = "linux")]
+    hash_builder: RandomState,
 }
 
 impl<K, V> QuickResidentIndex<K, V>
@@ -52,15 +113,30 @@ where
             .hot_allocation(1.0)
             .build()
             .expect("valid resident cache options");
+        let cache = Cache::with_options(
+            options,
+            EntryWeight,
+            RandomState::new(),
+            DefaultLifecycle::default(),
+        );
         Self {
-            // Use the standard RandomState hasher.
-            cache: Cache::with_options(
-                options,
-                EntryWeight,
-                RandomState::new(),
-                DefaultLifecycle::default(),
-            ),
+            #[cfg(not(target_os = "linux"))]
+            cache,
+            #[cfg(target_os = "linux")]
+            cache: crate::sync::Mutex::new(cache),
+            #[cfg(target_os = "linux")]
+            hash_builder: RandomState::new(),
         }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn with_cache<T>(&self, operation: impl FnOnce(&PolicyCache<K, V>) -> T) -> T {
+        operation(&self.cache)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn with_cache<T>(&self, operation: impl FnOnce(&mut PolicyCache<K, V>) -> T) -> T {
+        operation(&mut self.cache.lock())
     }
 
     pub(super) fn get<Q>(&self, key: &VersionedKeyRef<'_, Q>) -> Option<Entry<V>>
@@ -68,35 +144,56 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        self.cache.get(key).map(|entry| entry.snapshot())
+        #[cfg(target_os = "linux")]
+        let key = &HashedKey {
+            hash: self.hash_builder.hash_one(key),
+            key,
+        };
+        self.with_cache(|cache| cache.get(key).map(|entry| entry.snapshot()))
     }
 
     pub(super) fn insert_resident(&self, key: ResidentKey<K>, entry: ResidentEntry<V>) {
-        self.cache.insert(key, entry);
+        #[cfg(target_os = "linux")]
+        let key = HashedKey {
+            hash: self.hash_builder.hash_one(&key),
+            key,
+        };
+        self.with_cache(|cache| cache.insert(key, entry));
     }
 
     pub(super) fn invalidate(&self, key: &VersionedKey<K>) {
-        drop(self.cache.remove(key));
+        #[cfg(target_os = "linux")]
+        let key = &HashedKey {
+            hash: self.hash_builder.hash_one(key),
+            key,
+        };
+        self.with_cache(|cache| drop(cache.remove(key)));
     }
 
     pub(super) fn invalidate_before(&self, epoch: u64) {
-        self.cache.retain(|key, _| key.get().epoch >= epoch);
+        self.with_cache(|cache| {
+            cache.retain(|key, _| {
+                #[cfg(target_os = "linux")]
+                let key = &key.key;
+                key.get().epoch >= epoch
+            });
+        });
     }
 
     pub(super) fn clear(&self) {
-        self.cache.clear();
+        self.with_cache(|cache| cache.clear());
     }
 
     pub(super) fn resident_count(&self) -> u64 {
-        self.cache.len() as u64
+        self.with_cache(|cache| cache.len() as u64)
     }
 
     pub(super) fn resident_weight(&self) -> u64 {
-        self.cache.weight()
+        self.with_cache(|cache| cache.weight())
     }
 
     #[cfg(feature = "bench-internals")]
     pub(super) fn estimated_index_bytes(&self) -> usize {
-        self.cache.memory_used().total()
+        self.with_cache(|cache| cache.memory_used().total())
     }
 }
