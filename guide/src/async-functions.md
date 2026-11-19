@@ -266,6 +266,13 @@ the task registry reaches zero active tasks. Only then does xlfn call
 `AsyncExecutor::shutdown` and certify async quiescence. RTD and handle services
 cannot be sealed or reclaimed before that certificate.
 
+On Windows, this drain and the executor's final shutdown run on a framework
+helper initialized as an MTA. The lifecycle thread continues dispatching COM
+until task destruction, executor cleanup, and native poller exit have finished.
+An executor must not rely on shutdown running on its startup thread. Failure
+to prepare the dispatch helper leaves the executor owned by the runtime so
+shutdown can be retried without issuing a stopped certificate.
+
 An executor that retains a task without polling or dropping it can stall close;
 the framework retains the generation rather than reclaiming state still owned
 by that task. Application-owned background tasks should be joined in

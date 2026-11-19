@@ -176,6 +176,22 @@
     "reason": "Import for the audited resume-only boundary. deferred_termination_worker finishes phase/refcount cleanup and resumes the original payload; TerminationWorker::join consumes it before publishing Joined."
   },
   {
+    "path": "crates/xlfn/src/excel_rtd/windows/subscription_backend.rs",
+    "context": "module root",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "resume",
+    "reason": "Import for the audited resume-only connection boundary. ConnectDataWork returns the original payload after rolling back on the scoped helper, and connect_data resumes it only after the caller finishes its COM-dispatching join."
+  },
+  {
+    "path": "crates/xlfn/src/excel_rtd/windows/subscription_backend.rs",
+    "context": "fn run",
+    "code": "catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "resume",
+    "reason": "ConnectDataWork retains subscription rollback and output cleanup on the scoped helper while the caller dispatches COM. After joining that helper, connect_data resumes the original payload to the enclosing COM boundary."
+  },
+  {
     "path": "crates/xlfn/src/excel_rtd/windows/tests.rs",
     "context": "# [ test ] fn panicking_git_revocation_retry_requeues_claim",
     "code": "let result = catch_unwind(AssertUnwindSafe(|| {",

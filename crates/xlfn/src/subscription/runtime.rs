@@ -570,20 +570,23 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         // this operation to the generation-owned queue. Close drains that
         // queue's admissions and joins its workers before reclaiming servers.
         let operation = unsafe { server.enter_owned_operation() }?;
-        let mut subscriptions = server.subscriptions.lock();
-        let std::collections::hash_map::Entry::Occupied(subscription) =
-            subscriptions.entry(topic_id)
-        else {
-            return Ok(());
+        let (retired, subscription) = {
+            let mut subscriptions = server.subscriptions.lock();
+            // A source can reenter DisconnectData, or another caller can
+            // disconnect, before subscribe has returned its owner. Revoke
+            // that provisional generation too: installation must then fail
+            // and the connection transaction must finish the returned owner.
+            let Some(retired) = server.publish.disconnect_connection(topic_id)? else {
+                return Ok(());
+            };
+            let subscription = subscriptions.remove(&topic_id);
+            if subscription.is_some() {
+                runtime.record_shutdown_event(
+                    crate::shutdown_trace::ShutdownEvent::RemoveSubscription,
+                );
+            }
+            (retired, subscription)
         };
-        // The admitted owner already holds worker startup and queue capacity;
-        // terminal disconnection cannot be rejected by resource admission.
-        let Some(retired) = server.publish.disconnect_connection(topic_id)? else {
-            return Ok(());
-        };
-        let subscription = subscription.remove();
-        drop(subscriptions);
-        runtime.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);
         {
             let mut catalog = runtime.catalog.lock();
             cleanup_catalog_binding_and_pending(
@@ -593,7 +596,17 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 retired.generation,
             );
         }
-        subscription.defer(completion, operation);
+        // An installed owner already holds worker startup and queue capacity;
+        // terminal disconnection cannot be rejected by resource admission.
+        // A still-subscribing transaction retains its own operation until
+        // installation observes the revoked generation and joins its owner.
+        if let Some(subscription) = subscription {
+            subscription.defer(completion, operation);
+        } else {
+            // Release any external transport lease while this operation
+            // still retains runtime and server admission.
+            drop(completion);
+        }
         Ok(())
     }
 

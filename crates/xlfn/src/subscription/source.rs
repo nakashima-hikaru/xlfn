@@ -302,6 +302,11 @@ pub unsafe trait RtdSource: Send + Sync + 'static {
     type Subscription: RtdSubscription;
 
     /// Creates a subscription under the sink-transfer safety contract above.
+    ///
+    /// Subscription setup may run on a framework-owned thread. Do not depend
+    /// on the Excel caller's thread affinity; apartment-bound COM interfaces
+    /// require marshaling. Windows COM connections run setup in an initialized
+    /// MTA while the caller continues dispatching incoming STA calls.
     fn subscribe(
         &self,
         topic: &RtdTopic,

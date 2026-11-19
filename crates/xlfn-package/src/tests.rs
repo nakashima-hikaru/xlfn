@@ -50,6 +50,74 @@ fn synthetic_xll() -> Vec<u8> {
     bytes
 }
 
+fn synthetic_x86_xll() -> Vec<u8> {
+    let mut bytes = synthetic_xll();
+    let optional = 0x98;
+    write_u16(&mut bytes[0x84..0x86], IMAGE_FILE_MACHINE_I386);
+    bytes[0x94..0x96].copy_from_slice(&0xe0_u16.to_le_bytes());
+    bytes[optional..optional + 2].copy_from_slice(&0x10b_u16.to_le_bytes());
+    bytes[optional + 24..optional + 28].copy_from_slice(&0x1000_u32.to_le_bytes());
+    bytes[optional + 28..optional + 32].copy_from_slice(&0x10000000_u32.to_le_bytes());
+    for (offset, value) in [
+        (72, 0x100000_u32),
+        (76, 0x1000),
+        (80, 0x100000),
+        (84, 0x1000),
+    ] {
+        bytes[optional + offset..optional + offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes[optional + 88..optional + 92].fill(0);
+    bytes[optional + 92..optional + 96].copy_from_slice(&16_u32.to_le_bytes());
+    // PE32 has narrower stack/heap fields, so its data directories and section
+    // table begin 16 bytes earlier than the equivalent PE32+ image.
+    bytes.copy_within(optional + 112..optional + 0xf0, optional + 96);
+    bytes.copy_within(optional + 0xf0..optional + 0xf0 + 4 * 40, optional + 0xe0);
+    bytes[optional + 0xe0 + 4 * 40..optional + 0xf0 + 4 * 40].fill(0);
+    bytes
+}
+
+#[test]
+fn pe_architecture_rejects_machine_optional_header_mismatch() {
+    let directory = tempfile::tempdir().unwrap();
+    for (mut bytes, valid_target, wrong_machine, wrong_target) in [
+        (
+            synthetic_xll(),
+            "x86_64-pc-windows-msvc",
+            IMAGE_FILE_MACHINE_I386,
+            "i686-pc-windows-msvc",
+        ),
+        (
+            synthetic_x86_xll(),
+            "i686-pc-windows-msvc",
+            IMAGE_FILE_MACHINE_AMD64,
+            "x86_64-pc-windows-msvc",
+        ),
+    ] {
+        let path = directory.path().join("addin.xll");
+        fs::write(&path, &bytes).unwrap();
+        verify_xll(&path, valid_target, &[]).unwrap();
+        verify_pe_dependency_closure(&path, valid_target, &[]).unwrap();
+
+        // The machine field now matches the requested target, but the actual
+        // optional-header layout still belongs to the other architecture.
+        write_u16(&mut bytes[0x84..0x86], wrong_machine);
+        fs::write(&path, &bytes).unwrap();
+        for result in [
+            parse_pe_bytes(&bytes).map(|_| ()),
+            verify_xll(&path, wrong_target, &[]),
+            verify_pe_dependency_closure(&path, wrong_target, &[]),
+        ] {
+            let error = result.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("machine does not match its optional header"),
+                "{wrong_target}: {error}"
+            );
+        }
+    }
+}
+
 #[test]
 fn export_manifest_rejects_corrupt_data_and_duplicate_sections() {
     let baseline = synthetic_xll();

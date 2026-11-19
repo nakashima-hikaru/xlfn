@@ -147,6 +147,10 @@ impl CompositionTrace {
         machine.return_pending = true;
     }
 
+    pub(crate) fn mark_truncated(&self) {
+        self.inner.lock().trace_truncated = true;
+    }
+
     pub(crate) fn finish_return(&self) {
         let mut machine = self.inner.lock();
         if machine.return_pending || machine.terminal_pending {

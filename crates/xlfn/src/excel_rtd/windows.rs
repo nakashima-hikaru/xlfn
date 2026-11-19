@@ -43,6 +43,9 @@ mod server_gate;
 mod server_type;
 mod subscription_backend;
 mod update_event;
+pub(crate) use crate::drain_wait::drain_with_com_dispatch;
+#[cfg(all(test, feature = "rtd"))]
+pub(crate) use crate::drain_wait::windows::{DrainPreparationStage, fail_next_drain_preparation};
 #[cfg(test)]
 use crate::win32::{
     CoCreateGuid, DISPPARAMS, E_FAIL, E_INVALIDARG, E_POINTER, VARIANT, VARIANT_FALSE,
@@ -69,9 +72,6 @@ use class_factory::{
 #[cfg(test)]
 use com_abi::IUnknown_Vtbl;
 use com_abi::{IID_IUNKNOWN, com_boundary, guid_eq};
-pub(crate) use event::drain_with_com_dispatch;
-#[cfg(all(test, feature = "rtd"))]
-pub(crate) use event::{DrainPreparationStage, fail_next_drain_preparation};
 #[cfg(feature = "handles")]
 pub(super) use excel_rtd::observe;
 #[cfg(feature = "rtd")]

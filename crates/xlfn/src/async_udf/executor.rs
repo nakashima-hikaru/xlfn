@@ -18,6 +18,8 @@ use std::future::Future;
 /// `shutdown` must drain executor-owned scheduler callbacks and pollers before
 /// returning success. It is also called after a partially failed `start`.
 /// A shutdown error retains the executor and prevents a stopped certificate.
+/// Shutdown and final destruction can run on a framework helper thread; on
+/// Windows, lifecycle callers dispatch COM while waiting for that helper.
 pub trait AsyncExecutor: Send + Sync + 'static {
     /// Whether this executor accepts registered async worksheet functions.
     /// The framework checks this when compiling generated async entry points.

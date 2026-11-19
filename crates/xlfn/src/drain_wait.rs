@@ -4,6 +4,12 @@ mod threaded;
 #[cfg(all(test, windows))]
 pub(crate) use threaded::fail_next_drain_spawn;
 
+#[cfg(windows)]
+#[allow(unsafe_code, reason = "COM dispatch and owned Win32 wait handles")]
+pub(crate) mod windows;
+#[cfg(windows)]
+pub(crate) use windows::drain_with_com_dispatch;
+
 pub(crate) trait DrainWork: Send {
     type Output: Send;
 

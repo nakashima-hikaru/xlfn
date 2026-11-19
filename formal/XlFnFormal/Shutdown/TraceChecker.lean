@@ -1,5 +1,6 @@
 import XlFnFormal.Lifecycle.Checker
 import XlFnFormal.Shutdown.Checker
+import XlFnFormal.Shutdown.DiagnosticActivity
 import XlFnFormal.Shutdown.Refinement
 import Lean.Data.Json
 
@@ -57,8 +58,13 @@ private structure WireTrace where
   initial : Resources
   activities : Array Activity
   certificates : Array Event
+  diagnosticProjection : DiagnosticActivity
   traceTruncated : Bool
   outcome : String
+
+private structure WireCertificate where
+  events : Array Event
+  diagnosticProjection : DiagnosticActivity := {}
 
 private def wireReturnedSuccessBool (state : WireState) : Bool :=
   state.state.phase == .closed && isQuiescent state.state.resources
@@ -128,7 +134,6 @@ private def simpleCertificateEvent : String → Option Event
   | "startAsyncExecutor" => some .startAsyncExecutor
   | "stopAsyncExecutor" => some .stopAsyncExecutor
   | "startDiagnostics" => some .startDiagnostics
-  | "stopDiagnostics" => some .stopDiagnostics
   | "beginClose" => some .beginClose
   | "callsDrained" => some .callsDrained
   | "returnsDrained" => some .returnsDrained
@@ -175,18 +180,21 @@ private def simpleActivityEvent : String → Option Activity
   | "recordCleanupIssue" => some .recordCleanupIssue
   | _ => none
 
-private def parseCertificateEvent : Json → Except String Event
+private def parseCertificateEvent : Json → Except String WireCertificate
   | json =>
       match json.getTag? with
+      | some "stopDiagnostics" => do
+          let activity ← DiagnosticActivity.parse (← json.getObjVal? "stopDiagnostics")
+          return { events := activity.events, diagnosticProjection := activity }
       | some "quarantine" => do
           let payload ← json.getObjVal? "quarantine"
-          return .quarantine (← parseFailure payload)
+          return { events := #[.quarantine (← parseFailure payload)] }
       | some "failStop" => do
           let payload ← json.getObjVal? "failStop"
-          return .failStop (← parseFailure payload)
+          return { events := #[.failStop (← parseFailure payload)] }
       | some tag =>
           match simpleCertificateEvent tag with
-          | some event => return event
+          | some event => return { events := #[event] }
           | none => throw s!"unknown shutdown event: {tag}"
       | none => throw s!"shutdown event must be a string or tagged object: {json}"
 
@@ -277,11 +285,14 @@ private def parseResources (json : Json) : Except String Resources := do
 private def parseTrace (json : Json) : Except String WireTrace := do
   let activitiesJson : Array Json ← field json "activities"
   let certificatesJson : Array Json ← field json "certificates"
+  let certificates ← certificatesJson.mapM parseCertificateEvent
   return {
     generation := (← field json "generation")
     initial := (← parseResources (← json.getObjVal? "initial"))
     activities := (← activitiesJson.mapM parseActivityEvent)
-    certificates := (← certificatesJson.mapM parseCertificateEvent)
+    certificates := certificates.flatMap (·.events)
+    diagnosticProjection := certificates.foldl
+      (fun total certificate => total.add certificate.diagnosticProjection) {}
     traceTruncated := (← field json "trace_truncated")
     outcome := (← field json "outcome")
   }
@@ -318,6 +329,30 @@ private def countActivity (predicate : Activity → Bool) : List Activity → Na
   | [] => 0
   | head :: tail =>
       (if predicate head then 1 else 0) + countActivity predicate tail
+
+/-- The certificate projection must be backed by the independent raw ledger.
+    An unfinished trace may have observations after its latest diagnostic stop;
+    successful shutdown must account for every diagnostic observation. -/
+private def checkDiagnosticProjection (activities : Array Activity)
+    (projection : DiagnosticActivity) (returnedSuccess : Bool := false) :
+    Except String Unit := do
+  let observations := activities.toList
+  let recorded : DiagnosticActivity := {
+    enqueued := countActivity (fun activity => match activity with
+      | .enqueueDiagnostic => true
+      | _ => false) observations
+    flushed := countActivity (fun activity => match activity with
+      | .flushDiagnostic => true
+      | _ => false) observations
+    discarded := countActivity (fun activity => match activity with
+      | .discardDiagnostic => true
+      | _ => false) observations
+  }
+  if projection.enqueued > recorded.enqueued || projection.flushed > recorded.flushed ||
+      projection.discarded > recorded.discarded then
+    throw "diagnostic stop projection exceeds recorded activity"
+  if returnedSuccess && projection != recorded then
+    throw "diagnostic stop projection omits recorded activity"
 
 private def checkCountPair (label : String) (starts stops : Nat)
     (requireDrained : Bool := false) : Except String Unit := do
@@ -617,6 +652,7 @@ private def checkTrace (json : Json) : Except String Unit := do
   if trace.generation == 0 then
     throw "shutdown trace generation must be non-zero"
   checkActivities trace.initial trace.activities
+  checkDiagnosticProjection trace.activities trace.diagnosticProjection
   let initial : WireState := {
     generation := trace.generation
     state := State.opened trace.initial
@@ -631,6 +667,7 @@ private def checkTrace (json : Json) : Except String Unit := do
     | "in_progress" => return ()
     | "returned_success" =>
         checkActivities trace.initial trace.activities true final.state.resources.moduleResidencyHeld
+        checkDiagnosticProjection trace.activities trace.diagnosticProjection true
         checkReturnedSuccess initial final trace.certificates.toList hInitialOpen hSteps
     | "fail_stopped" =>
         match final.state.phase with

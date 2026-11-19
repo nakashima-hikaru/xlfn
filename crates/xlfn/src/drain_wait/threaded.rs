@@ -11,7 +11,7 @@ use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 /// The helper exclusively owns the work and must be joined before teardown.
 #[must_use = "join the helper before releasing the dispatch resources"]
-pub(in crate::excel_rtd) struct JoinTransferred<'scope, T>(RollbackGuard<StartedHelper<'scope, T>>);
+pub(super) struct JoinTransferred<'scope, T>(RollbackGuard<StartedHelper<'scope, T>>);
 
 struct StartedHelper<'scope, T>(ScopedJoinHandle<'scope, Result<T, CaughtPanic>>);
 
@@ -24,7 +24,7 @@ impl<T> Rollback for StartedHelper<'_, T> {
 }
 
 impl<T> JoinTransferred<'_, T> {
-    pub(in crate::excel_rtd) fn join(self) -> WorkerJoined<T> {
+    pub(super) fn join(self) -> WorkerJoined<T> {
         let StartedHelper(worker) = self.0.complete();
         let require_join = DropGuard::new((), |()| fail_stop());
         #[cfg(test)]
@@ -38,7 +38,7 @@ impl<T> JoinTransferred<'_, T> {
 }
 
 impl<W: DrainWork> UnstartedDrain<W> {
-    pub(in crate::excel_rtd) fn spawn<'scope, 'env>(
+    pub(super) fn spawn<'scope, 'env>(
         self,
         scope: &'scope Scope<'scope, 'env>,
         builder: Builder,
@@ -222,7 +222,7 @@ mod tests {
         }
         for path in ["spawn", "join", "abandon", "work"] {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "excel_rtd::drain_wait::threaded::tests::unknown_drain_startup_or_completion_cannot_return"])
+                .args(["--exact", "drain_wait::threaded::tests::unknown_drain_startup_or_completion_cannot_return"])
                 .env(CHILD, path)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())

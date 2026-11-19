@@ -314,6 +314,12 @@ does not guarantee an Excel recalculation deadline while Excel is busy.
 
 ## Stop a producer
 
+Windows also dispatches COM during `ConnectData` setup and failure cleanup.
+Source subscription runs on an MTA helper while Excel's caller retains the
+connection admission and output storage. If `DisconnectData` arrives before
+`subscribe` returns, it revokes that provisional connection; the returned
+subscription is then joined instead of being installed as a live topic.
+
 During disconnect, the channel stops accepting values, discards queued
 updates, waits for in-flight publication, and revokes its sink. A blocking
 subscription then joins its producer; a multiplexed subscription enqueues
