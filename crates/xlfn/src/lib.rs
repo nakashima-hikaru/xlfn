@@ -21,6 +21,8 @@
 //! transport, but neither public capability implies the other.
 //!
 //! The `serde` feature enables serialization of owned values and collections.
+//! Structured diagnostic logging uses `serde` and `serde_json` independently
+//! of that feature.
 //! The `jiff` feature provides civil-date conversions for serial dates.
 //!
 //! # Stability boundaries

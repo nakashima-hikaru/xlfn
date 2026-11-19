@@ -34,6 +34,18 @@ rustup target add i686-pc-windows-msvc
 If Cargo cannot find the MSVC linker, run your build from the Developer PowerShell
 supplied by Visual Studio Build Tools.
 
+## Rust version support
+
+The minimum supported Rust version (MSRV) is declared by
+`workspace.package.rust-version` in the repository's `Cargo.toml`. The repository
+pins that stable toolchain in `rust-toolchain.toml` for normal builds and CI.
+Verification tools can use separately pinned toolchains.
+
+During pre-1.0 development, releases may raise the MSRV to use required
+standard-library APIs or dependency versions. Such changes are recorded in the
+release notes. Check the new release's compiler requirement before upgrading an
+add-in in an environment with an approved toolchain list.
+
 ## Install `cargo-xlfn`
 
 Install the packaging and validation CLI:
@@ -60,7 +72,12 @@ The basic add-in requires no Cargo features. Enable optional features in your
 | `handles` | Rust objects owned by worksheet formulas                |
 | `rtd`     | Streaming Real-Time Data updates to cells               |
 | `cache`   | Calculation caching across worksheet calls              |
+| `serde`   | Serialization of owned worksheet values and collections |
 | `jiff`    | Serial-date conversion with `jiff::civil::Date`           |
+
+The `serde` feature controls serialization implementations for worksheet values.
+The framework also uses `serde` and `serde_json` for structured diagnostic logs,
+so those dependencies are present with or without the feature.
 
 For example:
 

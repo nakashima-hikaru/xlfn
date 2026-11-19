@@ -9,6 +9,12 @@ repository.workspace = true
 description = "XLL bundle validation, PE dependency checks, and package staging"
 readme = "README.md"
 
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["i686-pc-windows-msvc"]
+# docs.rs cross-compiles from Linux without the MSVC assembler.
+features = ["blake3/pure"]
+
 [dependencies]
 fs-err.workspace = true
 object.workspace = true

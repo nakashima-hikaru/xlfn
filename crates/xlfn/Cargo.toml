@@ -9,6 +9,22 @@ repository.workspace = true
 description = "Safe Rust framework for building Excel XLL add-ins"
 readme = "README.md"
 
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["i686-pc-windows-msvc"]
+# Document supported optional APIs without enabling developer instrumentation.
+features = [
+    "async",
+    "async-builtin",
+    "rtd",
+    "handles",
+    "cache",
+    "serde",
+    "jiff",
+    # docs.rs cross-compiles from Linux without the MSVC assembler.
+    "blake3/pure",
+]
+
 [features]
 default = []
 serde = ["serde/derive"]
