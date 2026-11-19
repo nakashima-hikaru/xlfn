@@ -5008,6 +5008,7 @@ fn temporary_registration_rejects_contention_before_entering_host_callbacks() {
 
 #[test]
 fn heartbeat_rejects_a_null_server_and_initializes_output() {
+    let _guard = TEST_LOCK.lock().unwrap();
     let mut alive = -1;
     // SAFETY: the null server exercises validation; alive is writable output.
     let status =

@@ -42,6 +42,7 @@ MODULES = {
     "async_udf/completion": Path("crates/xlfn/src/async_udf/completion.rs"),
     "async_udf/instrumentation": Path("crates/xlfn/src/async_udf/instrumentation.rs"),
     "cancellation": Path("crates/xlfn/src/cancellation.rs"),
+    "drain_wait/windows": Path("crates/xlfn/src/drain_wait/windows.rs"),
     "excel_rtd/windows/server": Path("crates/xlfn/src/excel_rtd/windows/server.rs"),
     "excel_rtd/windows/server/termination": Path(
         "crates/xlfn/src/excel_rtd/windows/server/termination.rs"
@@ -100,6 +101,7 @@ MODULES = {
     "excel_rtd/windows": Path("crates/xlfn/src/excel_rtd/windows.rs"),
 }
 WINDOWS_MODULES = {
+    "drain_wait/windows",
     "excel_rtd/windows/server/termination",
     "excel_rtd/windows/server_gate",
     "return_abi/numeric/process/windows",
