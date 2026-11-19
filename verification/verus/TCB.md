@@ -59,10 +59,18 @@ The `PO-*` snapshot properties do not independently prove native Box recovery,
 unsized payloads, Drop or raw-reader draining.
 
 OperationGate models closed admission, drained active operations and linear
-permit conservation (`OG-1` through `OG-5`). ServiceSlot models single owner,
+permit conservation (`OG-1` through `OG-5`). GenerationServiceSlot models single owner,
 valid publication, withdraw-before-drain, quiescence before extraction and
 fault isolation (`SS-1` through `SS-5`). Native guard lifetimes, pointer
 publication, Box and destruction still require representation connections.
+The model includes initialization faults and configuration/fault disarming;
+disarm cannot reclaim a ready, sealing or teardown-faulted service. It does not
+model ReplaceableServiceSlot's two publication lanes or external publication
+lock scopes. Native regression tests and Miri cover those paths separately.
+OperationGate's wait-completion transition observes an already sealed, zero
+active count and preserves the entire state. It cannot zero live permits;
+release transitions must discharge them first. This condition proves neither
+eventual progress nor the native wait/notify implementation.
 
 ### RotatingReadDomain and retirement queues
 

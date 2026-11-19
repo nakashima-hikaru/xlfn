@@ -54,14 +54,14 @@ struct Machine {
     // closeEpoch and generation transitions emitted by earlier cycles.
     events: Vec<CompositionEvent>,
     trace_truncated: bool,
+    // A failure before or after an observed success must not hide that
+    // return from the checker. Only a new attempt resets this history.
     returned_success: bool,
     quarantined: bool,
+    fail_stopped: bool,
     // Observation-only progress. These flags never issue a cleanup authority.
     cleanup_owner_present: bool,
     quarantine_pending: bool,
-    // A later failure observation must not erase an already observed unsafe
-    // success. Only a new attempt may reset this diagnostic history.
-    success_after_quarantine: bool,
     return_pending: bool,
     terminal_pending: bool,
 }
@@ -73,9 +73,9 @@ impl Machine {
             trace_truncated: false,
             returned_success: false,
             quarantined: false,
+            fail_stopped: false,
             cleanup_owner_present: false,
             quarantine_pending: false,
-            success_after_quarantine: false,
             return_pending: false,
             terminal_pending: false,
         }
@@ -110,11 +110,9 @@ impl CompositionTrace {
                 machine.terminal_pending = false;
                 machine.cleanup_owner_present = false;
                 machine.quarantine_pending = false;
-                machine.success_after_quarantine = false;
             }
             CompositionEvent::QuarantineOpen { .. } => {
                 machine.quarantined = true;
-                machine.returned_success = false;
                 machine.terminal_pending = false;
             }
             CompositionEvent::AcquireFinalCloseOwner
@@ -124,7 +122,12 @@ impl CompositionTrace {
             CompositionEvent::LiftShutdown(CertificateEvent::Quarantine(_)) => {
                 machine.quarantine_pending = machine.cleanup_owner_present;
                 machine.quarantined = !machine.cleanup_owner_present;
-                machine.returned_success = false;
+                machine.terminal_pending = false;
+            }
+            CompositionEvent::LiftShutdown(CertificateEvent::FailStop(_)) => {
+                // Fail-stop is terminal even with an active cleanup owner:
+                // unlike retention quarantine, it never waits for release.
+                machine.fail_stopped = true;
                 machine.terminal_pending = false;
             }
             CompositionEvent::ReleaseCleanupOwner => {
@@ -147,10 +150,7 @@ impl CompositionTrace {
     pub(crate) fn finish_return(&self) {
         let mut machine = self.inner.lock();
         if machine.return_pending || machine.terminal_pending {
-            if machine.return_pending && (machine.quarantined || machine.quarantine_pending) {
-                machine.success_after_quarantine = true;
-            }
-            machine.returned_success = machine.return_pending;
+            machine.returned_success |= machine.return_pending;
             machine.return_pending = false;
             machine.terminal_pending = false;
         }
@@ -168,10 +168,12 @@ impl CompositionTrace {
             initial: "initial",
             events: machine.events.clone(),
             trace_truncated: machine.trace_truncated,
-            // Never hide an observed success behind an earlier failure flag:
-            // the formal checker must reject success after quarantine.
-            outcome: if machine.success_after_quarantine || machine.returned_success {
+            // Never hide an observed success behind a failure flag, regardless
+            // of their order: the checker must inspect the final state.
+            outcome: if machine.returned_success {
                 "returned_success"
+            } else if machine.fail_stopped {
+                "fail_stopped"
             } else if machine.quarantined {
                 "quarantined"
             } else {
@@ -247,5 +249,105 @@ mod tests {
         });
         trace.finish_return();
         assert_eq!(outcome(&trace), "returned_success");
+    }
+
+    #[test]
+    fn fail_stop_is_terminal_without_releasing_the_cleanup_owner() {
+        for owned in [false, true] {
+            let trace = CompositionTrace::new();
+            if owned {
+                trace.record(CompositionEvent::AcquireFinalCloseOwner);
+            }
+            trace.record(CompositionEvent::LiftShutdown(CertificateEvent::FailStop(
+                ShutdownFailure::InvariantViolation,
+            )));
+            assert_eq!(outcome(&trace), "fail_stopped");
+            trace.mark_terminal_pending();
+            trace.finish_return();
+            assert_eq!(outcome(&trace), "fail_stopped");
+        }
+    }
+
+    #[test]
+    fn fail_stop_does_not_hide_a_pending_or_subsequent_success() {
+        for pending in [false, true] {
+            let trace = CompositionTrace::new();
+            if pending {
+                trace.mark_return_pending();
+            }
+            trace.record(CompositionEvent::LiftShutdown(CertificateEvent::FailStop(
+                ShutdownFailure::InvariantViolation,
+            )));
+            if !pending {
+                trace.mark_return_pending();
+            }
+            trace.finish_return();
+            assert_eq!(outcome(&trace), "returned_success");
+            trace.record(CompositionEvent::LiftShutdown(CertificateEvent::FailStop(
+                ShutdownFailure::BoundaryPanic,
+            )));
+            assert_eq!(outcome(&trace), "returned_success");
+        }
+    }
+
+    #[test]
+    fn success_observed_before_failure_is_not_hidden_from_the_checker() {
+        for failure in [
+            CompositionEvent::QuarantineOpen {
+                attempt: 1,
+                reason: ShutdownFailure::AddinShutdownFailed,
+            },
+            CompositionEvent::LiftShutdown(CertificateEvent::Quarantine(
+                ShutdownFailure::AddinShutdownFailed,
+            )),
+            CompositionEvent::LiftShutdown(CertificateEvent::FailStop(
+                ShutdownFailure::InvariantViolation,
+            )),
+        ] {
+            let trace = CompositionTrace::new();
+            trace.mark_return_pending();
+            trace.finish_return();
+            trace.record(failure);
+            assert_eq!(outcome(&trace), "returned_success");
+            trace.mark_terminal_pending();
+            trace.finish_return();
+            assert_eq!(outcome(&trace), "returned_success");
+        }
+    }
+
+    #[test]
+    fn a_new_open_attempt_resets_the_previous_success_observation() {
+        for (failure, expected) in [
+            (
+                CompositionEvent::QuarantineOpen {
+                    attempt: 2,
+                    reason: ShutdownFailure::AddinShutdownFailed,
+                },
+                "quarantined",
+            ),
+            (
+                CompositionEvent::LiftShutdown(CertificateEvent::Quarantine(
+                    ShutdownFailure::AddinShutdownFailed,
+                )),
+                "quarantined",
+            ),
+            (
+                CompositionEvent::LiftShutdown(CertificateEvent::FailStop(
+                    ShutdownFailure::InvariantViolation,
+                )),
+                "fail_stopped",
+            ),
+        ] {
+            let trace = CompositionTrace::new();
+            trace.mark_return_pending();
+            trace.finish_return();
+            trace.record(CompositionEvent::BeginOpen {
+                sampled_epoch: 1,
+                attempt: 2,
+            });
+            assert_eq!(outcome(&trace), "in_progress");
+            trace.record(failure);
+            assert_eq!(outcome(&trace), expected);
+        }
     }
 }

@@ -1,6 +1,48 @@
 use crate::runtime::Runtime;
 use crate::runtime::shutdown::QuiescenceProof;
 
+#[test]
+fn committed_session_precedes_diagnostic_configuration_after_trace_handoff() {
+    struct Sink;
+    impl crate::diagnostics::DiagnosticSink for Sink {
+        fn report(&self, _: &crate::diagnostics::DiagnosticEvent<'_>) {}
+    }
+    fn configure_after_handoff() {
+        crate::diagnostics::set_diagnostic_sink(Sink).unwrap();
+    }
+
+    let _module = crate::ingress::acquire_test_module_lease();
+    let diagnostics = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
+    crate::diagnostics::close_diagnostic_router().unwrap();
+    let runtime = Runtime::<()>::new();
+    let opening = runtime.begin_open().unwrap();
+    crate::diagnostics::reset_diagnostic_router().unwrap();
+    let opening = runtime.publish_with_lifecycle(opening, (), (), ());
+    // A diagnostic mutator can acquire its publication lock as soon as the
+    // open observer connects the trace. Force that exact interleaving before
+    // the remainder of commit_open, using a real sink-publication operation.
+    super::AFTER_OPEN_TRACE_CONNECTED.with(|hook| hook.set(Some(configure_after_handoff)));
+    runtime.finish_open(opening, Vec::new()).unwrap();
+    let document: serde_json::Value =
+        serde_json::from_str(&runtime.observer().composition_trace().trace_json().unwrap())
+            .unwrap();
+    drop(diagnostics);
+    assert_eq!(crate::boundary::host::host_auto_remove(&runtime), 1);
+
+    let events = document["events"].as_array().unwrap();
+    let committed = events
+        .iter()
+        .position(|event| event.get("commitOpen").is_some())
+        .expect("committed session");
+    let configured = events
+        .iter()
+        .position(|event| {
+            event.get("liftShutdown").and_then(|event| event.as_str()) == Some("startDiagnostics")
+        })
+        .expect("diagnostic publication certificate");
+    assert!(committed < configured);
+}
+
 fn with_terminal_context(
     before_close: impl FnOnce(),
     operation: impl FnOnce(&Runtime<()>, &QuiescenceProof),

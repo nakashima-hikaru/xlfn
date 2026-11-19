@@ -326,6 +326,19 @@ impl Drop for OwnedDrainPermit {
 }
 
 /// A striped drain gate. Stripe selection remains a policy of the caller.
+///
+/// At least one stripe is required; zero-stripe constructors are rejected at
+/// compile time, including when invoked outside a constant expression.
+///
+/// ```compile_fail
+/// use xlfn_kernel::drain_gate::StripedDrainGate;
+/// let _gate = StripedDrainGate::<0>::new_open();
+/// ```
+///
+/// ```compile_fail
+/// use xlfn_kernel::drain_gate::StripedDrainGate;
+/// let _gate = StripedDrainGate::<0>::new_sealed();
+/// ```
 pub struct StripedDrainGate<const N: usize> {
     counters: [CachePadded<SealableCounter>; N],
     idle: IdleNotification,
@@ -335,6 +348,7 @@ pub struct StripedDrainGate<const N: usize> {
 
 impl<const N: usize> StripedDrainGate<N> {
     pub const fn new_open() -> Self {
+        const { assert!(N > 0, "a striped drain gate requires at least one stripe") };
         Self {
             counters: [const { CachePadded::new(SealableCounter::new_open()) }; N],
             idle: IdleNotification::new(),
@@ -343,6 +357,7 @@ impl<const N: usize> StripedDrainGate<N> {
     }
 
     pub const fn new_sealed() -> Self {
+        const { assert!(N > 0, "a striped drain gate requires at least one stripe") };
         Self {
             counters: [const { CachePadded::new(SealableCounter::new_sealed()) }; N],
             idle: IdleNotification::new(),
