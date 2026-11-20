@@ -59,7 +59,12 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
 
     let call = match runtime.enter_async(&ingress) {
         Ok(call) => call,
-        Err(_) => return,
+        Err(error) => {
+            // SAFETY: the caller keeps the raw handle live, and ingress is
+            // retained until this rejected launch has finished its callback.
+            unsafe { reject_async_admission(&ingress, udf_id, raw_handle, error) };
+            return;
+        }
     };
 
     let result = catch_no_unwind(AssertUnwindSafe(|| {
@@ -74,6 +79,34 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
     }
 
     drop(call);
+}
+
+/// Completes a launch rejected after module entry but before generation
+/// admission. Closing can win between these two admissions, before an owned
+/// responder exists to supply its usual fallback completion.
+unsafe fn reject_async_admission(
+    ingress: &crate::ingress::AdmittedExport<'_>,
+    udf_id: &'static str,
+    raw_handle: *mut XLOPER12,
+    error: XllError,
+) {
+    let result = catch_no_unwind(AssertUnwindSafe(|| {
+        ingress.assert_active();
+        // SAFETY: the rejected launch retains both the caller's live raw
+        // handle and module ingress. return_error validates the handle and
+        // separately acquires callback admission before invoking Excel.
+        let delivery = unsafe { return_error(raw_handle, &error) };
+        report_completion(
+            udf_id,
+            &AsyncCompletion {
+                completion: OwnedCompletionOutcome::Error(error),
+                delivery,
+            },
+        );
+    }));
+    if result.is_err() {
+        crate::diagnostics::report_no_unwind(udf_id, &XllError::Panic);
+    }
 }
 
 pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
@@ -269,7 +302,12 @@ pub(crate) unsafe fn async_udf_boundary_named_handle<A, Start, Build, T>(
 
     let call = match runtime.enter_async(&ingress) {
         Ok(call) => call,
-        Err(_) => return,
+        Err(error) => {
+            // SAFETY: the caller keeps the raw handle live, and ingress is
+            // retained until this rejected launch has finished its callback.
+            unsafe { reject_async_admission(&ingress, udf_id, raw_handle, error) };
+            return;
+        }
     };
 
     let result = catch_no_unwind(AssertUnwindSafe(|| {
@@ -568,6 +606,77 @@ mod numeric_launch_tests {
         drop(crate::return_abi::numeric::Fp12CallGuard::enter());
     }
 
+    fn verify_rejected_admission(
+        launch: impl Fn(&'static Runtime<LaunchTestAddin>, *mut XLOPER12),
+    ) {
+        let _test = crate::runtime::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::runtime::StaticTestRuntime::<LaunchTestAddin>::new();
+        let runtime = fixture.runtime();
+        let open = runtime.begin_open().unwrap();
+        let open = runtime.publish(open, (), ());
+        runtime.finish_open(open, Vec::new()).unwrap();
+        let _callback = crate::test_callback::lock();
+        crate::test_callback::install();
+        crate::test_callback::reset();
+        let mut handle = XLOPER12 {
+            value: XLOPER12Value {
+                big_data: XLOPER12BigData {
+                    handle: XLOPER12BigDataHandle {
+                        data: std::ptr::null_mut(),
+                    },
+                    byte_count: 0,
+                },
+            },
+            xltype: XLTYPE_BIG_DATA,
+        };
+
+        // Stop at the real removal ordering between closing the generation
+        // and closing module ingress. The boundary can still enter the DLL,
+        // but it cannot acquire an AsyncCallGuard or create a responder.
+        runtime.close_generation_admission_for_test();
+        let ingress = crate::module_runtime::ingress();
+        assert_eq!(ingress.phase(), crate::ingress::PHASE_OPEN);
+        launch(runtime, &mut handle);
+        assert_eq!(crate::test_callback::async_return_calls(), 1);
+        assert_eq!(crate::test_callback::last_async_value(), -1);
+
+        // Rejection must still validate the raw handle, then honor callback
+        // closure; neither path may invoke Excel merely to return an error.
+        let mut invalid = XLOPER12::default();
+        launch(runtime, &mut invalid);
+        assert_eq!(crate::test_callback::async_return_calls(), 1);
+        crate::module_runtime::close_callbacks_for_test();
+        launch(runtime, &mut handle);
+        assert_eq!(crate::test_callback::async_return_calls(), 1);
+
+        ingress.begin_close_with(|| {});
+        assert!(ingress.seal_and_drain().is_ok());
+        launch(runtime, &mut handle);
+        assert_eq!(crate::test_callback::async_return_calls(), 1);
+        assert_eq!(ingress.active_udfs(), 0);
+    }
+
+    #[test]
+    fn miri_async_admission_rejection_completes_only_while_callbacks_are_open() {
+        verify_rejected_admission(|runtime, handle| {
+            // SAFETY: the fixture retains aligned, initialized raw storage
+            // through launch, including the intentionally invalid tag case.
+            unsafe {
+                async_udf_boundary_named(
+                    runtime,
+                    "rejected_async_admission",
+                    "REJECTED.ASYNC.ADMISSION",
+                    handle,
+                    |_, _, _| -> XllResult<std::future::Ready<XllResult<f64>>> {
+                        panic!("rejected generation must not run user preparation");
+                    },
+                );
+            }
+        });
+    }
+
     #[test]
     fn miri_async_launch_retains_nested_numeric_siblings() {
         static RUNTIME: Runtime<LaunchTestAddin> = Runtime::new();
@@ -644,6 +753,26 @@ mod numeric_launch_tests {
                 unreachable!("launch returns an error before building any async task")
             })
         }
+    }
+
+    #[cfg(feature = "handles")]
+    #[test]
+    fn miri_handle_async_admission_rejection_completes_only_while_callbacks_are_open() {
+        verify_rejected_admission(|runtime, handle| {
+            // SAFETY: the fixture owns initialized raw storage throughout
+            // launch; the boundary validates its tag before returning it.
+            unsafe {
+                async_udf_boundary_named_handle(
+                    runtime,
+                    "rejected_handle_async_admission",
+                    "REJECTED.HANDLE.ASYNC.ADMISSION",
+                    handle,
+                    |_, _, _| -> XllResult<UnusedHandleBuilder> {
+                        panic!("rejected generation must not prepare handle pins");
+                    },
+                );
+            }
+        });
     }
 
     #[cfg(feature = "handles")]

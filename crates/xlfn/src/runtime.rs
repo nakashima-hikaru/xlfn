@@ -772,6 +772,12 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Default for Runtime<A, P> {
 
 #[cfg(test)]
 impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
+    /// Stops at the removal transition before the module owner closes ingress.
+    #[cfg(feature = "async")]
+    pub(crate) fn close_generation_admission_for_test(&self) {
+        self.lifecycle.access().request_closing_for_test();
+    }
+
     pub(crate) fn cleanup_test_runtime(&self) {
         // A locally quarantined/unopened fixture does not own the global
         // module epoch and must not close another test's active ingress.
