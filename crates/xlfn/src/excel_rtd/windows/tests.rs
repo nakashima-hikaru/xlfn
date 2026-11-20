@@ -4057,6 +4057,95 @@ mod sta_probe {
 
 #[test]
 #[cfg(all(feature = "rtd", feature = "handles"))]
+fn sta_registration_mutex_wait_dispatches_com_and_keeps_reentry_excluded() {
+    const CHILD: &str = "XLFN_TEST_STA_REGISTRATION_MUTEX";
+    if std::env::var_os(CHILD).is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(CHILD, "1")
+            .args([
+                "--exact",
+                "excel_rtd::windows::tests::sta_registration_mutex_wait_dispatches_com_and_keeps_reentry_excluded",
+            ])
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(
+                    status.success(),
+                    "STA registration mutex probe failed: {status}"
+                );
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                child.wait().unwrap();
+                panic!("STA registration mutex wait stopped dispatching COM");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let _apartment = TestComApartment::enter_sta();
+    let _maintenance = super::registration::REGISTRATION_MAINTENANCE.lock();
+    let sta = thread::current().id();
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&dispatched);
+    let probe = sta_probe::new(move || {
+        assert_eq!(thread::current().id(), sta);
+        assert!(
+            super::registration::REGISTRATION_MAINTENANCE
+                .try_lock()
+                .is_none()
+        );
+        observed.store(true, Ordering::Release);
+    });
+    // SAFETY: this thread owns an STA and retains its registered interface.
+    let git = unsafe { super::global_interface_table::get_git() }.unwrap();
+    let mut cookie = 0;
+    // SAFETY: the interface, IID and writable cookie remain live here.
+    assert_eq!(
+        unsafe { git.register(probe.as_ptr(), &IID_IUNKNOWN, &mut cookie) },
+        S_OK
+    );
+    let name = format!(
+        "Global\\XlFnRtdRegistrationStaTest_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let worker_name = name.clone();
+    let (owned_tx, owned_rx) = mpsc::sync_channel(0);
+    let (call_tx, call_rx) = mpsc::sync_channel(0);
+    let owner = thread::spawn(move || {
+        let _apartment = TestComApartment::enter();
+        let mutex = super::registration::CrossProcessRegistrationGuard::acquire_named(&worker_name)
+            .unwrap();
+        owned_tx.send(()).unwrap();
+        call_rx.recv().unwrap();
+        let interface = sta_probe::interface(cookie);
+        sta_probe::call(&interface);
+        drop(interface);
+        // The waiting STA can acquire only after dispatching the callback.
+        drop(mutex);
+    });
+    owned_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    call_tx.send(()).unwrap();
+    let acquired = super::registration::CrossProcessRegistrationGuard::acquire_named_with_timeout(
+        &name, 5_000,
+    )
+    .unwrap();
+    assert!(dispatched.load(Ordering::Acquire));
+    drop(acquired);
+    owner.join().unwrap();
+    // SAFETY: the worker has released its apartment-local proxy and exited.
+    assert_eq!(unsafe { git.revoke(cookie) }, S_OK);
+}
+
+#[test]
+#[cfg(all(feature = "rtd", feature = "handles"))]
 fn sta_drain_pumps_com_during_helper_thread_exit() {
     const CHILD: &str = "XLFN_TEST_STA_DRAIN_THREAD_EXIT";
     if std::env::var_os(CHILD).is_none() {

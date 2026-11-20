@@ -58,6 +58,7 @@ windows_link::link!("oleaut32.dll" "system" fn SafeArrayPutElement(psa : *const 
 windows_link::link!("oleaut32.dll" "system" fn SafeArrayUnaccessData(psa : *const SAFEARRAY) -> HRESULT);
 windows_link::link!("kernel32.dll" "system" fn SetEvent(hevent : HANDLE) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn SetFileInformationByHandle(hfile : HANDLE, fileinformationclass : FILE_INFO_BY_HANDLE_CLASS, lpfileinformation : *const core::ffi::c_void, dwbuffersize : u32) -> BOOL);
+windows_link::link!("kernel32.dll" "system" fn SetLastError(dwerrcode : u32));
 windows_link::link!("oleaut32.dll" "system" fn SysAllocStringLen(strin : *const OLECHAR, ui : u32) -> BSTR);
 windows_link::link!("oleaut32.dll" "system" fn SysFreeString(bstrstring : BSTR));
 windows_link::link!("oleaut32.dll" "system" fn SysStringLen(pbstr : BSTR) -> u32);
@@ -256,6 +257,9 @@ impl Default for ELEMDESC_0 {
     }
 }
 pub const ERROR_FILE_NOT_FOUND: i32 = 2;
+pub const ERROR_INVALID_FUNCTION: i32 = 1;
+pub const ERROR_INVALID_PARAMETER: i32 = 87;
+pub const ERROR_NOT_SUPPORTED: i32 = 50;
 pub const ERROR_NO_MORE_ITEMS: i32 = 259;
 pub const ERROR_SUCCESS: i32 = 0;
 #[repr(C)]
@@ -291,10 +295,17 @@ pub struct FILETIME {
     pub dwHighDateTime: u32,
 }
 pub const FILE_ATTRIBUTE_REPARSE_POINT: i32 = 1024;
+pub const FILE_DISPOSITION_FLAG_DELETE: i32 = 1;
+pub const FILE_DISPOSITION_FLAG_POSIX_SEMANTICS: i32 = 2;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct FILE_DISPOSITION_INFO {
     pub DeleteFile: bool,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FILE_DISPOSITION_INFO_EX {
+    pub Flags: u32,
 }
 pub const FILE_FLAG_BACKUP_SEMANTICS: i32 = 33554432;
 pub const FILE_FLAG_OPEN_REPARSE_POINT: i32 = 2097152;
@@ -324,6 +335,7 @@ impl Default for FILE_RENAME_INFO_0 {
         unsafe { core::mem::zeroed() }
     }
 }
+pub const FILE_SHARE_DELETE: i32 = 4;
 pub const FILE_SHARE_READ: i32 = 1;
 pub const FILE_SHARE_WRITE: i32 = 2;
 pub const FILE_TRAVERSE: i32 = 32;
@@ -369,6 +381,7 @@ pub const FUNC_PUREVIRTUAL: FUNCKIND = 1;
 pub const FUNC_STATIC: FUNCKIND = 3;
 pub const FUNC_VIRTUAL: FUNCKIND = 0;
 pub const FileDispositionInfo: FILE_INFO_BY_HANDLE_CLASS = 4;
+pub const FileDispositionInfoEx: FILE_INFO_BY_HANDLE_CLASS = 21;
 pub const FileRenameInfo: FILE_INFO_BY_HANDLE_CLASS = 3;
 pub const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: i32 = 4;
 #[repr(C)]
@@ -682,6 +695,7 @@ pub const REG_OPTION_NON_VOLATILE: i32 = 0;
 pub const REG_OPTION_VOLATILE: i32 = 1;
 pub const REG_SZ: u32 = 1;
 pub const RPC_E_CHANGED_MODE: HRESULT = 0x80010106_u32 as _;
+pub const RPC_S_CALLPENDING: HRESULT = 0x80010115_u32 as _;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SAFEARRAY {

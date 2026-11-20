@@ -47,6 +47,8 @@
     Windows.Win32.CoTaskMemFree
     Windows.Win32.CoUninitialize
     Windows.Win32.CoWaitForMultipleHandles
+    Windows.Win32.SetLastError
+    Windows.Win32.RPC_S_CALLPENDING
     Windows.Win32.SHGetKnownFolderPath
     Windows.Win32.FILE_FLAG_OPEN_REPARSE_POINT
     Windows.Win32.FILE_ATTRIBUTE_REPARSE_POINT
@@ -58,8 +60,16 @@
     Windows.Win32.DELETE
     Windows.Win32.SetFileInformationByHandle
     Windows.Win32.FILE_DISPOSITION_INFO
+    Windows.Win32.FILE_DISPOSITION_INFO_EX
+    Windows.Win32.FILE_DISPOSITION_FLAG_DELETE
+    Windows.Win32.FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+    Windows.Win32.ERROR_INVALID_FUNCTION
+    Windows.Win32.ERROR_INVALID_PARAMETER
+    Windows.Win32.ERROR_NOT_SUPPORTED
+    Windows.Win32.FILE_SHARE_DELETE
     Windows.Win32.FILE_RENAME_INFO
     Windows.Win32.FileDispositionInfo
+    Windows.Win32.FileDispositionInfoEx
     Windows.Win32.FileRenameInfo
     Windows.Win32.DISPATCH_METHOD
     Windows.Win32.DISPPARAMS
