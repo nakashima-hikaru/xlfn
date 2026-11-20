@@ -400,13 +400,24 @@ impl<'call> XlArrayRef<'call> {
 
     fn from_value(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         let grid = GridView::from_array(value, argument)?;
+        Self::from_grid_with(grid, argument, |_| Ok(()))
+    }
+
+    /// Checks cell headers together with the caller's payload validation.
+    /// Keeping construction here ensures infallible cell iteration cannot
+    /// expose a header that skipped validation.
+    pub(super) fn from_grid_with(
+        grid: GridView<'call>,
+        argument: &'static str,
+        mut validate: impl FnMut(XlValueRef<'call>) -> XllResult<()>,
+    ) -> XllResult<Self> {
         let (rows, columns) = grid.shape();
         let cells = grid.cells();
         // Indexed access and iteration expose infallible XlValueRef values,
         // whose semantic type must already be valid. Check only the cell
         // headers here; payload conversion and string decoding remain lazy.
         for cell in cells {
-            checked_grid_cell(cell, argument)?;
+            validate(checked_grid_cell(cell, argument)?)?;
         }
         Ok(Self {
             cells,
