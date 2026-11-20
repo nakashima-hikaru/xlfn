@@ -4103,8 +4103,8 @@ fn sta_registration_mutex_wait_dispatches_com_and_keeps_reentry_excluded() {
     // SAFETY: this thread owns an STA and retains its registered interface.
     let git = unsafe { super::global_interface_table::get_git() }.unwrap();
     let mut cookie = 0;
-    // SAFETY: the interface, IID and writable cookie remain live here.
     assert_eq!(
+        // SAFETY: the interface, IID and writable cookie remain live here.
         unsafe { git.register(probe.as_ptr(), &IID_IUNKNOWN, &mut cookie) },
         S_OK
     );
@@ -5354,7 +5354,10 @@ fn registration_mutex_timeout_is_bounded_and_does_not_release_other_owner() {
         let result = CrossProcessRegistrationGuard::acquire_named_with_timeout(&waiter_name, 20);
         assert!(matches!(
             result,
-            Err(XllError::WindowsApi { code: 258, .. })
+            Err(XllError::WindowsApi {
+                function: "CoWaitForMultipleHandles(RTD registration mutex)",
+                code: crate::win32::RPC_S_CALLPENDING,
+            })
         ));
         assert!(started.elapsed() < Duration::from_secs(2));
         // A timed-out acquisition must neither release the other owner's
