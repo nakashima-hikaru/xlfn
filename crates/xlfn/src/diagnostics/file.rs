@@ -489,20 +489,22 @@ pub(crate) fn install_file_diagnostic_sink_at(
     open_file_sink(path, DiagnosticFileConfig::new())
 }
 
-fn open_file_sink(
+pub(super) fn open_file_sink(
     path: PathBuf,
     config: DiagnosticFileConfig,
 ) -> Result<PathBuf, DiagnosticInitError> {
-    // Construct the sink before touching the router. Installation rejects an
-    // existing process-wide sink rather than implicitly replacing its owner.
-    let sink = FileDiagnosticSink {
-        log: Mutex::new(RotatingLog::open_with_policy(
+    // Creating or rotating the log is stateful. Do so only after the router
+    // accepts the install; a duplicate must leave existing log files intact.
+    super::install_diagnostic_sink_with(|| {
+        let log = RotatingLog::open_with_policy(
             path.clone(),
             config.maximum_file_bytes().get(),
             usize::from(config.archives()),
-        )?),
-    };
-    super::install_diagnostic_sink(sink)?;
+        )?;
+        Ok(FileDiagnosticSink {
+            log: Mutex::new(log),
+        })
+    })?;
     Ok(path)
 }
 
