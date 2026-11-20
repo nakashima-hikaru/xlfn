@@ -21,6 +21,33 @@ fn borrowed_text(value: &str) -> f64 {
     value.chars().count() as f64
 }
 
+#[excel_function(thread_safe)]
+fn named_text<'call>(value: &'call str) -> f64 {
+    value.len() as f64
+}
+
+#[excel_function(thread_safe)]
+fn named_native_text<'call>(#[excel_arg(native)] value: &'call str) -> f64 {
+    value.len() as f64
+}
+
+#[excel_function(thread_safe)]
+fn named_text_default<'call>(
+    #[excel_arg(default = std::convert::identity::<&'call str>("fallback"))] value: &'call str,
+) -> f64 {
+    value.len() as f64
+}
+
+#[excel_function(thread_safe)]
+fn named_matrix<'call>(value: MatrixRef<'call, f64>) -> f64 {
+    value.iter().copied().sum()
+}
+
+#[excel_function(thread_safe)]
+fn named_numeric<'call>(value: NumericMatrixRef<'call>) -> f64 {
+    value.iter().copied().sum()
+}
+
 #[excel_function(name = "TEST.BORROWED.MATRIX", thread_safe)]
 fn borrowed_matrix(value: MatrixRef<'_, f64>) -> f64 {
     value.get(0, 0).copied().unwrap_or_default() + value.iter().skip(1).copied().sum::<f64>()

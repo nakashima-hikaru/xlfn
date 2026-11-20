@@ -67,6 +67,11 @@ use validation::validate_addin_metadata;
 /// `#[excel_context(main_thread)]`, `thread_safe`, `macro_sheet`, or `async`.
 /// A context spelling must carry its add-in type, optionally after a lifetime.
 /// Execution flags cannot combine with injected contexts or async functions.
+/// Unbounded lifetime parameters are supported, for example to return a
+/// `HandleAlias<'call, T>` tied to one of several borrowed inputs. The original
+/// Rust signature retains these relationships; the generated ABI wrapper
+/// infers the lifetimes of its call-scoped conversions. Type/const parameters,
+/// lifetime bounds, and where clauses are not supported.
 ///
 /// # Return values
 ///
@@ -74,6 +79,9 @@ use validation::validate_addin_metadata;
 /// `NumericArrayOutput` opts into FP12; `return_abi = fp12` also supports
 /// aliases. FP12 failures yield `#NUM!`; details remain in diagnostics.
 /// `return_abi = xloper12` explicitly selects ordinary returns.
+/// Automatic FP12 detection recognizes unqualified names and paths through
+/// the configured `xlfn` crate. Imported module names and other aliases require
+/// `return_abi = fp12`; unresolved spellings retain XLOPER12 by default.
 /// Async results always use Excel's asynchronous completion API.
 ///
 /// # Function policies
@@ -661,6 +669,13 @@ mod tests {
                 quote!(xlfn::output::NumericArrayOutput),
                 ReturnAbi::NumericArray12,
             ),
+            // A proc macro cannot tell whether an imported module is xlfn's
+            // output module or an unrelated user module with this spelling.
+            (quote!(output::NumericArrayOutput), ReturnAbi::Value12),
+            (
+                quote!(error::XllResult<NumericArrayOutput>),
+                ReturnAbi::Value12,
+            ),
             (quote!(XllResult<Matrix<f64>>), ReturnAbi::Value12),
             (
                 quote!(UdfResult<NumericArrayOutput>),
@@ -848,6 +863,106 @@ mod tests {
             assert_eq!(analyzed.arguments[0].abi(), abi, "{ty}");
             let lowered = model::lower(analyzed);
             assert_eq!(lowered.arguments[0].abi(), abi, "{ty}");
+        }
+    }
+
+    #[test]
+    fn async_native_borrowed_strings_are_rejected_for_inference_and_aliases() {
+        for (argument, expected) in [
+            (
+                quote!(#[excel_arg(native)] value: &str),
+                "&str borrows the current Excel call and is only supported by synchronous functions; use String for async arguments",
+            ),
+            (
+                quote!(#[excel_arg(native)] value: &core::primitive::str),
+                "&str borrows the current Excel call and is only supported by synchronous functions; use String for async arguments",
+            ),
+            (
+                quote!(#[excel_arg(native = str)] value: TextAlias),
+                "native str requires a synchronous function",
+            ),
+        ] {
+            let error = expand_excel_function(
+                quote!(),
+                function(quote!(async fn text_length(#argument) -> usize { 0 })),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn function_lifetimes_are_retained_in_rust_and_inferred_in_the_wrapper() {
+        let expanded = expand_excel_function(
+            quote!(),
+            function(quote!(
+                fn select<'call, 'other>(
+                    context: MainThreadContext<'call, State>,
+                    selected: Handle<'call, Dataset>,
+                    other: Handle<'other, Dataset>,
+                ) -> XllResult<HandleAlias<'call, Dataset>> {
+                    Ok(selected.alias())
+                }
+            )),
+        )
+        .unwrap();
+        let mut file: syn::File = syn::parse2(expanded).unwrap();
+        let original = file.items.remove(0).to_token_stream().to_string();
+        assert!(original.contains("fn select < 'call , 'other >"));
+        assert!(original.contains("Handle < 'call , Dataset >"));
+        assert!(original.contains("Handle < 'other , Dataset >"));
+        let generated = file.to_token_stream().to_string();
+        assert!(!generated.contains("'call"), "{generated}");
+        assert!(!generated.contains("'other"), "{generated}");
+        assert!(generated.contains("MainThreadContext < '_ , State >"));
+        assert!(generated.contains("HandleAlias < '_ , Dataset >"));
+    }
+
+    #[test]
+    fn functions_still_reject_type_const_and_bounded_lifetime_parameters() {
+        for item in [
+            quote!(
+                fn generic<T>(value: T) -> f64 {
+                    0.0
+                }
+            ),
+            quote!(
+                fn generic<const N: usize>(value: f64) -> f64 {
+                    value
+                }
+            ),
+        ] {
+            let error = expand_excel_function(quote!(), function(item)).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Excel functions cannot have type or const parameters"
+            );
+        }
+        for item in [
+            quote!(
+                fn bounded<'call: 'static>(value: &'call str) -> f64 {
+                    0.0
+                }
+            ),
+            quote!(
+                fn bounded<'call, 'other: 'call>(value: &'call str) -> f64 {
+                    0.0
+                }
+            ),
+            quote!(
+                fn bounded<'call>(value: &'call str) -> f64
+                where
+                    'call: 'static,
+                {
+                    0.0
+                }
+            ),
+        ] {
+            let error = expand_excel_function(quote!(), function(item)).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Excel function lifetime parameters cannot have bounds or a where clause"
+            );
         }
     }
 

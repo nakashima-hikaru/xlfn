@@ -6,7 +6,11 @@ This chapter covers ordinary inputs, return values, and errors; use
 
 ## Expose a Rust calculation
 
-Apply `#[excel_function]` to a safe, non-generic free function:
+Apply `#[excel_function]` to a safe free function. Unbounded lifetime parameters
+are supported so borrowed inputs and return values can name their relationships;
+type parameters, const parameters, lifetime bounds, and where clauses are not
+supported. See [Handle alias functions](handles.md#handle-alias-functions) for a
+function that returns one of several borrowed handles.
 
 ```rust
 {{#include ../fixtures/addin.md}}

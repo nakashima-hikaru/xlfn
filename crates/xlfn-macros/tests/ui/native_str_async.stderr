@@ -1,0 +1,11 @@
+error: &str borrows the current Excel call and is only supported by synchronous functions; use String for async arguments
+ --> tests/ui/native_str_async.rs:4:47
+  |
+4 | async fn inferred(#[excel_arg(native)] value: &str) -> usize {
+  |                                               ^^^^
+
+error: &str borrows the current Excel call and is only supported by synchronous functions; use String for async arguments
+ --> tests/ui/native_str_async.rs:9:53
+  |
+9 | async fn explicit(#[excel_arg(native = str)] value: &str) -> usize {
+  |                                                     ^^^^

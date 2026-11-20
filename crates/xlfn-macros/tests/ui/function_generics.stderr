@@ -1,0 +1,23 @@
+error: Excel functions cannot have type or const parameters
+ --> tests/ui/function_generics.rs:4:9
+  |
+4 | fn typed<T>(value: T) -> f64 { 0.0 }
+  |         ^^^
+
+error: Excel functions cannot have type or const parameters
+ --> tests/ui/function_generics.rs:7:12
+  |
+7 | fn constant<const N: usize>() -> f64 { N as f64 }
+  |            ^^^^^^^^^^^^^^^^
+
+error: Excel function lifetime parameters cannot have bounds or a where clause
+  --> tests/ui/function_generics.rs:10:11
+   |
+10 | fn bounded<'call: 'static>(value: &'call str) -> f64 { 0.0 }
+   |           ^^^^^^^^^^^^^^^^
+
+error: Excel function lifetime parameters cannot have bounds or a where clause
+  --> tests/ui/function_generics.rs:13:15
+   |
+13 | fn where_bound<'call>(value: &'call str) -> f64 where 'call: 'static { 0.0 }
+   |               ^^^^^^^

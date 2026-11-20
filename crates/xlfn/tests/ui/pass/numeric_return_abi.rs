@@ -1,5 +1,6 @@
 use xlfn::output::{NumericArrayBuilder, NumericArrayOutput};
 use xlfn::prelude::*;
+use xlfn::{error, output};
 
 struct State;
 
@@ -38,6 +39,13 @@ fn numeric_column() -> XllResult<Column<f64>> {
 
 #[excel_function(thread_safe)]
 fn numeric_output() -> XllResult<NumericArrayOutput> {
+    let mut output = NumericArrayBuilder::new(1, 1)?;
+    output.push_f64(1.0)?;
+    output.finish()
+}
+
+#[excel_function(thread_safe, return_abi = fp12)]
+fn imported_module_output() -> error::XllResult<output::NumericArrayOutput> {
     let mut output = NumericArrayBuilder::new(1, 1)?;
     output.push_f64(1.0)?;
     output.finish()
@@ -83,6 +91,7 @@ const _: unsafe extern "system" fn(*mut Xloper12, *const Fp12) -> *mut Xloper12 
 const _: unsafe extern "system" fn() -> *mut Xloper12 = xll_numeric_row;
 const _: unsafe extern "system" fn() -> *mut Xloper12 = xll_numeric_column;
 const _: unsafe extern "system" fn() -> *mut Fp12 = xll_numeric_output;
+const _: unsafe extern "system" fn() -> *mut Fp12 = xll_imported_module_output;
 const _: unsafe extern "system" fn() -> *mut Fp12 = xll_alias_explicit;
 const _: unsafe extern "system" fn() -> *mut Xloper12 = xll_forwarded_numeric_return;
 const _: unsafe extern "system" fn() -> *mut Xloper12 = xll_alias_default;
