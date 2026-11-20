@@ -2064,6 +2064,53 @@ fn same_handle_and_same_topic_reuse_pending_identity() {
 }
 
 #[test]
+fn preparation_during_connecting_survives_the_first_call_rolling_back() {
+    for commit_before_rollback in [false, true] {
+        let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+        let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+        let server = runtime.register_test_server(1);
+        let topic = RtdTopic::single("connecting-rollback").unwrap();
+        let first = runtime.prepare(&source, topic.borrowed()).unwrap();
+        let id = first.id();
+        let connection = runtime
+            .connect_transaction(&server, TopicId(1), id)
+            .unwrap();
+        let second = runtime.prepare(&source, topic.borrowed()).unwrap();
+        assert_eq!(first.key(), second.key());
+        assert!(second.has_reservation());
+
+        // Exercise both an outstanding reentrant call and a call whose xlfRtd
+        // already succeeded while the first connection was still provisional.
+        let second = if commit_before_rollback {
+            second.commit();
+            None
+        } else {
+            Some(second)
+        };
+        connection.rollback();
+        first.rollback();
+        assert!(runtime.catalog.lock().entries.contains_key(&id));
+        if let Some(second) = second {
+            second.commit();
+        }
+        assert_eq!(runtime.catalog.lock().pending_len(), 1);
+        runtime.catalog.lock().assert_identity_invariants();
+
+        // A later ConnectData must still be able to resolve the committed key.
+        runtime
+            .connect_transaction(&server, TopicId(2), id)
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert_eq!(runtime.catalog.lock().pending_len(), 0);
+        runtime.disconnect(&server, TopicId(2)).unwrap();
+        let catalog = runtime.catalog.lock();
+        assert!(catalog.entries.is_empty());
+        catalog.assert_identity_invariants();
+    }
+}
+
+#[test]
 fn distinct_handles_do_not_share_source_identity() {
     let fixture = SourceFixture::new();
     let (source_a, _, _) = fixture.add::<f64>(None);
@@ -2568,7 +2615,7 @@ fn pending_count_follows_borrowed_connection_and_termination_transitions() {
         .prepare(&source, BorrowedTopicParts::new(&["active"]).unwrap())
         .unwrap();
     assert_eq!(connecting.id(), id);
-    assert!(!connecting.has_reservation());
+    assert!(connecting.has_reservation());
     connecting.rollback();
     connection.commit().unwrap();
     assert_eq!(
