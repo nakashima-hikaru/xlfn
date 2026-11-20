@@ -397,6 +397,10 @@ enum TransactionState {
     // The installed directory is authoritative. `previous`, when present,
     // is cleanup payload only and is never a recovery source in this state.
     Committed,
+    // Recovery validated the committed destination but could not remove the
+    // backup. This durable handoff releases the destination for later commits;
+    // only this transaction's identity-checked payloads may be cleaned now.
+    CleanupPending,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -806,7 +810,8 @@ pub enum CleanupOutcome {
     /// The previous distribution and transaction directory were removed.
     Complete,
     /// The new distribution is authoritative, but the old backup remains as
-    /// cleanup payload. The transaction journal is retained.
+    /// cleanup payload. The transaction journal is retained; later commits
+    /// retry its cleanup and can proceed while the validated backup is locked.
     BackupRetained {
         backup: PathBuf,
         transaction: PathBuf,
@@ -2024,26 +2029,28 @@ fn recover_distribution_transaction(
                 }
                 remove_recovery_install(transaction, &journal_state, file_ops)?;
             }
-            TransactionState::Committed => {
+            TransactionState::Committed | TransactionState::CleanupPending => {
                 let installed = journal_state.installed_identity.ok_or_else(|| {
                     DistributionError::Invalid(
                         "committed transaction has no installed identity".to_owned(),
                     )
                 })?;
-                if optional_directory_identity(destination)?.is_none() {
-                    // Committed means the installed directory is authoritative.
-                    // The old distribution is cleanup payload only and must
-                    // never become a recovery source after commit.
-                    return quarantine_transaction(
-                        parent,
-                        destination_name,
-                        prefix,
-                        transaction,
-                        "committed destination is missing; refusing to restore the previous distribution",
-                        file_ops,
-                    );
+                if journal_state.state == TransactionState::Committed {
+                    if optional_directory_identity(destination)?.is_none() {
+                        // Committed means the installed directory is authoritative.
+                        // The old distribution is cleanup payload only and must
+                        // never become a recovery source after commit.
+                        return quarantine_transaction(
+                            parent,
+                            destination_name,
+                            prefix,
+                            transaction,
+                            "committed destination is missing; refusing to restore the previous distribution",
+                            file_ops,
+                        );
+                    }
+                    require_directory_identity(destination, installed, "installed destination")?;
                 }
-                require_directory_identity(destination, installed, "installed destination")?;
                 if optional_directory_identity(&previous)?.is_some() {
                     let expected = journal_state.previous_identity.ok_or_else(|| {
                         DistributionError::Invalid(
@@ -2051,7 +2058,31 @@ fn recover_distribution_transaction(
                         )
                     })?;
                     require_directory_identity(&previous, expected, "committed backup")?;
-                    file_ops.remove_dir_all(&previous)?;
+                    if file_ops.remove_dir_all(&previous).is_err() {
+                        // A loaded old XLL can keep the backup locked after a
+                        // successful commit. Persist the cleanup-only handoff
+                        // before allowing another commit to change destination;
+                        // otherwise this journal's installed identity would
+                        // reject every later recovery of the retained backup.
+                        transaction_directory.verify()?;
+                        commit_guard.ensure_held()?;
+                        if journal_state.state == TransactionState::Committed {
+                            write_transaction_state(
+                                &journal,
+                                parent,
+                                &mut journal_state,
+                                TransactionState::CleanupPending,
+                                file_ops,
+                            )?;
+                        } else {
+                            // A preceding attempt may have replaced the journal
+                            // before its directory sync failed. Re-establish the
+                            // durable handoff before permitting a new install.
+                            file_ops.sync_directory(transaction)?;
+                            file_ops.sync_directory(parent)?;
+                        }
+                        return Ok(());
+                    }
                     file_ops.sync_directory(transaction)?;
                 }
                 remove_recovery_install(transaction, &journal_state, file_ops)?;
