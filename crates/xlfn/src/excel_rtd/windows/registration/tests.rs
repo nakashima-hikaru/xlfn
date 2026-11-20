@@ -1,5 +1,5 @@
 use super::*;
-use crate::win32::{CoCreateGuid, S_OK};
+use crate::win32::{CoCreateGuid, RPC_S_CALLPENDING};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -71,10 +71,62 @@ fn assert_mutex_timeout(result: XllResult<CrossProcessRegistrationGuard>) {
     assert!(matches!(
         result,
         Err(XllError::WindowsApi {
-            function: "WaitForSingleObject(RTD registration mutex)",
-            code: 258, // WAIT_TIMEOUT
+            function: "CoWaitForMultipleHandles(RTD registration mutex)",
+            code: RPC_S_CALLPENDING,
         })
     ));
+}
+
+#[test]
+fn registration_mutex_acquires_abandoned_ownership_and_releases_it_once() {
+    let security = security::MutexSecurity::current_user().unwrap();
+    let name = format!(
+        "{}_abandoned_test_{}_{}",
+        security.name(),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let attributes = security.attributes();
+    let wide = wide_nul(&name);
+    // SAFETY: the unique name and security descriptor are retained. This
+    // unowned reference keeps the object alive after its first owner exits.
+    let raw = unsafe { CreateMutexW(&attributes, 0, wide.as_ptr()) };
+    assert!(!raw.is_null());
+    let _retained = MutexHandle(raw);
+    let abandoned_name = name.clone();
+    std::thread::spawn(move || {
+        let security = security::MutexSecurity::current_user().unwrap();
+        let attributes = security.attributes();
+        let wide = wide_nul(&abandoned_name);
+        // SAFETY: these descriptor/name inputs outlive creation. Existing
+        // mutexes ignore initial ownership, so acquire it explicitly below.
+        let raw = unsafe { CreateMutexW(&attributes, 0, wide.as_ptr()) };
+        assert!(!raw.is_null());
+        let handle = MutexHandle(raw);
+        // SAFETY: this worker owns a valid handle to the unowned mutex.
+        let status = unsafe { crate::win32::WaitForSingleObject(handle.0, 1_000) };
+        assert_eq!(status, crate::win32::WAIT_OBJECT_0 as u32);
+        // Close this reference without ReleaseMutex. The outer reference
+        // retains the kernel object, which becomes abandoned at thread exit.
+    })
+    .join()
+    .unwrap();
+
+    // SAFETY: set a stale nonzero error before CoWait to exercise its mutex
+    // last-error workaround without interfering with any live failed call.
+    unsafe { SetLastError(ERROR_FILE_NOT_FOUND as u32) };
+    let acquired = CrossProcessRegistrationGuard::acquire_named(&name).unwrap();
+    drop(acquired);
+    std::thread::spawn(move || {
+        // Another thread must acquire after Drop; same-thread recursive
+        // acquisition would hide an unreleased or multiply acquired mutex.
+        let _guard = CrossProcessRegistrationGuard::acquire_named(&name).unwrap();
+    })
+    .join()
+    .unwrap();
 }
 
 fn wait_for_child(child: Child) {

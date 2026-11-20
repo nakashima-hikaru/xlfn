@@ -1937,6 +1937,65 @@ mod preparation_tests {
     }
 
     #[test]
+    fn miri_prepared_borrowed_string_collections_defer_scratch_until_materialization() {
+        use crate::value::{Column, Matrix, Row};
+        let expected = "価格💡".repeat(32);
+        let mut text = crate::utf16::encode_counted(&expected, "values", 32_767).unwrap();
+        let cell = XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                string: text.as_mut_ptr(),
+            },
+            xltype: xlfn_sys::XLTYPE_STR,
+        };
+        let mut cells = [cell; 2];
+        for (rows, columns) in [(1, 2), (2, 1)] {
+            let root = XLOPER12 {
+                value: xlfn_sys::XLOPER12Value {
+                    array: xlfn_sys::XLOPER12Array {
+                        rows,
+                        columns,
+                        values: cells.as_mut_ptr(),
+                    },
+                },
+                xltype: xlfn_sys::XLTYPE_MULTI,
+            };
+            macro_rules! check {
+                ($ty:ty) => {
+                    crate::call::with_excel_call_scope_and_state(&root, |root, scope| {
+                        let value = XlValueRef::from_array_cell(root).unwrap();
+                        let mut args = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                        let warm = args.prepare::<$ty>(0, "values", value).unwrap();
+                        let identity = args.finish().unwrap();
+                        assert_eq!(scope.scratch().allocated_bytes(), 0);
+                        drop(warm);
+                        assert_eq!(scope.scratch().allocated_bytes(), 0);
+
+                        let mut args = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                        let cold = args.prepare::<$ty>(0, "values", value).unwrap();
+                        assert_eq!(args.finish().unwrap(), identity);
+                        assert_eq!(scope.scratch().allocated_bytes(), 0);
+                        let result = cold.materialize().unwrap();
+                        assert_eq!(result.as_slice(), [expected.as_str(); 2]);
+                        assert!(scope.scratch().allocated_bytes() > 0);
+
+                        let mut eager = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                        let decoded = eager.decode::<$ty>(0, "values", value).unwrap();
+                        assert_eq!(eager.finish().unwrap(), identity);
+                        assert_eq!(decoded.as_slice(), result.as_slice());
+                    });
+                };
+            }
+            check!(Vec<&str>);
+            check!(Matrix<&str>);
+            if rows == 1 {
+                check!(Row<&str>);
+            } else {
+                check!(Column<&str>);
+            }
+        }
+    }
+
+    #[test]
     fn prepared_borrowed_strings_keep_validation_order_and_poison_identity() {
         use crate::value::{Matrix, OptionalExcelValue};
         let mut malformed = [1_u16, 0xd800];
@@ -1980,12 +2039,7 @@ mod preparation_tests {
 
         fn check<'call, T, P>()
         where
-            T: ExcelParameter<
-                    'call,
-                    FormulaInputMode,
-                    ElementPrepared = P,
-                    Elements = PreparedParameterSequence<'call, T, FormulaInputMode>,
-                >,
+            T: ExcelParameter<'call, FormulaInputMode, ElementPrepared = P>,
         {
             // The explicit P fixes the retained payload shape independently
             // of the static materializer. Check the actual allocation budget

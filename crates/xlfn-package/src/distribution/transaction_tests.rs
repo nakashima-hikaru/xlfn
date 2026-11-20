@@ -71,6 +71,7 @@ enum FileOperation {
 struct InjectedFileOps {
     failed_renames: BTreeSet<usize>,
     failed_removes: BTreeSet<usize>,
+    blocked_remove_paths: BTreeSet<PathBuf>,
     failed_syncs: BTreeSet<usize>,
     fail_sync_after_backup: bool,
     fail_sync_after_install: bool,
@@ -124,7 +125,7 @@ impl DistributionFileOps for InjectedFileOps {
         self.operations
             .borrow_mut()
             .push(FileOperation::RemoveDirectory(path.to_path_buf()));
-        if self.failed_removes.contains(&call) {
+        if self.failed_removes.contains(&call) || self.blocked_remove_paths.contains(path) {
             return Err(io::Error::other(format!(
                 "injected directory removal failure #{call}"
             )));
@@ -343,6 +344,153 @@ fn committed_cleanup_failure_never_restores_previous_distribution() {
         fs::read(quarantine.join("previous/old.xll")).unwrap(),
         b"old"
     );
+}
+
+#[test]
+fn locked_committed_backup_allows_later_commits_and_eventual_cleanup() {
+    let (directory, destination, staging) = distribution_fixture();
+    let outcome = crate::PreparedDistribution::new(prepared_test_directory(&staging))
+        .commit_with(&destination, &InjectedFileOps::failing_removes([1]))
+        .unwrap();
+    let CleanupOutcome::BackupRetained {
+        backup,
+        transaction,
+        ..
+    } = outcome.cleanup()
+    else {
+        panic!("the injected deletion failure must retain the backup");
+    };
+    let journal = transaction.join(TRANSACTION_JOURNAL);
+    assert_eq!(
+        read_transaction_journal(&journal).unwrap().state,
+        TransactionState::Committed
+    );
+    let file_ops = InjectedFileOps {
+        blocked_remove_paths: [backup.clone()].into_iter().collect(),
+        ..InjectedFileOps::default()
+    };
+
+    // The same old XLL remains locked across multiple successful replacements.
+    // Its retained journal must no longer depend on the destination's identity.
+    for (revision, contents) in [b"second".as_slice(), b"third"].into_iter().enumerate() {
+        let staging = directory.path().join(format!("staging-{revision}"));
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("new.xll"), contents).unwrap();
+        let outcome = crate::PreparedDistribution::new(prepared_test_directory(&staging))
+            .commit_with(&destination, &file_ops)
+            .unwrap();
+        assert!(matches!(outcome.cleanup(), CleanupOutcome::Complete));
+        assert_eq!(fs::read(destination.join("new.xll")).unwrap(), contents);
+        assert_eq!(fs::read(backup.join("old.xll")).unwrap(), b"old");
+        assert_eq!(
+            read_transaction_journal(&journal).unwrap().state,
+            TransactionState::CleanupPending
+        );
+        assert_eq!(
+            transaction_directories(directory.path()).as_slice(),
+            std::slice::from_ref(transaction)
+        );
+    }
+
+    // Releasing the old image permits cleanup without touching the current XLL.
+    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+    recover_stale_transactions(
+        directory.path(),
+        "win-x64",
+        &guard,
+        &SystemDistributionFileOps,
+    )
+    .unwrap();
+    assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"third");
+    assert!(transaction_directories(directory.path()).is_empty());
+}
+
+#[test]
+fn cleanup_only_recovery_still_rejects_replaced_backup_identity() {
+    let (directory, destination, staging) = distribution_fixture();
+    let outcome = crate::PreparedDistribution::new(prepared_test_directory(&staging))
+        .commit_with(&destination, &InjectedFileOps::failing_removes([1]))
+        .unwrap();
+    let CleanupOutcome::BackupRetained {
+        backup,
+        transaction,
+        ..
+    } = outcome.cleanup()
+    else {
+        panic!("the injected deletion failure must retain the backup");
+    };
+    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+    let blocked = InjectedFileOps {
+        blocked_remove_paths: [backup.clone()].into_iter().collect(),
+        ..InjectedFileOps::default()
+    };
+    recover_stale_transactions(directory.path(), "win-x64", &guard, &blocked).unwrap();
+    assert_eq!(
+        read_transaction_journal(&transaction.join(TRANSACTION_JOURNAL))
+            .unwrap()
+            .state,
+        TransactionState::CleanupPending
+    );
+
+    fs::rename(backup, directory.path().join("displaced-backup")).unwrap();
+    fs::create_dir(backup).unwrap();
+    fs::write(backup.join("foreign.xll"), b"foreign").unwrap();
+    let file_ops = InjectedFileOps::default();
+    let error =
+        recover_stale_transactions(directory.path(), "win-x64", &guard, &file_ops).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("committed backup identity changed")
+    );
+    assert_eq!(fs::read(backup.join("foreign.xll")).unwrap(), b"foreign");
+    assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
+    assert!(file_ops.operations.borrow().is_empty());
+}
+
+#[test]
+fn failed_cleanup_handoff_durability_prevents_the_next_install() {
+    let (directory, destination, staging) = distribution_fixture();
+    let outcome = crate::PreparedDistribution::new(prepared_test_directory(&staging))
+        .commit_with(&destination, &InjectedFileOps::failing_removes([1]))
+        .unwrap();
+    let CleanupOutcome::BackupRetained { backup, .. } = outcome.cleanup() else {
+        panic!("the injected deletion failure must retain the backup");
+    };
+    let next_staging = directory.path().join("next-staging");
+    fs::create_dir(&next_staging).unwrap();
+    fs::write(next_staging.join("new.xll"), b"next").unwrap();
+    let file_ops = InjectedFileOps {
+        blocked_remove_paths: [backup.clone()].into_iter().collect(),
+        failed_syncs: [1].into_iter().collect(),
+        ..InjectedFileOps::default()
+    };
+
+    crate::PreparedDistribution::new(prepared_test_directory(&next_staging))
+        .commit_with(&destination, &file_ops)
+        .unwrap_err();
+
+    assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
+    assert_eq!(fs::read(next_staging.join("new.xll")).unwrap(), b"next");
+    assert_eq!(fs::read(backup.join("old.xll")).unwrap(), b"old");
+    assert_eq!(transaction_directories(directory.path()).len(), 1);
+    assert!(file_ops.operations.borrow().iter().all(|operation| {
+        matches!(operation, FileOperation::RemoveDirectory(path) if path == backup)
+    }));
+
+    // The new journal may already be visible despite the failed sync. A retry
+    // must not mistake visibility for a durable handoff and skip the barrier.
+    let retry = InjectedFileOps {
+        blocked_remove_paths: [backup.clone()].into_iter().collect(),
+        failed_syncs: [1].into_iter().collect(),
+        ..InjectedFileOps::default()
+    };
+    crate::PreparedDistribution::new(prepared_test_directory(&next_staging))
+        .commit_with(&destination, &retry)
+        .unwrap_err();
+    assert_eq!(retry.sync_count.get(), 1);
+    assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
+    assert_eq!(fs::read(next_staging.join("new.xll")).unwrap(), b"next");
 }
 
 #[test]

@@ -74,6 +74,37 @@ fn renamed_handle(value: ObjectHandle<'_, Dataset>) -> ObjectHandleAlias<'_, Dat
     value.alias()
 }
 
+#[excel_function]
+fn contextual_alias<'call>(
+    _context: MainThreadContext<'call, TestAddin>,
+    value: DatasetHandle<'call>,
+) -> ObjectHandleAlias<'call, Dataset> {
+    value.alias()
+}
+
+#[excel_function]
+fn selected_alias<'selected, 'other>(
+    selected: ObjectHandle<'selected, Dataset>,
+    _other: ObjectHandle<'other, Dataset>,
+) -> FunctionResult<ObjectHandleAlias<'selected, Dataset>> {
+    Ok(selected.alias())
+}
+
+#[excel_function]
+fn choose_alias<'call>(
+    first: Handle<'call, Dataset>,
+    second: Handle<'call, Dataset>,
+    choose_first: bool,
+) -> HandleAlias<'call, Dataset> {
+    if choose_first { first.alias() } else { second.alias() }
+}
+
+#[excel_function]
+fn alias_with_text<'call>(text: &str, value: Handle<'call, Dataset>) -> HandleAlias<'call, Dataset> {
+    let _ = text.len();
+    value.alias()
+}
+
 #[excel_function(name = "TEST.HANDLE.CONSUME")]
 fn consume_handle(value: DatasetHandle<'_>) -> f64 {
     let _: &Dataset = value.as_ref();

@@ -13,6 +13,7 @@ use crate::validation::{validate_export_id, validate_registration_string};
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident};
 use syn::ext::IdentExt;
+use syn::visit_mut::VisitMut;
 use syn::{Attribute, Expr, FnArg, GenericArgument, Ident, Pat, Path, PathArguments, Type};
 
 /// Syntax extracted from one excel_function item.
@@ -550,10 +551,28 @@ pub(super) fn analyze(parsed: ParsedUdf) -> syn::Result<UdfSpec> {
             "Excel functions must be ordinary safe Rust functions",
         ));
     }
-    if !function.sig.generics.params.is_empty() || function.sig.generics.where_clause.is_some() {
+    if function
+        .sig
+        .generics
+        .params
+        .iter()
+        .any(|parameter| !matches!(parameter, syn::GenericParam::Lifetime(_)))
+    {
         return Err(syn::Error::new_spanned(
             &function.sig.generics,
-            "Excel functions cannot be generic",
+            "Excel functions cannot have type or const parameters",
+        ));
+    }
+    if function.sig.generics.where_clause.is_some()
+        || function
+            .sig
+            .generics
+            .lifetimes()
+            .any(|parameter| !parameter.bounds.is_empty())
+    {
+        return Err(syn::Error::new_spanned(
+            &function.sig.generics,
+            "Excel function lifetime parameters cannot have bounds or a where clause",
         ));
     }
     if function.sig.variadic.is_some() {
@@ -1239,7 +1258,45 @@ fn analyze_presence(
 /// emitter. This pass cannot fail because all user-facing validation is done
 /// by analyze.
 pub(super) fn lower(spec: UdfSpec) -> UdfPlan {
-    let spec = spec.data;
+    let mut spec = spec.data;
+    // The original Rust function keeps its named lifetime relationships. Its
+    // generated ABI wrapper has no lifetime parameters: infer the call lifetime
+    // in every copied type instead, and let the original invocation unify them.
+    let mut lifetimes = WrapperLifetimes {
+        parameters: spec
+            .function
+            .sig
+            .generics
+            .lifetimes()
+            .map(|parameter| parameter.lifetime.ident.clone())
+            .collect(),
+        bound: Vec::new(),
+    };
+    lifetimes.visit_type_mut(&mut spec.return_type);
+    let context = match &mut spec.execution {
+        ExecutionSpec::MainThread { context_ty }
+        | ExecutionSpec::ThreadSafe { context_ty }
+        | ExecutionSpec::MacroSheet { context_ty }
+        | ExecutionSpec::Async { context_ty } => context_ty,
+    };
+    if let Some(context) = context {
+        lifetimes.visit_type_mut(&mut context.ty);
+        lifetimes.visit_type_mut(&mut context.addin);
+    }
+    for argument in &mut spec.arguments {
+        lifetimes.visit_type_mut(&mut argument.ty);
+        match &mut argument.conversion {
+            ArgumentConversion::HandleLease { object } => lifetimes.visit_type_mut(object),
+            ArgumentConversion::Value(value) => {
+                for action in [&mut value.blank, &mut value.missing] {
+                    if let PresenceAction::Default(expression) = action {
+                        lifetimes.visit_expr_mut(expression);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     let udf_id = spec.metadata.id.as_str();
     let symbols = UdfSymbols {
         export_ident: format_ident!("xll_{udf_id}"),
@@ -1280,5 +1337,148 @@ pub(super) fn lower(spec: UdfSpec) -> UdfPlan {
             crate_path: spec.crate_path,
             symbols,
         },
+    }
+}
+
+/// Rewrite only references to the UDF's free lifetime parameters. Higher-ranked
+/// binders belong to their own scope, and explicit `'static` stays explicit.
+struct WrapperLifetimes {
+    parameters: Vec<Ident>,
+    bound: Vec<Ident>,
+}
+
+impl WrapperLifetimes {
+    fn push_bound(&mut self, lifetimes: Option<&syn::BoundLifetimes>) -> usize {
+        let previous = self.bound.len();
+        if let Some(lifetimes) = lifetimes {
+            self.bound.extend(
+                lifetimes
+                    .lifetimes
+                    .iter()
+                    .filter_map(|parameter| match parameter {
+                        syn::GenericParam::Lifetime(parameter) => {
+                            Some(parameter.lifetime.ident.clone())
+                        }
+                        _ => None,
+                    }),
+            );
+        }
+        previous
+    }
+}
+
+impl VisitMut for WrapperLifetimes {
+    fn visit_lifetime_mut(&mut self, lifetime: &mut syn::Lifetime) {
+        if self.parameters.contains(&lifetime.ident) && !self.bound.contains(&lifetime.ident) {
+            lifetime.ident = Ident::new("_", lifetime.ident.span());
+        }
+    }
+
+    fn visit_type_fn_ptr_mut(&mut self, ty: &mut syn::TypeFnPtr) {
+        let previous = self.push_bound(ty.lifetimes.as_ref());
+        syn::visit_mut::visit_type_fn_ptr_mut(self, ty);
+        self.bound.truncate(previous);
+    }
+
+    fn visit_trait_bound_mut(&mut self, bound: &mut syn::TraitBound) {
+        let previous = self.push_bound(bound.lifetimes.as_ref());
+        syn::visit_mut::visit_trait_bound_mut(self, bound);
+        self.bound.truncate(previous);
+    }
+
+    fn visit_expr_closure_mut(&mut self, closure: &mut syn::ExprClosure) {
+        let previous = self.push_bound(closure.lifetimes.as_ref());
+        syn::visit_mut::visit_expr_closure_mut(self, closure);
+        self.bound.truncate(previous);
+    }
+
+    fn visit_item_mut(&mut self, _item: &mut syn::Item) {
+        // Nested items in a default expression cannot capture the UDF's
+        // parameters, and declare any lifetimes in an independent scope.
+    }
+
+    fn visit_label_mut(&mut self, _label: &mut syn::Label) {}
+
+    fn visit_expr_break_mut(&mut self, expression: &mut syn::ExprBreak) {
+        if let Some(value) = &mut expression.expr {
+            self.visit_expr_mut(value);
+        }
+    }
+
+    fn visit_expr_continue_mut(&mut self, _expression: &mut syn::ExprContinue) {}
+
+    fn visit_bound_lifetimes_mut(&mut self, lifetimes: &mut syn::BoundLifetimes) {
+        // A binder declares names; those declarations must never become `'_`.
+        for parameter in &mut lifetimes.lifetimes {
+            if let syn::GenericParam::Lifetime(parameter) = parameter {
+                for bound in &mut parameter.bounds {
+                    self.visit_lifetime_mut(bound);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod lifetime_tests {
+    use super::*;
+
+    fn wrapper_lifetimes() -> WrapperLifetimes {
+        WrapperLifetimes {
+            parameters: vec![syn::parse_quote!(call)],
+            bound: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn higher_ranked_binders_and_static_are_not_rewritten() {
+        let mut ty: Type = syn::parse_quote!((
+            for<'call> fn(&'call str) -> &'call str,
+            &'call str,
+            &'static str,
+            Box<dyn for<'call> Trait<'call> + 'call>,
+        ));
+        wrapper_lifetimes().visit_type_mut(&mut ty);
+        let expected: Type = syn::parse_quote!((
+            for<'call> fn(&'call str) -> &'call str,
+            &'_ str,
+            &'static str,
+            Box<dyn for<'call> Trait<'call> + '_>,
+        ));
+        assert_eq!(
+            ty.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+    }
+
+    #[test]
+    fn default_types_are_rewritten_without_changing_labels_or_nested_items() {
+        let mut expression: Expr = syn::parse_quote!({
+            fn nested<'call>(value: &'call str) -> &'call str {
+                value
+            }
+            'call: loop {
+                if false {
+                    continue 'call;
+                }
+                break 'call nested(identity::<&'call str>("fallback"));
+            }
+        });
+        wrapper_lifetimes().visit_expr_mut(&mut expression);
+        let expected: Expr = syn::parse_quote!({
+            fn nested<'call>(value: &'call str) -> &'call str {
+                value
+            }
+            'call: loop {
+                if false {
+                    continue 'call;
+                }
+                break 'call nested(identity::<&'_ str>("fallback"));
+            }
+        });
+        assert_eq!(
+            expression.to_token_stream().to_string(),
+            expected.to_token_stream().to_string(),
+        );
     }
 }

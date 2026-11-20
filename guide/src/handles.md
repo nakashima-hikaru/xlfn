@@ -143,6 +143,26 @@ The new formula refers to the same Rust object. `HandleAlias<'_, T>` is a
 call-scoped return value; a plain `Handle<'_, T>` is an input and cannot be
 returned or stored after the call.
 
+With multiple borrowed inputs, name the lifetime that the alias returns.
+Unbounded lifetime parameters also allow an injected context alongside a handle:
+
+```rust
+{{#include ../fixtures/dataset.md}}
+#[excel_function(name = "DATASET.SELECT")]
+fn select<'call>(
+    _context: MainThreadContext<'call, DatasetAddin>,
+    first: Handle<'call, Dataset>,
+    second: Handle<'call, Dataset>,
+    choose_first: bool,
+) -> HandleAlias<'call, Dataset> {
+    if choose_first { first.alias() } else { second.alias() }
+}
+```
+
+Rust checks the declared lifetime relationships in the original function. The
+generated wrapper infers the lifetime for the current call; naming it does not
+permit an alias to escape that call or become `'static`.
+
 ## Async-scoped handle leases
 
 An async UDF that needs an existing object accepts a generation-scoped lease:

@@ -1,11 +1,12 @@
 use super::ActiveServer;
+use crate::drain_wait::windows::ComApartmentGuard;
 use crate::sync::{Mutex, MutexGuard};
 use crate::win32::{
-    CloseHandle, CreateMutexW, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GUID,
-    GetLastError, HANDLE, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
-    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW,
-    RegQueryValueExW, RegSetValueExW, ReleaseMutex, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0,
-    WaitForSingleObject,
+    COWAIT_DISPATCH_CALLS, CloseHandle, CoWaitForMultipleHandles, CreateMutexW, E_UNEXPECTED,
+    ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GUID, GetLastError, HANDLE, HKEY,
+    HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+    RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW,
+    RegSetValueExW, ReleaseMutex, S_OK, SetLastError, WAIT_ABANDONED,
 };
 use crate::{XllError, XllResult};
 use std::ptr;
@@ -187,18 +188,36 @@ impl CrossProcessRegistrationGuard {
         // object. Validate it before trusting that object for exclusion.
         security.validate(handle.0)?;
 
-        // SAFETY: `handle` is a live mutex handle returned by CreateMutexW.
-        let wait = unsafe { WaitForSingleObject(handle.0, timeout_ms) };
-        if wait != (WAIT_OBJECT_0 as u32) && wait != (WAIT_ABANDONED as u32) {
-            let code = if wait == WAIT_FAILED {
-                // SAFETY: GetLastError is read immediately after WAIT_FAILED.
-                (unsafe { GetLastError() }) as i32
-            } else {
-                wait as i32
-            };
+        // Excel's STA must dispatch COM while another process owns the
+        // registration. Preserve an existing apartment; initialize one for
+        // framework/test threads that have not entered COM. The local
+        // maintenance guard rejects reentry throughout this pumping wait.
+        let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::WindowsApi {
+            function: "CoInitializeEx(RTD registration mutex)",
+            code,
+        })?;
+        let mut index = u32::MAX;
+        // SAFETY: clear the thread's last error as required by CoWait's
+        // documented workaround for nondeterministic mutex return status.
+        unsafe { SetLastError(ERROR_SUCCESS as u32) };
+        // SAFETY: one live mutex handle and a writable index are retained for
+        // the whole call. Classic STAs dispatch COM by default; this flag
+        // permits it on ASTAs too, without broad window-message dispatch.
+        let status = unsafe {
+            CoWaitForMultipleHandles(COWAIT_DISPATCH_CALLS, timeout_ms, 1, &handle.0, &mut index)
+        };
+        if status != S_OK {
             return Err(XllError::WindowsApi {
-                function: "WaitForSingleObject(RTD registration mutex)",
-                code,
+                function: "CoWaitForMultipleHandles(RTD registration mutex)",
+                code: status,
+            });
+        }
+        // S_OK plus WAIT_ABANDONED also transfers mutex ownership. Scavenge
+        // the previous owner's marked registrations under that same lock.
+        if index != 0 && index != WAIT_ABANDONED as u32 {
+            return Err(XllError::WindowsApi {
+                function: "CoWaitForMultipleHandles(RTD registration mutex index)",
+                code: E_UNEXPECTED,
             });
         }
 

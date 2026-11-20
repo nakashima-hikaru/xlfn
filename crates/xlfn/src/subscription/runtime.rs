@@ -251,7 +251,10 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
 
         if let Some((existing_id, entry)) = catalog.find_identity(SourceId(source.id), &topic)? {
             let existing_key = SubscriptionKey::from_internal(self.runtime_id, existing_id);
-            if entry.is_connected() {
+            // A connecting entry can still roll back. Each caller must retain
+            // its own reservation until its xlfRtd call commits or fails, so a
+            // failed connection cannot orphan another caller's transport key.
+            if entry.is_active() {
                 return Ok(PreparedSubscription {
                     #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
                     id: existing_id,

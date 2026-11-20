@@ -616,6 +616,29 @@ impl<'call> PreparedBorrowedString<'call> {
     }
 }
 
+/// Validated string cells borrowing their input and the call's decoding arena.
+/// The scratch borrow is stored once for the sequence. Preparation does not
+/// allocate per-cell state or UTF-8 strings on a formula-cache hit.
+#[doc(hidden)]
+pub struct PreparedBorrowedStringSequence<'call> {
+    cells: XlArrayRef<'call>,
+    argument: &'static str,
+    scratch: &'call crate::call::CallScratch,
+}
+
+impl<'call> PreparedBorrowedStringSequence<'call> {
+    fn materialize(self) -> XllResult<Vec<&'call str>> {
+        let mut values = try_allocate_cells(self.cells.len())?;
+        for cell in self.cells.cells() {
+            values.push(
+                self.scratch
+                    .decode_utf16(cell.utf16(self.argument)?, self.argument)?,
+            );
+        }
+        Ok(values)
+    }
+}
+
 impl<'call> PrepareExcel<'call> for String {
     type Prepared = PreparedString<'call>;
     fn prepare(
@@ -661,7 +684,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
         match value {}
     }
 
-    type Elements = PreparedParameterSequence<'call, Self, M>;
+    type Elements = PreparedBorrowedStringSequence<'call>;
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -684,8 +707,18 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
         context: &mut DecodeCallContext<'_, 'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
-        cells.retain(|value, argument| {
-            <Self as ExcelParameter<'call, M>>::prepare_element(value, argument, context, identity)
+        let argument = cells.argument;
+        // Preserve the former output/prepared-cell admission limit: the
+        // retained Ready(&str) representation had exactly the output size.
+        let mut budget = ArrayInputBudget::new::<Self>(cells.grid.cells().len(), argument)?;
+        let cells = XlArrayRef::from_grid_with(cells.grid, argument, |value| {
+            budget.include(value)?;
+            M::semantic_utf16(identity, value.utf16(argument)?, argument)
+        })?;
+        Ok(PreparedBorrowedStringSequence {
+            cells,
+            argument,
+            scratch: context.scratch(),
         })
     }
     fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
@@ -1972,13 +2005,12 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelValueRef<'call> {
                 M::tag(identity, 3);
                 M::u64(identity, rows as u64);
                 M::u64(identity, columns as u64);
-                for cell in grid.cells() {
-                    let cell = raw::checked_grid_cell(cell, argument)?;
+                let raw = XlArrayRef::from_grid_with(grid, argument, |cell| {
                     budget.include(cell)?;
-                    validate_dynamic_cell::<M>(cell, argument, identity)?;
-                }
+                    validate_dynamic_cell::<M>(cell, argument, identity)
+                })?;
                 PreparedDynamicValue::Array(ExcelArrayRef {
-                    raw: XlArrayRef::from_excel(value, argument)?,
+                    raw,
                     scratch: context.scratch(),
                     argument,
                 })

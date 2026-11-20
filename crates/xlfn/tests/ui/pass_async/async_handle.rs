@@ -32,9 +32,9 @@ struct Dataset {
 fn assert_send_sync<T: Send + Sync>() {}
 
 #[excel_function(name = "TEST.HANDLE.ASYNC")]
-async fn async_handle(
-    context: AsyncContext<'_, AsyncHandleAddin>,
-    dataset: HandleLease<'_, Dataset>,
+async fn async_handle<'generation>(
+    context: AsyncContext<'generation, AsyncHandleAddin>,
+    dataset: HandleLease<'generation, Dataset>,
     time: f64,
 ) -> XllResult<f64> {
     let _ = context.state();

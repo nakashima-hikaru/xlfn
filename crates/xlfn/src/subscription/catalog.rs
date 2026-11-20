@@ -66,6 +66,7 @@ pub(crate) struct SubscriptionEntry {
 }
 
 impl SubscriptionEntry {
+    #[cfg(test)]
     pub(crate) fn is_connected(&self) -> bool {
         matches!(
             self.phase,
@@ -88,6 +89,9 @@ impl SubscriptionEntry {
     }
 
     pub(crate) fn can_remove(&self) -> bool {
+        // A committed preparation can precede ConnectData (or its retry).
+        // Keep that transport key valid even after its last reservation ends;
+        // disconnection/server termination revokes the commitment separately.
         matches!(
             self.phase,
             SubscriptionPhase::Pending {

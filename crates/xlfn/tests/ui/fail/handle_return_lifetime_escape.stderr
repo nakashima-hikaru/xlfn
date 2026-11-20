@@ -1,0 +1,51 @@
+error: lifetime may not live long enough
+  --> tests/ui/fail/handle_return_lifetime_escape.rs:11:5
+   |
+10 | fn escape<'call>(value: Handle<'call, Dataset>) -> HandleAlias<'static, Dataset> {
+   |           ----- lifetime `'call` defined here
+11 |     value.alias()
+   |     ^^^^^^^^^^^^^ returning this value requires that `'call` must outlive `'static`
+   |
+   = note: requirement occurs because of the type `xlfn::handle::HandleAlias<'_, Dataset>`, which makes the generic argument `'_` invariant
+   = note: the struct `xlfn::handle::HandleAlias<'call, T>` is invariant over the parameter `'call`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error: lifetime may not live long enough
+  --> tests/ui/fail/handle_return_lifetime_escape.rs:19:5
+   |
+15 | fn wrong_input<'selected, 'other>(
+   |                ---------  ------ lifetime `'other` defined here
+   |                |
+   |                lifetime `'selected` defined here
+...
+19 |     other.alias()
+   |     ^^^^^^^^^^^^^ function was supposed to return data with lifetime `'other` but it is returning data with lifetime `'selected`
+   |
+   = help: consider adding the following bound: `'selected: 'other`
+   = note: requirement occurs because of the type `xlfn::handle::HandleAlias<'_, Dataset>`, which makes the generic argument `'_` invariant
+   = note: the struct `xlfn::handle::HandleAlias<'call, T>` is invariant over the parameter `'call`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error: lifetime may not live long enough
+  --> tests/ui/fail/handle_return_lifetime_escape.rs:19:5
+   |
+15 | fn wrong_input<'selected, 'other>(
+   |                ---------  ------ lifetime `'other` defined here
+   |                |
+   |                lifetime `'selected` defined here
+...
+19 |     other.alias()
+   |     ^^^^^^^^^^^^^ function was supposed to return data with lifetime `'selected` but it is returning data with lifetime `'other`
+   |
+   = help: consider adding the following bound: `'other: 'selected`
+   = note: requirement occurs because of the type `xlfn::handle::HandleAlias<'_, Dataset>`, which makes the generic argument `'_` invariant
+   = note: the struct `xlfn::handle::HandleAlias<'call, T>` is invariant over the parameter `'call`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error: one or more lifetime errors were found in this item
+  --> tests/ui/fail/handle_return_lifetime_escape.rs:15:4
+   |
+15 | fn wrong_input<'selected, 'other>(
+   |    ^^^^^^^^^^^
+   |
+   = help: `'selected` and `'other` must be the same: replace one with the other

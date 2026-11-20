@@ -1507,10 +1507,7 @@ mod tests {
                 fs::read_to_string(&path).unwrap(),
                 "original diagnostic record\n"
             );
-            assert_eq!(
-                fs::read_to_string(&archive).unwrap(),
-                "previous archive\n"
-            );
+            assert_eq!(fs::read_to_string(&archive).unwrap(), "previous archive\n");
         }
         assert!(!directory.path().join("diagnostics.log.lock").exists());
 

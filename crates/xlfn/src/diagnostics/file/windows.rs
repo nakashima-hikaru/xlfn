@@ -4,10 +4,13 @@
 
 use super::{LogAccess, reject_parent_traversal};
 use crate::win32::{
-    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
+    BY_HANDLE_FILE_INFORMATION, DELETE, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
+    ERROR_NOT_SUPPORTED, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_INFO_BY_HANDLE_CLASS,
     FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
-    FileDispositionInfo, FileRenameInfo, GetFileInformationByHandle, SetFileInformationByHandle,
+    FileDispositionInfo, FileDispositionInfoEx, FileRenameInfo, GetFileInformationByHandle,
+    SetFileInformationByHandle,
 };
 use std::ffi::OsStr;
 use std::mem::{MaybeUninit, align_of, offset_of};
@@ -218,20 +221,52 @@ enum FileChange<'a> {
 
 impl FileChange<'_> {
     fn apply(self, file: &fs::File) -> io::Result<()> {
-        let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+        let deleting = matches!(self, Self::Delete);
+        // Remove the archive's name when this rotation handle closes, even
+        // when a reader that shared DELETE still has the old contents open.
+        // Otherwise the following no-replace rename sees a delete-pending
+        // destination until that reader exits.
+        let disposition = FILE_DISPOSITION_INFO_EX {
+            Flags: (FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS) as u32,
+        };
         let (class, buffer, bytes): (FILE_INFO_BY_HANDLE_CLASS, *const core::ffi::c_void, u32) =
             match self {
                 Self::Rename(info) => (FileRenameInfo, info.storage.as_ptr().cast(), info.bytes),
                 Self::Delete => (
-                    FileDispositionInfo,
+                    FileDispositionInfoEx,
                     std::ptr::from_ref(&disposition).cast(),
-                    size_of::<FILE_DISPOSITION_INFO>() as u32,
+                    size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
                 ),
             };
         // SAFETY: the buffer matches `class` and remains live during the call.
         // The file and its directory remain open for this synchronous operation.
         if unsafe { SetFileInformationByHandle(file.as_raw_handle(), class, buffer, bytes) } == 0 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            if !deleting
+                || !matches!(
+                    error.raw_os_error(),
+                    Some(ERROR_INVALID_FUNCTION | ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED)
+                )
+            {
+                return Err(error);
+            }
+            // Older filesystems may not support POSIX disposition. Retain
+            // the existing conservative behavior there; never weaken sharing
+            // or replace an occupied destination to force rotation through.
+            let legacy = FILE_DISPOSITION_INFO { DeleteFile: true };
+            // SAFETY: the live legacy buffer matches FileDispositionInfo and
+            // the file remains pinned with DELETE access for this call.
+            if unsafe {
+                SetFileInformationByHandle(
+                    file.as_raw_handle(),
+                    FileDispositionInfo,
+                    std::ptr::from_ref(&legacy).cast(),
+                    size_of::<FILE_DISPOSITION_INFO>() as u32,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
         }
         Ok(())
     }

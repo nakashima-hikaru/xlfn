@@ -592,6 +592,61 @@ mod bounded_text_tests {
         assert_eq!(fs::read_to_string(&archive).unwrap(), "older");
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn log_rotation_reuses_archive_name_while_a_delete_sharing_reader_is_open() {
+        use crate::win32::{FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
+        use std::io::Read;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let directory = test_log_directory();
+        let path = directory.path().join("diagnostics.log");
+        let archive = path.with_file_name("diagnostics.log.1");
+        let mut log = RotatingLog::open_with_policy(path.clone(), 8, 1).unwrap();
+        log.write_line("first").unwrap();
+        log.write_line("second").unwrap();
+        let mut reader = fs::OpenOptions::new()
+            .read(true)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE) as u32)
+            .open(&archive)
+            .unwrap();
+
+        log.write_line("third").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "third\n");
+        assert_eq!(fs::read_to_string(&archive).unwrap(), "second\n");
+        let mut original = String::new();
+        reader.read_to_string(&mut original).unwrap();
+        assert_eq!(original, "first\n");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn log_rotation_preserves_files_when_a_reader_denies_delete_sharing() {
+        use crate::win32::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let directory = test_log_directory();
+        let path = directory.path().join("diagnostics.log");
+        let archive = path.with_file_name("diagnostics.log.1");
+        let mut log = RotatingLog::open_with_policy(path.clone(), 8, 1).unwrap();
+        log.write_line("first").unwrap();
+        log.write_line("second").unwrap();
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE) as u32)
+            .open(&archive)
+            .unwrap();
+
+        assert!(log.write_line("third").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second\n");
+        assert_eq!(fs::read_to_string(&archive).unwrap(), "first\n");
+        drop(reader);
+        log.write_line("third").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "third\n");
+        assert_eq!(fs::read_to_string(&archive).unwrap(), "second\n");
+    }
+
     #[test]
     fn log_rotation_keeps_the_directory_pinned_until_unlock() {
         let directory = test_log_directory();
