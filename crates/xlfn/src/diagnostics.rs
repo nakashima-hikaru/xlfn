@@ -469,8 +469,23 @@ pub(crate) fn install_diagnostic_sink(
     configure_diagnostic_sink(sink, false)
 }
 
+// Defer fallible or stateful sink construction until the router has admitted
+// the installation under its transition lock.
+pub(crate) fn install_diagnostic_sink_with<S: DiagnosticSink>(
+    make_sink: impl FnOnce() -> Result<S, DiagnosticInitError>,
+) -> Result<(), DiagnosticInitError> {
+    configure_diagnostic_sink_with(make_sink, false)
+}
+
 fn configure_diagnostic_sink(
     sink: impl DiagnosticSink,
+    replace: bool,
+) -> Result<(), DiagnosticInitError> {
+    configure_diagnostic_sink_with(|| Ok(sink), replace)
+}
+
+fn configure_diagnostic_sink_with<S: DiagnosticSink>(
+    make_inner_sink: impl FnOnce() -> Result<S, DiagnosticInitError>,
     replace: bool,
 ) -> Result<(), DiagnosticInitError> {
     let router = router();
@@ -484,7 +499,7 @@ fn configure_diagnostic_sink(
         return Err(DiagnosticInitError::RouterClosed);
     }
     let make_sink = || {
-        let sink = Box::new(AsyncDiagnosticSink::new(sink)?);
+        let sink = Box::new(AsyncDiagnosticSink::new(make_inner_sink()?)?);
         if let Some(trace) = router.trace_handle() {
             sink.set_trace_sink(trace);
         }
@@ -1437,7 +1452,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_file_sink_construction_preserves_the_current_sink() {
+    fn duplicate_file_sink_installation_skips_invalid_path_and_preserves_existing_sink() {
         // Other tests may report through the global sink without replacing it.
         // Count this test's event while still detecting duplicate delivery.
         struct PreservedSink(Arc<AtomicUsize>);
@@ -1453,11 +1468,84 @@ mod tests {
         set_diagnostic_sink(PreservedSink(Arc::clone(&delivered))).unwrap();
         let directory = file::test_log_directory();
 
+        // An existing sink takes precedence even over a path that cannot be
+        // opened as a log file. No file construction should be attempted.
         let result = install_file_diagnostic_sink_at(directory.path().to_path_buf());
-        assert!(matches!(result, Err(DiagnosticInitError::Io(_))));
+        assert!(matches!(result, Err(DiagnosticInitError::AlreadyInstalled)));
         report_no_unwind("failed_file_sink_construction_preserved", &XllError::Panic);
         clear_diagnostic_sink().unwrap();
         assert_eq!(delivered.load(Ordering::Relaxed), 1);
+
+        // The invalid path must still report its I/O error when installation
+        // is actually allowed.
+        let result = install_file_diagnostic_sink_at(directory.path().to_path_buf());
+        assert!(matches!(result, Err(DiagnosticInitError::Io(_))));
+        assert!(!diagnostic_sink_running());
+    }
+
+    #[test]
+    fn rejected_file_sink_installation_does_not_modify_or_create_logs() {
+        let _router_guard = prepare_global_router();
+        set_diagnostic_sink(CountingSink(Arc::new(AtomicUsize::new(0)))).unwrap();
+
+        let directory = file::test_log_directory();
+        let path = directory.path().join("diagnostics.log");
+        let archive = directory.path().join("diagnostics.log.1");
+        fs::write(&path, "original diagnostic record\n").unwrap();
+        fs::write(&archive, "previous archive\n").unwrap();
+        let limit = std::num::NonZeroU64::new(1).unwrap();
+
+        for archives in [0, 1] {
+            let config = DiagnosticFileConfig::new()
+                .with_maximum_file_bytes(limit)
+                .with_archives(archives);
+            assert!(matches!(
+                file::open_file_sink(path.clone(), config),
+                Err(DiagnosticInitError::AlreadyInstalled)
+            ));
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                "original diagnostic record\n"
+            );
+            assert_eq!(
+                fs::read_to_string(&archive).unwrap(),
+                "previous archive\n"
+            );
+        }
+        assert!(!directory.path().join("diagnostics.log.lock").exists());
+
+        let absent = directory.path().join("absent.log");
+        assert!(matches!(
+            file::open_file_sink(absent.clone(), DiagnosticFileConfig::new()),
+            Err(DiagnosticInitError::AlreadyInstalled)
+        ));
+        assert!(!absent.exists());
+        assert!(!directory.path().join("absent.log.lock").exists());
+
+        clear_diagnostic_sink().unwrap();
+    }
+
+    #[test]
+    fn accepted_file_sink_installation_creates_and_writes_log() {
+        let _router_guard = prepare_global_router();
+        let directory = file::test_log_directory();
+        let path = directory.path().join("diagnostics.log");
+        assert_eq!(
+            file::open_file_sink(path.clone(), DiagnosticFileConfig::new()).unwrap(),
+            path
+        );
+        report_no_unwind("accepted_file_sink", &XllError::Panic);
+        clear_diagnostic_sink().unwrap();
+        let log = fs::read_to_string(&path).unwrap();
+        // Unrelated tests may report while the process-wide sink is active.
+        let matching = log
+            .lines()
+            .filter(|line| {
+                let record: serde_json::Value = serde_json::from_str(line).unwrap();
+                record["udf"] == "accepted_file_sink"
+            })
+            .count();
+        assert_eq!(matching, 1);
     }
 
     #[test]
