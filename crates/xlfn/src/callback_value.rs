@@ -493,6 +493,8 @@ mod tests {
     assert_not_impl_any!(CallbackOwner<'static>: Send, Sync);
 
     static FREE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    // When a test also needs the module-wide callback lease (directly or
+    // through CallbackScript), acquire that lease before this counter lock.
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     unsafe fn successful_free(_: &mut XLOPER12) -> i32 {
@@ -558,8 +560,8 @@ mod tests {
 
     #[test]
     fn xlf_register_release_abort_suppresses_unregister() {
-        let _test_guard = TEST_LOCK.lock().unwrap();
         let script = crate::registration::host::test_support::CallbackScript::install([]);
+        let _test_guard = TEST_LOCK.lock().unwrap();
         FREE_CALLS.store(0, Ordering::Relaxed);
         let session = HostCallbackSession::new();
         let mut register_result = CallbackOwner::from_callback_for_test_with_session(
@@ -582,8 +584,8 @@ mod tests {
 
     #[test]
     fn xlf_unregister_release_uncalced_suppresses_set_name() {
-        let _test_guard = TEST_LOCK.lock().unwrap();
         let script = crate::registration::host::test_support::CallbackScript::install([]);
+        let _test_guard = TEST_LOCK.lock().unwrap();
         FREE_CALLS.store(0, Ordering::Relaxed);
         let session = HostCallbackSession::new();
         let mut unregister_result = CallbackOwner::from_callback_for_test_with_session(
