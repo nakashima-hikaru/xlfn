@@ -1466,6 +1466,8 @@ pub mod v1 {
 
         #[test]
         fn resident_calculation_callbacks_only_reach_the_published_generation() {
+            // Keep the process-wide epoch exclusive through the final quarantine check.
+            let _module_lease = crate::ingress::acquire_test_module_lease();
             let runtime = Box::leak(Box::new(MacroRuntime::<CallbackAddin>::new()));
             let _fixture = crate::runtime::StaticTestRuntime::from_static(runtime.runtime());
             assert_inactive_events(runtime);
