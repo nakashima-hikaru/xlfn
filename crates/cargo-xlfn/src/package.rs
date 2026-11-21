@@ -26,15 +26,17 @@ pub(crate) fn package(args: &PackageArgs) -> Result {
     let build_target_directory = build_target_guard.path();
     if args.all {
         validate_transactional_output_root(&args.out)?;
-        let output_parent = args
-            .out
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(output_parent)?;
-        // The parent may have been created after the initial check. Verify
-        // the complete path again before placing any staging directory in it.
-        validate_output_destination(&args.out)?;
+    } else {
+        xlfn_package::validate_directory_path(&args.out)?;
+    }
+    let output = std::path::absolute(&args.out)?;
+    let output_parent = output.parent().context("package output has no parent")?;
+    fs::create_dir_all(output_parent)?;
+    // Acquire before creating any staging below the output or running
+    // recovery. The shared lock survives an all-target root replacement.
+    let output_lock = xlfn_package::PackageOutputLock::acquire(&output)?;
+
+    if args.all {
         let staging_guard = tempfile::Builder::new()
             .prefix(".cargo-xlfn-package-all-")
             .tempdir_in(output_parent)?;
@@ -46,7 +48,7 @@ pub(crate) fn package(args: &PackageArgs) -> Result {
             let target_staging = xlfn_package::PrivateStagingDirectory::create(
                 &staging_root.path().join(target.directory()),
             )?;
-            validate_output_destination(&args.out.join(target.directory()))?;
+            validate_output_destination(&output.join(target.directory()))?;
             let verified = build_and_verify_target(TargetBuildRequest {
                 target: *target,
                 metadata: &metadata,
@@ -59,7 +61,7 @@ pub(crate) fn package(args: &PackageArgs) -> Result {
             prepared_packages.push((*target, prepared));
         }
         for target in &targets {
-            validate_output_destination(&args.out.join(target.directory()))?;
+            validate_output_destination(&output.join(target.directory()))?;
         }
         let shared_artifacts = prepared_packages
             .iter()
@@ -81,18 +83,18 @@ pub(crate) fn package(args: &PackageArgs) -> Result {
         for (target, prepared) in prepared_packages {
             distribution = distribution.with_nested_package(target.directory(), prepared)?;
         }
-        report_distribution_cleanup(distribution.commit(&args.out)?);
+        report_distribution_cleanup(output_lock.commit_all(distribution, &metadata.package_name)?);
         println!("created {}", args.out.display());
     } else {
-        xlfn_package::validate_directory_path(&args.out)?;
-        fs::create_dir_all(&args.out)?;
-        xlfn_package::validate_directory_path(&args.out)?;
+        output_lock.ensure_target_staging_allowed()?;
+        fs::create_dir_all(&output)?;
+        xlfn_package::validate_directory_path(&output)?;
         let target = targets[0];
-        let destination = args.out.join(target.directory());
-        validate_output_destination(&destination)?;
+        let destination = output.join(target.directory());
+        validate_transactional_output_root(&destination)?;
         let staging_guard = tempfile::Builder::new()
             .prefix(&format!(".{}.tmp-", target.directory()))
-            .tempdir_in(&args.out)?;
+            .tempdir_in(&output)?;
         let staging = xlfn_package::PrivateStagingDirectory::create(
             &staging_guard.path().join("distribution"),
         )?;
@@ -123,7 +125,11 @@ pub(crate) fn package(args: &PackageArgs) -> Result {
         )?;
         let distribution =
             xlfn_package::PreparedDistribution::new(prepared_root).with_package(prepared)?;
-        report_distribution_cleanup(distribution.commit(&destination)?);
+        report_distribution_cleanup(output_lock.commit_target(
+            distribution,
+            &metadata.package_name,
+            target.triple(),
+        )?);
         println!("created {}", destination.display());
     }
     Ok(())
@@ -154,7 +160,7 @@ pub(crate) fn validate_transactional_output_root(destination: &Path) -> Result {
         Some(Component::Normal(_))
     ) {
         bail!(
-            "package --all output must name a dedicated directory, not {}",
+            "package output must name a dedicated directory, not {}",
             destination.display()
         );
     }
@@ -164,7 +170,7 @@ pub(crate) fn validate_transactional_output_root(destination: &Path) -> Result {
         let destination = fs::canonicalize(destination)?;
         if current.starts_with(&destination) {
             bail!(
-                "package --all refuses to replace the current directory or one of its ancestors: {}",
+                "package refuses to replace the current directory or one of its ancestors: {}",
                 destination.display()
             );
         }

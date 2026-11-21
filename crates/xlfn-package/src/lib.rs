@@ -65,7 +65,8 @@ pub use commit::{CommitSourceLease, PreparedDirectoryCommit, PreparedPackageComm
 pub use distribution::{
     CleanupOutcome, CommitOutcome, DistributionError, DistributionFileOps,
     DistributionRecoveryError, DistributionRecoveryQuarantineError, DistributionResult,
-    PreparedDistribution, SystemDistributionFileOps, validate_output_destination,
+    PackageOutputLock, PreparedDistribution, SystemDistributionFileOps,
+    validate_output_destination,
 };
 pub use error::{
     EffectiveCrtPolicy, ImportTarget, PackageError, PackageResult, REQUIRED_XLL_EXPORTS,

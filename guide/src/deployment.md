@@ -15,6 +15,19 @@ This generates `package/win-x86/` and `package/win-x64/`. Distribute the directo
 matching your users' Excel process bitness, or include both in an installer that
 selects the appropriate package.
 
+Use a dedicated output directory with `--out`. Packaging replaces whole target
+directories, or the whole output root with `--all`. It refuses to replace an
+existing directory containing unrelated files or output from a different
+package. Choose a new directory or move extra files elsewhere first. Do not
+put source files, installer assets, or notes inside the packaging output.
+If changing versions of `cargo-xlfn` makes the existing manifest incompatible,
+use a fresh output directory rather than deleting the old one to make the
+command pass.
+
+Both modes use the same output-root lock for staging, recovery, and commit.
+If a single-target transaction is still present in the output root, retry the
+same single-target command to recover it before running `--all`.
+
 ## Package contents
 
 Each target directory contains:
@@ -64,7 +77,9 @@ an unverified backup.
 
 Follow the transaction journal when recovering an interrupted update. A backup
 left after a committed update is only pending cleanup; the newly installed
-package remains authoritative.
+package remains authoritative. A retained backup that can no longer be
+recognized as a complete managed output is moved aside, not deleted. Inspect
+the location reported by the error before retrying.
 
 ## Versioning worksheet functions
 
