@@ -882,6 +882,8 @@ mod tests {
 
     impl Drop for GlobalRouterTestGuard {
         fn drop(&mut self) {
+            // The next module epoch can only reset a terminally closed router.
+            let _ = close_diagnostic_router();
             let ingress = crate::module_runtime::ingress();
             if ingress.phase() != crate::ingress::PHASE_CLOSED {
                 ingress.begin_close_with(|| {});
@@ -905,6 +907,15 @@ mod tests {
             _module_lease: module_lease,
             _diagnostic_lock: diagnostic_lock,
         }
+    }
+
+    #[test]
+    fn global_router_fixture_allows_next_epoch_reset() {
+        let _module_lease = crate::ingress::acquire_test_module_lease();
+        drop(prepare_global_router());
+        let reset = crate::diagnostics::reset_diagnostic_router();
+        let _ = crate::diagnostics::close_diagnostic_router();
+        reset.unwrap();
     }
 
     #[test]

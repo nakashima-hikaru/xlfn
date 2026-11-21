@@ -1869,11 +1869,21 @@ mod tests {
         let (events_tx, events_rx) = mpsc::channel();
         crate::diagnostics::set_diagnostic_sink(Capture(events_tx)).unwrap();
         let _cleanup = std::mem::DropGuard::new((), |()| {
-            let _ = crate::diagnostics::clear_diagnostic_sink();
+            // A reopenable drain would leave the router in the old epoch.
+            let _ = crate::diagnostics::close_diagnostic_router();
             ingress.begin_close_with(|| {});
             let _ = ingress.seal_and_drain();
         });
         test(events_rx);
+    }
+
+    #[test]
+    fn producer_diagnostics_fixture_allows_next_epoch_reset() {
+        let _module_lease = crate::ingress::acquire_test_module_lease();
+        with_producer_diagnostics(|_| {});
+        let reset = crate::diagnostics::reset_diagnostic_router();
+        let _ = crate::diagnostics::close_diagnostic_router();
+        reset.unwrap();
     }
 
     #[test]
