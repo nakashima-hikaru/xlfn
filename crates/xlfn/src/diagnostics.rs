@@ -1195,21 +1195,34 @@ mod tests {
     #[test]
     fn intentional_worksheet_errors_do_not_emit_failure_diagnostics() {
         let _router_guard = prepare_global_router();
-        let reports = Arc::new(AtomicUsize::new(0));
-        set_diagnostic_sink(CountingSink(Arc::clone(&reports))).unwrap();
-        let next_id = NEXT_ID.load(Ordering::Relaxed);
+        struct WorksheetErrorSink(Arc<Mutex<Vec<&'static str>>>);
+
+        impl DiagnosticSink for WorksheetErrorSink {
+            fn report(&self, event: &DiagnosticEvent<'_>) {
+                let udf_id = event.udf_id();
+                if matches!(udf_id, "worksheet_error" | "custom_error" | "panic_error") {
+                    self.0.lock().push(udf_id);
+                }
+            }
+        }
+
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        set_diagnostic_sink(WorksheetErrorSink(Arc::clone(&reports))).unwrap();
         report_udf_failure_no_unwind(
             "worksheet_error",
             &XllError::ExcelValue(crate::ExcelError::Number),
         );
-        assert_eq!(NEXT_ID.load(Ordering::Relaxed), next_id);
+        // The lease isolates fixture setup, not reporting on other threads.
+        std::thread::spawn(|| report_no_unwind("unrelated_worksheet_report", &XllError::Panic))
+            .join()
+            .unwrap();
         report_udf_failure_no_unwind(
             "custom_error",
             &XllError::custom(crate::ExcelError::Number, "calculation rejected"),
         );
         report_udf_failure_no_unwind("panic_error", &XllError::Panic);
         clear_diagnostic_sink().unwrap();
-        assert_eq!(reports.load(Ordering::Relaxed), 2);
+        assert_eq!(reports.lock().as_slice(), ["custom_error", "panic_error"]);
     }
 
     #[test]
