@@ -541,6 +541,17 @@ impl<'call> CoercedGridRef<'call> {
     }
 }
 
+/// Recognizes the usual unflagged binary64 cell without decoding an
+/// arbitrary header. Other headers still go through the generic validation.
+#[inline(always)]
+pub(super) fn plain_numeric_grid_cell(cell: &XLOPER12) -> Option<f64> {
+    if cell.xltype != xlfn_sys::XLTYPE_NUM {
+        return None;
+    }
+    // SAFETY: the exact XLTYPE_NUM tag selects the initialized numeric member.
+    Some(unsafe { cell.value.number })
+}
+
 pub(super) fn checked_grid_cell<'call>(
     cell: &'call XLOPER12,
     argument: &'static str,

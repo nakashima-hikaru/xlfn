@@ -147,6 +147,43 @@ fn prepared_numeric_matrix_ref_matches_eager_identity_and_values() {
 }
 
 #[test]
+fn prepared_numeric_matrices_preserve_flagged_cell_semantics() {
+    let mut flagged_number = XLOPER12::number(-0.0);
+    flagged_number.xltype |= xlfn_sys::XLBIT_XL_FREE;
+    let mut flagged_integer = XLOPER12::integer(-1);
+    flagged_integer.xltype |= xlfn_sys::XLBIT_DLL_FREE;
+
+    let mut cells = [
+        flagged_number,
+        flagged_integer,
+        XLOPER12::number(f64::MIN_POSITIVE),
+    ];
+    let root = array_root(&mut cells);
+    let identity = check_numeric_matrix_identity(&root);
+    assert_eq!(
+        identity,
+        numeric_matrix_ref_identity(&root, true).unwrap().1
+    );
+
+    cells[0] = XLOPER12::number(-0.0);
+    cells[1] = XLOPER12::integer(-1);
+    let root = array_root(&mut cells);
+    assert_eq!(identity, check_numeric_matrix_identity(&root));
+
+    let mut flagged_nonfinite = XLOPER12::number(f64::NEG_INFINITY);
+    flagged_nonfinite.xltype |= xlfn_sys::XLBIT_DLL_FREE;
+    cells[0] = flagged_nonfinite;
+    let root = array_root(&mut cells);
+    assert!(matches!(
+        numeric_matrix_identity(&root, true),
+        Err(XllError::Input {
+            argument: "values",
+            reason: InputError::NonFinite,
+        })
+    ));
+}
+
+#[test]
 fn miri_optional_matrix_ref_defers_scratch_until_materialization() {
     let mut cells = [XLOPER12::number(-0.0), XLOPER12::nil(), XLOPER12::missing()];
     let root = array_root(&mut cells);

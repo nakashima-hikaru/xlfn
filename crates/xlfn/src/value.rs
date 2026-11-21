@@ -303,11 +303,16 @@ impl<'call> FromExcel<'call> for f64 {
             XlValueType::Integer => (unsafe { value.raw.value.integer }) as f64,
             _ => return Err(value.wrong_type(argument, "number")),
         };
-        if !number.is_finite() {
-            return Err(XllError::input(argument, InputError::NonFinite));
-        }
-        Ok(number)
+        validate_finite_number(number, argument)
     }
+}
+
+#[inline]
+fn validate_finite_number(number: f64, argument: &'static str) -> XllResult<f64> {
+    if !number.is_finite() {
+        return Err(XllError::input(argument, InputError::NonFinite));
+    }
+    Ok(number)
 }
 
 impl ExcelInputIdentity for f64 {

@@ -544,7 +544,12 @@ impl<'call> ExcelInputCells<'call> {
             super::ArrayInputBudget::new::<f64>(self.grid.cells().len(), self.argument)?;
         let argument = self.argument;
         identity.f64_sequence(self.grid.cells().iter().map(|cell| {
-            let value = super::raw::checked_grid_cell(cell, self.argument)?;
+            if let Some(number) = super::raw::plain_numeric_grid_cell(cell) {
+                // The initial budget already covers a numeric cell. Only
+                // other payloads need the generic per-cell budget check.
+                return super::validate_finite_number(number, argument);
+            }
+            let value = super::raw::checked_grid_cell(cell, argument)?;
             budget.include(value)?;
             f64::from_excel(value, argument)
         }))?;
