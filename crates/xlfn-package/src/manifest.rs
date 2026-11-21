@@ -231,3 +231,63 @@ pub(crate) fn artifact_relative_path(path: &Path, label: &str) -> PackageResult<
     windows_name_key(label, name)?;
     Ok(PathBuf::from(name))
 }
+
+/// Verifies that replacing an old target will not discard anything except
+/// artifacts named by an xlfn build manifest for this package and architecture.
+/// The manifest is an ownership marker for accidental overwrite prevention,
+/// not a signature or proof of trust.
+pub(crate) fn validate_existing_package(path: &Path, package: &str, target: &str) -> PackageResult {
+    const MANIFEST: &str = "build-manifest.json";
+    const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+    let entries = crate::commit::read_directory_entries(path, MAX_PREPARED_ENTRIES)?;
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let name = entries
+        .get(MANIFEST)
+        .ok_or("build-manifest.json is missing")?;
+    let manifest_path = path.join(name);
+    let input = crate::staging::open_staged_file_no_follow(&manifest_path)?;
+    let metadata = input.metadata()?;
+    if !metadata.is_file() || is_reparse_point(&metadata) {
+        return Err("build manifest is not a regular file".into());
+    }
+    let mut bytes = Vec::new();
+    input.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err("build manifest exceeds the size limit".into());
+    }
+    let manifest: BuildManifest = serde_json::from_slice(&bytes)?;
+    if manifest.schema != BUILD_MANIFEST_SCHEMA
+        || manifest.package != package
+        || manifest.target != target
+    {
+        return Err("build manifest does not identify the same package, schema and target".into());
+    }
+    let xll = format!("{}.xll", manifest.artifact);
+    let mut expected = BTreeSet::from([MANIFEST.to_owned()]);
+    let mut found_xll = false;
+    for file in manifest.files {
+        let key = windows_name_key("manifest file", &file.relative_path)?;
+        if !expected.insert(key.clone()) {
+            return Err("build manifest describes a duplicate or self-referential entry".into());
+        }
+        let actual_name = entries
+            .get(&key)
+            .ok_or_else(|| format!("build manifest file is missing: {key}"))?;
+        if actual_name != &file.relative_path {
+            return Err(format!("build manifest name does not match {actual_name:?}").into());
+        }
+        let metadata = fs::symlink_metadata(path.join(actual_name))?;
+        if !metadata.is_file() || is_reparse_point(&metadata) || metadata.len() != file.size {
+            return Err(
+                format!("build manifest type or size does not match {actual_name:?}").into(),
+            );
+        }
+        found_xll |= file.relative_path == xll;
+    }
+    if !found_xll {
+        return Err("build manifest does not describe the packaged XLL".into());
+    }
+    crate::commit::ensure_exact_entry_set(&entries, &expected, path)
+}

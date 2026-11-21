@@ -188,6 +188,7 @@ fn commit_test_directory_with(
         |_| Ok(()),
         |path| Ok(prepared.verify_committed_contents(path)?),
         file_ops,
+        None,
     )?;
     Ok(())
 }
@@ -537,6 +538,7 @@ fn post_commit_verification_failure_restores_previous_distribution() {
             ))
         },
         &file_ops,
+        None,
     )
     .unwrap_err();
 
@@ -572,6 +574,7 @@ fn post_commit_verification_failure_without_previous_removes_install() {
             ))
         },
         &file_ops,
+        None,
     )
     .unwrap_err();
 
@@ -959,6 +962,7 @@ fn source_rejection_after_backup_reports_interruption() {
         },
         |path| Ok(prepared.verify_committed_contents(path)?),
         &SystemDistributionFileOps,
+        None,
     )
     .unwrap_err();
     let DistributionError::Interrupted {
@@ -1435,6 +1439,7 @@ fn verification_failure_survives_failed_rollback_cleanup() {
                     ))
                 },
                 &file_ops,
+                None,
             )
             .unwrap_err();
             let message = error.to_string();

@@ -21,6 +21,10 @@ mod journal_tests;
 #[cfg(test)]
 mod transaction_tests;
 
+mod managed;
+use managed::ManagedOutput;
+pub use managed::PackageOutputLock;
+
 /// File-system operations used by the distribution transaction.
 ///
 /// The trait is deliberately small so the transaction engine can be tested
@@ -905,6 +909,15 @@ impl PreparedDistribution {
         destination: &Path,
         file_ops: &impl DistributionFileOps,
     ) -> DistributionResult<CommitOutcome> {
+        self.commit_with_policy(destination, file_ops, None)
+    }
+
+    fn commit_with_policy(
+        self,
+        destination: &Path,
+        file_ops: &impl DistributionFileOps,
+        managed: Option<ManagedOutput<'_>>,
+    ) -> DistributionResult<CommitOutcome> {
         let root = &self.root;
         let packages = &self.packages;
         commit_prepared_directory_with(
@@ -928,6 +941,7 @@ impl PreparedDistribution {
                 Ok(())
             },
             file_ops,
+            managed,
         )
     }
 }
@@ -1164,6 +1178,7 @@ fn commit_prepared_directory_with(
     verify_source: impl Fn(&Path) -> DistributionResult,
     verify_destination: impl Fn(&Path) -> DistributionResult,
     file_ops: &impl DistributionFileOps,
+    managed: Option<ManagedOutput<'_>>,
 ) -> DistributionResult<CommitOutcome> {
     validate_output_destination(destination)?;
     let parent = destination
@@ -1179,8 +1194,24 @@ fn commit_prepared_directory_with(
                 "distribution destination name is not valid UTF-8".to_owned(),
             )
         })?;
-    let commit_guard = DistributionCommitGuard::acquire(parent, destination_name)?;
-    recover_stale_transactions(parent, destination_name, &commit_guard, file_ops)?;
+    let destination_guard;
+    let commit_guard = match &managed {
+        Some(output) if output.is_root() => output.root,
+        _ => {
+            destination_guard = DistributionCommitGuard::acquire(parent, destination_name)?;
+            &destination_guard
+        }
+    };
+    if let Some(output) = &managed {
+        output.root.ensure_held()?;
+    }
+    recover_stale_transactions_with_policy(
+        parent,
+        destination_name,
+        commit_guard,
+        file_ops,
+        managed.as_ref(),
+    )?;
     validate_commit_location(parent, destination)?;
 
     prepared.verify_source_contents()?;
@@ -1209,6 +1240,11 @@ fn commit_prepared_directory_with(
             validate_commit_location(parent, destination)?;
             commit_guard.ensure_held()?;
             require_directory_identity(destination, expected, "original destination")?;
+            if let Some(output) = &managed {
+                output.validate_existing(destination)?;
+                output.root.ensure_held()?;
+                require_directory_identity(destination, expected, "managed destination")?;
+            }
             file_ops.rename(destination, &previous)?;
             output_changed = true;
             output_was_changed = true;
@@ -1361,6 +1397,14 @@ fn commit_prepared_directory_with(
         if let Err(verification_error) = validate_output_destination(destination)
             .map_err(DistributionError::from)
             .and_then(|_| verify_destination(destination))
+            .and_then(|()| {
+                // Check the exact tree moved out of the way, not merely its
+                // name or inode. A new foreign file is grounds for rollback.
+                if let (Some(output), true) = (&managed, had_previous) {
+                    output.validate_existing(&previous)?;
+                }
+                Ok(())
+            })
         {
             let rollback_state = if had_previous {
                 TransactionState::RollbackPending
@@ -1657,11 +1701,22 @@ fn quarantine_transaction(
     .into())
 }
 
+#[cfg(test)]
 fn recover_stale_transactions(
     parent: &Path,
     destination_name: &str,
     commit_guard: &DistributionCommitGuard,
     file_ops: &impl DistributionFileOps,
+) -> DistributionResult {
+    recover_stale_transactions_with_policy(parent, destination_name, commit_guard, file_ops, None)
+}
+
+fn recover_stale_transactions_with_policy(
+    parent: &Path,
+    destination_name: &str,
+    commit_guard: &DistributionCommitGuard,
+    file_ops: &impl DistributionFileOps,
+    managed: Option<&ManagedOutput<'_>>,
 ) -> DistributionResult {
     commit_guard.ensure_held()?;
     if commit_guard.destination() != parent.join(destination_name) {
@@ -1671,41 +1726,45 @@ fn recover_stale_transactions(
     }
     crate::validate_directory_path(parent)?;
     let prefix = format!(".{destination_name}.transaction-");
-    let destination = parent.join(destination_name);
-    let transactions = fs::read_dir(parent)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<io::Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(&prefix))
-        })
-        .collect::<Vec<_>>();
+    let transactions = pending_transaction_paths(parent, &prefix)?;
 
     for transaction in transactions {
         recover_distribution_transaction(
             parent,
             destination_name,
             &prefix,
-            &destination,
             &transaction,
             commit_guard,
             file_ops,
+            managed,
         )?;
     }
     Ok(())
+}
+
+fn pending_transaction_paths(parent: &Path, prefix: &str) -> io::Result<Vec<PathBuf>> {
+    fs::read_dir(parent)?
+        .filter_map(|entry| match entry {
+            Ok(entry) => entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(prefix))
+                .then(|| Ok(entry.path())),
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
 }
 
 fn recover_distribution_transaction(
     parent: &Path,
     destination_name: &str,
     prefix: &str,
-    destination: &Path,
     transaction: &Path,
     commit_guard: &DistributionCommitGuard,
     file_ops: &impl DistributionFileOps,
+    managed: Option<&ManagedOutput<'_>>,
 ) -> DistributionResult {
+    let destination = commit_guard.destination();
     let mut previous_path = Some(transaction.join("previous"));
     let result = (|| {
         commit_guard.ensure_held()?;
@@ -2058,6 +2117,21 @@ fn recover_distribution_transaction(
                         )
                     })?;
                     require_directory_identity(&previous, expected, "committed backup")?;
+                    if let Some(output) = managed
+                        && let Err(error) = output.validate_existing(&previous)
+                    {
+                        // Legacy journals only attest the directory's
+                        // identity, not whether its contents were managed.
+                        // A partially cleaned tree is likewise unproven.
+                        return quarantine_transaction(
+                            parent,
+                            destination_name,
+                            prefix,
+                            transaction,
+                            error.to_string(),
+                            file_ops,
+                        );
+                    }
                     if file_ops.remove_dir_all(&previous).is_err() {
                         // A loaded old XLL can keep the backup locked after a
                         // successful commit. Persist the cleanup-only handoff

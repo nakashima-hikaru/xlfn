@@ -8,6 +8,7 @@ fn bypass(prepared: &PreparedDirectoryCommit, destination: &Path) {
         |_| Ok(()),
         |_| Ok(()),
         &SystemDistributionFileOps,
+        None,
     );
 }
 
