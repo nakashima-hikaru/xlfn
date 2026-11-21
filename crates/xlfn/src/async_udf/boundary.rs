@@ -607,12 +607,13 @@ mod numeric_launch_tests {
     }
 
     fn verify_rejected_admission(
+        runtime: &'static Runtime<LaunchTestAddin>,
         launch: impl Fn(&'static Runtime<LaunchTestAddin>, *mut XLOPER12),
     ) {
         let _test = crate::runtime::tests::TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let fixture = crate::runtime::StaticTestRuntime::<LaunchTestAddin>::new();
+        let fixture = crate::runtime::StaticTestRuntime::from_static(runtime);
         let runtime = fixture.runtime();
         let open = runtime.begin_open().unwrap();
         let open = runtime.publish(open, (), ());
@@ -660,7 +661,8 @@ mod numeric_launch_tests {
 
     #[test]
     fn miri_async_admission_rejection_completes_only_while_callbacks_are_open() {
-        verify_rejected_admission(|runtime, handle| {
+        static RUNTIME: Runtime<LaunchTestAddin> = Runtime::new();
+        verify_rejected_admission(&RUNTIME, |runtime, handle| {
             // SAFETY: the fixture retains aligned, initialized raw storage
             // through launch, including the intentionally invalid tag case.
             unsafe {
@@ -758,7 +760,8 @@ mod numeric_launch_tests {
     #[cfg(feature = "handles")]
     #[test]
     fn miri_handle_async_admission_rejection_completes_only_while_callbacks_are_open() {
-        verify_rejected_admission(|runtime, handle| {
+        static RUNTIME: Runtime<LaunchTestAddin> = Runtime::new();
+        verify_rejected_admission(&RUNTIME, |runtime, handle| {
             // SAFETY: the fixture owns initialized raw storage throughout
             // launch; the boundary validates its tag before returning it.
             unsafe {
