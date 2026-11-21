@@ -690,40 +690,81 @@ mod tests {
 
     #[test]
     fn miri_failed_published_free_retains_the_matching_charge_until_real_reclamation() {
+        #[cfg(not(miri))]
+        {
+            // Exact deltas of process-wide and module-wide totals require isolation
+            // from numeric returns created by other libtest threads.
+            const CHILD: &str = "XLFN_TEST_NUMERIC_FREE_ACCOUNTING_CHILD";
+            if std::env::var_os(CHILD).is_none() {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        concat!(
+                            module_path!(),
+                            "::miri_failed_published_free_retains_the_matching_charge_until_real_reclamation"
+                        )
+                        .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+                        .unwrap(),
+                    ])
+                    .env(CHILD, "1")
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                    "isolated numeric accounting test: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+                return;
+            }
+        }
+
         let call = Fp12CallGuard::enter();
+        #[cfg(not(miri))]
         let before = numeric_return_memory_metrics().unwrap();
         let output = NumericArrayOutput::from_f64(1, 1, &[7.0]).unwrap();
         let block = output.allocation.pointer;
+        #[cfg(not(miri))]
         let bytes = output.allocation.bytes;
-        output.publish(&call).unwrap();
+        let pointer = output.publish(&call).unwrap();
         drop(call);
         FAIL_NEXT_BLOCK_FREE.with(|fail| fail.set(true));
         // The following entry detaches the epoch, but failed HeapFree cannot
         // discharge its process or module accounting.
         drop(Fp12CallGuard::enter());
-        let retained = numeric_return_memory_metrics().unwrap();
-        assert_eq!(
-            retained.process_published_bytes,
-            before.process_published_bytes + bytes
-        );
-        assert_eq!(
-            retained.process_reserved_bytes,
-            before.process_reserved_bytes + bytes
-        );
-        assert_eq!(
-            retained.module_published_bytes,
-            before.module_published_bytes + bytes
-        );
+        // SAFETY: the injected release failed, so the published cell is
+        // still allocated and readable. Exercise this under Miri as well.
+        assert_eq!(unsafe { values(pointer) }, &[7.0]);
+        #[cfg(not(miri))]
+        {
+            let retained = numeric_return_memory_metrics().unwrap();
+            assert_eq!(
+                retained.process_published_bytes,
+                before.process_published_bytes + bytes
+            );
+            assert_eq!(
+                retained.process_reserved_bytes,
+                before.process_reserved_bytes + bytes
+            );
+            assert_eq!(
+                retained.module_published_bytes,
+                before.module_published_bytes + bytes
+            );
+        }
         // SAFETY: the injected free did not release this detached single node.
         // Excel has no reader and this test owns the sole retry.
         unsafe { reclaim_epoch(block.as_ptr()) };
-        let after = numeric_return_memory_metrics().unwrap();
-        assert_eq!(
-            after.process_published_bytes,
-            before.process_published_bytes
-        );
-        assert_eq!(after.process_reserved_bytes, before.process_reserved_bytes);
-        assert_eq!(after.module_published_bytes, before.module_published_bytes);
+        #[cfg(not(miri))]
+        {
+            let after = numeric_return_memory_metrics().unwrap();
+            assert_eq!(
+                after.process_published_bytes,
+                before.process_published_bytes
+            );
+            assert_eq!(after.process_reserved_bytes, before.process_reserved_bytes);
+            assert_eq!(after.module_published_bytes, before.module_published_bytes);
+        }
     }
 
     unsafe fn values<'a>(pointer: *mut FP12) -> &'a [f64] {
