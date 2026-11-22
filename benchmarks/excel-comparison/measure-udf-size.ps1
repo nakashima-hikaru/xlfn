@@ -66,6 +66,11 @@ try {
         $pdbBytes = (Get-Item $pdb).Length
         # Public symbol locations identify monomorphization, not exact sizes.
         $boundarySymbols = @(Select-String -Path $map -Pattern 'sync_boundary')
+        $extraExports = @(Select-String -Path $map -AllMatches -Pattern '\bxll_bench_extra_\d{4}\b' |
+            ForEach-Object { $_.Matches.Value } | Sort-Object -Unique).Count
+        if ($extraExports -ne $count) {
+            throw "Expected $count generated UDF symbols in the map; found $extraExports"
+        }
         $timingLines = @(Select-String -Path (Join-Path $case.FullName "build.log") -Pattern 'Total time|Pass [0-9]|Final:' |
             ForEach-Object { $_.Line.Trim() })
         $report += [ordered]@{

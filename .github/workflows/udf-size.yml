@@ -49,6 +49,9 @@ jobs:
                 Get-Content (Join-Path $out "scalar-boundary.log")
                 exit $LASTEXITCODE
               }
+              if (!(Select-String -Quiet -Path (Join-Path $out "scalar-boundary.log") -Pattern 'time:')) {
+                throw "No scalar boundary measurements in $variant"
+              }
             } finally {
               Pop-Location
             }
