@@ -5,11 +5,54 @@ use std::sync::atomic::AtomicBool;
 const TEST_CALCULATION: CalculationEpoch = CalculationEpoch::INITIAL;
 
 #[test]
+fn empty_calculation_never_initializes_task_shards() {
+    let state = CalculationState::new(TEST_CALCULATION);
+    let admission = state.enter_admission().unwrap();
+    assert!(!state.remove_task(1));
+    assert!(!state.task_shards_are_allocated());
+    drop(admission);
+
+    assert_eq!(state.close_admission().wait().drain_tasks().len(), 0);
+    assert!(!state.task_shards_are_allocated());
+}
+
+#[test]
+fn concurrent_first_task_registrations_share_the_shard_table() {
+    let state = CalculationState::new(TEST_CALCULATION);
+    let admissions = [
+        state.enter_admission().unwrap(),
+        state.enter_admission().unwrap(),
+    ];
+    assert!(!state.task_shards_are_allocated());
+    let start = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        for (offset, admission) in admissions.into_iter().enumerate() {
+            let start = &start;
+            scope.spawn(move || {
+                let (cancellation, _) = CancellationSource::new(CancellationGuarantee::BestEffort);
+                start.wait();
+                // IDs 1 and 33 deliberately share a shard.
+                admission.insert_task(
+                    TaskRegistrationId(1 + 32 * offset as u64),
+                    TaskControl {
+                        cancellation: cancellation.into_task().0,
+                    },
+                );
+            });
+        }
+    });
+    assert!(state.task_shards_are_allocated());
+    assert!(state.remove_task(1));
+    assert_eq!(state.close_admission().wait().drain_tasks().len(), 1);
+}
+
+#[test]
 fn miri_calculation_close_waits_for_admitted_insert_and_preserves_pins() {
     let owner = PublishedOwner::new(CalculationState::new(CalculationEpoch::INITIAL));
     // SAFETY: this private owner remains alive until after the pin drops.
     let pin = unsafe { CalculationPin::acquire(&owner) };
     let admission = owner.enter_admission().unwrap();
+    assert!(!owner.task_shards_are_allocated());
     let closing = owner.close_admission();
     assert!(owner.enter_admission().is_err());
     let (cancellation, token) = crate::cancellation::CancellationSource::new(
@@ -34,6 +77,7 @@ fn miri_calculation_close_waits_for_admitted_insert_and_preserves_pins() {
                 cancellation: cancellation.into_task().0,
             },
         );
+        assert!(owner.task_shards_are_allocated());
         drop(admission);
         let controls = drained_rx.recv().unwrap();
         assert_eq!(controls.len(), 1);

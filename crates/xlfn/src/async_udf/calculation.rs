@@ -3,6 +3,7 @@ use crate::sync::Mutex;
 use crossbeam_utils::CachePadded;
 use rustc_hash::FxHashMap;
 use std::ptr::NonNull;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use xlfn_kernel::operation_gate::{GateClosed, OperationGuard, TerminationWaitGuard};
@@ -54,30 +55,27 @@ pub(crate) struct CalculationState {
     /// canceled tasks whose controls have already been drained. This is the
     /// calculation allocation's reclamation authority.
     pins: AtomicUsize,
-    shards: Box<[CachePadded<TaskShard>]>,
+    // Only a live admission can initialize the table. Keep it published until
+    // the calculation itself is reclaimed, even if all tasks finish first.
+    shards: OnceLock<Box<[CachePadded<TaskShard>]>>,
 }
 
 impl CalculationState {
     pub(crate) fn new(epoch: CalculationEpoch) -> Self {
-        let shards = (0..TASK_SHARDS)
-            .map(|_| {
-                CachePadded::new(TaskShard {
-                    tasks: Mutex::new(FxHashMap::default()),
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
         Self {
             epoch,
             admission: xlfn_kernel::operation_gate::OperationGate::new(),
             pins: AtomicUsize::new(0),
-            shards,
+            shards: OnceLock::new(),
         }
     }
 
     pub(crate) fn remove_task(&self, id: u64) -> bool {
         let index = task_shard(id);
-        let removed = self.shards[index].tasks.lock().remove(&id);
+        let Some(shards) = self.shards.get() else {
+            return false;
+        };
+        let removed = shards[index].tasks.lock().remove(&id);
         let existed = removed.is_some();
         // Source destruction can wake executor/user wakers. Contain their
         // destructors after releasing the shard lock.
@@ -120,8 +118,15 @@ impl CalculationState {
     }
 
     #[cfg(test)]
+    pub(crate) fn task_shards_are_allocated(&self) -> bool {
+        self.shards.get().is_some()
+    }
+
+    #[cfg(test)]
     pub(crate) fn tasks_are_empty(&self) -> bool {
         self.shards
+            .get()
+            .map_or(&[][..], Box::as_ref)
             .iter()
             .all(|shard| shard.tasks.lock().is_empty())
     }
@@ -129,13 +134,17 @@ impl CalculationState {
     #[cfg(test)]
     pub(crate) fn task_shards_are_unlocked_and_empty(&self) -> bool {
         self.shards
+            .get()
+            .map_or(&[][..], Box::as_ref)
             .iter()
             .all(|shard| shard.tasks.try_lock().is_some_and(|tasks| tasks.is_empty()))
     }
 
     #[cfg(test)]
     pub(crate) fn task_shard_is_unlocked(&self, id: u64) -> bool {
-        self.shards[task_shard(id)].tasks.try_lock().is_some()
+        self.shards
+            .get()
+            .is_none_or(|shards| shards[task_shard(id)].tasks.try_lock().is_some())
     }
 }
 
@@ -156,7 +165,17 @@ impl CalculationAdmission<'_> {
         // RegistrationId is affine and its only production constructor is the
         // registry's checked monotonic allocator. TaskReservation retains both
         // the ID and matching admission until this consuming transfer.
-        self.state.shards[task_shard(id.value())]
+        let shards = self.state.shards.get_or_init(|| {
+            (0..TASK_SHARDS)
+                .map(|_| {
+                    CachePadded::new(TaskShard {
+                        tasks: Mutex::new(FxHashMap::default()),
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        });
+        shards[task_shard(id.value())]
             .tasks
             .lock()
             .insert(id.value(), control);
@@ -191,16 +210,16 @@ impl AdmissionDrainedCalculation<'_> {
         // so controls can only disappear while lengths are sampled. This
         // cold scan provides an upper bound without forcing every spawn and
         // completion to update a shared allocation-hint counter.
-        let capacity = self
-            .state
-            .shards
-            .iter()
-            .map(|shard| shard.tasks.lock().len())
-            .sum();
+        // As no admission remains, an absent table cannot be initialized
+        // after this check. Removal never creates a table.
+        let Some(shards) = self.state.shards.get() else {
+            return TaskControlBatch::new();
+        };
+        let capacity = shards.iter().map(|shard| shard.tasks.lock().len()).sum();
         // Callers drop/wake the controls after releasing the registry control
         // lock. No TaskControl destructor runs while a shard lock is held.
         let mut result = TaskControlBatch::with_capacity(capacity);
-        for shard in self.state.shards.iter() {
+        for shard in shards.iter() {
             let mut tasks = shard.tasks.lock();
             result.extend(tasks.drain().map(|(_, task)| task));
         }
