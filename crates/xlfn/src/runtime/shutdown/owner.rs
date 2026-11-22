@@ -29,7 +29,8 @@ impl<A: crate::Addin> Rollback for PendingRemoval<'_, A> {
 }
 
 /// Keeps cleanup ownership until the terminal callback has returned. The
-/// pipeline owns module authority separately and returns it here on failure.
+/// private stopping owner pairs this exact claim with the drained module
+/// authority and returns that authority here on failure.
 pub(crate) struct RemovalClaimGuard<'runtime, A: crate::Addin> {
     lifecycle: &'runtime crate::lifecycle::LifecycleCoordinator<A>,
     observer: &'runtime crate::runtime::observer::RuntimeObserver,

@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -172,21 +173,10 @@ def error_spans(message: dict) -> list[dict]:
 def check_fixture(
     fixture: Fixture,
     overlay: Path,
-    originals: dict[Path, str],
     target: Path,
     compile_target: str | None = None,
     extra_features: tuple[str, ...] = (),
 ) -> dict:
-    for relative, source in originals.items():
-        (overlay / relative).write_text(source, encoding="utf-8")
-    injected = overlay / MODULES[fixture.module]
-    # Rust accepts literal Unicode; JSON's ASCII-only \uXXXX escapes are not
-    # Rust string escapes and would reject non-ASCII checkout/fixture paths.
-    path_literal = json.dumps(str(overlay / fixture.path), ensure_ascii=False)
-    with injected.open("a", encoding="utf-8") as source:
-        source.write(
-            f"\n#[allow(dead_code)]\n#[path = {path_literal}]\nmod typestate_compile_fixture;\n"
-        )
     package = (
         "xlfn-kernel"
         if fixture.module.startswith("kernel/")
@@ -221,20 +211,43 @@ def check_fixture(
     command.extend(["--target-dir", str(target), "--message-format=json"])
     if compile_target:
         command.extend(["--target", compile_target])
-    completed = subprocess.run(
-        command,
-        cwd=overlay,
-        text=True,
-        encoding="utf-8",
-        capture_output=True,
-        env={**os.environ, "CARGO_TERM_COLOR": "never"},
-    )
+    # Rust accepts literal Unicode; JSON's ASCII-only \uXXXX escapes are not
+    # Rust string escapes and would reject non-ASCII checkout/fixture paths.
+    injected = overlay / MODULES[fixture.module]
+    path_literal = json.dumps(str(overlay / fixture.path), ensure_ascii=False)
+    fixture_declaration = (
+        f"\n#[allow(dead_code)]\n#[path = {path_literal}]\nmod typestate_compile_fixture;\n"
+    ).encode()
+    original = injected.read_bytes()
+    try:
+        with injected.open("ab") as source:
+            source.write(fixture_declaration)
+        completed = subprocess.run(
+            command,
+            cwd=overlay,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            env={**os.environ, "CARGO_TERM_COLOR": "never"},
+        )
+    finally:
+        # Keep all other input files and their timestamps untouched. Restore
+        # bytes, not text, including any original CRLF and non-ASCII content.
+        injected.write_bytes(original)
     errors = []
+    workspace_artifacts_rebuilt = 0
     for line in completed.stdout.splitlines():
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if (
+            event.get("reason") == "compiler-artifact"
+            and event.get("fresh") is False
+            and (manifest := event.get("manifest_path"))
+            and Path(manifest).is_relative_to(overlay)
+        ):
+            workspace_artifacts_rebuilt += 1
         if event.get("reason") == "compiler-message":
             message = event["message"]
             if message.get("level") == "error":
@@ -266,6 +279,7 @@ def check_fixture(
         "features": list(features),
         "command": command,
         "exit_code": completed.returncode,
+        "workspace_artifacts_rebuilt": workspace_artifacts_rebuilt,
         "expected": sorted(expected),
         "observed": sorted(observed),
         "unexpected_errors": unexpected,
@@ -334,14 +348,12 @@ def main() -> int:
             f"SKIP {len(skipped)} Windows fixtures on {compile_target}; run on Windows or use --target",
             flush=True,
         )
+    started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="xlfn-typestate-") as directory:
         overlay = Path(directory)
         report["source_sha256"] = copy_sources(ROOT, overlay)
-        originals = {
-            path: (overlay / path).read_text(encoding="utf-8") for path in MODULES.values()
-        }
         for fixture in cases:
-            result = check_fixture(fixture, overlay, originals, target, args.target, extra_features)
+            result = check_fixture(fixture, overlay, target, args.target, extra_features)
             report["fixtures"].append(result)
             print(f"{'PASS' if result['passed'] else 'FAIL'} {fixture.path}", flush=True)
             if not result["passed"]:
@@ -350,6 +362,16 @@ def main() -> int:
                 # A broken positive control invalidates all negative evidence.
                 if not fixture.errors:
                     break
+    executed = len(report["fixtures"])
+    report["runner_cost"] = {
+        "cargo_invocations": executed,
+        "fixture_injections": executed,
+        "fixture_restores": executed,
+        "workspace_artifacts_rebuilt": sum(
+            fixture["workspace_artifacts_rebuilt"] for fixture in report["fixtures"]
+        ),
+        "elapsed_seconds": time.perf_counter() - started,
+    }
     report["passed"] = len(report["fixtures"]) == len(cases) and all(
         result["passed"] for result in report["fixtures"]
     )

@@ -2,7 +2,7 @@
 use super::CompletedResources;
 use crate::module_runtime::ModuleExportsDrained;
 
-fn invalid(first: ModuleExportsDrained, second: ModuleExportsDrained, resources: CompletedResources) {
+fn invalid(first: ModuleExportsDrained, second: ModuleExportsDrained, resources: CompletedResources<'_>) {
     let _ = (first, second);
     let _ = crate::module_runtime::ModuleExportsDrained::certify(resources);
     let _ = crate::module_runtime::ModuleExportsDrained::certify(resources); // error: E0382

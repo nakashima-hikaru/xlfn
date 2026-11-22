@@ -11,7 +11,7 @@ use crate::error::InputError;
 use crate::subscription::{RtdUpdate, StoredRtdValue};
 use crate::win32::{
     DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_PARAMNOTFOUND, DISP_E_TYPEMISMATCH,
-    DISP_E_UNKNOWNINTERFACE, DISP_E_UNKNOWNNAME, DISPID_UNKNOWN, DISPPARAMS, E_FAIL, E_INVALIDARG,
+    DISP_E_UNKNOWNINTERFACE, DISP_E_UNKNOWNNAME, DISPID_UNKNOWN, DISPPARAMS, E_INVALIDARG,
     E_POINTER, EXCEPINFO, FADF_BSTR, FADF_DISPATCH, FADF_HAVEIID, FADF_RECORD, FADF_UNKNOWN,
     FADF_VARIANT, GUID, S_OK, SAFEARRAY, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
     SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayGetVartype, SysFreeString, SysStringLen,
@@ -19,7 +19,9 @@ use crate::win32::{
 };
 use crate::{XllError, XllResult};
 use std::ptr::{self, NonNull};
-use xlfn_host::com_transport::automation::{VariantArray, VariantValue, write_variant};
+use xlfn_host::com_transport::automation::{
+    VariantArray, VariantArraySource, VariantValue, write_variant,
+};
 
 pub(super) const IID_NULL: super::GUID = super::GUID {
     data1: 0,
@@ -662,7 +664,12 @@ pub fn benchmark_rtd_bstr(value: &str) {
 }
 
 pub(super) unsafe fn write_value_variant(result: *mut VARIANT, value: &StoredRtdValue) -> i32 {
-    let value = match value {
+    // SAFETY: the enclosing Automation boundary controls the empty output slot.
+    unsafe { write_variant(result, stored_variant_value(value)) }
+}
+
+fn stored_variant_value(value: &StoredRtdValue) -> VariantValue<'_> {
+    match value {
         StoredRtdValue::Number(value) => VariantValue::Number(*value),
         StoredRtdValue::Boolean(value) => VariantValue::Boolean(*value),
         StoredRtdValue::Integer(value) => VariantValue::Integer(*value),
@@ -672,56 +679,23 @@ pub(super) unsafe fn write_value_variant(result: *mut VARIANT, value: &StoredRtd
             VariantValue::ErrorCode((0x800A_0000_u32 | (2000 + value.code()) as u32) as i32)
         }
         StoredRtdValue::Empty => VariantValue::Empty,
-    };
-    // SAFETY: the enclosing Automation boundary controls the empty output slot.
-    unsafe { write_variant(result, value) }
+    }
 }
 
-/// Native array adapter. The private refresh publication core still owns
-/// release evidence and sole write/commit authority.
-pub(crate) enum WindowsRefreshArrayApi {}
-impl WindowsRefreshArrayApi {
-    pub(crate) fn create(count: u32) -> Result<NonNull<SAFEARRAY>, i32> {
-        VariantArray::create(count)
+pub(crate) type WindowsRefreshArrayApi = VariantArray<RtdArraySource>;
+
+/// Maps borrowed batch entries to native scalars without copying a batch or
+/// importing subscription types into the host crate.
+pub(crate) enum RtdArraySource {}
+
+impl VariantArraySource for RtdArraySource {
+    type Update = RtdUpdate;
+
+    fn row(update: &Self::Update) -> (i32, VariantValue<'_>) {
+        (update.topic_id, stored_variant_value(&update.value))
     }
 
-    pub(crate) unsafe fn access(array: NonNull<SAFEARRAY>) -> Result<*mut VARIANT, i32> {
-        // SAFETY: the private refresh owner supplies the fresh, unlocked array.
-        unsafe { VariantArray::access(array) }
-    }
-
-    pub(crate) unsafe fn fill(data: *mut VARIANT, updates: &[RtdUpdate]) -> Result<(), i32> {
-        if data.is_null() {
-            return Err(E_FAIL);
-        }
-        // SAFETY: AccessData locked the validated 2*updates.len VARIANT cells.
-        let cells = unsafe { std::slice::from_raw_parts_mut(data, updates.len() * 2) };
-        for (column, update) in cells.as_chunks_mut::<2>().0.iter_mut().zip(updates) {
-            let mut topic = VARIANT::default();
-            topic.Anonymous.Anonymous.vt = VT_I4;
-            topic.Anonymous.Anonymous.Anonymous.lVal = update.topic_id;
-            column[0] = topic;
-            // SAFETY: each array-owned VARIANT is initialized and writable;
-            // successful conversion transfers its BSTR directly into the cell.
-            let status = unsafe { write_value_variant(&mut column[1], &update.value) };
-            if status != S_OK {
-                return Err(status);
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) unsafe fn unaccess(array: NonNull<SAFEARRAY>) -> Result<(), i32> {
-        // SAFETY: the private refresh owner retains exactly one access.
-        unsafe { VariantArray::unaccess(array) }
-    }
-
-    pub(crate) unsafe fn destroy(array: NonNull<SAFEARRAY>) {
-        // SAFETY: the private refresh owner proves this array unlocked and untransferred.
-        unsafe { VariantArray::destroy(array) };
-    }
-
-    pub(crate) fn retained(status: i32) {
+    fn retained(status: i32) {
         // Unlike the old fail-stop unlock guard, an unsuccessful unlock now
         // retains the allocation without a second unlock or destruction attempt.
         crate::diagnostics::report_no_unwind(

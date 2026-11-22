@@ -37,7 +37,9 @@ thread_local! {
 }
 
 struct MockApi;
-impl ArrayApi for MockApi {
+// SAFETY: the mock tracks one logical array and its lock in thread-local state.
+unsafe impl ArrayApi for MockApi {
+    type Update = RtdUpdate;
     type Array = usize;
     type Data = usize;
     fn create(count: u32) -> Result<usize, i32> {
@@ -52,7 +54,7 @@ impl ArrayApi for MockApi {
             Ok(1)
         })
     }
-    fn access(array: usize) -> Result<usize, i32> {
+    unsafe fn access(array: usize) -> Result<usize, i32> {
         assert_eq!(array, 1);
         API.with(|state| {
             let mut state = state.borrow_mut();
@@ -68,7 +70,7 @@ impl ArrayApi for MockApi {
             Ok(array)
         })
     }
-    fn fill(data: usize, updates: &[RtdUpdate]) -> Result<(), i32> {
+    unsafe fn fill(data: usize, updates: &[RtdUpdate]) -> Result<(), i32> {
         assert_eq!(data, 1);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].value, StoredRtdValue::Integer(42));
@@ -83,7 +85,7 @@ impl ArrayApi for MockApi {
             Ok(())
         })
     }
-    fn unaccess(array: usize) -> Result<(), i32> {
+    unsafe fn unaccess(array: usize) -> Result<(), i32> {
         assert_eq!(array, 1);
         API.with(|state| {
             let mut state = state.borrow_mut();
@@ -98,7 +100,7 @@ impl ArrayApi for MockApi {
             Ok(())
         })
     }
-    fn destroy(array: usize) {
+    unsafe fn destroy(array: usize) {
         assert_eq!(array, 1);
         API.with(|state| {
             let mut state = state.borrow_mut();
@@ -214,13 +216,18 @@ fn miri_marshal_failures_restore_exact_batch_and_obey_array_lock_ownership() {
         let failed = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
             RefreshPublication::<_, MockApi>::prepare(batch)
         }));
-        if matches!(
-            fault,
-            Fault::AccessPanic | Fault::FillPanic | Fault::UnlockPanic
-        ) {
-            assert!(failed.is_err());
+        let status = match fault {
+            Fault::CreateError => Some(-1),
+            Fault::AccessError => Some(-2),
+            Fault::FillError => Some(-3),
+            Fault::UnlockError => Some(-4),
+            Fault::AccessPanic | Fault::FillPanic | Fault::UnlockPanic => None,
+            Fault::None => unreachable!(),
+        };
+        if let Some(status) = status {
+            assert!(matches!(failed, Ok(Err(MarshalFailure::Backend(s))) if s == status));
         } else {
-            assert!(matches!(failed, Ok(Err(_))));
+            assert!(failed.is_err());
         }
         API.with(|state| {
             let state = state.borrow();
@@ -370,8 +377,8 @@ fn miri_after_handoff_completion_failure_keeps_the_transferred_array() {
             (1, Some(1), 0)
         );
         API.with(|state| assert_eq!(state.borrow().destroyed, 0));
-        // The mock host, not the publication transaction, owns destruction now.
-        MockApi::destroy(1);
+        // SAFETY: the mock host owns the transferred handle after handoff.
+        unsafe { MockApi::destroy(1) };
         server
             .test_server()
             .publish
@@ -416,7 +423,8 @@ fn miri_panic_after_commit_does_not_reset_outputs_or_restore_delivered_batch() {
         );
         API.with(|state| assert_eq!(state.borrow().destroyed, 0));
         assert_eq!(server.pending_update_count(), 0);
-        MockApi::destroy(1);
+        // SAFETY: the mock host owns the transferred handle after handoff.
+        unsafe { MockApi::destroy(1) };
     }
 }
 
@@ -442,23 +450,29 @@ fn forgotten_prepared_publication_never_hands_off_or_certifies_delivery() {
 }
 
 struct PointerApi;
-impl ArrayApi for PointerApi {
+// SAFETY: the pointer is only an identity token for the same tracked mock array.
+unsafe impl ArrayApi for PointerApi {
+    type Update = RtdUpdate;
     type Array = std::ptr::NonNull<u8>;
     type Data = usize;
     fn create(count: u32) -> Result<Self::Array, i32> {
         MockApi::create(count).map(|_| std::ptr::NonNull::dangling())
     }
-    fn access(_: Self::Array) -> Result<Self::Data, i32> {
-        MockApi::access(1)
+    unsafe fn access(_: Self::Array) -> Result<Self::Data, i32> {
+        // SAFETY: the pointer mock delegates ownership to mock handle 1.
+        unsafe { MockApi::access(1) }
     }
-    fn fill(data: Self::Data, updates: &[RtdUpdate]) -> Result<(), i32> {
-        MockApi::fill(data, updates)
+    unsafe fn fill(data: Self::Data, updates: &[RtdUpdate]) -> Result<(), i32> {
+        // SAFETY: the pointer mock delegates ownership to mock handle 1.
+        unsafe { MockApi::fill(data, updates) }
     }
-    fn unaccess(_: Self::Array) -> Result<(), i32> {
-        MockApi::unaccess(1)
+    unsafe fn unaccess(_: Self::Array) -> Result<(), i32> {
+        // SAFETY: the pointer mock delegates ownership to mock handle 1.
+        unsafe { MockApi::unaccess(1) }
     }
-    fn destroy(_: Self::Array) {
-        MockApi::destroy(1);
+    unsafe fn destroy(_: Self::Array) {
+        // SAFETY: the pointer mock delegates ownership to mock handle 1.
+        unsafe { MockApi::destroy(1) };
     }
     fn retained(_: Self::Array, status: i32) {
         MockApi::retained(1, status);
@@ -540,7 +554,8 @@ fn miri_notification_reentry_can_read_the_handed_off_raw_outputs() {
     assert_eq!(array, std::ptr::NonNull::<u8>::dangling().as_ptr());
     API.with(|state| assert_eq!(state.borrow().destroyed, 0));
     // Simulate the host releasing the array after receiving ownership.
-    PointerApi::destroy(std::ptr::NonNull::dangling());
+    // SAFETY: this is the unlocked token transferred to the mock host.
+    unsafe { PointerApi::destroy(std::ptr::NonNull::dangling()) };
     let remaining = server.begin_refresh().unwrap();
     assert_eq!(remaining.updates()[0].value, StoredRtdValue::Integer(43));
     remaining.complete(RefreshOutcome::Delivered).unwrap();

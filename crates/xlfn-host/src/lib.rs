@@ -9,6 +9,10 @@ pub mod drain;
 #[cfg(windows)]
 pub mod com_transport;
 
+/// Array construction and abandonment separate from batch-delivery authority.
+#[doc(hidden)]
+pub mod refresh_array;
+
 /// COM-aware waiting and owned Win32 event handles.
 #[doc(hidden)]
 #[cfg(windows)]

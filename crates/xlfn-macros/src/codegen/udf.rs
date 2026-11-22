@@ -3,6 +3,47 @@ use xlfn_common::{ArgumentAbi, ReturnAbi};
 
 use crate::model;
 
+// Render the entrypoint type and its registration ABI together. Ownership and
+// conversion policy live in the lowering plan, not in the Excel wire ABI.
+fn render_argument_abi(
+    abi: ArgumentAbi,
+    krate: &syn::Path,
+    generated: proc_macro2::Span,
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    let (raw_type, variant) = match abi {
+        ArgumentAbi::Value12 => (
+            quote_spanned!(generated=>*mut #krate::__private::v1::XLOPER12),
+            quote_spanned!(generated=>Value12),
+        ),
+        ArgumentAbi::Reference12 => (
+            quote_spanned!(generated=>*mut #krate::__private::v1::XLOPER12),
+            quote_spanned!(generated=>Reference12),
+        ),
+        ArgumentAbi::Float64 => (
+            quote_spanned!(generated=>::core::primitive::f64),
+            quote_spanned!(generated=>Float64),
+        ),
+        ArgumentAbi::Boolean16 => (
+            quote_spanned!(generated=>::core::primitive::i16),
+            quote_spanned!(generated=>Boolean16),
+        ),
+        ArgumentAbi::Integer32 => (
+            quote_spanned!(generated=>::core::primitive::i32),
+            quote_spanned!(generated=>Integer32),
+        ),
+        ArgumentAbi::CountedUtf16 => (
+            quote_spanned!(generated=>*const ::core::primitive::u16),
+            quote_spanned!(generated=>CountedUtf16),
+        ),
+        ArgumentAbi::NumericArray12 => (
+            quote_spanned!(generated=>*const #krate::__private::v1::FP12),
+            quote_spanned!(generated=>NumericArray12),
+        ),
+    };
+    let descriptor = quote_spanned!(generated=>#krate::__private::v1::ArgumentAbi::#variant);
+    (raw_type, descriptor)
+}
+
 pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenStream {
     // Generated locals must not capture names used by consumer default expressions.
     // Interpolated user syntax retains its original span and resolves at the call site.
@@ -29,24 +70,16 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     );
     let execution = &plan.execution;
     let arguments = &plan.arguments;
-    let raw_parameters = arguments.iter().map(|argument| {
-        let raw = &argument.raw_ident;
-        let ty = match argument.abi() {
-            ArgumentAbi::Value12 | ArgumentAbi::Reference12 => {
-                quote_spanned!(generated=>*mut #krate::__private::v1::XLOPER12)
-            }
-            ArgumentAbi::NumericArray12 => {
-                quote_spanned!(generated=>*const #krate::__private::v1::FP12)
-            }
-            ArgumentAbi::Float64 => quote_spanned!(generated=>::core::primitive::f64),
-            ArgumentAbi::Boolean16 => quote_spanned!(generated=>::core::primitive::i16),
-            ArgumentAbi::Integer32 => quote_spanned!(generated=>::core::primitive::i32),
-            ArgumentAbi::CountedUtf16 => {
-                quote_spanned!(generated=>*const ::core::primitive::u16)
-            }
-        };
-        quote_spanned!(generated=>#raw: #ty)
-    });
+    let rendered_arguments: Vec<_> = arguments
+        .iter()
+        .map(|argument| {
+            let raw = &argument.raw_ident;
+            let (ty, descriptor) = render_argument_abi(argument.abi(), krate, generated);
+            (quote_spanned!(generated=>#raw: #ty), descriptor)
+        })
+        .collect();
+    let raw_parameters = rendered_arguments.iter().map(|(parameter, _)| parameter);
+    let argument_abi_tokens = rendered_arguments.iter().map(|(_, descriptor)| descriptor);
     let argument_descriptors = arguments.iter().map(|argument| {
         let name = &argument.excel_name;
         let description = &argument.description;
@@ -124,19 +157,6 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         _ => emit_sync(plan, &return_assertion, &execution_mode, raw_parameters),
     };
 
-    let argument_abi_tokens = arguments.iter().map(|argument| {
-        let variant = match argument.abi() {
-            ArgumentAbi::Value12 => quote_spanned!(generated=>Value12),
-            ArgumentAbi::Reference12 => quote_spanned!(generated=>Reference12),
-            ArgumentAbi::Float64 => quote_spanned!(generated=>Float64),
-            ArgumentAbi::Boolean16 => quote_spanned!(generated=>Boolean16),
-            ArgumentAbi::Integer32 => quote_spanned!(generated=>Integer32),
-            ArgumentAbi::CountedUtf16 => quote_spanned!(generated=>CountedUtf16),
-            ArgumentAbi::NumericArray12 => quote_spanned!(generated=>NumericArray12),
-        };
-        quote_spanned!(generated=>#krate::__private::v1::ArgumentAbi::#variant)
-    });
-
     quote_spanned! {generated=>
         #function
 
@@ -180,11 +200,11 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     }
 }
 
-fn emit_sync(
+fn emit_sync<'a>(
     plan: &model::UdfPlan,
     return_assertion: &proc_macro2::TokenStream,
     execution_mode: &proc_macro2::TokenStream,
-    raw_parameters: impl Iterator<Item = proc_macro2::TokenStream>,
+    raw_parameters: impl Iterator<Item = &'a proc_macro2::TokenStream>,
 ) -> proc_macro2::TokenStream {
     let generated = proc_macro2::Span::mixed_site();
     let krate = &plan.crate_path;

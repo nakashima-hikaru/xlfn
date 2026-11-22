@@ -8,7 +8,8 @@ use crate::generation::OpeningGeneration;
 use crate::host_callback::HostCallbackSession;
 use crate::registration::RegistrationDescriptor;
 use crate::runtime::open_txn::{
-    GenerationStaged, HostAttached, Initialized, Initializing, OpeningTxn,
+    GenerationStaged, HostAttached, Initialized, Initializing, OpenRollbackOwner, OpeningTxn,
+    PreparedGeneration, RollbackState,
 };
 use crate::runtime::rollback::{active_runtime_generation, rollback_open};
 use crate::runtime::transactions::open_addin_inner;
@@ -27,13 +28,23 @@ pub(crate) enum OpenFailure<'runtime, A: Addin> {
         transaction: Box<OpeningTxn<'runtime, A, Initialized<A>>>,
         error: XllError,
     },
-    GenerationStaged {
-        transaction: Box<OpeningTxn<'runtime, A, GenerationStaged<A>>>,
+    Rollback {
+        owner: Box<OpenRollbackOwner<'runtime, A>>,
         error: XllError,
     },
 }
 
 impl<'runtime, A: Addin> OpenFailure<'runtime, A> {
+    pub(crate) fn rollback<S: RollbackState<A>>(
+        transaction: OpeningTxn<'runtime, A, S>,
+        error: XllError,
+    ) -> Self {
+        Self::Rollback {
+            owner: Box::new(transaction.into_rollback()),
+            error,
+        }
+    }
+
     pub(crate) fn recover(self, lifecycle: &AddinLifecycleAccess<'_, A>) -> XllError {
         match self {
             Self::HostAttached { transaction, error } => {
@@ -53,8 +64,8 @@ impl<'runtime, A: Addin> OpenFailure<'runtime, A> {
                 transaction.into_rollback().run(lifecycle);
                 error
             }
-            Self::GenerationStaged { transaction, error } => {
-                transaction.into_rollback().run(lifecycle);
+            Self::Rollback { owner, error } => {
+                owner.run(lifecycle);
                 error
             }
         }
@@ -89,7 +100,7 @@ impl<'runtime, A: Addin> OpeningTxn<'runtime, A, Initialized<A>> {
                 if transaction.deps().lifecycle_access().phase()
                     != crate::lifecycle::LifecyclePhase::Opening
                 {
-                    return Err(transaction.failure(XllError::Closing));
+                    return Err(OpenFailure::rollback(transaction, XllError::Closing));
                 }
                 Ok(transaction)
             }
@@ -105,12 +116,9 @@ impl<'runtime, A: Addin> OpeningTxn<'runtime, A, Initialized<A>> {
     }
 }
 
-impl<'runtime, A: Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
+impl<'runtime, A: Addin> OpeningTxn<'runtime, A, PreparedGeneration<A>> {
     pub(crate) fn failure(self, error: XllError) -> OpenFailure<'runtime, A> {
-        OpenFailure::GenerationStaged {
-            transaction: Box::new(self),
-            error,
-        }
+        OpenFailure::rollback(self, error)
     }
 }
 
@@ -208,7 +216,7 @@ where
         let transaction = match transaction.install_lifecycle(lifecycle) {
             Ok(transaction) => transaction,
             Err((reason, transaction)) => {
-                return Err(transaction
+                return Err((*transaction)
                     .failure(crate::lifecycle::lifecycle_access_error(reason))
                     .recover(lifecycle));
             }

@@ -2470,6 +2470,20 @@ fn iunknown_vtable_has_three_pointer_slots() {
 }
 
 #[test]
+fn empty_refresh_overwrites_stale_outputs_without_a_safearray() {
+    let mut count = -1;
+    let mut array = ptr::dangling_mut();
+    // SAFETY: both output slots are writable and disjoint. The sentinel is
+    // not an owned array and must be overwritten without dereferencing it.
+    assert_eq!(
+        unsafe { write_refresh_data(&mut count, &mut array, &[]) },
+        S_OK
+    );
+    assert_eq!(count, 0);
+    assert!(array.is_null());
+}
+
+#[test]
 fn refresh_data_arrays_have_two_rows_for_small_and_large_batches() {
     let _apartment = TestComApartment::enter();
     for count in [1, 2, 3, 100] {
@@ -2494,6 +2508,9 @@ fn refresh_data_arrays_have_two_rows_for_small_and_large_batches() {
         // SAFETY: write_refresh_data returned a live SAFEARRAY owned by this
         // test and it has not yet been destroyed.
         assert_eq!(unsafe { SafeArrayGetDim(array) }, 2);
+        // SAFETY: the live SAFEARRAY descriptor can be read before any
+        // subsequent OLE operations. Handoff may publish only after unlock.
+        assert_eq!(unsafe { (*array).cLocks }, 0);
 
         let mut first_lower = -1;
         let mut first_upper = -1;

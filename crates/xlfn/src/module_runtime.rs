@@ -390,15 +390,15 @@ impl ModuleExportsDrained {
     }
 
     pub(crate) fn certify(
-        resources: crate::runtime::CompletedResources,
-    ) -> Result<(ModuleQuiescent, ExportsDrained), (crate::XllError, Self)> {
+        resources: crate::runtime::CompletedResources<'_>,
+    ) -> crate::XllResult<(ModuleQuiescent, &ExportsDrained)> {
         let (module, resources) = resources.into_module_parts();
         if !module.id.is_current() {
             xlfn_kernel::invariant::fail_stop();
         }
         module.close_callbacks();
         if !module.module.callback_admission.is_closed_and_quiescent() {
-            return Err((crate::XllError::Closing, module));
+            return Err(crate::XllError::Closing);
         }
         #[cfg(any(feature = "rtd", feature = "handles"))]
         RtdModuleState::certify_logical_quiescence(LogicalQuiescencePublication {
@@ -407,7 +407,7 @@ impl ModuleExportsDrained {
         });
         #[cfg(not(any(feature = "rtd", feature = "handles")))]
         let _completed = resources;
-        Ok((ModuleQuiescent { id: module.id }, module.exports))
+        Ok((ModuleQuiescent { id: module.id }, &module.exports))
     }
 
     /// Isolated module tests intentionally do not model generation resources.

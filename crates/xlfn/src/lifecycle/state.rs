@@ -1562,11 +1562,6 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
         self.core.state.removal_attempt()
     }
 
-    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
-    pub(crate) fn opening_config(&self) -> Option<crate::addin_impl::RuntimeConfig> {
-        self.core.state.opening().map(|opening| opening.init_config)
-    }
-
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn has_current_generation(&self) -> bool {
         self.core.state.has_current_generation()

@@ -1018,6 +1018,7 @@ mod tests {
     fn native_abi_drives_ffi_types_and_both_execution_conversions() {
         for asynchronous in [false, true] {
             let qualifier = asynchronous.then(|| quote!(async));
+            let borrowed = (!asynchronous).then(|| quote!(#[excel_arg(native)] borrowed: &str,));
             let expanded = expand_excel_function(
                 quote!(),
                 function(quote!(
@@ -1027,6 +1028,7 @@ mod tests {
                         #[excel_arg(native)] count: i32,
                         #[excel_arg(native)] text: String,
                         #[excel_arg(strict)] strict_number: f64,
+                        #borrowed
                     ) -> f64 { number }
                 )),
             )
@@ -1057,7 +1059,15 @@ mod tests {
                 types[4],
                 "__raw_4 : * mut :: xlfn :: __private :: v1 :: XLOPER12"
             );
-            assert_eq!(types.len(), if asynchronous { 6 } else { 5 });
+            assert_eq!(types.len(), 6);
+            if asynchronous {
+                assert_eq!(
+                    types[5],
+                    "__async_handle : * mut :: xlfn :: __private :: v1 :: XLOPER12"
+                );
+            } else {
+                assert_eq!(types[5], "__raw_5 : * const :: core :: primitive :: u16");
+            }
             let expanded = expanded.to_string();
             for variant in [
                 "Float64",
@@ -1067,6 +1077,13 @@ mod tests {
                 "Value12",
             ] {
                 assert!(expanded.contains(&format!("ArgumentAbi :: {variant}")));
+            }
+            assert_eq!(
+                expanded.matches("ArgumentAbi :: CountedUtf16").count(),
+                if asynchronous { 1 } else { 2 },
+            );
+            if !asynchronous {
+                assert!(expanded.contains("prepare_native_str ("));
             }
             for suffix in ["f64", "bool", "i32", "string"] {
                 let prefix = if asynchronous { "" } else { "prepare_" };

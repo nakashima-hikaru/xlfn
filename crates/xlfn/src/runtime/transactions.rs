@@ -1,5 +1,5 @@
 use crate::XllError;
-use crate::addin_impl::{Addin, BuildInfo, OpenContext, RuntimeConfig};
+use crate::addin_impl::{Addin, BuildInfo, OpenContext};
 use crate::error::IntoXllError;
 use crate::host_callback::HostCallbackSession;
 use crate::panic_boundary::catch_no_unwind;
@@ -8,7 +8,7 @@ use crate::registration::{HostRegistrar, RegistrationHost};
 use crate::runtime::capabilities::ShutdownDeps;
 #[cfg(test)]
 use crate::runtime::open_txn::RollbackState;
-use crate::runtime::open_txn::{GenerationStaged, HostAttached, OpeningState, OpeningTxn};
+use crate::runtime::open_txn::{HostAttached, OpeningState, OpeningTxn, PreparedGeneration};
 use crate::runtime::shutdown::{
     ExecutionDrainFailure, ExecutionDrained, FinalRemoval, FinalizedRemoval, RemovalOwner,
     TeardownTxn,
@@ -22,24 +22,22 @@ use crate::lifecycle::lifecycle_access_error;
 use crate::runtime::open;
 use crate::runtime::recovery::{commit_removal_control, handle_unload_hazard, quarantine_runtime};
 
-type StagedOpenResult<'runtime, A> = Result<
+type RegisteredOpenResult<'runtime, A> = Result<
     (
-        OpeningTxn<'runtime, A, GenerationStaged<A>>,
+        OpeningTxn<'runtime, A, PreparedGeneration<A>>,
         crate::registration::SuccessfulRegistrations,
     ),
     open::OpenFailure<'runtime, A>,
 >;
 
-type InitializedOpenResult<'runtime, A> = Result<
-    (OpeningTxn<'runtime, A, GenerationStaged<A>>, RuntimeConfig),
-    open::OpenFailure<'runtime, A>,
->;
+type PreparedOpenResult<'runtime, A> =
+    Result<OpeningTxn<'runtime, A, PreparedGeneration<A>>, open::OpenFailure<'runtime, A>>;
 
 pub(crate) fn open_addin_inner<'runtime, A>(
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
     mut transaction: OpeningTxn<'runtime, A, HostAttached<A>>,
-) -> StagedOpenResult<'runtime, A>
+) -> RegisteredOpenResult<'runtime, A>
 where
     A: Addin,
 {
@@ -84,46 +82,56 @@ where
         Err(error) => return Err(transaction.failure(error)),
     };
     let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
-    let (mut transaction, runtime_config) = initialize_addin::<A>(context, transaction)?;
+    let transaction = initialize_addin::<A>(context, transaction)?;
     if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
         return Err(transaction.failure(XllError::Closing));
     }
-    let has_async_functions = prepared_set
-        .iter()
-        .any(|descriptor| descriptor.execution().is_async());
-    if has_async_functions
-        || (!prepared_set.as_slice().is_empty() && runtime_config.calculation_end_notifications())
-    {
-        let event_result = {
+    transaction.register_prepared_host(registrar, &prepared_set)
+}
+
+impl<'runtime, A: Addin> OpeningTxn<'runtime, A, PreparedGeneration<A>> {
+    pub(crate) fn register_prepared_host(
+        self,
+        registrar: HostRegistrar,
+        prepared_set: &crate::registration::preflight::ValidatedRegistrationSet,
+    ) -> RegisteredOpenResult<'runtime, A> {
+        let mut transaction = self;
+        let deps = transaction.deps();
+        let has_async_functions = prepared_set
+            .iter()
+            .any(|descriptor| descriptor.execution().is_async());
+        if has_async_functions
+            || (!prepared_set.as_slice().is_empty()
+                && transaction.runtime_config().calculation_end_notifications())
+        {
+            let event_result = transaction.ensure_calculation_events(has_async_functions);
+            match event_result {
+                Ok(()) => {}
+                Err(error) => return Err(transaction.failure(error)),
+            }
+        }
+        if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
+            return Err(transaction.failure(XllError::Closing));
+        }
+        let registration_result = {
             let host = RegistrationHost::new(transaction.callbacks_mut());
-            deps.ensure_calculation_events(&host, has_async_functions)
+            registrar.register_all(&host, prepared_set)
         };
-        match event_result {
-            Ok(()) => {}
-            Err(error) => return Err(transaction.failure(error)),
+        let mut registrations = match registration_result {
+            Ok(registrations) => registrations,
+            Err(error) => {
+                let error = retain_transaction_error(&mut transaction, error);
+                return Err(transaction.failure(error));
+            }
+        };
+        // Retain successful Excel mutations before installing the lifecycle
+        // state. Either operation can still lose to a nested close.
+        transaction.retain_journal(registrations.take_journal());
+        if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
+            return Err(transaction.failure(XllError::Closing));
         }
+        Ok((transaction, registrations))
     }
-    if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
-        return Err(transaction.failure(XllError::Closing));
-    }
-    let registration_result = {
-        let host = RegistrationHost::new(transaction.callbacks_mut());
-        registrar.register_all(&host, &prepared_set)
-    };
-    let mut registrations = match registration_result {
-        Ok(registrations) => registrations,
-        Err(error) => {
-            let error = retain_transaction_error(&mut transaction, error);
-            return Err(transaction.failure(error));
-        }
-    };
-    // Retain successful Excel mutations before installing the lifecycle
-    // state. Either operation can still lose to a nested close.
-    transaction.retain_journal(registrations.take_journal());
-    if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
-        return Err(transaction.failure(XllError::Closing));
-    }
-    Ok((transaction, registrations))
 }
 
 #[cfg(test)]
@@ -142,7 +150,7 @@ pub(crate) fn rollback_active_open<'runtime, A, S>(
 pub(crate) fn initialize_addin<'runtime, A>(
     context: OpenContext<A>,
     transaction: OpeningTxn<'runtime, A, HostAttached<A>>,
-) -> InitializedOpenResult<'runtime, A>
+) -> PreparedOpenResult<'runtime, A>
 where
     A: Addin,
 {
@@ -165,12 +173,10 @@ where
         layers,
         init_config: runtime_config,
     };
-    let mut transaction = transaction.stage_generation(opening)?;
+    let transaction = transaction.stage_generation(opening)?;
     // Prepare the entire generation service bundle while the transaction
     // still owns the rollback session, before workers or host registration.
-    if let Err(error) = transaction.prepare_services(runtime_config) {
-        return Err(transaction.failure(error));
-    }
+    let transaction = transaction.prepare_services()?;
     #[cfg(feature = "async")]
     if let Err(error) = transaction
         .deps()
@@ -181,7 +187,7 @@ where
     }
     #[cfg(not(feature = "async"))]
     let _ = async_executor;
-    Ok((transaction, runtime_config))
+    Ok(transaction)
 }
 
 fn retain_transaction_error<A: Addin, S>(

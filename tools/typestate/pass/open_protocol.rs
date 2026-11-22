@@ -19,6 +19,8 @@ fn open<'runtime, A: crate::Addin>(
         .initialized(lifecycle_state, inputs)
         .stage_opening_generation(generation)
         .ok()?
+        .prepare_services()
+        .ok()?
         .install_lifecycle(access)
         .ok()?
         .stage_host_mutations(registrations)

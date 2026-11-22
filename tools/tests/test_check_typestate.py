@@ -33,12 +33,27 @@ class PackageRoutingTests(unittest.TestCase):
                 source.parent.mkdir(parents=True)
                 source.write_text("// original\n", encoding="utf-8")
                 fixture = checker.Fixture(Path("tools/typestate/pass/control.rs"), module, ())
-                completed = subprocess.CompletedProcess([], 0, "", "")
-                with patch.object(checker.subprocess, "run", return_value=completed) as run:
+                events = [
+                    {"reason": "compiler-artifact", "fresh": fresh, "manifest_path": str(path)}
+                    for fresh, path in (
+                        (False, overlay / "Cargo.toml"),
+                        (True, overlay / "Cargo.toml"),
+                        (False, overlay.parent / "external" / "Cargo.toml"),
+                    )
+                ]
+                stdout = "\n".join(json.dumps(event) for event in events)
+                completed = subprocess.CompletedProcess([], 0, stdout, "")
+
+                def compile_fixture(*_args, **_kwargs):
+                    self.assertIn(
+                        "mod typestate_compile_fixture;", source.read_text(encoding="utf-8")
+                    )
+                    return completed
+
+                with patch.object(checker.subprocess, "run", side_effect=compile_fixture) as run:
                     result = checker.check_fixture(
                         fixture,
                         overlay,
-                        {relative: "// original\n"},
                         overlay / "target",
                         "x86_64-pc-windows-msvc",
                         ("blake3/pure",),
@@ -52,8 +67,42 @@ class PackageRoutingTests(unittest.TestCase):
                     self.assertNotIn("--features", command)
                 self.assertTrue(result["passed"])
                 self.assertEqual(result["package"], package)
+                self.assertEqual(result["workspace_artifacts_rebuilt"], 1)
                 self.assertEqual(result["features"], list(features))
-                self.assertIn("mod typestate_compile_fixture;", source.read_text(encoding="utf-8"))
+                self.assertEqual(source.read_bytes(), b"// original\n")
+
+
+class OverlayCleanupTests(unittest.TestCase):
+    def test_only_injected_source_is_written_and_its_bytes_survive_cargo_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            overlay = Path(directory)
+            first = "registration/host"
+            second = "kernel/service_slot"
+            source = overlay / checker.MODULES[first]
+            untouched = overlay / checker.MODULES[second]
+            original = "// 元のソース\r\n".encode()
+            for path in (source, untouched):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(original)
+            fixture = checker.Fixture(Path("tools/typestate/pass/control.rs"), first, ())
+            before = untouched.stat().st_mtime_ns
+            writes = []
+            write_bytes = Path.write_bytes
+
+            def record_write(path, data):
+                writes.append(path)
+                return write_bytes(path, data)
+
+            with (
+                patch.object(Path, "write_bytes", record_write),
+                patch.object(checker.subprocess, "run", side_effect=OSError("no cargo")),
+                self.assertRaisesRegex(OSError, "no cargo"),
+            ):
+                checker.check_fixture(fixture, overlay, overlay / "target")
+            self.assertEqual(writes, [source])
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(untouched.read_bytes(), original)
+            self.assertEqual(untouched.stat().st_mtime_ns, before)
 
 
 class Utf8TypestateTests(unittest.TestCase):
@@ -215,6 +264,8 @@ class Utf8TypestateTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertTrue(report["passed"])
         self.assertEqual(len(compiled), 2)
+        for count in ("cargo_invocations", "fixture_injections", "fixture_restores"):
+            self.assertEqual(report["runner_cost"][count], 2)
         self.assertEqual(len(report["skipped_fixtures"]), 1)
         negative = next(case for case in report["fixtures"] if case["expected"])
         self.assertEqual(negative["expected"], [[3, "E0308"]])
