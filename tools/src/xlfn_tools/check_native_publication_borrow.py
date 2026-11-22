@@ -168,7 +168,9 @@ fn borrowed_cache_lease_probe<V>(lease: CacheLease<'_, V>) {
         # would test privacy rather than consumption of the retirement owner.
         reclaim_path = tree / "crates/xlfn-services/src/cache/reclamation.rs"
         reclaim_source = reclaim_path.read_text()
-        anchor = "unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>, report: CachePanicReporter) {"
+        anchor = (
+            "unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>, report: CachePanicReporter) {"
+        )
         probe = """
 unsafe fn duplicate_cache_reclamation_probe<V>(entry: ReclaimEntry<V>) {
     unsafe { reclaim_cache_node(entry, super::ignore_cache_panic); }
@@ -193,7 +195,7 @@ unsafe fn duplicate_cache_reclamation_probe<V>(entry: ReclaimEntry<V>) {
         reclaim_path.write_text(reclaim_source)
         probe = """
 fn release_cache_domain_before_batch_probe() {
-    let domain = CacheLookupDomain::<u8>::new();
+    let domain = CacheLookupDomain::<u8>::with_reporter(super::ignore_cache_panic);
     let batch = domain.quiesce_and_drain();
     drop(domain);
     reclaim_cache_entries(batch);

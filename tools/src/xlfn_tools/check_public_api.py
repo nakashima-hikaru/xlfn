@@ -17,9 +17,7 @@ FEATURES = {"core": "", "full": "async-builtin,rtd,handles,cache,serde,jiff"}
 # rustdoc JSON only names cross-crate re-exports. It does not include their
 # definitions or implementation blocks in the facade JSON. Track the upstream
 # definitions that are part of the supported xlfn surface separately.
-ENGINE_CONTRACTS = re.compile(
-    r"\bxlfn_engine::(?:diagnostic_id|error|value_types)(?:::|$)"
-)
+ENGINE_CONTRACTS = re.compile(r"\bxlfn_engine::(?:diagnostic_id|error|value_types)(?:::|$)")
 SERVICE_CONTRACTS = re.compile(
     r"^[^(]*\bxlfn_services::cache::(?:CacheBudget|CacheEndpoint|CacheWeightPolicy|CanonicalF64)\b"
 )

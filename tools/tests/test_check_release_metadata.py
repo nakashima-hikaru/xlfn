@@ -141,8 +141,10 @@ renamed_facade = { package = "xlfn", path = "../api", version = "=0.2.0" }
         )
         self.assertEqual(
             check(self.root),
-            ["xlfn-engine:target.cfg(windows).build-dependencies.renamed_facade: "
-             "forbidden dependency on xlfn"],
+            [
+                "xlfn-engine:target.cfg(windows).build-dependencies.renamed_facade: "
+                "forbidden dependency on xlfn"
+            ],
         )
 
     def test_missing_version_and_nonexact_requirement_are_rejected(self):

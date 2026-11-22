@@ -23,6 +23,24 @@ cover project source; they do not audit every expanded library implementation.
 
 ## Shared transitions and resource boundaries
 
+### Quarantine cleanup
+
+Production `xlfn-engine::quarantine::CleanupProtocol` and the
+`operation_gate::quarantine` proof expand the same claim and completion
+transitions. At this sequential boundary, only Idle or Pending can issue a
+claim, the incarnation cannot wrap, and Running and terminal states cannot
+issue a second claim. Completion needs the exact issuing identity, ticket
+issuer, epoch and incarnation, plus a current epoch observation. Refusal
+preserves the prior state; success moves to a terminal state.
+
+The model uses arbitrary scalar issuer and epoch identities. Its trusted
+native composition includes the same canonical lock around admission and
+native owner transfer, stable issuer identity and equality, epoch equality
+and the accuracy of the live epoch predicate, and native owner preservation,
+drain and return on failure or panic. The proof does not treat a numeric
+identity as native authority or prove that those observations stay valid
+outside the lock.
+
 ### SealableCounter and DrainGate
 
 The counter transition kernel is instantiated for both u32 and u64. Its named

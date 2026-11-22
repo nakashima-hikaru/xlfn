@@ -191,7 +191,9 @@ impl<T: ExcelHandleObject> AsRef<T> for Handle<'_, T> {
 pub struct HandleLease<'generation, T: ExcelHandleObject> {
     object_id: ObjectId,
     value: TypedObjectProjection<T>,
-    _generation: PhantomData<&'generation ()>,
+    // Retain the prior lease's negative unwind-safety contract without
+    // storing an arena reference or another pin owner.
+    _generation: PhantomData<std::ptr::NonNull<&'generation std::cell::UnsafeCell<()>>>,
 }
 
 impl<T: ExcelHandleObject> HandleLease<'_, T> {

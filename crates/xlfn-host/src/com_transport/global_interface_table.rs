@@ -42,13 +42,14 @@ struct IGlobalInterfaceTableVtable {
 }
 
 /// Owns the COM reference returned by CoCreateInstance for the GIT.
-pub(super) struct GlobalInterfaceTable {
+pub struct GlobalInterfaceTable {
     pointer: NonNull<IGlobalInterfaceTable>,
 }
 
 /// # Safety
-/// The caller must have entered a COM apartment on the current thread.
-pub(super) unsafe fn get_git() -> Result<GlobalInterfaceTable, i32> {
+/// The caller must keep the current COM apartment entered until the owned
+/// interface is dropped.
+pub unsafe fn get_git() -> Result<GlobalInterfaceTable, i32> {
     let mut git: *mut c_void = ptr::null_mut();
 
     // SAFETY: `git` is a valid writable output slot, the aggregation pointer is
@@ -74,23 +75,26 @@ pub(super) unsafe fn get_git() -> Result<GlobalInterfaceTable, i32> {
 }
 
 impl GlobalInterfaceTable {
+    fn vtable(&self) -> &IGlobalInterfaceTableVtable {
+        // SAFETY: the owned COM reference keeps this interface live.
+        let table = unsafe { self.pointer.as_ref() }.vtable;
+        // SAFETY: COM supplies a live IGlobalInterfaceTable vtable for the
+        // lifetime of the interface.
+        unsafe { &*table }
+    }
+
     /// # Safety
     /// The caller must be in the COM apartment that owns this interface.
-    pub(super) unsafe fn revoke(&self, cookie: u32) -> i32 {
+    pub unsafe fn revoke(&self, cookie: u32) -> i32 {
         // SAFETY: the wrapper owns a live GIT interface and the vtable method
         // receives the same interface pointer returned by CoCreateInstance.
-        unsafe {
-            ((*(*self.pointer.as_ptr()).vtable).revoke_interface_from_global)(
-                self.pointer.as_ptr(),
-                cookie,
-            )
-        }
+        unsafe { (self.vtable().revoke_interface_from_global)(self.pointer.as_ptr(), cookie) }
     }
 
     /// # Safety
     /// `callback`, `interface_id`, and `cookie` must satisfy the GIT method's
     /// COM contract and remain live for the duration of this call.
-    pub(super) unsafe fn register(
+    pub unsafe fn register(
         &self,
         callback: *mut c_void,
         interface_id: *const GUID,
@@ -98,7 +102,7 @@ impl GlobalInterfaceTable {
     ) -> i32 {
         // SAFETY: validated by this method's caller contract.
         unsafe {
-            ((*(*self.pointer.as_ptr()).vtable).register_interface_in_global)(
+            (self.vtable().register_interface_in_global)(
                 self.pointer.as_ptr(),
                 callback,
                 interface_id,
@@ -111,7 +115,7 @@ impl GlobalInterfaceTable {
     /// `interface_id` must point to a readable GUID for the duration of the
     /// call. The returned pointer owns the one interface reference produced by
     /// GetInterfaceFromGlobal.
-    pub(super) unsafe fn get_interface(
+    pub unsafe fn get_interface(
         &self,
         cookie: u32,
         interface_id: *const GUID,
@@ -120,7 +124,7 @@ impl GlobalInterfaceTable {
         // SAFETY: `interface_id` is validated by this method's caller contract
         // and `output` is a writable local result slot.
         let status = unsafe {
-            ((*(*self.pointer.as_ptr()).vtable).get_interface_from_global)(
+            (self.vtable().get_interface_from_global)(
                 self.pointer.as_ptr(),
                 cookie,
                 interface_id,
@@ -141,7 +145,7 @@ impl Drop for GlobalInterfaceTable {
         // SAFETY: `pointer` owns the one COM reference returned by
         // CoCreateInstance and Drop runs exactly once.
         unsafe {
-            ((*(*self.pointer.as_ptr()).vtable).release)(self.pointer.as_ptr());
+            (self.vtable().release)(self.pointer.as_ptr());
         }
     }
 }

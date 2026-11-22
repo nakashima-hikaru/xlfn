@@ -4,6 +4,11 @@
 #[doc(hidden)]
 pub mod drain;
 
+/// Owned COM interface and native Automation transport primitives.
+#[doc(hidden)]
+#[cfg(windows)]
+pub mod com_transport;
+
 /// COM-aware waiting and owned Win32 event handles.
 #[doc(hidden)]
 #[cfg(windows)]

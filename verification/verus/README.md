@@ -22,7 +22,7 @@ The verification layers have distinct scopes:
 | `sealable_counter` | Checked 32/64-bit admission, release, seal and reopen transitions | Actual atomic location and concurrent history |
 | `drain_gate` | Release/notify/unlock, wait reobservation, striped drain, idle seal and rollback | Native atomics, guards, wait/notify and stripe identity |
 | `published_owner` | Initialized memory, provenance and allocator permission ownership | Native Box conversion, unsized payloads and Drop |
-| `operation_gate` | Admission closure and permit conservation | Native guard and owner-lifetime correspondence |
+| `operation_gate` | Admission closure and permit conservation; shared quarantine claim and completion transitions | Native guard and owner lifetime; quarantine lock, identity and owner composition |
 | `rotating_read_domain` | Reader retry, seal/publish/reopen, pending/idle recovery and certified queue withdrawal | Native atomic/lock/queue identity and weak memory |
 | `service_slot` | Publication, withdrawal and fault-state ownership | Native pointer publication and destruction |
 | `cache_lease` | Pin/observation resources, shared lookup, retirement and heap-permission recovery | Native pin field, resident index, queue cutoff and allocation recovery |

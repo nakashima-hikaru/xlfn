@@ -91,6 +91,7 @@ pub struct ARRAYDESC {
 }
 impl Default for ARRAYDESC {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -103,6 +104,7 @@ pub union BINDPTR {
 }
 impl Default for BINDPTR {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -151,6 +153,7 @@ pub union CY {
 }
 impl Default for CY {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -171,6 +174,7 @@ pub struct DECIMAL {
 }
 impl Default for DECIMAL {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -182,6 +186,7 @@ pub union DECIMAL_0 {
 }
 impl Default for DECIMAL_0 {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -199,6 +204,7 @@ pub union DECIMAL_1 {
 }
 impl Default for DECIMAL_1 {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -242,6 +248,7 @@ pub struct ELEMDESC {
 }
 impl Default for ELEMDESC {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -253,6 +260,7 @@ pub union ELEMDESC_0 {
 }
 impl Default for ELEMDESC_0 {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -321,6 +329,7 @@ pub struct FILE_RENAME_INFO {
 }
 impl Default for FILE_RENAME_INFO {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -332,6 +341,7 @@ pub union FILE_RENAME_INFO_0 {
 }
 impl Default for FILE_RENAME_INFO_0 {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -357,6 +367,7 @@ pub struct FUNCDESC {
 }
 impl Default for FUNCDESC {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -683,6 +694,7 @@ pub struct PARAMDESCEX {
 }
 impl Default for PARAMDESCEX {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -708,6 +720,7 @@ pub struct SAFEARRAY {
 }
 impl Default for SAFEARRAY {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -739,6 +752,7 @@ pub struct SID {
 }
 impl Default for SID {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -755,6 +769,7 @@ pub struct SID_IDENTIFIER_AUTHORITY {
 }
 impl Default for SID_IDENTIFIER_AUTHORITY {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -829,6 +844,7 @@ pub struct TYPEATTR {
 }
 impl Default for TYPEATTR {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -840,6 +856,7 @@ pub struct TYPEDESC {
 }
 impl Default for TYPEDESC {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -852,6 +869,7 @@ pub union TYPEDESC_0 {
 }
 impl Default for TYPEDESC_0 {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -870,6 +888,7 @@ pub struct VARDESC {
 }
 impl Default for VARDESC {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -881,6 +900,7 @@ pub union VARDESC_0 {
 }
 impl Default for VARDESC_0 {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -906,6 +926,7 @@ pub struct VARIANT {
 }
 impl Default for VARIANT {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -917,6 +938,7 @@ pub union VARIANT_0 {
 }
 impl Default for VARIANT_0 {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -931,6 +953,7 @@ pub struct VARIANT_0_0 {
 }
 impl Default for VARIANT_0_0 {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -986,6 +1009,7 @@ pub union VARIANT_0_0_0 {
 }
 impl Default for VARIANT_0_0_0 {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }

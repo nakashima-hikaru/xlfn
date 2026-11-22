@@ -111,6 +111,37 @@ pub const MAX_EXCEL_FUNCTION_ARGUMENTS: usize = 255;
 /// Maximum length of an Excel counted string, measured in UTF-16 code units.
 pub const EXCEL_STRING_LIMIT: usize = 32_767;
 
+/// Counts UTF-16 code units without allocating or decoding to scalar values.
+#[inline]
+pub fn utf16_code_units(text: &str) -> usize {
+    if text.is_ascii() {
+        text.len()
+    } else {
+        non_ascii_utf16_len(text)
+    }
+}
+
+// Keep the vector reduction's register/stack setup off the ASCII return path.
+#[inline(never)]
+fn non_ascii_utf16_len(text: &str) -> usize {
+    // Valid UTF-8 contributes one UTF-16 unit per leading byte, plus
+    // one more for each four-byte scalar (a surrogate pair). Counting
+    // independent bytes can vectorize and avoids decoding characters
+    // merely to determine the allocation size.
+    text.as_bytes()
+        .chunks(64)
+        .map(|chunk| {
+            // At most two units per byte: a 64-byte subtotal fits u8.
+            usize::from(
+                chunk
+                    .iter()
+                    .map(|&byte| u8::from(byte & 0xc0 != 0x80) + u8::from(byte >= 0xf0))
+                    .sum::<u8>(),
+            )
+        })
+        .sum()
+}
+
 /// Maximum length of an Excel function name, measured in UTF-16 code units.
 pub const EXCEL_FUNCTION_NAME_LIMIT: usize = 255;
 

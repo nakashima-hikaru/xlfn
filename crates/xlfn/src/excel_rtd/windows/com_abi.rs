@@ -11,11 +11,14 @@ use super::module_lifetime;
 // In Windows metadata, `VARENUM` is typed as an i32 enum while `VARIANT::vt` and
 // `SafeArrayCreate` expect `VARTYPE` (u16). We provide typed u16 constants here
 // for ergonomic and type-safe COM VARIANT manipulation without pervasive casts.
+#[cfg(test)]
 pub(crate) const VT_EMPTY: u16 = crate::win32::VT_EMPTY as u16;
 pub(crate) const VT_I4: u16 = crate::win32::VT_I4 as u16;
+#[cfg(test)]
 pub(crate) const VT_R8: u16 = crate::win32::VT_R8 as u16;
 pub(crate) const VT_BSTR: u16 = crate::win32::VT_BSTR as u16;
 pub(crate) const VT_BOOL: u16 = crate::win32::VT_BOOL as u16;
+#[cfg(test)]
 pub(crate) const VT_ERROR: u16 = crate::win32::VT_ERROR as u16;
 pub(crate) const VT_DISPATCH: u16 = crate::win32::VT_DISPATCH as u16;
 pub(crate) const VT_UNKNOWN: u16 = crate::win32::VT_UNKNOWN as u16;

@@ -4375,6 +4375,8 @@ fn miri_ghostcell_scope_releases_permits_during_unwind() {
 #[test]
 fn ghostcell_handle_authority_stays_thread_bound() {
     static_assertions::assert_not_impl_any!(Handle<'static, DataRecord>: Send, Sync);
+    static_assertions::assert_impl_all!(crate::handle::HandleLease<'static, DataRecord>: Send, Sync, Unpin);
+    static_assertions::assert_not_impl_any!(crate::handle::HandleLease<'static, DataRecord>: std::panic::UnwindSafe, std::panic::RefUnwindSafe);
     static_assertions::assert_not_impl_any!(crate::handle::HandleDomainPermit: Send, Sync);
     static_assertions::assert_not_impl_any!(crate::call::CallStorage<'static, 'static>: Send, Sync);
     static_assertions::assert_not_impl_any!(crate::value::DecodeCallContext<'static, 'static>: Send, Sync);

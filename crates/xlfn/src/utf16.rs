@@ -195,11 +195,7 @@ pub(crate) fn checked_utf16_len(
     argument: &'static str,
     limit: usize,
 ) -> XllResult<usize> {
-    let length = if text.is_ascii() {
-        text.len()
-    } else {
-        non_ascii_utf16_len(text)
-    };
+    let length = xlfn_common::utf16_code_units(text);
     if length > limit {
         return Err(XllError::input(
             argument,
@@ -210,27 +206,6 @@ pub(crate) fn checked_utf16_len(
         ));
     }
     Ok(length)
-}
-
-// Keep the vector reduction's register/stack setup off the ASCII return path.
-#[inline(never)]
-fn non_ascii_utf16_len(text: &str) -> usize {
-    // Valid UTF-8 contributes one UTF-16 unit per leading byte, plus
-    // one more for each four-byte scalar (a surrogate pair). Counting
-    // independent bytes can vectorize and avoids decoding characters
-    // merely to determine the allocation size.
-    text.as_bytes()
-        .chunks(64)
-        .map(|chunk| {
-            // At most two units per byte: a 64-byte subtotal fits u8.
-            usize::from(
-                chunk
-                    .iter()
-                    .map(|&byte| u8::from(byte & 0xc0 != 0x80) + u8::from(byte >= 0xf0))
-                    .sum::<u8>(),
-            )
-        })
-        .sum()
 }
 
 /// Validates that `text` does not exceed `limit` UTF-16 code units.

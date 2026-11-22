@@ -2,6 +2,9 @@
 //! Host payloads never enter this protocol. The caller must claim, extract,
 //! and later reinstall its opaque owner under its own coordinator lock.
 
+mod transitions;
+use transitions::{claim_cleanup, complete_cleanup};
+
 /// An affine authorization for one cleanup incarnation, not a native owner.
 #[must_use]
 pub struct CleanupClaim<Issuer, Epoch> {
@@ -84,21 +87,7 @@ impl<Issuer: Copy + Eq, Epoch: Copy + Eq> CleanupProtocol<Issuer, Epoch> {
     /// Call only while the issuer holds its canonical lock and can transfer
     /// the unique native owner into the returned ticket's driver.
     pub fn claim(&mut self, issuer: Issuer, epoch: Epoch) -> Option<CleanupClaim<Issuer, Epoch>> {
-        if !matches!(self.progress, Progress::Idle | Progress::Pending) {
-            return None;
-        }
-        let incarnation = self.next_incarnation;
-        self.next_incarnation = incarnation.checked_add(1)?;
-        self.progress = Progress::Running {
-            issuer,
-            epoch,
-            incarnation,
-        };
-        Some(CleanupClaim {
-            issuer,
-            epoch,
-            incarnation,
-        })
+        claim_cleanup!(self.progress, self.next_incarnation, issuer, epoch)
     }
 
     /// Atomically verifies issuer, incarnation and current epoch before changing
@@ -110,19 +99,7 @@ impl<Issuer: Copy + Eq, Epoch: Copy + Eq> CleanupProtocol<Issuer, Epoch> {
         current: impl FnOnce(Epoch) -> bool,
         outcome: CleanupOutcome,
     ) -> bool {
-        if !matches!(
-            self.progress,
-            Progress::Running { issuer: running_issuer, epoch, incarnation }
-                if issuer == running_issuer && claim.issuer == running_issuer
-                    && claim.epoch == epoch && claim.incarnation == incarnation && current(epoch)
-        ) {
-            return false;
-        }
-        self.progress = match outcome {
-            CleanupOutcome::Drained => Progress::Drained(claim.epoch),
-            CleanupOutcome::Retained => Progress::Retained(claim.epoch),
-        };
-        true
+        complete_cleanup!(self.progress, issuer, claim, epoch => current(epoch), outcome)
     }
 }
 

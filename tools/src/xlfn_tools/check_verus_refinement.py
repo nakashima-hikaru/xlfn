@@ -31,6 +31,12 @@ PROOFS = (
 )
 
 
+SHARED_BASELINE_SOURCES = {
+    "sealable_counter": (Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),),
+    "operation_gate": (Path("crates/xlfn-engine/src/quarantine/transitions.rs"),),
+}
+
+
 def build_plan() -> MutationPlan:
     plan = MutationPlan()
     previous = Path.cwd()
@@ -43,11 +49,7 @@ def build_plan() -> MutationPlan:
         covered = {snapshot.proof.name for snapshot in plan.snapshots.values()}
         for name in PROOFS:
             if name not in covered:
-                dependencies = (
-                    (Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),)
-                    if name == "sealable_counter"
-                    else ()
-                )
+                dependencies = SHARED_BASELINE_SOURCES.get(name, ())
                 plan.add_baseline(Snapshot.read(Path("verification/verus") / name, dependencies))
     finally:
         os.chdir(previous)

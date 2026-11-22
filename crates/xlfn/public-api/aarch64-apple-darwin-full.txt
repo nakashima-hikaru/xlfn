@@ -806,8 +806,8 @@ pub fn xlfn::handle::HandleLease<'_, T>::deref(&self) -> &Self::Target
 impl<'generation, T> core::marker::Freeze for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::Freeze
 impl<'generation, T> core::marker::Unpin for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::Unpin
 impl<'generation, T> core::marker::UnsafeUnpin for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::UnsafeUnpin
-impl<'generation, T> core::panic::unwind_safe::RefUnwindSafe for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::panic::unwind_safe::RefUnwindSafe
-impl<'generation, T> core::panic::unwind_safe::UnwindSafe for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::panic::unwind_safe::UnwindSafe
+impl<'generation, T> !core::panic::unwind_safe::RefUnwindSafe for xlfn::handle::HandleLease<'generation, T>
+impl<'generation, T> !core::panic::unwind_safe::UnwindSafe for xlfn::handle::HandleLease<'generation, T>
 pub struct xlfn::handle::HandleObjectId
 impl core::clone::Clone for xlfn::handle::HandleObjectId
 pub fn xlfn::handle::HandleObjectId::clone(&self) -> Self
@@ -1292,8 +1292,8 @@ pub fn xlfn::handle::HandleLease<'_, T>::deref(&self) -> &Self::Target
 impl<'generation, T> core::marker::Freeze for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::Freeze
 impl<'generation, T> core::marker::Unpin for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::Unpin
 impl<'generation, T> core::marker::UnsafeUnpin for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::UnsafeUnpin
-impl<'generation, T> core::panic::unwind_safe::RefUnwindSafe for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::panic::unwind_safe::RefUnwindSafe
-impl<'generation, T> core::panic::unwind_safe::UnwindSafe for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::panic::unwind_safe::UnwindSafe
+impl<'generation, T> !core::panic::unwind_safe::RefUnwindSafe for xlfn::handle::HandleLease<'generation, T>
+impl<'generation, T> !core::panic::unwind_safe::UnwindSafe for xlfn::handle::HandleLease<'generation, T>
 pub struct xlfn::prelude::MacroSheetContext<'call, A: xlfn::Addin>
 impl<'call, A: xlfn::Addin> xlfn::addin::MacroSheetContext<'call, A>
 pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn_engine::error::XllResult<xlfn::value::ExcelValue>
