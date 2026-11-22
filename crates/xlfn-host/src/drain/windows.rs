@@ -43,48 +43,6 @@ fn preparation_fails(stage: DrainPreparationStage) -> bool {
     })
 }
 
-struct DispatchApartment(ComApartmentGuard);
-
-impl DispatchApartment {
-    fn enter() -> Result<Self, DrainPreparationError> {
-        #[cfg(any(test, feature = "dispatch-test-hooks"))]
-        if preparation_fails(DrainPreparationStage::Apartment) {
-            return Err(DrainPreparationError::Injected(
-                DrainPreparationStage::Apartment,
-            ));
-        }
-        // Preserve an existing STA. A thread without COM initialization enters
-        // an MTA, so other Windows callers retain ordinary blocking behavior.
-        ComApartmentGuard::enter()
-            .map(Self)
-            .map_err(DrainPreparationError::Apartment)
-    }
-
-    fn prepare<W>(
-        self,
-        drain: UnstartedDrain<W>,
-    ) -> Result<DispatchPrepared<W>, (DrainPreparationError, UnstartedDrain<W>)> {
-        #[cfg(any(test, feature = "dispatch-test-hooks"))]
-        if preparation_fails(DrainPreparationStage::Event) {
-            return Err((
-                DrainPreparationError::Injected(DrainPreparationStage::Event),
-                drain,
-            ));
-        }
-        let completion = match ManualResetEvent::new(false) {
-            Ok(event) => event,
-            Err(error) => {
-                return Err((DrainPreparationError::Event(error), drain));
-            }
-        };
-        Ok(DispatchPrepared {
-            drain,
-            completion,
-            _apartment: self.0,
-        })
-    }
-}
-
 /// Owns the untransferred work and both resources needed to pump its caller's
 /// STA. The event is closed before the caller's apartment guard is released.
 pub struct DispatchPrepared<W> {
@@ -98,10 +56,35 @@ pub struct DispatchPrepared<W> {
 pub fn prepare_com_dispatch<W: DrainWork>(
     drain: UnstartedDrain<W>,
 ) -> Result<DispatchPrepared<W>, (DrainPreparationError, UnstartedDrain<W>)> {
-    match DispatchApartment::enter() {
-        Ok(apartment) => apartment.prepare(drain),
-        Err(error) => Err((error, drain)),
+    #[cfg(any(test, feature = "dispatch-test-hooks"))]
+    if preparation_fails(DrainPreparationStage::Apartment) {
+        return Err((
+            DrainPreparationError::Injected(DrainPreparationStage::Apartment),
+            drain,
+        ));
     }
+    // Preserve an existing STA. A thread without COM initialization enters
+    // an MTA, so other Windows callers retain ordinary blocking behavior.
+    let apartment = match ComApartmentGuard::enter() {
+        Ok(apartment) => apartment,
+        Err(code) => return Err((DrainPreparationError::Apartment(code), drain)),
+    };
+    #[cfg(any(test, feature = "dispatch-test-hooks"))]
+    if preparation_fails(DrainPreparationStage::Event) {
+        return Err((
+            DrainPreparationError::Injected(DrainPreparationStage::Event),
+            drain,
+        ));
+    }
+    let completion = match ManualResetEvent::new(false) {
+        Ok(event) => event,
+        Err(error) => return Err((DrainPreparationError::Event(error), drain)),
+    };
+    Ok(DispatchPrepared {
+        drain,
+        completion,
+        _apartment: apartment,
+    })
 }
 
 impl<W: DrainWork> DispatchPrepared<W> {

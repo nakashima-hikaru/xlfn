@@ -66,22 +66,11 @@ impl AbsentGenerationServices {
 /// services from another attempt.
 struct PublishedGeneration<A: crate::Addin> {
     root: NonNull<ExecutionGeneration<A>>,
-    services: NonNull<
-        GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    >,
+    services: NonNull<AddinGenerationServices<A>>,
 }
 
 impl<A: crate::Addin> PublishedGeneration<A> {
-    fn new(
-        root: &ExecutionGeneration<A>,
-        services: &GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    ) -> Self {
+    fn new(root: &ExecutionGeneration<A>, services: &AddinGenerationServices<A>) -> Self {
         Self {
             root: NonNull::from(root),
             services: NonNull::from(services),
@@ -94,12 +83,7 @@ impl<A: crate::Addin> PublishedGeneration<A> {
         unsafe { self.root.as_ref() }
     }
 
-    fn services(
-        &self,
-    ) -> &GenerationServices<
-        crate::addin_impl::AddinSubscription<A>,
-        crate::addin_impl::AddinSources<A>,
-    > {
+    fn services(&self) -> &AddinGenerationServices<A> {
         // SAFETY: publication implies generation services are valid for the
         // duration of the read-side lease.
         unsafe { self.services.as_ref() }
@@ -221,12 +205,7 @@ impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
         Ok(unsafe { crate::generation::ExecutionLease::new(self.publication().root, permit) })
     }
 
-    pub(crate) fn services(
-        &self,
-    ) -> &GenerationServices<
-        crate::addin_impl::AddinSubscription<A>,
-        crate::addin_impl::AddinSources<A>,
-    > {
+    pub(crate) fn services(&self) -> &AddinGenerationServices<A> {
         self.publication().services()
     }
 }
@@ -234,12 +213,7 @@ impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
 /// The complete ownership bundle for a published generation.
 pub(crate) struct OpenGeneration<A: crate::Addin> {
     generation: PublishedOwner<ExecutionGeneration<A>>,
-    services: PublishedOwner<
-        GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    >,
+    services: PublishedOwner<AddinGenerationServices<A>>,
     publication: PublishedOwner<PublishedGeneration<A>>,
     module_epoch: ModuleEpochLease,
 }
@@ -248,12 +222,7 @@ pub(crate) struct OpenGeneration<A: crate::Addin> {
 /// closing ownership slot.
 pub(crate) struct ClosingGeneration<A: crate::Addin> {
     generation: PublishedOwner<ExecutionGeneration<A>>,
-    services: PublishedOwner<
-        GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    >,
+    services: PublishedOwner<AddinGenerationServices<A>>,
     publication: PublishedOwner<PublishedGeneration<A>>,
 }
 
@@ -262,12 +231,7 @@ pub(crate) struct ClosingGeneration<A: crate::Addin> {
 /// payload while the module authority remains in the lifecycle state.
 pub(crate) struct OpenRetirement<A: crate::Addin> {
     generation: RuntimeGeneration,
-    services: PublishedOwner<
-        GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    >,
+    services: PublishedOwner<AddinGenerationServices<A>>,
     _publication: PublishedOwner<PublishedGeneration<A>>,
 }
 
@@ -408,11 +372,6 @@ impl<A: crate::Addin> ClosePayload<A> {
         matches!(self, Self::Published(_))
     }
 
-    #[cfg(any(test, feature = "refinement"))]
-    fn has_opening_generation(&self) -> bool {
-        matches!(self, Self::Staged(_))
-    }
-
     #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
     fn opening(&self) -> Option<&OpeningGeneration<A>> {
         match self {
@@ -421,14 +380,7 @@ impl<A: crate::Addin> ClosePayload<A> {
         }
     }
 
-    fn retiring_services(
-        &self,
-    ) -> Option<
-        &GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    > {
+    fn retiring_services(&self) -> Option<&AddinGenerationServices<A>> {
         match self {
             Self::Retiring(retirement) => Some(retirement.services.as_ref()),
             Self::Published(bundle) => Some(bundle.services.as_ref()),
@@ -477,11 +429,6 @@ impl<A: crate::Addin> OpenAbortPayload<A> {
         }
     }
 
-    #[cfg(any(test, feature = "refinement"))]
-    fn has_opening_generation(&self) -> bool {
-        matches!(self, Self::Staged(_))
-    }
-
     #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
     fn opening(&self) -> Option<&OpeningGeneration<A>> {
         match self {
@@ -518,12 +465,7 @@ impl<A: crate::Addin> PublishedClosePayload<A> {
         }
     }
 
-    fn retiring_services(
-        &self,
-    ) -> &GenerationServices<
-        crate::addin_impl::AddinSubscription<A>,
-        crate::addin_impl::AddinSources<A>,
-    > {
+    fn retiring_services(&self) -> &AddinGenerationServices<A> {
         match self {
             Self::Published(closing) => closing.services.as_ref(),
             Self::Retiring(retirement) => retirement.services.as_ref(),
@@ -710,16 +652,6 @@ impl<A: crate::Addin> CloseResources<A> {
         self.payload().is_some_and(ClosePayload::is_published)
     }
 
-    #[cfg(any(test, feature = "refinement"))]
-    fn has_opening_generation(&self) -> bool {
-        match self {
-            Self::AwaitingOpenAbort { payload, .. } => payload.has_opening_generation(),
-            _ => self
-                .payload()
-                .is_some_and(ClosePayload::has_opening_generation),
-        }
-    }
-
     #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
     fn opening(&self) -> Option<&OpeningGeneration<A>> {
         match self {
@@ -728,14 +660,7 @@ impl<A: crate::Addin> CloseResources<A> {
         }
     }
 
-    fn retiring_services(
-        &self,
-    ) -> Option<
-        &GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    > {
+    fn retiring_services(&self) -> Option<&AddinGenerationServices<A>> {
         self.payload().and_then(ClosePayload::retiring_services)
     }
 
@@ -1015,26 +940,7 @@ impl<A: crate::Addin> ClosingState<A> {
         }
     }
 
-    #[cfg(any(test, feature = "refinement"))]
-    fn has_opening_generation(&self) -> bool {
-        match self {
-            Self::OpeningActive {
-                resources: ActiveOpeningClose::AwaitingAbort { payload },
-                ..
-            } => payload.has_opening_generation(),
-            Self::OpeningActive { .. } => false,
-            Self::Ready { resources } => resources.has_opening_generation(),
-        }
-    }
-
-    fn retiring_services(
-        &self,
-    ) -> Option<
-        &GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    > {
+    fn retiring_services(&self) -> Option<&AddinGenerationServices<A>> {
         match self {
             Self::OpeningActive {
                 resources: ActiveOpeningClose::Published { payload, .. },
@@ -1206,16 +1112,7 @@ trait NativeState<A: crate::Addin> {
     fn opening(&self) -> Option<&OpeningGeneration<A>>;
     #[cfg(any(test, feature = "refinement"))]
     fn has_current_generation(&self) -> bool;
-    #[cfg(any(test, feature = "refinement"))]
-    fn has_opening_generation(&self) -> bool;
-    fn generation_services(
-        &self,
-    ) -> Option<
-        &GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    >;
+    fn generation_services(&self) -> Option<&AddinGenerationServices<A>>;
     fn module_epoch_id(&self) -> Option<ModuleEpochId>;
     fn removal_attempt(&self) -> Option<RemovalAttemptId>;
     fn take_opening(&mut self) -> Option<OpeningGeneration<A>>;
@@ -1294,31 +1191,7 @@ impl<A: crate::Addin> NativeState<A> for LifecycleState<A> {
         }
     }
 
-    #[cfg(any(test, feature = "refinement"))]
-    fn has_opening_generation(&self) -> bool {
-        match self {
-            Self::Opening {
-                payload: OpeningPayload::Staged(_),
-                ..
-            } => true,
-            Self::Stopping(StoppingState::Remove(closing)) => closing.has_opening_generation(),
-            Self::Stopping(StoppingState::RollbackOpen(resources))
-            | Self::Quarantined(resources) => resources.has_opening_generation(),
-            Self::Closed
-            | Self::Stopping(StoppingState::Finalizing(_))
-            | Self::Open { .. }
-            | Self::Opening { .. } => false,
-        }
-    }
-
-    fn generation_services(
-        &self,
-    ) -> Option<
-        &GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    > {
+    fn generation_services(&self) -> Option<&AddinGenerationServices<A>> {
         match self {
             Self::Opening {
                 payload: OpeningPayload::Published(bundle),
@@ -1492,25 +1365,6 @@ impl<A: crate::Addin> LifecycleCore<A> {
         }
     }
 
-    /// Returns the mutex-protected canonical state. It is intentionally a
-    /// reference because the state owns the phase payload.
-    const fn canonical_state(&self) -> &LifecycleState<A> {
-        &self.state
-    }
-
-    const fn host_intent(&self) -> HostLifecycleIntent {
-        self.host_intent
-    }
-
-    const fn last_committed_generation(&self) -> Option<RuntimeGeneration> {
-        self.last_committed_generation
-    }
-
-    fn protocol_generation(&self) -> Option<RuntimeGeneration> {
-        self.state
-            .protocol_generation(self.last_committed_generation)
-    }
-
     fn final_removal_ready(&self, expected_attempt: RemovalAttemptId) -> Option<FinalRemovalReady> {
         match &self.state {
             LifecycleState::Stopping(StoppingState::Remove(ClosingState::Ready { resources })) => {
@@ -1530,38 +1384,9 @@ impl<A: crate::Addin> LifecycleCore<A> {
         }
     }
 
-    const fn removal_epoch(&self) -> u64 {
-        self.sequence.removal_epoch().get()
-    }
-
-    fn removal_attempt(&self) -> Option<RemovalAttemptId> {
-        self.state.removal_attempt()
-    }
-
     #[cfg(test)]
     fn set_next_lifecycle_attempt_for_test(&mut self, value: u64) {
         self.sequence = mem::take(&mut self.sequence).seeded_next_open_for_test(value);
-    }
-
-    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
-    fn opening_config(&self) -> Option<crate::addin_impl::RuntimeConfig> {
-        self.state.opening().map(|opening| opening.init_config)
-    }
-
-    #[cfg(any(test, feature = "refinement"))]
-    fn has_current_generation(&self) -> bool {
-        self.state.has_current_generation()
-    }
-
-    fn generation_services(
-        &self,
-    ) -> Option<
-        &GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    > {
-        self.state.generation_services()
     }
 }
 
@@ -1641,23 +1466,25 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
     }
 
     fn canonical_state(&self) -> &LifecycleState<A> {
-        self.core.canonical_state()
+        &self.core.state
     }
 
     pub(crate) fn phase(&self) -> LifecyclePhase {
-        self.canonical_state().phase()
+        self.core.state.phase()
     }
 
     pub(crate) fn host_intent(&self) -> HostLifecycleIntent {
-        self.core.host_intent()
+        self.core.host_intent
     }
 
     pub(crate) fn last_committed_generation(&self) -> Option<RuntimeGeneration> {
-        self.core.last_committed_generation()
+        self.core.last_committed_generation
     }
 
     pub(crate) fn protocol_generation(&self) -> Option<RuntimeGeneration> {
-        self.core.protocol_generation()
+        self.core
+            .state
+            .protocol_generation(self.core.last_committed_generation)
     }
 
     pub(crate) fn final_removal_ready(
@@ -1676,16 +1503,16 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
 
     #[cfg(test)]
     pub(crate) fn module_epoch_id(&self) -> Option<ModuleEpochId> {
-        self.canonical_state().module_epoch_id()
+        self.core.state.module_epoch_id()
     }
 
     pub(crate) fn removal_epoch(&self) -> u64 {
-        self.core.removal_epoch()
+        self.core.sequence.removal_epoch().get()
     }
 
     /// Monotonic identity boundary for residency held across an opening call.
     pub(crate) fn next_open_sequence(&self) -> u64 {
-        self.core.sequence.next_open_for_test()
+        self.core.sequence.next_open_sequence()
     }
 
     /// Classify once while locked, then retain that exact guard through the
@@ -1707,7 +1534,7 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
     }
 
     pub(crate) fn open_attempt(&self) -> Option<OpenAttemptId> {
-        self.canonical_state().open_attempt()
+        self.core.state.open_attempt()
     }
 
     /// Observation metadata for the first irreversible quarantine request.
@@ -1732,33 +1559,26 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
     }
 
     pub(crate) fn removal_attempt(&self) -> Option<RemovalAttemptId> {
-        self.core.removal_attempt()
+        self.core.state.removal_attempt()
     }
 
     #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
     pub(crate) fn opening_config(&self) -> Option<crate::addin_impl::RuntimeConfig> {
-        self.core.opening_config()
+        self.core.state.opening().map(|opening| opening.init_config)
     }
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn has_current_generation(&self) -> bool {
-        self.core.has_current_generation()
+        self.core.state.has_current_generation()
     }
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn has_opening_generation(&self) -> bool {
-        self.core.state.has_opening_generation()
+        self.core.state.opening().is_some()
     }
 
-    pub(crate) fn generation_services(
-        &self,
-    ) -> Option<
-        &GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    > {
-        self.core.generation_services()
+    pub(crate) fn generation_services(&self) -> Option<&AddinGenerationServices<A>> {
+        self.core.state.generation_services()
     }
 
     #[cfg(test)]
@@ -1787,12 +1607,7 @@ pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
 }
 
 pub(crate) struct UnpublishedGeneration<A: crate::Addin> {
-    pub(crate) services: Box<
-        GenerationServices<
-            crate::addin_impl::AddinSubscription<A>,
-            crate::addin_impl::AddinSources<A>,
-        >,
-    >,
+    pub(crate) services: Box<AddinGenerationServices<A>>,
     pub(crate) module_epoch: ModuleEpochLease,
     generation_storage: Box<std::mem::MaybeUninit<ExecutionGeneration<A>>>,
     publication_storage: Box<std::mem::MaybeUninit<PublishedGeneration<A>>>,
@@ -2193,7 +2008,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             }
         }
         self.phase
-            .store(core.canonical_state().phase() as u8, Ordering::Release);
+            .store(core.state.phase() as u8, Ordering::Release);
     }
 
     fn publish_effect(bundle: &OpenGeneration<A>) -> TransitionEffect<A> {
@@ -2597,7 +2412,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 self,
                 Some(empty.attempt),
                 Some(empty.module_epoch),
-                core.last_committed_generation(),
+                core.last_committed_generation,
             ) {
                 let resources = empty.into_resources();
                 core.state = if open_rollback_state {

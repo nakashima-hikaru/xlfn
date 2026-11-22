@@ -2260,7 +2260,7 @@ fn same_handle_reuses_active_subscription_identity() {
             .lock()
             .entries
             .get(&id)
-            .is_some_and(|entry| entry.is_active())
+            .is_some_and(|entry| entry.state().is_active())
     );
 }
 
@@ -3268,7 +3268,7 @@ fn connection_notification_panic_rolls_back_catalog_and_allows_retry() {
     );
     assert!(disconnected.load(Ordering::Acquire));
     assert!(sink_slot.lock().is_none());
-    assert!(!runtime.catalog.lock().entries[&id].is_active());
+    assert!(!runtime.catalog.lock().entries[&id].state().is_active());
     assert_eq!(runtime.services.active_quota.used(), 0);
     assert_eq!(runtime.services.queued_update_quota.used(), 0);
     runtime.catalog.lock().assert_identity_invariants();
@@ -3278,7 +3278,7 @@ fn connection_notification_panic_rolls_back_catalog_and_allows_retry() {
         .unwrap()
         .commit()
         .unwrap();
-    assert!(runtime.catalog.lock().entries[&id].is_active());
+    assert!(runtime.catalog.lock().entries[&id].state().is_active());
     sink_slot.lock().as_ref().unwrap().publish(2).unwrap();
     let refresh = server.begin_refresh().unwrap();
     assert_eq!(refresh.updates()[0].value, StoredRtdValue::Integer(2));
@@ -3314,7 +3314,7 @@ fn connection_notification_reentrant_refresh_observes_committed_publication() {
     sink_slot.lock().as_ref().unwrap().publish(42).unwrap();
     connection.commit().unwrap();
     assert!(refreshed.load(Ordering::Acquire));
-    assert!(runtime.catalog.lock().entries[&id].is_active());
+    assert!(runtime.catalog.lock().entries[&id].state().is_active());
 }
 
 #[test]
@@ -3477,7 +3477,11 @@ fn concurrent_provisional_disconnect_preserves_a_replacement_connection() {
         assert!(old_disconnected.load(Ordering::Acquire));
         assert!(old_sink.lock().is_none());
         assert!(!replacement_disconnected.load(Ordering::Acquire));
-        assert!(runtime.catalog.lock().entries[&replacement_id].is_active());
+        assert!(
+            runtime.catalog.lock().entries[&replacement_id]
+                .state()
+                .is_active()
+        );
         assert!(
             server
                 .test_server()
@@ -3767,7 +3771,7 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
         catalog
             .entries
             .get(&id)
-            .is_some_and(|entry| entry.is_active())
+            .is_some_and(|entry| entry.state().is_active())
     );
     assert_eq!(catalog.pending_len(), 0);
 }
@@ -3869,7 +3873,7 @@ fn rejected_connection_source_leaves_preparation_pending() {
     {
         let mut catalog = runtime.catalog.lock();
         let entry = catalog.entries.get_mut(&id).unwrap();
-        assert!(!entry.is_connected());
+        assert!(!entry.state().is_connected());
         entry.source_id = SourceId(source.id);
         catalog.assert_identity_invariants();
     }

@@ -8,16 +8,17 @@ use crate::generation::{ConnectionGeneration, ServerGeneration};
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
 
-use xlfn_services::rtd::quota::{CatalogQuota, PendingCharge};
-
+use xlfn_services::rtd::quota::CatalogQuota;
 use xlfn_services::rtd::{EntryError, EntryState};
 
 pub(super) type PrepareTicket = xlfn_services::rtd::PrepareTicket<SubscriptionId>;
 pub(super) type ConnectionTicket =
     xlfn_services::rtd::ConnectionTicket<SubscriptionId, ServerGeneration, ConnectionGeneration>;
+pub(crate) type SubscriptionEntryState =
+    EntryState<SubscriptionId, ServerGeneration, ConnectionGeneration>;
 pub(crate) use xlfn_services::rtd::PreparationFinish;
 
-fn map_entry_error(error: EntryError) -> XllError {
+pub(crate) fn map_entry_error(error: EntryError) -> XllError {
     let diagnostic_id = match error {
         EntryError::ActiveKeyDuplicate => crate::diagnostics::catalog::ACTIVE_KEY_DUPLICATE,
         EntryError::Closing => return XllError::Closing,
@@ -33,83 +34,12 @@ fn map_entry_error(error: EntryError) -> XllError {
 pub(crate) struct SubscriptionEntry {
     pub(crate) source_id: SourceId,
     pub(crate) topic: RtdTopic,
-    state: EntryState<SubscriptionId, ServerGeneration, ConnectionGeneration>,
+    state: SubscriptionEntryState,
 }
 
 impl SubscriptionEntry {
-    #[cfg(test)]
-    pub(crate) fn is_connected(&self) -> bool {
-        self.state.is_connected()
-    }
-
-    pub(crate) fn is_active(&self) -> bool {
-        self.state.is_active()
-    }
-
-    fn is_identifiable(&self) -> bool {
-        self.state.is_identifiable()
-    }
-
-    pub(crate) fn counts_as_pending(&self) -> bool {
-        self.state.counts_as_pending()
-    }
-
-    pub(crate) fn can_remove(&self) -> bool {
-        self.state.can_remove()
-    }
-
-    pub(crate) fn server_generation(&self) -> Option<ServerGeneration> {
-        self.state.server_generation()
-    }
-
-    pub(crate) fn connection_generation(&self) -> Option<ConnectionGeneration> {
-        self.state.connection_generation()
-    }
-
-    pub(super) fn add_reservation(&mut self) -> XllResult<PrepareTicket> {
-        self.state.add_reservation().map_err(map_entry_error)
-    }
-
-    pub(super) fn finish_preparation(
-        &mut self,
-        ticket: PrepareTicket,
-        committed: bool,
-    ) -> PreparationFinish {
-        self.state.finish_preparation(ticket, committed)
-    }
-
-    pub(crate) fn claim_server(&mut self, generation: ServerGeneration) -> XllResult<()> {
-        self.state.claim_server(generation).map_err(map_entry_error)
-    }
-
-    pub(super) fn begin_connection(
-        &mut self,
-        server: ServerGeneration,
-        connection: ConnectionGeneration,
-    ) -> XllResult<ConnectionTicket> {
-        self.state
-            .begin_connection(server, connection)
-            .map_err(map_entry_error)
-    }
-
-    pub(super) fn rollback_connection(&mut self, ticket: &ConnectionTicket) -> bool {
-        self.state.rollback_connection(ticket)
-    }
-
-    pub(super) fn finish_connection(&mut self, ticket: &ConnectionTicket) -> bool {
-        self.state.finish_connection(ticket)
-    }
-
-    pub(crate) fn revoke_for_server_termination(&mut self, server: ServerGeneration) -> bool {
-        self.state.revoke_for_server_termination(server)
-    }
-
-    pub(crate) fn cleanup_connection(
-        &mut self,
-        server: ServerGeneration,
-        connection: ConnectionGeneration,
-    ) -> (bool, bool) {
-        self.state.cleanup_connection(server, connection)
+    pub(crate) fn state(&self) -> &SubscriptionEntryState {
+        &self.state
     }
 }
 
@@ -118,40 +48,6 @@ pub(crate) struct SubscriptionCatalog {
     pub(crate) quota: CatalogQuota,
     pub(crate) identities: SubscriptionIdentityIndex,
     pub(crate) next_subscription_id: u64,
-}
-
-struct PendingInsertPlan<'catalog, 'parts, Part: AsRef<str>> {
-    entry: std::collections::hash_map::VacantEntry<'catalog, SubscriptionId, SubscriptionEntry>,
-    identity: xlfn_services::rtd::index::IdentityInsertion<
-        'catalog,
-        SubscriptionIdentityKey,
-        SubscriptionId,
-    >,
-    topic: BorrowedTopicParts<'parts, Part>,
-    runtime_id: u64,
-    id: SubscriptionId,
-    key: SubscriptionKey,
-    source_id: SourceId,
-    next_id: &'catalog mut u64,
-    charge: PendingCharge<'catalog>,
-    next_subscription_id: u64,
-}
-impl<Part: AsRef<str>> PendingInsertPlan<'_, '_, Part> {
-    fn commit(self) -> (PrepareTicket, SubscriptionKey) {
-        // User-supplied AsRef conversion may unwind. No map/accounting mutation
-        // occurs until this owner has produced its exact canonical topic.
-        let topic = self.topic.into_owned();
-        let (state, ticket) = EntryState::new_pending(self.runtime_id, self.id);
-        self.identity.commit();
-        self.entry.insert(SubscriptionEntry {
-            source_id: self.source_id,
-            topic,
-            state,
-        });
-        *self.next_id = self.next_subscription_id;
-        self.charge.commit();
-        (ticket, self.key)
-    }
 }
 
 impl SubscriptionCatalog {
@@ -182,13 +78,13 @@ impl SubscriptionCatalog {
         Ok(None)
     }
 
-    fn plan_pending_insert<'catalog, 'parts, Part: AsRef<str>>(
-        &'catalog mut self,
+    pub(super) fn insert_pending<Part: AsRef<str>>(
+        &mut self,
         runtime_id: u64,
         source_id: SourceHandleId,
-        topic: BorrowedTopicParts<'parts, Part>,
+        topic: BorrowedTopicParts<'_, Part>,
         limits: RtdLimits,
-    ) -> XllResult<PendingInsertPlan<'catalog, 'parts, Part>> {
+    ) -> XllResult<(PrepareTicket, SubscriptionKey)> {
         let charge = self
             .quota
             .prepare_insert(
@@ -217,30 +113,19 @@ impl SubscriptionCatalog {
                 crate::diagnostics::catalog::RTD_INDEX_DUPLICATE,
             ));
         };
-        Ok(PendingInsertPlan {
-            entry,
-            identity,
-            topic,
-            runtime_id,
-            id,
-            key,
+        // User-supplied AsRef conversion may unwind. No map/accounting mutation
+        // occurs until this owner has produced its exact canonical topic.
+        let topic = topic.into_owned();
+        let (state, ticket) = EntryState::new_pending(runtime_id, id);
+        identity.commit();
+        entry.insert(SubscriptionEntry {
             source_id,
-            next_id: &mut self.next_subscription_id,
-            charge,
-            next_subscription_id,
-        })
-    }
-
-    pub(super) fn insert_pending<Part: AsRef<str>>(
-        &mut self,
-        runtime_id: u64,
-        source_id: SourceHandleId,
-        topic: BorrowedTopicParts<'_, Part>,
-        limits: RtdLimits,
-    ) -> XllResult<(PrepareTicket, SubscriptionKey)> {
-        Ok(self
-            .plan_pending_insert(runtime_id, source_id, topic, limits)?
-            .commit())
+            topic,
+            state,
+        });
+        self.next_subscription_id = next_subscription_id;
+        charge.commit();
+        Ok((ticket, key))
     }
 
     #[cfg(test)]
@@ -251,20 +136,20 @@ impl SubscriptionCatalog {
     pub(crate) fn with_entry<R>(
         &mut self,
         id: SubscriptionId,
-        update: impl FnOnce(&mut SubscriptionEntry) -> R,
+        update: impl FnOnce(&mut SubscriptionEntryState) -> R,
     ) -> Option<R> {
         let entry = self.entries.get_mut(&id)?;
-        let was_pending = entry.counts_as_pending();
-        let was_identifiable = entry.is_identifiable();
-        let result = update(entry);
-        if was_identifiable && !entry.is_identifiable() {
+        let was_pending = entry.state.counts_as_pending();
+        let was_identifiable = entry.state.is_identifiable();
+        let result = update(&mut entry.state);
+        if was_identifiable && !entry.state.is_identifiable() {
             let identity_key = SubscriptionIdentityKey::new(entry.source_id, &entry.topic);
             if !self.identities.remove(identity_key, id) {
                 xlfn_kernel::invariant::fail_stop();
             }
         }
         self.quota
-            .transition(was_pending, entry.counts_as_pending());
+            .transition(was_pending, entry.state.counts_as_pending());
 
         Some(result)
     }
@@ -272,9 +157,9 @@ impl SubscriptionCatalog {
     pub(crate) fn remove_entry(&mut self, id: SubscriptionId) -> Option<SubscriptionEntry> {
         let removed = self.entries.remove(&id)?;
         self.quota
-            .remove(removed.topic.byte_len(), removed.counts_as_pending());
+            .remove(removed.topic.byte_len(), removed.state.counts_as_pending());
         let identity_key = SubscriptionIdentityKey::new(removed.source_id, &removed.topic);
-        if removed.is_identifiable() && !self.identities.remove(identity_key, id) {
+        if removed.state.is_identifiable() && !self.identities.remove(identity_key, id) {
             xlfn_kernel::invariant::fail_stop();
         }
         Some(removed)
@@ -293,7 +178,7 @@ impl SubscriptionCatalog {
                     "each subscription is indexed exactly once"
                 );
                 let entry = self.entries.get(id).expect("indexed entry exists");
-                assert!(entry.is_identifiable());
+                assert!(entry.state.is_identifiable());
                 assert_eq!(entry.source_id, key.source_id);
                 assert_eq!(entry.topic.identity_hash(), key.topic_hash);
                 for other_id in &ids[..position] {
@@ -305,7 +190,7 @@ impl SubscriptionCatalog {
             seen_ids.len(),
             self.entries
                 .values()
-                .filter(|entry| entry.is_identifiable())
+                .filter(|entry| entry.state.is_identifiable())
                 .count()
         );
 
@@ -319,13 +204,13 @@ impl SubscriptionCatalog {
             self.quota.pending(),
             self.entries
                 .values()
-                .filter(|entry| entry.counts_as_pending())
+                .filter(|entry| entry.state.counts_as_pending())
                 .count()
         );
 
         for entry in self.entries.values() {
             assert!(
-                !entry.can_remove(),
+                !entry.state.can_remove(),
                 "remove terminal entries under the catalog lock"
             );
         }

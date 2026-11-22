@@ -25,8 +25,8 @@ fn snapshot(coordinator: &LifecycleCoordinator<()>) -> Snapshot {
         canonical_phase: core.state.phase(),
         projected_phase: LifecyclePhase::from_raw(coordinator.phase.load(Ordering::Acquire)),
         host_intent: core.host_intent,
-        next_open_sequence: core.sequence.next_open_for_test(),
-        removal_epoch: core.removal_epoch(),
+        next_open_sequence: core.sequence.next_open_sequence(),
+        removal_epoch: core.sequence.removal_epoch().get(),
         removal_attempt: core.state.removal_attempt(),
         publication_empty: coordinator.publication.load(Ordering::Acquire).is_null(),
     }

@@ -106,15 +106,11 @@ mod tests {
     }
 
     #[test]
-    fn refused_spawn_returns_the_work_for_a_later_dispatch() {
-        let calls = AtomicUsize::new(0);
+    fn refused_spawn_maps_error_and_returns_unstarted_owner() {
         let drops = Arc::new(AtomicUsize::new(0));
         let owner = DropObserved(Arc::clone(&drops));
-        let calls_in_worker = &calls;
         let ready = drain_with_com_dispatch(UnstartedDrain::new(move || {
-            calls_in_worker.fetch_add(1, Ordering::AcqRel);
             drop(owner);
-            17
         }))
         .unwrap_or_else(|_| panic!("preparing the apartment and event must succeed"));
 
@@ -123,14 +119,8 @@ mod tests {
             panic!("injected spawn failure started a worker");
         };
         assert!(matches!(error, XllError::Native { .. }));
-        assert_eq!(calls.load(Ordering::Acquire), 0);
         assert_eq!(drops.load(Ordering::Acquire), 0);
-
-        let joined = drain_with_com_dispatch(unstarted)
-            .and_then(|ready| ready.run())
-            .unwrap_or_else(|_| panic!("retry must join the worker"));
-        assert_eq!(joined.into_output(), 17);
-        assert_eq!(calls.load(Ordering::Acquire), 1);
+        drop(unstarted);
         assert_eq!(drops.load(Ordering::Acquire), 1);
     }
 

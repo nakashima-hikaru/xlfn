@@ -4,7 +4,7 @@
 )]
 
 use super::catalog::{
-    ConnectionTicket, PreparationFinish, PrepareTicket, SubscriptionCatalog, SubscriptionEntry,
+    ConnectionTicket, PreparationFinish, PrepareTicket, SubscriptionCatalog, map_entry_error,
 };
 use super::data_plane::PublishCore;
 use super::disconnect::OwnedSubscription;
@@ -255,7 +255,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             // A connecting entry can still roll back. Each caller must retain
             // its own reservation until its xlfRtd call commits or fails, so a
             // failed connection cannot orphan another caller's transport key.
-            if entry.is_active() {
+            if entry.state().is_active() {
                 return Ok(PreparedSubscription {
                     #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
                     id: existing_id,
@@ -265,7 +265,9 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             }
 
             let ticket = catalog
-                .with_entry(existing_id, SubscriptionEntry::add_reservation)
+                .with_entry(existing_id, |state| {
+                    state.add_reservation().map_err(map_entry_error)
+                })
                 .ok_or(crate::error::construct::internal(
                     crate::diagnostics::catalog::RTD_INDEX_ORPHAN,
                 ))??;
@@ -284,7 +286,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         {
             let mut catalog = self.catalog.lock();
             let Some(finish) =
-                catalog.with_entry(id, |entry| entry.finish_preparation(ticket, committed))
+                catalog.with_entry(id, |state| state.finish_preparation(ticket, committed))
             else {
                 return;
             };
@@ -310,7 +312,9 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     ) -> XllResult<()> {
         let mut catalog = self.catalog.lock();
         catalog
-            .with_entry(id, |entry| entry.claim_server(generation))
+            .with_entry(id, |state| {
+                state.claim_server(generation).map_err(map_entry_error)
+            })
             .ok_or(XllError::Closing)??;
         Ok(())
     }
@@ -323,9 +327,9 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         let mut catalog = self.catalog.lock();
 
         let should_remove = catalog
-            .with_entry(id, |entry| {
-                entry.rollback_connection(ticket);
-                entry.can_remove()
+            .with_entry(id, |state| {
+                state.rollback_connection(ticket);
+                state.can_remove()
             })
             .unwrap_or(false);
 
@@ -363,21 +367,23 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
 
         let (source, topic, ticket) = {
             let mut catalog = runtime.catalog.lock();
-            let Some(result) = catalog.with_entry(id, |entry| -> XllResult<_> {
-                // Resolve the immutable arena entry before acquiring any
-                // catalog connection obligation. A rejected source must leave
-                // the pending subscription available for rollback or retry.
-                let source = runtime
-                    .sources
-                    .resolve(entry.source_id.0)
-                    .ok_or(XllError::StaleHandle)?;
-                let topic = entry.topic.clone();
-                let ticket = entry.begin_connection(server.generation, conn_gen)?;
-                Ok((source, topic, ticket))
-            }) else {
-                return Err(XllError::Closing);
-            };
-            result?
+            // Resolve the immutable arena entry before acquiring any catalog
+            // connection obligation. A rejected source must leave the pending
+            // subscription available for rollback or retry.
+            let entry = catalog.entries.get(&id).ok_or(XllError::Closing)?;
+            let source = runtime
+                .sources
+                .resolve(entry.source_id.0)
+                .ok_or(XllError::StaleHandle)?;
+            let topic = entry.topic.clone();
+            let ticket = catalog
+                .with_entry(id, |state| {
+                    state
+                        .begin_connection(server.generation, conn_gen)
+                        .map_err(map_entry_error)
+                })
+                .ok_or(XllError::Closing)??;
+            (source, topic, ticket)
         };
         let transaction = ConnectionTransaction::new(
             ConnectionReservation {
@@ -445,7 +451,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         {
             let mut catalog = self.catalog.lock();
             if !catalog
-                .with_entry(id, |entry| entry.finish_connection(ticket))
+                .with_entry(id, |state| state.finish_connection(ticket))
                 .unwrap_or(false)
             {
                 return Err(XllError::Closing);
@@ -481,14 +487,14 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         {
             let mut catalog = self.catalog.lock();
             let transitioned = catalog
-                .with_entry(id, |entry| entry.rollback_connection(ticket))
+                .with_entry(id, |state| state.rollback_connection(ticket))
                 .unwrap_or(false);
 
             if transitioned
                 && catalog
                     .entries
                     .get(&id)
-                    .is_some_and(SubscriptionEntry::can_remove)
+                    .is_some_and(|entry| entry.state().can_remove())
             {
                 catalog.remove_entry(id);
             }
@@ -1089,8 +1095,10 @@ mod typestate_tests {
             let ticket = runtime
                 .catalog
                 .lock()
-                .with_entry(id, |entry| {
-                    entry.begin_connection(server.generation(), generation)
+                .with_entry(id, |state| {
+                    state
+                        .begin_connection(server.generation(), generation)
+                        .map_err(map_entry_error)
                 })
                 .unwrap()
                 .unwrap();
@@ -1114,7 +1122,7 @@ mod typestate_tests {
             }
             assert_eq!(runtime.services.active_quota.used(), 0);
             assert!(server.test_server().subscriptions.lock().is_empty());
-            assert!(!runtime.catalog.lock().entries[&id].is_connected());
+            assert!(!runtime.catalog.lock().entries[&id].state().is_connected());
             prepared.rollback();
             assert!(runtime.catalog.lock().entries.is_empty());
             runtime.catalog.lock().assert_identity_invariants();

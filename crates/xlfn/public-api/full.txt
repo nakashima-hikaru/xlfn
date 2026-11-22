@@ -219,14 +219,14 @@ impl<V: core::fmt::Debug> core::fmt::Debug for xlfn::cache::CacheLease<'_, V>
 pub fn xlfn::cache::CacheLease<'_, V>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<V: core::fmt::Display> core::fmt::Display for xlfn::cache::CacheLease<'_, V>
 pub fn xlfn::cache::CacheLease<'_, V>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<V: core::marker::Send + core::marker::Sync> core::marker::Send for xlfn::cache::CacheLease<'_, V>
-impl<V: core::marker::Sync> core::marker::Sync for xlfn::cache::CacheLease<'_, V>
 impl<V> core::ops::deref::Deref for xlfn::cache::CacheLease<'_, V>
 pub type xlfn::cache::CacheLease<'_, V>::Target = V
 pub fn xlfn::cache::CacheLease<'_, V>::deref(&self) -> &Self::Target
 impl<V> core::ops::drop::Drop for xlfn::cache::CacheLease<'_, V>
 pub fn xlfn::cache::CacheLease<'_, V>::drop(&mut self)
 impl<'a, V> core::marker::Freeze for xlfn::cache::CacheLease<'a, V> where xlfn_services::cache::CacheLease<'a, V>: core::marker::Freeze
+impl<'a, V> core::marker::Send for xlfn::cache::CacheLease<'a, V> where xlfn_services::cache::CacheLease<'a, V>: core::marker::Send
+impl<'a, V> core::marker::Sync for xlfn::cache::CacheLease<'a, V> where xlfn_services::cache::CacheLease<'a, V>: core::marker::Sync
 impl<'a, V> core::marker::Unpin for xlfn::cache::CacheLease<'a, V> where xlfn_services::cache::CacheLease<'a, V>: core::marker::Unpin
 impl<'a, V> core::marker::UnsafeUnpin for xlfn::cache::CacheLease<'a, V> where xlfn_services::cache::CacheLease<'a, V>: core::marker::UnsafeUnpin
 impl<'a, V> !core::panic::unwind_safe::RefUnwindSafe for xlfn::cache::CacheLease<'a, V>

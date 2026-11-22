@@ -20,31 +20,25 @@ pub(crate) enum QuarantineReason {
 /// after a quarantine decision. `ManuallyDrop` is used as documentation and
 /// as a type-level guarantee that dropping the runtime cannot accidentally
 /// execute code whose quiescence was not proven.
-pub(crate) enum QuarantinedResource<A: crate::Addin> {
-    ModuleAuthority {
-        authority: ManuallyDrop<crate::module_runtime::ModuleAuthority>,
-        reason: QuarantineReason,
-    },
-    SharedState {
-        generation: Option<RuntimeGeneration>,
-        shared_state: ManuallyDrop<A::SharedState>,
-        reason: QuarantineReason,
-    },
-    Layers {
-        generation: Option<RuntimeGeneration>,
-        layers: ManuallyDrop<A::Layers>,
-        reason: QuarantineReason,
-    },
-    Generation {
-        generation: Option<RuntimeGeneration>,
-        shared_state: ManuallyDrop<A::SharedState>,
-        layers: ManuallyDrop<A::Layers>,
-        reason: QuarantineReason,
-    },
+#[expect(
+    dead_code,
+    reason = "quarantined payloads are intentionally retained without reading or dropping"
+)]
+enum QuarantinedPayload<A: crate::Addin> {
+    ModuleAuthority(crate::module_runtime::ModuleAuthority),
+    SharedState(A::SharedState),
+    Layers(A::Layers),
+    Generation(A::SharedState, A::Layers),
+}
+
+struct QuarantinedRecord<A: crate::Addin> {
+    generation: Option<RuntimeGeneration>,
+    reason: QuarantineReason,
+    _payload: ManuallyDrop<QuarantinedPayload<A>>,
 }
 
 pub(crate) struct QuarantineVault<A: crate::Addin> {
-    resources: Mutex<Vec<QuarantinedResource<A>>>,
+    resources: Mutex<Vec<QuarantinedRecord<A>>>,
 }
 
 impl<A: crate::Addin> QuarantineVault<A> {
@@ -54,18 +48,30 @@ impl<A: crate::Addin> QuarantineVault<A> {
         }
     }
 
+    fn push(
+        &self,
+        generation: Option<RuntimeGeneration>,
+        reason: QuarantineReason,
+        payload: QuarantinedPayload<A>,
+    ) {
+        self.resources.lock().push(QuarantinedRecord {
+            generation,
+            reason,
+            _payload: ManuallyDrop::new(payload),
+        });
+    }
+
     /// A rejected canonical installation is not cleanup success. Keep its
     /// affine authority without retrying drain or releasing its module epoch.
     pub(crate) fn retain_module_authority(
         &self,
         authority: crate::module_runtime::ModuleAuthority,
     ) {
-        self.resources
-            .lock()
-            .push(QuarantinedResource::ModuleAuthority {
-                authority: ManuallyDrop::new(authority),
-                reason: QuarantineReason::OpenStateInvariant,
-            });
+        self.push(
+            None,
+            QuarantineReason::OpenStateInvariant,
+            QuarantinedPayload::ModuleAuthority(authority),
+        );
     }
 
     pub(crate) fn retain_shared_state(
@@ -74,13 +80,11 @@ impl<A: crate::Addin> QuarantineVault<A> {
         shared_state: A::SharedState,
         reason: QuarantineReason,
     ) {
-        self.resources
-            .lock()
-            .push(QuarantinedResource::SharedState {
-                generation,
-                shared_state: ManuallyDrop::new(shared_state),
-                reason,
-            });
+        self.push(
+            generation,
+            reason,
+            QuarantinedPayload::SharedState(shared_state),
+        );
     }
 
     pub(crate) fn retain_layers(
@@ -89,11 +93,7 @@ impl<A: crate::Addin> QuarantineVault<A> {
         layers: A::Layers,
         reason: QuarantineReason,
     ) {
-        self.resources.lock().push(QuarantinedResource::Layers {
-            generation,
-            layers: ManuallyDrop::new(layers),
-            reason,
-        });
+        self.push(generation, reason, QuarantinedPayload::Layers(layers));
     }
 
     pub(crate) fn retain_generation(
@@ -107,49 +107,18 @@ impl<A: crate::Addin> QuarantineVault<A> {
             layers,
             ..
         } = root;
-        self.resources.lock().push(QuarantinedResource::Generation {
+        self.push(
             generation,
-            shared_state: ManuallyDrop::new(shared_state),
-            layers: ManuallyDrop::new(layers),
             reason,
-        });
+            QuarantinedPayload::Generation(shared_state, layers),
+        );
     }
 
     pub(crate) fn snapshot(&self) -> Vec<(Option<RuntimeGeneration>, QuarantineReason)> {
         self.resources
             .lock()
             .iter()
-            .map(|resource| match resource {
-                QuarantinedResource::ModuleAuthority { authority, reason } => {
-                    let _ = authority;
-                    (None, *reason)
-                }
-                QuarantinedResource::SharedState {
-                    generation,
-                    shared_state,
-                    reason,
-                } => {
-                    let _ = shared_state;
-                    (*generation, *reason)
-                }
-                QuarantinedResource::Layers {
-                    generation,
-                    layers,
-                    reason,
-                } => {
-                    let _ = layers;
-                    (*generation, *reason)
-                }
-                QuarantinedResource::Generation {
-                    generation,
-                    shared_state,
-                    layers,
-                    reason,
-                } => {
-                    let _ = (shared_state, layers);
-                    (*generation, *reason)
-                }
-            })
+            .map(|record| (record.generation, record.reason))
             .collect()
     }
 }
