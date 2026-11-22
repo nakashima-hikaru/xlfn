@@ -65,7 +65,10 @@ try {
         $sections = Read-PeSections $image
         $pdbBytes = (Get-Item $pdb).Length
         # Public symbol locations identify monomorphization, not exact sizes.
-        $boundarySymbols = @(Select-String -Path $map -Pattern 'sync_boundary')
+        $boundarySymbols = @(Select-String -Path $map -Pattern '^\s*([0-9a-f]+:[0-9a-f]+)\s+\S*sync_boundary')
+        # Distinct public names can point to the same code under normal ICF.
+        $boundaryAddresses = @($boundarySymbols | ForEach-Object { $_.Matches[0].Groups[1].Value } |
+            Sort-Object -Unique)
         $extraExports = @(Select-String -Path $map -AllMatches -Pattern '\bxll_bench_extra_\d{4}\b' |
             ForEach-Object { $_.Matches.Value } | Sort-Object -Unique).Count
         if ($extraExports -ne $count) {
@@ -79,6 +82,7 @@ try {
             sections = $sections
             pdb_bytes = $pdbBytes
             boundary_map_entries = $boundarySymbols.Count
+            boundary_map_unique_addresses = $boundaryAddresses.Count
             linker_timing = $timingLines
         }
         Write-Output "$count extras: .text=$($sections['.text'].virtual_bytes) B, PDB=$pdbBytes B, build=$($timer.Elapsed.TotalSeconds) s"
