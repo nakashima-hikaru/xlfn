@@ -716,14 +716,27 @@ mod tests {
         // rejects wall-clock reads, so this catches an eager real timestamp.
         report_no_unwind("sinkless_real_timestamp", &XllError::Panic);
 
-        struct TimestampSink(std::sync::mpsc::SyncSender<SystemTime>);
+        struct TimestampSink(std::sync::mpsc::Sender<SystemTime>);
         impl DiagnosticSink for TimestampSink {
             fn report(&self, event: &DiagnosticEvent<'_>) {
-                self.0.send(event.timestamp()).unwrap();
+                if event.udf_id() == "delivered_timestamp" {
+                    self.0.send(event.timestamp()).unwrap();
+                }
             }
         }
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        // Clearing the sink joins its worker before the receiver is drained.
+        let (sender, receiver) = std::sync::mpsc::channel();
         set_diagnostic_sink(TimestampSink(sender)).unwrap();
+        std::thread::spawn(|| {
+            report_with_id_no_unwind(
+                "unrelated_timestamp",
+                &XllError::Panic,
+                DiagnosticId::from_u64(3),
+                || SystemTime::UNIX_EPOCH,
+            );
+        })
+        .join()
+        .unwrap();
         report_with_id_no_unwind(
             "delivered_timestamp",
             &XllError::Panic,
@@ -816,15 +829,17 @@ mod tests {
             fn enter(&self, _: &tracing::span::Id) {}
             fn exit(&self, _: &tracing::span::Id) {}
         }
-        struct FullSink(std::sync::mpsc::SyncSender<usize>);
+        struct FullSink(std::sync::mpsc::Sender<usize>);
         impl DiagnosticSink for FullSink {
             fn report(&self, event: &DiagnosticEvent<'_>) {
-                if let XllError::Native { message, .. } = event.error() {
+                if event.udf_id() == "traced-error"
+                    && let XllError::Native { message, .. } = event.error()
+                {
                     self.0.send(message.len()).unwrap();
                 }
             }
         }
-        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        let (sender, receiver) = std::sync::mpsc::channel();
         set_diagnostic_sink(FullSink(sender)).unwrap();
         let records = Arc::new(Mutex::new(Vec::new()));
         let dispatch = tracing::Dispatch::new(Subscriber(Arc::clone(&records)));
@@ -840,9 +855,19 @@ mod tests {
             report_no_unwind("traced-error", &small);
             report_no_unwind("traced-error", &large);
         });
+        // Register the tracing callsite under the test dispatcher first.
+        // Then deliver an unrelated native error while the sink is still live.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| report_no_unwind("unrelated_traced_error", &small))
+                .join()
+                .unwrap();
+        });
         clear_diagnostic_sink().unwrap();
-        assert_eq!(receiver.recv().unwrap(), "ordinary 日本語".len());
-        assert_eq!(receiver.recv().unwrap(), 1024 * 1024);
+        assert_eq!(
+            receiver.try_iter().collect::<Vec<_>>(),
+            ["ordinary 日本語".len(), 1024 * 1024]
+        );
         let records = records.lock();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].display, small.to_string());
