@@ -1854,10 +1854,10 @@ fn failed_git_revocation_is_retained_and_retryable() {
     let cookie = NonZeroU32::new(41).unwrap();
     module_lifetime().git_cookie_registered();
     module_lifetime().git_cookie_revocation_deferred(cookie);
-    let error = XllError::WindowsApi {
-        function: "IGlobalInterfaceTable::RevokeInterfaceFromGlobal",
-        code: E_FAIL,
-    };
+    let error = crate::error::construct::windows_api(
+        "IGlobalInterfaceTable::RevokeInterfaceFromGlobal",
+        E_FAIL,
+    );
     assert_eq!(module_lifetime().snapshot().outstanding_git_cookies, 0);
     assert_eq!(module_lifetime().snapshot().revocation_debt, 1);
     assert_eq!(module_lifetime().queued_git_revocation_debt(), vec![cookie]);
@@ -2182,9 +2182,9 @@ impl DispatchTestSource {
         self.sink
             .lock()
             .as_ref()
-            .ok_or(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_DISPATCH,
-            })?
+            .ok_or(crate::error::construct::internal(
+                crate::diagnostics::catalog::RTD_DISPATCH,
+            ))?
             .publish(value)
     }
 }
@@ -3252,20 +3252,13 @@ fn com_query_failures_clear_stale_output_pointers() {
     shutdown(&handles).unwrap();
 }
 
-#[cfg(feature = "handles")]
-#[test]
-fn idispatch_resolves_names_and_invokes_heartbeat() {
-    let _guard = TEST_LOCK.lock().unwrap();
-    let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
-
-    // SAFETY: ACTIVE_SERVER and `ensured` retain the server while its COM
-    // interfaces are used below.
-    let factory = get_test_class_factory(&ensured);
+fn create_test_dispatch<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    factory: &TestClassFactory<E, C>,
+) -> TestUnknownReference {
     let dispatch_iid = iid_idispatch_from_fields();
     let mut dispatch = ptr::null_mut();
     assert_eq!(
-        // SAFETY: `factory`, the IID, and output are live for the call.
+        // SAFETY: `factory`, the IID, and output slot remain live for the call.
         unsafe {
             (factory.vtable().create_instance)(
                 factory.as_ptr(),
@@ -3276,7 +3269,20 @@ fn idispatch_resolves_names_and_invokes_heartbeat() {
         },
         S_OK
     );
-    let dispatch = TestUnknownReference::new(dispatch);
+    TestUnknownReference::new(dispatch)
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn idispatch_resolves_names_and_invokes_heartbeat() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+
+    // SAFETY: ACTIVE_SERVER and `ensured` retain the server while its COM
+    // interfaces are used below.
+    let factory = get_test_class_factory(&ensured);
+    let dispatch = create_test_dispatch(&factory);
     let server = dispatch.server(&ensured);
     // SAFETY: the IDispatch pointer is the RtdServer's identity pointer.
     let vtable = unsafe { server.as_ref().vtable };
@@ -3436,21 +3442,7 @@ fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
     let factory = get_test_class_factory(&ensured);
-    let dispatch_iid = iid_idispatch_from_fields();
-    let mut dispatch = ptr::null_mut();
-    assert_eq!(
-        // SAFETY: `factory`, the IID, and output are live for the call.
-        unsafe {
-            (factory.vtable().create_instance)(
-                factory.as_ptr(),
-                ptr::null_mut(),
-                &dispatch_iid,
-                &mut dispatch,
-            )
-        },
-        S_OK
-    );
-    let dispatch = TestUnknownReference::new(dispatch);
+    let dispatch = create_test_dispatch(&factory);
     let server = dispatch.server(&ensured);
     // SAFETY: the IDispatch pointer is the RtdServer's identity pointer.
     let vtable = unsafe { server.as_ref().vtable };
@@ -3702,21 +3694,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server while the
     // factory and dispatch interface are used.
     let factory = get_test_class_factory(&ensured);
-    let dispatch_iid = iid_idispatch_from_fields();
-    let mut dispatch = ptr::null_mut();
-    assert_eq!(
-        // SAFETY: `factory`, the IID, and output slot remain live.
-        unsafe {
-            (factory.vtable().create_instance)(
-                factory.as_ptr(),
-                ptr::null_mut(),
-                &dispatch_iid,
-                &mut dispatch,
-            )
-        },
-        S_OK
-    );
-    let dispatch = TestUnknownReference::new(dispatch);
+    let dispatch = create_test_dispatch(&factory);
     let server = dispatch.server(&ensured);
     // SAFETY: CreateInstance returned the RtdServer identity pointer.
     let vtable = unsafe { server.as_ref().vtable };
@@ -5359,6 +5337,7 @@ fn registration_mutex_timeout_is_bounded_and_does_not_release_other_owner() {
             Err(XllError::WindowsApi {
                 function: "CoWaitForMultipleHandles(RTD registration mutex)",
                 code: crate::win32::RPC_S_CALLPENDING,
+                ..
             })
         ));
         assert!(started.elapsed() < Duration::from_secs(2));

@@ -1,4 +1,4 @@
-// module: return_abi/numeric
-fn invalid(state: &super::process::ProcessState, bytes: usize) {
-    state.release_published(bytes); // error: E0624
-}
+// module: host/lib
+// The raw ledger moved into the native adapter. A sibling cannot obtain its
+// type; reclaiming a live charge must go through the affine public capability.
+fn invalid(_: &super::process_quota::ProcessState) {} // error: E0603

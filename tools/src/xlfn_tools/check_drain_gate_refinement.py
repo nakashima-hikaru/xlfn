@@ -27,6 +27,14 @@ MUTATIONS = {
         "            $notify;\n        }",
     ),
     "return while active": ("while $active != 0", "while false"),
+    "wait leaks notification registration": (
+        "        $clear;\n        $unlock;",
+        "        $unlock;",
+    ),
+    "wait clears notification after unlock": (
+        "        $clear;\n        $unlock;",
+        "        $unlock;\n        $clear;",
+    ),
     "stripe rollback omits undo": (
         "                    $undo;",
         "                    ();",

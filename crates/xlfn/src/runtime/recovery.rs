@@ -79,9 +79,9 @@ pub(crate) fn quarantine_runtime_resources<A: Addin>(
     // it outside the best-effort cleanup catch so a missing authority cannot
     // be swallowed as an ordinary quarantine cleanup failure.
     use crate::module_runtime::ModuleCleanupClaim;
-    let module_cleanup_authority = match runtime.lifecycle_control().take_module_cleanup_authority()
-    {
+    let module_cleanup_authority = match runtime.lifecycle_control().begin_quarantine_cleanup() {
         ModuleCleanupClaim::Ready(authority) => Some(authority),
+        ModuleCleanupClaim::StaleEpoch => return,
         ModuleCleanupClaim::DeferredOwner => {
             // A quarantine request does not seize authority from a live
             // opening/finalization owner or retry its drain. Its resolution
@@ -100,21 +100,15 @@ pub(crate) fn quarantine_runtime_resources<A: Addin>(
         ModuleCleanupClaim::NoModuleAuthority => None,
         ModuleCleanupClaim::Unavailable => fail_stop_invariant(
             "active module epoch lacks affine close authority",
-            &XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
-            },
+            &crate::error::construct::internal(crate::diagnostics::catalog::CLOSE_RUNTIME),
         ),
     };
-    let owns_cleanup = module_cleanup_authority.is_some();
     let _ = catch_no_unwind(AssertUnwindSafe(|| {
         if let Some(module_cleanup_authority) = module_cleanup_authority
-            && let Err((error, authority)) = module_cleanup_authority.finish()
+            && let Err((error, retained)) = module_cleanup_authority.finish()
         {
             runtime.lifecycle_orchestrator().quarantine();
-            if let Err(rejected) = runtime
-                .lifecycle_control()
-                .retain_failed_module_cleanup(authority)
-            {
+            if let Some(rejected) = retained {
                 runtime
                     .open_deps()
                     .quarantine()
@@ -136,9 +130,4 @@ pub(crate) fn quarantine_runtime_resources<A: Addin>(
             );
         }
     }));
-    if owns_cleanup {
-        runtime
-            .lifecycle_control()
-            .finish_module_cleanup_for_quarantine();
-    }
 }

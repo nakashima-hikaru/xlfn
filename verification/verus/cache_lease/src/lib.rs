@@ -1,13 +1,13 @@
 //! Verus formal verification of CacheLease and Temporal Reclamation protocol.
 //!
 //! Refines the formal TemporalReclamation protocol from `formal/XlFnFormal/TemporalReclamation/`
-//! for `crates/xlfn/src/cache.rs`'s `CacheLease` and `CacheNode`.
+//! for `crates/xlfn-services/src/cache.rs`'s `CacheLease` and `CacheNode`.
 //! Proves theorems [TR-OBSERVE-1], [TR-LEASE-1], [TR-ADMISSION-1], [TR-RECLAIM-1], and [TR-NO-UAF].
 //! All proofs ensure zero verification failures, zero assumes, and zero runtime overhead.
 
 use vstd::prelude::*;
 
-#[path = "../../../../crates/xlfn/src/cache/pin_transitions.rs"]
+#[path = "../../../../crates/xlfn-services/src/cache/pin_transitions.rs"]
 pub mod pin_transitions;
 pub mod pin_ownership;
 
@@ -347,6 +347,6 @@ pub mod retained_observations;
 
 pub mod resident_index;
 
-#[path = "../../../../crates/xlfn/src/cache/node_layout.rs"]
+#[path = "../../../../crates/xlfn-services/src/cache/node_layout.rs"]
 pub mod node_layout;
 pub mod inline_value;

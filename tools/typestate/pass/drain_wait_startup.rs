@@ -1,5 +1,5 @@
-// module: drain_wait/windows
-use crate::drain_wait::UnstartedDrain;
+// module: host/drain/windows
+use super::UnstartedDrain;
 
 fn ordered() {
     let result = std::thread::scope(|scope| {

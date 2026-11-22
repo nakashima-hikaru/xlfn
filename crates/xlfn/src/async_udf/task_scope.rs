@@ -1,5 +1,5 @@
 use crate::generation::RuntimeGeneration;
-use crate::handle::GenerationLeaseBrand;
+use crate::handle::TaskPins;
 use std::future::Future;
 
 /// Narrow lifetime brand for the generated async handle path.
@@ -12,7 +12,7 @@ use std::future::Future;
 #[derive(Clone, Copy)]
 pub struct AsyncTaskScope<'generation> {
     generation: RuntimeGeneration,
-    brand: &'generation GenerationLeaseBrand,
+    pins: &'generation TaskPins,
 }
 
 /// Generated-user-code builder for the narrow async handle path.
@@ -53,18 +53,78 @@ pub(crate) trait HandleScopedTaskBuilder {
 
 #[cfg(feature = "handles")]
 impl<'generation> AsyncTaskScope<'generation> {
-    pub(crate) fn new(
-        generation: RuntimeGeneration,
-        brand: &'generation GenerationLeaseBrand,
-    ) -> Self {
-        Self { generation, brand }
+    pub(crate) fn new(generation: RuntimeGeneration, pins: &'generation TaskPins) -> Self {
+        Self { generation, pins }
     }
 
-    pub(crate) const fn brand(self) -> &'generation GenerationLeaseBrand {
-        self.brand
+    pub(crate) const fn pins(self) -> &'generation TaskPins {
+        self.pins
     }
 
     pub(crate) const fn generation(self) -> RuntimeGeneration {
         self.generation
+    }
+}
+
+/// Wraps an evaluation at its single ownership boundary. Keeps the concrete
+/// future type hidden before returning it to the generic task runner.
+///
+/// # Safety
+/// The returned future and its captures must be the only remaining users of
+/// the scope, apart from the pin owner's own cleanup guard.
+#[cfg(feature = "handles")]
+#[allow(
+    unsafe_code,
+    reason = "The owning launch invokes this only once per evaluation"
+)]
+pub(super) unsafe fn with_pin_cleanup<'generation, F: Future + Send + 'generation>(
+    scope: AsyncTaskScope<'generation>,
+    future: F,
+) -> impl Future<Output = F::Output> + Send + 'generation
+where
+    F::Output: 'static,
+{
+    ScopedEvaluation {
+        future,
+        _end: ScopeEnd(scope.pins()),
+    }
+}
+
+#[cfg(feature = "handles")]
+struct ScopedEvaluation<'generation, F> {
+    // Destruction order matters: the contained future may use its leases
+    // during Drop. Drop glue runs _end after future, including on unwind.
+    future: F,
+    _end: ScopeEnd<'generation>,
+}
+
+#[cfg(feature = "handles")]
+struct ScopeEnd<'generation>(&'generation TaskPins);
+
+#[cfg(feature = "handles")]
+impl Drop for ScopeEnd<'_> {
+    #[allow(
+        unsafe_code,
+        reason = "The evaluator ends before the pin cleanup guard"
+    )]
+    fn drop(&mut self) {
+        // SAFETY: with_pin_cleanup requires the wrapped future to be the
+        // only remaining user of the scope. This guard is dropped after it.
+        unsafe { self.0.release_after_evaluation() };
+    }
+}
+
+#[cfg(feature = "handles")]
+impl<F: Future> Future for ScopedEvaluation<'_, F> {
+    type Output = F::Output;
+
+    #[allow(unsafe_code, reason = "Structural pin projection of the future field")]
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // SAFETY: no code replaces or moves future after pinning. The
+        // wrapper has no custom Drop and drops the future in place.
+        unsafe { self.map_unchecked_mut(|this| &mut this.future) }.poll(context)
     }
 }

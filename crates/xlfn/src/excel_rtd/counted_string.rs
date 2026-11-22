@@ -379,6 +379,7 @@ mod tests {
             Err(XllError::ExcelApi {
                 function: ExcelApiFunction::Free,
                 failure: ExcelApiFailure::Status(ExcelCallbackStatus::Abort),
+                ..
             })
         ));
         assert!(matches!(
@@ -386,6 +387,7 @@ mod tests {
             Err(XllError::ExcelApi {
                 function: ExcelApiFunction::Rtd,
                 failure: ExcelApiFailure::Suppressed(ExcelCallbackStatus::Abort),
+                ..
             })
         ));
         script.assert_calls(&[XLF_RTD, XLF_RTD]);

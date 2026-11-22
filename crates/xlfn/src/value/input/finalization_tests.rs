@@ -52,7 +52,8 @@ fn miri_typed_finalization_rejects_missing_or_failed_arguments() {
         assert!(matches!(
             incomplete.finish_typed(),
             Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
+                diagnostic_id: crate::diagnostics::catalog::INPUT_FINGERPRINT,
+                ..
             })
         ));
 
@@ -72,7 +73,8 @@ fn miri_typed_finalization_rejects_missing_or_failed_arguments() {
         assert!(matches!(
             failed.finish_typed(),
             Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
+                diagnostic_id: crate::diagnostics::catalog::INPUT_FINGERPRINT,
+                ..
             })
         ));
         assert_eq!(prepared.materialize().unwrap(), 7.0);

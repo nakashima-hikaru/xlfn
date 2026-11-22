@@ -9,77 +9,27 @@ use std::rc::Rc;
 use std::slice;
 use xlfn_sys::{XLBIT_DLL_FREE, XLBIT_XL_FREE, XLOPER12, XLOPER12Array, XLTYPE_MASK};
 
-/// The validated semantic value type of an Excel `XLOPER12`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-#[non_exhaustive]
-pub enum XlValueType {
-    /// A binary64 number.
-    Number,
-    /// A counted UTF-16 string.
-    String,
-    /// A Boolean.
-    Boolean,
-    /// A worksheet reference that may contain multiple areas.
-    Reference,
-    /// An Excel error code.
-    Error,
-    /// An Excel control-flow value.
-    Flow,
-    /// A rectangular array of cells.
-    Multi,
-    /// An omitted argument.
-    Missing,
-    /// A blank cell.
-    Nil,
-    /// A single-area worksheet reference.
-    SimpleReference,
-    /// A signed 32-bit integer.
-    Integer,
-    /// An Excel binary-data value.
-    BigData,
-}
+pub use xlfn_engine::value_types::XlValueType;
 
-impl XlValueType {
-    /// Decodes a raw base xltype mask into a validated [`XlValueType`].
-    #[must_use]
-    pub(crate) const fn from_raw(raw: u32) -> Option<Self> {
-        match raw {
-            xlfn_sys::XLTYPE_NUM => Some(Self::Number),
-            xlfn_sys::XLTYPE_STR => Some(Self::String),
-            xlfn_sys::XLTYPE_BOOL => Some(Self::Boolean),
-            xlfn_sys::XLTYPE_REF => Some(Self::Reference),
-            xlfn_sys::XLTYPE_ERR => Some(Self::Error),
-            xlfn_sys::XLTYPE_FLOW => Some(Self::Flow),
-            xlfn_sys::XLTYPE_MULTI => Some(Self::Multi),
-            xlfn_sys::XLTYPE_MISSING => Some(Self::Missing),
-            xlfn_sys::XLTYPE_NIL => Some(Self::Nil),
-            xlfn_sys::XLTYPE_SREF => Some(Self::SimpleReference),
-            xlfn_sys::XLTYPE_INT => Some(Self::Integer),
-            xlfn_sys::XLTYPE_BIG_DATA => Some(Self::BigData),
-            _ => None,
-        }
+/// Decodes a raw base xltype mask into a validated [`XlValueType`].
+#[must_use]
+pub(crate) const fn xl_value_type_from_raw(raw: u32) -> Option<XlValueType> {
+    match raw {
+        xlfn_sys::XLTYPE_NUM => Some(XlValueType::Number),
+        xlfn_sys::XLTYPE_STR => Some(XlValueType::String),
+        xlfn_sys::XLTYPE_BOOL => Some(XlValueType::Boolean),
+        xlfn_sys::XLTYPE_REF => Some(XlValueType::Reference),
+        xlfn_sys::XLTYPE_ERR => Some(XlValueType::Error),
+        xlfn_sys::XLTYPE_FLOW => Some(XlValueType::Flow),
+        xlfn_sys::XLTYPE_MULTI => Some(XlValueType::Multi),
+        xlfn_sys::XLTYPE_MISSING => Some(XlValueType::Missing),
+        xlfn_sys::XLTYPE_NIL => Some(XlValueType::Nil),
+        xlfn_sys::XLTYPE_SREF => Some(XlValueType::SimpleReference),
+        xlfn_sys::XLTYPE_INT => Some(XlValueType::Integer),
+        xlfn_sys::XLTYPE_BIG_DATA => Some(XlValueType::BigData),
+        _ => None,
     }
 }
-
-impl std::fmt::Display for XlValueType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Number => write!(f, "Number"),
-            Self::String => write!(f, "String"),
-            Self::Boolean => write!(f, "Boolean"),
-            Self::Reference => write!(f, "Reference"),
-            Self::Error => write!(f, "Error"),
-            Self::Flow => write!(f, "Flow"),
-            Self::Multi => write!(f, "Multi"),
-            Self::Missing => write!(f, "Missing"),
-            Self::Nil => write!(f, "Nil"),
-            Self::SimpleReference => write!(f, "SimpleReference"),
-            Self::Integer => write!(f, "Integer"),
-            Self::BigData => write!(f, "BigData"),
-        }
-    }
-}
-
 /// A call-scoped semantic view of one Excel value.
 ///
 /// The validated base type is observable through [`Self::value_type`]. Excel
@@ -183,7 +133,7 @@ impl<'call> XlValueRef<'call> {
                 InputError::Malformed("unknown xltype flag"),
             ));
         }
-        if XlValueType::from_raw(raw.base_type()).is_none() {
+        if crate::value::xl_value_type_from_raw(raw.base_type()).is_none() {
             return Err(XllError::input(
                 "<raw>",
                 InputError::Malformed("unknown base xltype"),
@@ -199,7 +149,7 @@ impl<'call> XlValueRef<'call> {
     #[must_use]
     #[inline]
     pub const fn value_type(self) -> XlValueType {
-        match XlValueType::from_raw(self.raw.base_type()) {
+        match crate::value::xl_value_type_from_raw(self.raw.base_type()) {
             Some(value_type) => value_type,
             None => unreachable!(),
         }
@@ -835,13 +785,16 @@ mod tests {
         ];
 
         for (raw, expected_type) in cases {
-            assert_eq!(XlValueType::from_raw(raw), Some(expected_type));
+            assert_eq!(
+                crate::value::xl_value_type_from_raw(raw),
+                Some(expected_type)
+            );
         }
 
-        assert_eq!(XlValueType::from_raw(0), None);
-        assert_eq!(XlValueType::from_raw(0x0003), None);
-        assert_eq!(XlValueType::from_raw(0x0200), None);
-        assert_eq!(XlValueType::from_raw(0x1000), None);
+        assert_eq!(crate::value::xl_value_type_from_raw(0), None);
+        assert_eq!(crate::value::xl_value_type_from_raw(0x0003), None);
+        assert_eq!(crate::value::xl_value_type_from_raw(0x0200), None);
+        assert_eq!(crate::value::xl_value_type_from_raw(0x1000), None);
     }
 
     #[test]

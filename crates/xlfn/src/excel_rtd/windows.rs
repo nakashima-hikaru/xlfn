@@ -37,7 +37,7 @@ mod class_factory;
 mod com_abi;
 mod event;
 mod excel_rtd;
-mod global_interface_table;
+use xlfn_host::com_transport::global_interface_table;
 mod module_state;
 mod registration;
 mod server;

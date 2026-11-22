@@ -150,9 +150,11 @@ impl ActiveSubscription {
     #[inline]
     pub(crate) fn allocate_sequence(&mut self) -> XllResult<u64> {
         let sequence = self.next_sequence;
-        self.next_sequence = sequence.checked_add(1).ok_or(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_OVERFLOW,
-        })?;
+        self.next_sequence = sequence
+            .checked_add(1)
+            .ok_or(crate::error::construct::internal(
+                crate::diagnostics::catalog::REFERENCE_OVERFLOW,
+            ))?;
         Ok(sequence)
     }
 
@@ -335,9 +337,11 @@ impl<N> Default for RefreshState<N> {
 impl<N> RefreshState<N> {
     pub(crate) fn ensure_notification_ticket(&self) -> XllResult<()> {
         let ticket = self.next_notification_ticket;
-        ticket.checked_add(1).ok_or(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TICKET_OVERFLOW,
-        })?;
+        ticket
+            .checked_add(1)
+            .ok_or(crate::error::construct::internal(
+                crate::diagnostics::catalog::TICKET_OVERFLOW,
+            ))?;
         Ok(())
     }
 

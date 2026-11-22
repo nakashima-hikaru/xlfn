@@ -179,7 +179,7 @@ fn host_auto_open_inner<A: Addin>(
         if runtime.phase() == LifecyclePhase::Quarantined {
             return 0;
         }
-        let mut lifecycle = match runtime.bind_addin_lifecycle() {
+        let mut sta = match runtime.begin_sta_session() {
             Ok(access) => access,
             Err(error) => {
                 let error = lifecycle_access_error(error);
@@ -193,7 +193,7 @@ fn host_auto_open_inner<A: Addin>(
             == crate::lifecycle::LifecyclePhase::Closed
             && runtime.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete;
         if controlled_reload {
-            let result = runtime.remove_addin(&lifecycle, &mut callbacks);
+            let result = runtime.remove_addin(sta.access(), &mut callbacks);
             if result == 0 || runtime.phase() != crate::lifecycle::LifecyclePhase::Closed {
                 return 0;
             }
@@ -205,19 +205,16 @@ fn host_auto_open_inner<A: Addin>(
                 runtime.complete_explicit_removal();
                 return 0;
             }
-            lifecycle = match runtime.bind_addin_lifecycle() {
-                Ok(access) => access,
-                Err(error) => {
-                    let error = lifecycle_access_error(error);
-                    report_boundary_error("xlAutoOpen lifecycle rebind", &error);
-                    runtime.quarantine_runtime();
-                    return 0;
-                }
-            };
+            if let Err(error) = sta.rebind() {
+                let error = lifecycle_access_error(error);
+                report_boundary_error("xlAutoOpen lifecycle rebind", &error);
+                runtime.quarantine_runtime();
+                return 0;
+            }
             runtime.clear_host_intent();
         }
         let result = runtime.open_addin_boundary(
-            &lifecycle,
+            &mut sta,
             callbacks,
             crate::runtime::OpenBoundaryRequest {
                 addin_id,
@@ -257,8 +254,10 @@ where
     with_host_lifecycle(ptr::from_ref(runtime).cast::<()>(), |frame| {
         let boundary = HostCloseBoundary { frame };
         let mut callbacks = HostCallbackSession::new();
-        deactivate_addin(runtime, &mut callbacks, "xlAutoClose lifecycle thread");
-        if runtime.phase() == LifecyclePhase::Closed
+        let export = xlfn_engine::DeactivationExport::AutoClose;
+        deactivate_addin(runtime, &mut callbacks, export);
+        if export.permits_physical_release_boundary()
+            && runtime.phase() == LifecyclePhase::Closed
             && runtime.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete
         {
             if runtime.physical_unload_enabled() {
@@ -288,7 +287,11 @@ where
 {
     with_host_lifecycle(ptr::from_ref(runtime).cast::<()>(), |_| {
         let mut callbacks = HostCallbackSession::new();
-        deactivate_addin(runtime, &mut callbacks, "xlAutoRemove lifecycle thread");
+        deactivate_addin(
+            runtime,
+            &mut callbacks,
+            xlfn_engine::DeactivationExport::AutoRemove,
+        );
         1
     })
     .unwrap_or_else(|| {
@@ -300,7 +303,7 @@ where
 fn deactivate_addin<A: Addin>(
     runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     callbacks: &mut HostCallbackSession,
-    boundary: &'static str,
+    export: xlfn_engine::DeactivationExport,
 ) {
     if runtime.phase() == LifecyclePhase::Quarantined {
         return;
@@ -309,7 +312,7 @@ fn deactivate_addin<A: Addin>(
         Ok(access) => access,
         Err(error) => {
             let error = lifecycle_access_error(error);
-            report_boundary_error(boundary, &error);
+            report_boundary_error(export.diagnostic_context(), &error);
             runtime.quarantine_runtime();
             return;
         }

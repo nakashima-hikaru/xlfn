@@ -1,79 +1,18 @@
 //! Allocation-free bounds for diagnostic cloning and tracing output.
 
 use crate::{XllError, error::InputError};
-use std::borrow::Cow;
 use std::fmt;
 
 // Error chains are application-owned. Bound admission before their recursive
 // derived Clone/Drop implementations can consume an unbounded worker stack.
 pub(super) const MAX_ERROR_DEPTH: usize = 128;
 
-/// Requested dynamic storage of a clone, excluding the fixed channel envelope.
-/// String cloning copies length, not spare capacity. Every nested Box is charged
-/// its full allocation; paths use the platform's lossless encoded byte length.
 pub(super) fn clone_bytes(error: &XllError) -> Option<usize> {
-    let mut current = error;
-    let mut bytes = 0_usize;
-    for _ in 0..MAX_ERROR_DEPTH {
-        let (local, source) = match current {
-            XllError::Native { message, .. } => (message.len(), None),
-            XllError::Application {
-                message, source, ..
-            } => (
-                message
-                    .len()
-                    .checked_add(source.as_ref().map_or(0, |source| source.retained_bytes()))?,
-                None,
-            ),
-            XllError::Custom { message, .. } => (
-                match message {
-                    Cow::Borrowed(_) => 0,
-                    Cow::Owned(message) => message.len(),
-                },
-                None,
-            ),
-            XllError::LibraryLoad { path, .. } => (path.as_os_str().as_encoded_bytes().len(), None),
-            XllError::RtdSubscriptionShutdown { key, source, .. } => (
-                key.len().checked_add(size_of::<XllError>())?,
-                Some(&**source),
-            ),
-            XllError::RtdProducerFailure { topic, source } => (
-                topic.len().checked_add(size_of::<XllError>())?,
-                Some(&**source),
-            ),
-            XllError::Input {
-                reason: InputError::UnknownEnum { actual, .. },
-                ..
-            } => (actual.len(), None),
-            XllError::Input { .. }
-            | XllError::Shape { .. }
-            | XllError::ElementCountMismatch { .. }
-            | XllError::Domain { .. }
-            | XllError::ExcelApi { .. }
-            | XllError::WindowsApi { .. }
-            | XllError::RegistrationConflict { .. }
-            | XllError::MetadataDebtBindingChanged { .. }
-            | XllError::MissingSymbol { .. }
-            | XllError::AbiMismatch { .. }
-            | XllError::ExcelValue(_)
-            | XllError::InvalidHandle
-            | XllError::StaleHandle
-            | XllError::Closing
-            | XllError::Overloaded
-            | XllError::ReentrantCall
-            | XllError::Panic
-            | XllError::Internal { .. } => (0, None),
-        };
-        bytes = bytes.checked_add(local)?;
-        if bytes > super::DIAGNOSTIC_PAYLOAD_MAX_BYTES {
-            return None;
-        }
-        let Some(source) = source else {
-            return Some(bytes);
-        };
-        current = source;
-    }
-    None
+    crate::error::construct::clone_bytes(
+        error,
+        super::DIAGNOSTIC_PAYLOAD_MAX_BYTES,
+        MAX_ERROR_DEPTH,
+    )
 }
 
 /// Keeps tracing's two existing fields and ordinary Display/Debug text intact.
@@ -187,7 +126,7 @@ impl fmt::Display for DisplayError<'_> {
                     actual.len()
                 )
             }
-            XllError::RtdProducerFailure { topic, source } => {
+            XllError::RtdProducerFailure { topic, source, .. } => {
                 write!(
                     output,
                     "RTD producer failed for topic ({} bytes, redacted): {}",
@@ -200,6 +139,7 @@ impl fmt::Display for DisplayError<'_> {
                 topic_id,
                 key,
                 source,
+                ..
             } => {
                 write!(
                     output,
@@ -235,7 +175,7 @@ impl fmt::Debug for DebugError<'_> {
                 .field("code", code)
                 .field("message", &DebugText(message))
                 .finish(),
-            XllError::RtdProducerFailure { topic, source } => output
+            XllError::RtdProducerFailure { topic, source, .. } => output
                 .debug_struct("RtdProducerFailure")
                 .field("topic_bytes", &topic.len())
                 .field("source", &DebugError(source))
@@ -245,6 +185,7 @@ impl fmt::Debug for DebugError<'_> {
                 topic_id,
                 key,
                 source,
+                ..
             } => output
                 .debug_struct("RtdSubscriptionShutdown")
                 .field("server_generation", server_generation)
@@ -316,10 +257,10 @@ mod tests {
         assert_eq!(clone_bytes(&large), None);
         for error in [
             &large,
-            &XllError::RtdProducerFailure {
-                topic: "test".to_owned(),
-                source: Box::new(large.clone()),
-            },
+            &crate::error::construct::rtd_producer_failure(
+                "test".to_owned(),
+                Box::new(large.clone()),
+            ),
         ] {
             for text in [
                 format!("{}", TracedError(error)),
@@ -339,20 +280,20 @@ mod tests {
     fn clone_budget_counts_owned_lengths_boxes_and_paths() {
         let mut message = String::with_capacity(4096);
         message.push_str("abc");
-        let error = XllError::RtdProducerFailure {
-            topic: "topic".to_owned(),
-            source: Box::new(XllError::RtdSubscriptionShutdown {
-                server_generation: 1,
-                topic_id: 2,
-                key: "key".to_owned(),
-                source: Box::new(XllError::Native { code: 1, message }),
-            }),
-        };
+        let error = crate::error::construct::rtd_producer_failure(
+            "topic".to_owned(),
+            Box::new(crate::error::construct::rtd_subscription_shutdown(
+                1,
+                2,
+                "key".to_owned(),
+                Box::new(XllError::Native { code: 1, message }),
+            )),
+        );
         assert_eq!(clone_bytes(&error), Some(11 + 2 * size_of::<XllError>()));
         let path = std::path::PathBuf::from("native/日本語.dll");
         let bytes = path.as_os_str().as_encoded_bytes().len();
         assert_eq!(
-            clone_bytes(&XllError::LibraryLoad { path, os_error: 1 }),
+            clone_bytes(&crate::error::construct::library_load(path, 1)),
             Some(bytes)
         );
         assert_eq!(clone_bytes(&XllError::Panic), Some(0));
@@ -362,19 +303,13 @@ mod tests {
     fn deep_structured_errors_are_rejected_before_recursive_clone() {
         let mut error = XllError::Panic;
         for _ in 1..MAX_ERROR_DEPTH {
-            error = XllError::RtdProducerFailure {
-                topic: String::new(),
-                source: Box::new(error),
-            };
+            error = crate::error::construct::rtd_producer_failure(String::new(), Box::new(error));
         }
         assert_eq!(
             clone_bytes(&error),
             Some((MAX_ERROR_DEPTH - 1) * size_of::<XllError>())
         );
-        error = XllError::RtdProducerFailure {
-            topic: String::new(),
-            source: Box::new(error),
-        };
+        error = crate::error::construct::rtd_producer_failure(String::new(), Box::new(error));
         assert_eq!(clone_bytes(&error), None);
     }
 

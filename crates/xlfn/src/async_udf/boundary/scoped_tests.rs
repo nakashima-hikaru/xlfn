@@ -27,11 +27,13 @@ use xlfn_sys::{XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG
 enum Mode {
     Ready,
     ForgetReady,
+    DropLeaseReady,
     Error,
     PollPanic,
     DropPanic,
     Pending,
     BuildPanic,
+    BuildPanicAfterBind,
 }
 
 struct Payload(Arc<AtomicUsize>);
@@ -78,12 +80,17 @@ impl HandleScopedBuilder<f64> for Builder {
             );
         }
         assert_ne!(self.mode, Mode::BuildPanic, "injected scoped builder panic");
+        let lease = self
+            .pending
+            .bind(scope)
+            .expect("matching fixture generation");
+        assert_ne!(
+            self.mode,
+            Mode::BuildPanicAfterBind,
+            "injected panic after binding a task pin"
+        );
         let inner = Inner {
-            lease: Some(
-                self.pending
-                    .bind(scope)
-                    .expect("matching fixture generation"),
-            ),
+            lease: Some(lease),
             mode: self.mode,
             polls: self.polls,
             drops: self.drops,
@@ -110,23 +117,43 @@ impl Future for Inner<'_> {
             started.send(()).unwrap();
         }
         match this.mode {
-            Mode::ForgetReady => {
-                #[allow(clippy::mem_forget, reason = "exercise task-owned pin cleanup")]
-                std::mem::forget(this.lease.take().unwrap());
+            Mode::ForgetReady | Mode::DropLeaseReady => {
+                let lease = this.lease.take().unwrap();
+                let payload = Arc::clone(&lease.0);
+                assert!(!std::mem::needs_drop::<HandleLease<'_, Payload>>());
+                if this.mode == Mode::ForgetReady {
+                    #[allow(
+                        clippy::forget_non_drop,
+                        clippy::mem_forget,
+                        reason = "exercise task-owned pins without projection destruction"
+                    )]
+                    std::mem::forget(lease);
+                } else {
+                    #[allow(
+                        clippy::drop_non_drop,
+                        reason = "projection disposal never owns a pin"
+                    )]
+                    drop(lease);
+                }
+                assert_eq!(payload.load(Ordering::Relaxed), 0);
                 Poll::Ready(Ok(42.0))
             }
             Mode::Ready | Mode::DropPanic => Poll::Ready(Ok(42.0)),
             Mode::Error => Poll::Ready(Err(XllError::Overloaded)),
             Mode::PollPanic => panic!("injected scoped poll panic"),
             Mode::Pending => Poll::Pending,
-            Mode::BuildPanic => unreachable!(),
+            Mode::BuildPanic | Mode::BuildPanicAfterBind => unreachable!(),
         }
     }
 }
 
 impl Drop for Inner<'_> {
     fn drop(&mut self) {
-        drop(self.lease.take());
+        // A valid last reference can still be read while the scope-owned
+        // future is being destroyed. Its raw pin must not be drained yet.
+        if let Some(lease) = self.lease.take() {
+            assert_eq!(lease.0.load(Ordering::Relaxed), 0);
+        }
         self.drops.fetch_add(1, Ordering::Relaxed);
         if let Some(lifecycle) = self.reenter.take().and_then(|weak| weak.upgrade()) {
             assert!(
@@ -307,7 +334,7 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
                         token,
                         Arc::clone(&events),
                         Arc::clone(&payload_drops),
-                        mode != Mode::ForgetReady,
+                        true,
                         reenter.then(|| Arc::downgrade(&lifecycle)),
                     ),
                 ),
@@ -342,7 +369,9 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
     assert_eq!(payload_drops.load(Ordering::Relaxed), 1);
     assert_eq!(
         drops.load(Ordering::Relaxed),
-        usize::from(mode != Mode::BuildPanic && !cancel_before_poll)
+        usize::from(
+            !matches!(mode, Mode::BuildPanic | Mode::BuildPanicAfterBind) && !cancel_before_poll
+        )
     );
     assert_eq!(
         crate::test_callback::async_return_calls(),
@@ -357,7 +386,9 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
             (Completion::Cancelled, Delivery::Delivered)
         } else {
             match mode {
-                Mode::Ready | Mode::ForgetReady => (Completion::Success, Delivery::Delivered),
+                Mode::Ready | Mode::ForgetReady | Mode::DropLeaseReady => {
+                    (Completion::Success, Delivery::Delivered)
+                }
                 Mode::Error => (
                     Completion::Error(UdfErrorKind::Internal),
                     Delivery::Delivered,
@@ -366,7 +397,9 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
                     (Completion::Error(UdfErrorKind::Panic), Delivery::Delivered)
                 }
                 Mode::Pending => (Completion::Cancelled, Delivery::Delivered),
-                Mode::BuildPanic => (Completion::Error(UdfErrorKind::Panic), Delivery::Delivered),
+                Mode::BuildPanic | Mode::BuildPanicAfterBind => {
+                    (Completion::Error(UdfErrorKind::Panic), Delivery::Delivered)
+                }
             }
         };
         assert_eq!(events.lock().as_slice(), &[expected]);
@@ -386,6 +419,7 @@ fn miri_scoped_delivery_completion_disposes_inner_before_reporting() {
 fn miri_scoped_delivery_releases_pins_when_user_forgets_lease() {
     for instrumented in [false, true] {
         run(Mode::ForgetReady, instrumented, false, false);
+        run(Mode::DropLeaseReady, instrumented, false, false);
     }
 }
 
@@ -393,6 +427,7 @@ fn miri_scoped_delivery_releases_pins_when_user_forgets_lease() {
 fn miri_scoped_delivery_builder_panic_releases_reservation_and_raw_pin() {
     for instrumented in [false, true] {
         run(Mode::BuildPanic, instrumented, false, true);
+        run(Mode::BuildPanicAfterBind, instrumented, false, false);
     }
 }
 #[test]

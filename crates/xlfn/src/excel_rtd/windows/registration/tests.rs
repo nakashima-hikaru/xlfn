@@ -73,6 +73,7 @@ fn assert_mutex_timeout(result: XllResult<CrossProcessRegistrationGuard>) {
         Err(XllError::WindowsApi {
             function: "CoWaitForMultipleHandles(RTD registration mutex)",
             code: RPC_S_CALLPENDING,
+            ..
         })
     ));
 }

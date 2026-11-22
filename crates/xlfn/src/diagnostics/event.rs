@@ -3,9 +3,10 @@
 use crate::XllError;
 use crate::diagnostics::id::DiagnosticId;
 use smol_str::SmolStr;
-use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
+#[doc(inline)]
+pub use xlfn_engine::error::DiagnosticInitError;
 
 /// Receives detailed failures while Excel continues to receive only safe error values.
 pub trait DiagnosticSink: Send + 'static {
@@ -65,31 +66,6 @@ impl DiagnosticEvent<'_> {
     pub const fn timestamp(&self) -> SystemTime {
         self.timestamp
     }
-}
-
-/// A failure to create, install, or replace a diagnostic sink.
-///
-/// Converts into [`XllError`] with `From` and [`crate::error::IntoXllError`].
-/// I/O failures retain their operating-system context; router lifecycle failures
-/// become closing or reentrancy errors.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum DiagnosticInitError {
-    /// A process-wide sink is already installed; replacement must be explicit.
-    #[error("a process-wide diagnostic sink is already installed")]
-    AlreadyInstalled,
-    /// The diagnostic file or another sink resource could not be initialized.
-    #[error(transparent)]
-    Io(#[from] io::Error),
-    /// The bounded diagnostic delivery worker could not be started.
-    #[error("failed to start diagnostic logger worker: {0}")]
-    WorkerSpawn(#[source] io::Error),
-    /// The diagnostic worker attempted to replace its own sink.
-    #[error("diagnostic sink mutation was requested from its own worker")]
-    ReentrantMutation,
-    /// The process diagnostic router is closing or closed.
-    #[error("the diagnostic router is closing or closed")]
-    RouterClosed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]

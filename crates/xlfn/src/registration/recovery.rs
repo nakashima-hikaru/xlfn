@@ -104,11 +104,12 @@ pub(crate) fn retry_metadata_debt_with_host(
 }
 
 fn terminal_retry_error(host: &RegistrationHost<'_>) -> Option<crate::XllError> {
-    host.terminal_status()
-        .map(|status| crate::XllError::ExcelApi {
-            function: crate::error::ExcelApiFunction::Evaluate,
-            failure: crate::error::ExcelApiFailure::Suppressed(status),
-        })
+    host.terminal_status().map(|status| {
+        crate::error::construct::excel_api(
+            crate::error::ExcelApiFunction::Evaluate,
+            crate::error::ExcelApiFailure::Suppressed(status),
+        )
+    })
 }
 
 #[cfg(all(
@@ -195,7 +196,8 @@ mod tests {
             assert!(matches!(
                 debt.last_error(),
                 XllError::MetadataDebtBindingChanged {
-                    name: "TEST.REBOUND"
+                    name: "TEST.REBOUND",
+                    ..
                 }
             ));
         }
@@ -322,7 +324,7 @@ mod tests {
                 Some(XllError::ExcelApi {
                     failure: crate::error::ExcelApiFailure::Suppressed(terminal),
                     ..
-                }) if terminal == ExcelCallbackStatus::from_raw(status),
+                }) if terminal == crate::error::callback_status_from_raw(status),
             ));
             assert!(host.registration_id("TEST.LATER").is_err());
             script.assert_calls(&[XLF_EVALUATE, XLF_SET_NAME]);
@@ -345,12 +347,12 @@ mod tests {
                 Err(XllError::ExcelApi {
                     failure: crate::error::ExcelApiFailure::Suppressed(terminal),
                     ..
-                }) if terminal == ExcelCallbackStatus::from_raw(status),
+                }) if terminal == crate::error::callback_status_from_raw(status),
             ));
             assert!(!ledger.metadata_debt_status().has_pending_work());
             assert_eq!(
                 callbacks.terminal_status(),
-                Some(ExcelCallbackStatus::from_raw(status))
+                Some(crate::error::callback_status_from_raw(status))
             );
             script.assert_calls(&[XLF_EVALUATE, XLF_SET_NAME]);
         }

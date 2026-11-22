@@ -71,9 +71,9 @@ impl ReturnsQuiescent {
         claim: &RemovalClaimGuard<'_, A>,
     ) -> crate::XllResult<Self> {
         if !claim.belongs_to(deps.lifecycle()) {
-            return Err(crate::XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::CLOSE_CERTIFICATE,
+            ));
         }
         let drained = deps.returns().close_admission().wait()?;
         Ok(Self {
@@ -203,18 +203,18 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
         // Validate the supplied policy/runtime and thread-affine access before
         // extracting any state that would otherwise be dropped on an error.
         if !std::ptr::eq(&runtime.lifecycle, deps.lifecycle()) {
-            return Err(AddinQuiesceFailure::Lifecycle(crate::XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
-            }));
+            return Err(AddinQuiesceFailure::Lifecycle(
+                crate::error::construct::internal(crate::diagnostics::catalog::CLOSE_RUNTIME),
+            ));
         }
         let lifecycle_present = deps.has_addin_lifecycle(lifecycle).map_err(|error| {
             AddinQuiesceFailure::Lifecycle(crate::lifecycle::lifecycle_access_error(error))
         })?;
         let Some(generation) = take_generation() else {
             if lifecycle_present {
-                return Err(AddinQuiesceFailure::Lifecycle(crate::XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
-                }));
+                return Err(AddinQuiesceFailure::Lifecycle(
+                    crate::error::construct::internal(crate::diagnostics::catalog::LIFECYCLE_SLOT),
+                ));
             }
             return Ok(Self::empty(deps, generation_id));
         };
@@ -357,9 +357,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
         }
         if !shared_state_dropped {
             return Err(LifecycleFailure::disposed(
-                crate::XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
-                },
+                crate::error::construct::internal(crate::diagnostics::catalog::LIFECYCLE_SLOT),
                 empty_binding,
             ));
         }
@@ -476,9 +474,7 @@ impl HostDetachFailure {
     }
 
     pub(crate) fn into_error(self) -> crate::XllError {
-        crate::XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
-        }
+        crate::error::construct::internal(crate::diagnostics::catalog::REGISTRATION_UNKNOWN)
     }
 }
 
@@ -865,13 +861,13 @@ impl ReclaimFailure {
     pub(crate) fn into_error(self) -> crate::XllError {
         match self {
             Self::Diagnostics(error) => error,
-            Self::Rtd(error) => crate::XllError::Internal {
-                diagnostic_id: if error.missing_module_residency {
-                    crate::diagnostics::id::DiagnosticId::MODULE_RESIDENCY
+            Self::Rtd(error) => {
+                crate::error::construct::internal(if error.missing_module_residency {
+                    crate::diagnostics::catalog::MODULE_RESIDENCY
                 } else {
-                    crate::diagnostics::id::DiagnosticId::RTD_GIT_QUIESCENCE
-                },
-            },
+                    crate::diagnostics::catalog::RTD_GIT_QUIESCENCE
+                })
+            }
         }
     }
 }
@@ -918,9 +914,9 @@ impl ResourcesReclaimed {
             }
             _ => {
                 return Err((
-                    crate::XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-                    },
+                    crate::error::construct::internal(
+                        crate::diagnostics::catalog::CLOSE_CERTIFICATE,
+                    ),
                     module,
                 ));
             }
@@ -929,9 +925,7 @@ impl ResourcesReclaimed {
             || !claim.belongs_to(deps.lifecycle())
         {
             return Err((
-                crate::XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-                },
+                crate::error::construct::internal(crate::diagnostics::catalog::CLOSE_CERTIFICATE),
                 module,
             ));
         }

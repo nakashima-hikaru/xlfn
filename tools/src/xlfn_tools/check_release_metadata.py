@@ -37,6 +37,43 @@ def dependency_tables(document: dict):
             yield f"target.{target}.{section}", configuration.get(section, {})
 
 
+IMPLEMENTATION_DEPENDENCIES = {
+    "xlfn-engine": {"xlfn-common", "xlfn-kernel"},
+    "xlfn-services": {"xlfn-common", "xlfn-engine", "xlfn-kernel"},
+    "xlfn-host": {"xlfn-common", "xlfn-engine", "xlfn-kernel", "xlfn-services", "xlfn-sys"},
+}
+
+
+def check_implementation_dependencies(root: Path, members: dict, workspace: dict) -> list[str]:
+    """Use package identities rather than Cargo aliases, including target dependencies."""
+    names = {path: manifest["package"]["name"] for path, manifest in members.items()}
+    internal_names = set(names.values())
+    errors = []
+    for directory, document in members.items():
+        package = names[directory]
+        allowed = IMPLEMENTATION_DEPENDENCIES.get(package)
+        if allowed is None:
+            continue
+        for section, dependencies in dependency_tables(document):
+            for alias, declaration in dependencies.items():
+                root_dir = directory
+                if isinstance(declaration, dict) and declaration.get("workspace"):
+                    declaration = workspace.get("dependencies", {}).get(alias, {})
+                    root_dir = root
+                destination = alias
+                if isinstance(declaration, dict):
+                    if "path" in declaration:
+                        target = (root_dir / declaration["path"]).resolve()
+                        destination = names.get(target, declaration.get("package", alias))
+                    else:
+                        destination = declaration.get("package", alias)
+                if destination in internal_names and destination not in allowed:
+                    errors.append(
+                        f"{package}:{section}.{alias}: forbidden dependency on {destination}"
+                    )
+    return errors
+
+
 def check(root: Path) -> list[str]:
     root = root.resolve()
     workspace = manifest(root / "Cargo.toml")["workspace"]
@@ -45,7 +82,7 @@ def check(root: Path) -> list[str]:
         for member in workspace["members"]
     }
     originals = {name: (root / name).read_bytes() for name in LICENSES}
-    errors = []
+    errors = check_implementation_dependencies(root, members, workspace)
 
     def check_dependencies(directory: Path, label: str, dependencies: dict) -> None:
         for name, dependency in dependencies.items():

@@ -671,11 +671,6 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         self.returns.close_admission();
         lifecycle.quarantine_state(&mut control);
     }
-
-    #[cfg(test)]
-    pub(in crate::runtime) fn release_test_module_lease(&self) {
-        drop(self.lifecycle.test_module_lease.lock().take());
-    }
 }
 
 #[cfg(test)]

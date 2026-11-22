@@ -23,6 +23,39 @@ cover project source; they do not audit every expanded library implementation.
 
 ## Shared transitions and resource boundaries
 
+### Quarantine cleanup
+
+Production `xlfn-engine::quarantine::CleanupProtocol` and the
+`operation_gate::quarantine` proof expand the same claim and completion
+transitions. At this sequential boundary, only Idle or Pending can issue a
+claim, the incarnation cannot wrap, and Running and terminal states cannot
+issue a second claim. Completion needs the exact issuing identity, ticket
+issuer, epoch and incarnation, plus a current epoch observation. Refusal
+preserves the prior state; success moves to a terminal state.
+
+The model uses arbitrary scalar issuer and epoch identities. Its trusted
+native composition includes the same canonical lock around admission and
+native owner transfer, stable issuer identity and equality, epoch equality
+and the accuracy of the live epoch predicate, and native owner preservation,
+drain and return on failure or panic. The proof does not treat a numeric
+identity as native authority or prove that those observations stay valid
+outside the lock.
+
+### RTD preparation and revocation
+
+The runtime and `operation_gate::rtd` execute the same preparation,
+server-termination and disconnect transition expressions. Wrong runtime or
+entry identity leaves the entire replacement phase untouched. Completing
+any matching revoked preparation cannot reestablish commitment or become
+AwaitConnect. Server termination and disconnect only enter Revoked, and
+subsequent revocation cannot resurrect the entry.
+
+The native catalog lock, fresh incarnation issuance and identity equality,
+ticket uniqueness, actual reservation decrement/fail-stop, catalog indexing,
+quota retention/removal, and host publication remain outside this proof.
+Reservation payload is carried unchanged in the model; no quota arithmetic
+or concurrent/live-host behavior is proved here.
+
 ### SealableCounter and DrainGate
 
 The counter transition kernel is instantiated for both u32 and u64. Its named
@@ -34,8 +67,14 @@ underflow use fail-stop transitions.
 
 Production, Loom and Verus share DrainGate's release tail and wait-loop control.
 The slow final release locks, releases, notifies if idle, then unlocks; no backend
-access follows unlock. Waiting registers and reobserves after wakes and returns
-only on an actual zero observation. Arbitrary sampled interference includes
+access follows unlock. A blocking wait registers and reobserves after wakes.
+The unique controller clears registration before normal unlock; RAII also
+clears on unwinding while the controller still excludes replacement waiters.
+A nonblocking poll uses Acquire count observations under the notification lock
+without arming notification. Native and Loom both use Acquire for successful
+and rejected admission; rejection only synchronizes with the seal it observes,
+not completion of outstanding permits. Verus checks state transitions, not
+native Acquire/Release synchronization. Arbitrary sampled interference includes
 spurious wakes; it supplies no termination theorem.
 
 Resource invariants conserve instance-bound permits (`DG-1`, `DG-2`). Drain

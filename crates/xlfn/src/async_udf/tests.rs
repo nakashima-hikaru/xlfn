@@ -940,7 +940,8 @@ fn timed_close_retains_executor_until_blocking_poll_returns() {
     assert!(matches!(
         lifecycle.close_with_timeout(Duration::from_millis(10)),
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_TIME,
+            diagnostic_id: crate::diagnostics::catalog::ASYNC_TIME,
+            ..
         })
     ));
     assert!(lifecycle.registry().is_closing());

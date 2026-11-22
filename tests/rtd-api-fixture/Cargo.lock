@@ -487,14 +487,37 @@ dependencies = [
  "triomphe",
  "windows-link 0.100.0",
  "xlfn-common",
+ "xlfn-engine",
+ "xlfn-host",
  "xlfn-kernel",
  "xlfn-macros",
+ "xlfn-services",
  "xlfn-sys",
 ]
 
 [[package]]
 name = "xlfn-common"
 version = "0.2.0"
+
+[[package]]
+name = "xlfn-engine"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "thiserror",
+]
+
+[[package]]
+name = "xlfn-host"
+version = "0.1.0"
+dependencies = [
+ "smallvec",
+ "windows-link 0.100.0",
+ "xlfn-common",
+ "xlfn-engine",
+ "xlfn-kernel",
+ "xlfn-sys",
+]
 
 [[package]]
 name = "xlfn-kernel"
@@ -522,6 +545,15 @@ name = "xlfn-rtd-api-fixture"
 version = "0.1.0"
 dependencies = [
  "xlfn",
+]
+
+[[package]]
+name = "xlfn-services"
+version = "0.1.0"
+dependencies = [
+ "rustc-hash",
+ "smallvec",
+ "xlfn-kernel",
 ]
 
 [[package]]

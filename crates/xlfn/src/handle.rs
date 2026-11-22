@@ -69,9 +69,9 @@ pub(crate) use topic::{
     PublishedTopicState, TopicRemoval, TopicTable,
 };
 #[cfg(all(feature = "async", feature = "handles"))]
-pub(crate) use typed::GenerationLeaseBrand;
-#[cfg(all(feature = "async", feature = "handles"))]
 pub use typed::PendingHandleLease;
+#[cfg(all(feature = "async", feature = "handles"))]
+pub(crate) use typed::TaskPins;
 #[cfg(feature = "handles")]
 pub use typed::{ExcelHandleObject, Handle, HandleAlias, HandleLease, HandleObjectId};
 

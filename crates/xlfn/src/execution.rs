@@ -94,12 +94,29 @@ impl<A: crate::Addin> InstrumentationPlan<A> {
         layers_enabled::<A::Layers>() || self.trace_enabled
     }
 
-    pub(crate) fn has_layers(&self) -> bool {
-        layers_enabled::<A::Layers>()
-    }
-
-    pub(crate) const fn trace_enabled(&self) -> bool {
-        self.trace_enabled
+    /// Starts observation only on the observed path. Capture may acquire a
+    /// calculation snapshot; it runs before any user layer is entered.
+    pub(crate) fn start<C>(
+        &self,
+        udf_id: &'static str,
+        excel_name: &'static str,
+        call_id: CallId,
+        capture: impl FnOnce() -> (CalculationId, C),
+    ) -> (ObservationEntry, C) {
+        let timer = CallTimer::start();
+        let (calculation_id, captured) = capture();
+        let entry = ObservationEntry {
+            timer,
+            trace_metadata: UdfTraceMetadata {
+                udf_id,
+                excel_name,
+                call_id,
+                calculation_id,
+                concurrent_calls: crate::module_runtime::ingress().active_udfs(),
+            },
+            trace_enabled: self.trace_enabled,
+        };
+        (entry, captured)
     }
 }
 
@@ -126,6 +143,122 @@ impl CallTimer {
 
     pub(crate) fn elapsed(self) -> Duration {
         self.started.elapsed()
+    }
+}
+
+/// Timed observation before layer admission. Its rejection factory finalizes
+/// the boundary-specific outcome before any partially entered layer exits.
+pub(crate) struct ObservationEntry {
+    timer: CallTimer,
+    trace_metadata: UdfTraceMetadata,
+    trace_enabled: bool,
+}
+
+impl ObservationEntry {
+    pub(crate) fn enter<L: UdfLayers, R: LayerRejection>(
+        self,
+        layers: &L,
+        reject: impl FnOnce(XllError, CallTimer) -> R,
+    ) -> Result<CallObservation<<L as private::UdfLayersImpl>::Guards>, RejectedObservation<R>>
+    {
+        let layers = if layers_enabled::<L>() {
+            let UdfTraceMetadata {
+                udf_id,
+                excel_name,
+                call_id,
+                calculation_id,
+                concurrent_calls,
+            } = self.trace_metadata;
+            let metadata = CallMetadata {
+                udf_id,
+                excel_name,
+                call_id,
+                calculation_id,
+                started_at: SystemTime::now(),
+                concurrent_calls,
+            };
+            match enter_layers(layers, &metadata, |error| reject(error, self.timer)) {
+                Ok(layers) => Some(layers),
+                Err(rejection) => {
+                    return Err(RejectedObservation {
+                        entry: self,
+                        rejection,
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        Ok(CallObservation {
+            entry: self,
+            layers,
+        })
+    }
+
+    fn trace(&self, outcome: &CallOutcome<'_>) {
+        if self.trace_enabled {
+            trace(&self.trace_metadata, outcome);
+        }
+    }
+}
+
+/// Layer rejection has already produced a boundary result and exited all
+/// prior guards. Report and trace that same result before returning it.
+pub(crate) struct RejectedObservation<R> {
+    entry: ObservationEntry,
+    rejection: R,
+}
+
+impl<R: LayerRejection> RejectedObservation<R> {
+    pub(crate) fn finish(self, report: impl FnOnce(&R)) -> R {
+        report(&self.rejection);
+        if self.entry.trace_enabled {
+            self.entry.trace(&self.rejection.outcome());
+        }
+        self.rejection
+    }
+}
+
+/// Owns the admitted layer guards and emits one shared outcome, running
+/// each guard's exit behind its own panic boundary.
+pub(crate) struct CallObservation<G: UdfLayerGuard> {
+    entry: ObservationEntry,
+    layers: Option<G>,
+}
+
+impl<G: UdfLayerGuard> CallObservation<G> {
+    #[cfg(all(test, feature = "async"))]
+    pub(crate) fn for_test(
+        metadata: &CallMetadata,
+        timer: CallTimer,
+        layers: Option<G>,
+        trace_enabled: bool,
+    ) -> Self {
+        Self {
+            entry: ObservationEntry {
+                timer,
+                trace_metadata: UdfTraceMetadata {
+                    udf_id: metadata.udf_id,
+                    excel_name: metadata.excel_name,
+                    call_id: metadata.call_id,
+                    calculation_id: metadata.calculation_id,
+                    concurrent_calls: metadata.concurrent_calls,
+                },
+                trace_enabled,
+            },
+            layers,
+        }
+    }
+
+    pub(crate) fn elapsed(&self) -> Duration {
+        self.entry.timer.elapsed()
+    }
+
+    pub(crate) fn finish(self, outcome: &CallOutcome<'_>) {
+        if let Some(layers) = self.layers {
+            exit_layers(layers, outcome);
+        }
+        self.entry.trace(outcome);
     }
 }
 
@@ -728,6 +861,137 @@ mod tests {
             Err((XllError::Overloaded, _))
         ));
         assert_eq!(order.lock().as_slice(), ["enter-a", "reject", "exit-a"]);
+    }
+
+    #[test]
+    fn rejected_observation_shares_one_final_outcome_with_all_entered_layers() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Delivery {
+            Accepted,
+            Rejected,
+            Unobserved,
+        }
+
+        type Events = Arc<Mutex<Vec<(&'static str, &'static str, Duration)>>>;
+
+        struct Layer {
+            name: &'static str,
+            events: Events,
+            fail_entry: bool,
+            panic_on_exit: bool,
+        }
+
+        impl UdfLayer for Layer {
+            type Guard = Self;
+
+            fn enter(&self, _: &CallMetadata) -> XllResult<Self::Guard> {
+                self.events
+                    .lock()
+                    .push((self.name, "enter", Duration::ZERO));
+                if self.fail_entry {
+                    Err(XllError::Overloaded)
+                } else {
+                    Ok(Self {
+                        events: Arc::clone(&self.events),
+                        ..*self
+                    })
+                }
+            }
+        }
+
+        impl UdfLayerGuard for Layer {
+            fn exit(self, outcome: &CallOutcome<'_>) {
+                self.events.lock().push((
+                    self.name,
+                    outcome.delivery.trace_label(),
+                    outcome.duration,
+                ));
+                assert!(!self.panic_on_exit, "injected layer exit panic");
+            }
+        }
+
+        struct Rejection {
+            cause: XllError,
+            delivery: Delivery,
+            delivery_error: XllError,
+            duration: Duration,
+        }
+
+        impl LayerRejection for Rejection {
+            fn outcome(&self) -> CallOutcome<'_> {
+                CallOutcome {
+                    completion: UdfCompletionOutcome::from_error(&self.cause),
+                    delivery: match self.delivery {
+                        Delivery::Accepted => UdfDeliveryOutcome::Delivered,
+                        Delivery::Rejected => UdfDeliveryOutcome::Failed {
+                            error: &self.delivery_error,
+                        },
+                        Delivery::Unobserved => UdfDeliveryOutcome::Unobserved,
+                    },
+                    duration: self.duration,
+                }
+            }
+        }
+
+        for delivery in [Delivery::Accepted, Delivery::Rejected, Delivery::Unobserved] {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let layer = |name, fail_entry, panic_on_exit| Layer {
+                name,
+                events: Arc::clone(&events),
+                fail_entry,
+                panic_on_exit,
+            };
+            let entry = ObservationEntry {
+                timer: CallTimer::start(),
+                trace_metadata: UdfTraceMetadata {
+                    udf_id: "test",
+                    excel_name: "TEST",
+                    call_id: CallId::new(1),
+                    calculation_id: CalculationId::new(1),
+                    concurrent_calls: 1,
+                },
+                trace_enabled: false,
+            };
+            let layers = (
+                layer("outer", false, false),
+                layer("inner", false, true),
+                layer("rejecting", true, false),
+                layer("not entered", false, false),
+            );
+            let result = entry.enter(&layers, |cause, _| {
+                events.lock().push(("boundary", "finalize", Duration::ZERO));
+                Rejection {
+                    cause,
+                    delivery,
+                    delivery_error: XllError::Closing,
+                    duration: Duration::from_millis(3),
+                }
+            });
+            let Err(rejection) = result else {
+                panic!("the third layer must reject entry");
+            };
+            let finalized = rejection.finish(|_| {});
+            let outcome = finalized.outcome();
+            assert!(matches!(
+                outcome.completion,
+                UdfCompletionOutcome::Error {
+                    error: XllError::Overloaded,
+                    ..
+                }
+            ));
+            let label = outcome.delivery.trace_label();
+            assert_eq!(
+                events.lock().as_slice(),
+                [
+                    ("outer", "enter", Duration::ZERO),
+                    ("inner", "enter", Duration::ZERO),
+                    ("rejecting", "enter", Duration::ZERO),
+                    ("boundary", "finalize", Duration::ZERO),
+                    ("inner", label, outcome.duration),
+                    ("outer", label, outcome.duration),
+                ]
+            );
+        }
     }
 
     #[test]

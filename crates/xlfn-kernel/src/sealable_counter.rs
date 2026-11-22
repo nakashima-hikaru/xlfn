@@ -116,8 +116,8 @@ impl SealableCounter {
     pub(crate) fn try_acquire(&self) -> Result<(), Sealed> {
         // Acquire a reopen's publication even if a delayed reader selected
         // this gate in an older generation. The count itself publishes no data.
-        self.state
-            .try_update(Ordering::Acquire, Ordering::Relaxed, acquire_update)
+        // Rejection acquires the observed seal, too. It is not a drain proof.
+        transitions::try_admission!(self.state, try_update, acquire_update)
             .map(|_| ())
             .map_err(|_| Sealed)
     }
@@ -155,8 +155,7 @@ impl SealableCounter {
 
     /// Registers drain notification in the same atomic state as admission and
     /// release, and returns the active count observed by that RMW. The bit is
-    /// cleared only by an exclusive gate controller after an idle observation,
-    /// or by a serialized reopen; no independent waiter counter exists.
+    /// cleared on exit by the exclusive wait scope. Polling does not register.
     ///
     /// Linearization Point: atomic fetch_or setting WAITING_BIT.
     pub(crate) fn mark_waiting(&self) -> usize {
@@ -166,7 +165,7 @@ impl SealableCounter {
     /// Deregisters the sole idle observer. The gate controller serializes
     /// registration; already-committed notification tails may still run.
     pub(crate) fn clear_waiting(&self) {
-        self.state.fetch_and(!WAITING_BIT, Ordering::Relaxed);
+        transitions::clear_waiting!(self.state, WAITING_BIT);
     }
 
     /// Linearization Point: atomic fetch_or setting SEALED_BIT.
@@ -267,8 +266,7 @@ pub(crate) mod loom_support {
         }
 
         pub(crate) fn try_acquire(&self) -> Result<(), Sealed> {
-            self.state
-                .fetch_update(Ordering::Acquire, Ordering::Relaxed, acquire_update)
+            transitions::try_admission!(self.state, fetch_update, acquire_update)
                 .map(|_| ())
                 .map_err(|_| Sealed)
         }
@@ -294,6 +292,10 @@ pub(crate) mod loom_support {
 
         pub(crate) fn mark_waiting(&self) -> usize {
             transitions::mark_waiting!(self.state, WAITING_BIT, ACTIVE_COUNT_MASK)
+        }
+
+        pub(crate) fn clear_waiting(&self) {
+            transitions::clear_waiting!(self.state, WAITING_BIT);
         }
 
         pub(crate) fn seal(&self) {
@@ -373,6 +375,38 @@ mod tests {
             value.store(7, Ordering::Relaxed);
             counter.reopen().unwrap();
             reader.join().unwrap();
+        });
+    }
+
+    #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn loom_rejected_admission_acquires_seal_publication() {
+        use loom::sync::Arc;
+        use loom::sync::atomic::AtomicUsize;
+        use loom::thread;
+
+        let mut model = loom::model::Builder::new();
+        model.preemption_bound = Some(2);
+        model.check(|| {
+            let counter = Arc::new(loom_support::Counter::new());
+            let value = Arc::new(AtomicUsize::new(0));
+            let sealing_counter = Arc::clone(&counter);
+            let publishing_value = Arc::clone(&value);
+            let sealer = thread::spawn(move || {
+                publishing_value.store(7, Ordering::Relaxed);
+                sealing_counter.seal();
+            });
+            loop {
+                if counter.try_acquire().is_err() {
+                    break;
+                }
+                counter.release();
+                thread::yield_now();
+            }
+            // Observe before joining: only rejection can acquire the seal.
+            assert_eq!(value.load(Ordering::Relaxed), 7);
+            sealer.join().unwrap();
         });
     }
 

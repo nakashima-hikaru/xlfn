@@ -94,6 +94,7 @@ pub struct FILE_ID_128 {
 }
 impl Default for FILE_ID_128 {
     fn default() -> Self {
+        // SAFETY: this SDK record admits an all-zero Rust representation.
         unsafe { core::mem::zeroed() }
     }
 }

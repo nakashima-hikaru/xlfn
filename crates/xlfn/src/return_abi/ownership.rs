@@ -1,6 +1,6 @@
 //! Excel-owned return-obligation ownership and quiescence accounting.
 
-use crate::{XllError, XllResult};
+use crate::XllResult;
 use xlfn_kernel::drain_gate::{
     DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit, current_thread_stripe,
 };
@@ -101,16 +101,16 @@ impl ReturnObserver {
 impl ReturnTracker {
     pub(crate) fn reopen_admission(&self) -> XllResult<()> {
         if !self.admission_closed() || !self.is_quiescent() {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::RETURN_REOPEN,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::RETURN_REOPEN,
+            ));
         }
         self.gate
             .control()
             .wait_if_sealed()
             .map(|closed| drop(closed.reopen()))
-            .map_err(|_| XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::RETURN_REOPEN,
+            .map_err(|_| {
+                crate::error::construct::internal(crate::diagnostics::catalog::RETURN_REOPEN)
             })
     }
 

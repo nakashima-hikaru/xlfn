@@ -165,6 +165,11 @@ impl RegistrationAtomic {
         self.raw = previous | bits;
         previous
     }
+
+    fn fetch_and(&mut self, bits: $word, ordering: Ordering)
+        requires ordering == Ordering::Relaxed,
+        ensures final(self).raw == old(self).raw & bits,
+    { self.raw = self.raw & bits; }
 }
 
 
@@ -337,10 +342,25 @@ impl WaitModel {
         self.registered = false;
     }
 
-    fn unlock(&mut self, _guard: ())
+    fn clear_registration(&mut self)
         requires old(self).held, old(self).registered,
-            old(self).raw & $mask == 0,
-        ensures !final(self).held, final(self).registered, final(self).raw == old(self).raw,
+        ensures final(self).held, !final(self).registered,
+            final(self).raw & $mask == old(self).raw & $mask,
+            final(self).raw & $waiting == 0,
+    {
+        let previous = self.raw;
+        let mut atomic = RegistrationAtomic { raw: previous };
+        super::super::transitions::clear_waiting!(atomic, $waiting);
+        self.raw = atomic.raw;
+        self.registered = false;
+        assert((previous & !$waiting) & $mask == previous & $mask) by(bit_vector);
+        assert((previous & !$waiting) & $waiting == 0) by(bit_vector);
+    }
+
+    fn unlock(&mut self, _guard: ())
+        requires old(self).held, !old(self).registered,
+            old(self).raw & $mask == 0, old(self).raw & $waiting == 0,
+        ensures !final(self).held, !final(self).registered, final(self).raw == old(self).raw,
     { self.held = false; }
 }
 
@@ -348,11 +368,11 @@ impl WaitModel {
 #[verifier::exec_allows_no_decreases_clause]
 pub fn wait_loop_refines(model: &mut WaitModel)
     requires !old(model).held, old(model).cursor <= old(model).samples.len(),
-    ensures !final(model).held, final(model).registered,
-        final(model).raw & $mask == 0, final(model).raw & $waiting != 0,
+    ensures !final(model).held, !final(model).registered,
+        final(model).raw & $mask == 0, final(model).raw & $waiting == 0,
 {
     wait_loop!(guard, active;
-        model.lock(), model.register(), model.wait(guard), model.unlock(guard);
+        model.lock(), model.register(), model.wait(guard), model.clear_registration(), model.unlock(guard);
         invariant
             model.held, model.registered,
             model.raw & $waiting != 0,
@@ -420,6 +440,7 @@ pub fn scan_stripes(raw: &mut Vec<$word>) -> (idle: bool)
 pub open spec fn reader_interference(before: $word, after: $word) -> bool {
     ||| after == before
     ||| after == before | $waiting
+    ||| after == before & !$waiting
     ||| after == before | $sealed
     ||| $acquire_spec(before) == TransitionOutcome::Success(after)
     ||| $release_spec(before) == TransitionOutcome::Success(after)
@@ -429,6 +450,8 @@ pub proof fn sealed_step_is_nonincreasing(before: $word, after: $word)
     requires before & $sealed != 0, reader_interference(before, after),
     ensures after & $sealed != 0, after & $mask <= before & $mask,
 {
+    assert((before & !$waiting) & $sealed == before & $sealed) by(bit_vector);
+    assert((before & !$waiting) & $mask == before & $mask) by(bit_vector);
     assert((before | $waiting) & $sealed == before & $sealed) by(bit_vector);
     assert((before | $waiting) & $mask == before & $mask) by(bit_vector);
     assert((before | $sealed) & $sealed != 0) by(bit_vector);

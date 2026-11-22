@@ -107,14 +107,15 @@ impl<'issuer, A: crate::Addin> LifecycleAccess<'issuer, A> {
 
     pub(crate) fn rollback_decision(&mut self) -> RollbackDecision<'issuer, A> {
         match &self.core.state {
-            LifecycleState::Closed(ClosedState::Idle) => RollbackDecision::ClosedIdle,
-            LifecycleState::Closed(ClosedState::Finalizing { .. }) | LifecycleState::Closing(_) => {
+            LifecycleState::Closed => RollbackDecision::ClosedIdle,
+            LifecycleState::Stopping(StoppingState::Finalizing(_))
+            | LifecycleState::Stopping(StoppingState::Remove(_)) => {
                 RollbackDecision::ClosingOwnsCleanup
             }
             LifecycleState::Opening { .. }
             | LifecycleState::Open { .. }
             | LifecycleState::Quarantined(_) => RollbackDecision::Unavailable,
-            LifecycleState::OpenRollbackPending(_) => {
+            LifecycleState::Stopping(StoppingState::RollbackOpen(_)) => {
                 let issuer = self.coordinator;
                 match issuer.claim_removal(self) {
                     Some(claim) => {

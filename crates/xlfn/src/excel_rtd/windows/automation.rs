@@ -1,6 +1,6 @@
 use super::com_abi::{
-    DISPATCH_METHOD, IUnknown_Vtbl, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_EMPTY,
-    VT_ERROR, VT_I4, VT_R8, VT_UNKNOWN, VT_VARIANT,
+    DISPATCH_METHOD, IUnknown_Vtbl, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_I4,
+    VT_UNKNOWN, VT_VARIANT,
 };
 use super::update_event::{OwnedRtdUpdateEvent, RtdUpdateEvent};
 use super::{
@@ -12,14 +12,14 @@ use crate::subscription::{RtdUpdate, StoredRtdValue};
 use crate::win32::{
     DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_PARAMNOTFOUND, DISP_E_TYPEMISMATCH,
     DISP_E_UNKNOWNINTERFACE, DISP_E_UNKNOWNNAME, DISPID_UNKNOWN, DISPPARAMS, E_FAIL, E_INVALIDARG,
-    E_OUTOFMEMORY, E_POINTER, EXCEPINFO, FADF_BSTR, FADF_DISPATCH, FADF_HAVEIID, FADF_RECORD,
-    FADF_UNKNOWN, FADF_VARIANT, GUID, S_OK, SAFEARRAY, SAFEARRAYBOUND, SafeArrayAccessData,
-    SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound,
-    SafeArrayGetUBound, SafeArrayGetVartype, SafeArrayUnaccessData, SysAllocStringLen,
-    SysFreeString, SysStringLen, VARIANT, VARIANT_BOOL, VariantClear,
+    E_POINTER, EXCEPINFO, FADF_BSTR, FADF_DISPATCH, FADF_HAVEIID, FADF_RECORD, FADF_UNKNOWN,
+    FADF_VARIANT, GUID, S_OK, SAFEARRAY, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
+    SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayGetVartype, SysFreeString, SysStringLen,
+    VARIANT, VARIANT_BOOL, VariantClear,
 };
 use crate::{XllError, XllResult};
 use std::ptr::{self, NonNull};
+use xlfn_host::com_transport::automation::{VariantArray, VariantValue, write_variant};
 
 pub(super) const IID_NULL: super::GUID = super::GUID {
     data1: 0,
@@ -646,61 +646,7 @@ unsafe fn wide_name_eq_ascii(name: *const u16, expected: &[u8]) -> bool {
     // element establishes that it has no unmatched suffix.
     unsafe { *name.add(expected.len()) == 0 }
 }
-pub(super) unsafe fn write_bstr_variant(result: *mut VARIANT, value: &str) -> i32 {
-    let length =
-        match crate::utf16::checked_utf16_len(value, "RTD value", crate::utf16::EXCEL_STRING_LIMIT)
-        {
-            Ok(length) => length,
-            Err(_) => return E_INVALIDARG,
-        };
-
-    // SAFETY: a null source requests an uninitialized BSTR with exactly this
-    // many code units plus its terminator. The validated Excel limit fits u32.
-    let bstr = unsafe { SysAllocStringLen(ptr::null(), length as u32) };
-    // The generated BSTR alias is const-qualified, but this allocation is new
-    // writable storage exclusively owned by this function.
-    let Some(bstr) = NonNull::new(bstr.cast_mut()) else {
-        return E_FAIL;
-    };
-    let owner = std::mem::DropGuard::new(bstr, |bstr| {
-        // SAFETY: this guard owns the allocation until the completed VARIANT
-        // receives it; unwind before transfer frees it exactly once.
-        unsafe { SysFreeString(bstr.as_ptr()) };
-    });
-    if value.len() == length {
-        // Equal UTF-8 and UTF-16 lengths prove ASCII for a valid Rust str.
-        for (index, &byte) in value.as_bytes().iter().enumerate() {
-            // SAFETY: the byte count equals the allocated code-unit count.
-            // Write directly without borrowing uninitialized BSTR contents.
-            unsafe { bstr.as_ptr().add(index).write(u16::from(byte)) };
-        }
-    } else if value.len() == length * 3 {
-        // The exact checked length and maximum of three UTF-8 bytes per
-        // UTF-16 unit prove that each scalar is one three-byte BMP unit.
-        for (index, unit) in crate::utf16::fixed_bmp_units(value).enumerate() {
-            // SAFETY: the fixed-width iterator yields exactly the allocated
-            // number of units, excluding the allocator-supplied terminator.
-            unsafe { bstr.as_ptr().add(index).write(unit) };
-        }
-    } else {
-        for (index, unit) in value.encode_utf16().enumerate() {
-            // SAFETY: checked_utf16_len counted this same immutable string, so
-            // every write is in bounds. The allocator's terminator is retained.
-            unsafe { bstr.as_ptr().add(index).write(unit) };
-        }
-    }
-
-    let mut variant = VARIANT::default();
-    variant.Anonymous.Anonymous.vt = VT_BSTR;
-    variant.Anonymous.Anonymous.Anonymous.bstrVal = bstr.as_ptr();
-
-    // SAFETY: the caller guarantees that `result` points to writable VARIANT
-    // output storage. Ownership of `bstr` transfers into the written VARIANT.
-    unsafe { *result = variant };
-    let _ = std::mem::DropGuard::dismiss(owner);
-
-    S_OK
-}
+pub(super) use xlfn_host::com_transport::automation::write_bstr_variant;
 
 /// Bench the actual Windows BSTR writer, including allocation and release
 /// but not the separate SAFEARRAY and transport stages.
@@ -716,83 +662,32 @@ pub fn benchmark_rtd_bstr(value: &str) {
 }
 
 pub(super) unsafe fn write_value_variant(result: *mut VARIANT, value: &StoredRtdValue) -> i32 {
-    if result.is_null() {
-        return E_POINTER;
-    }
-
-    let mut variant = VARIANT::default();
-
-    match value {
-        StoredRtdValue::Number(value) => {
-            variant.Anonymous.Anonymous.vt = VT_R8;
-            variant.Anonymous.Anonymous.Anonymous.dblVal = *value;
-        }
-        StoredRtdValue::Boolean(value) => {
-            variant.Anonymous.Anonymous.vt = VT_BOOL;
-            variant.Anonymous.Anonymous.Anonymous.boolVal = if *value { -1 } else { 0 };
-        }
-        StoredRtdValue::Integer(value) => {
-            variant.Anonymous.Anonymous.vt = VT_I4;
-            variant.Anonymous.Anonymous.Anonymous.lVal = *value;
-        }
-        StoredRtdValue::String(value) => {
-            // SAFETY: `result` was validated as non-null above and `value`
-            // remains readable for the duration of the call.
-            return unsafe { write_bstr_variant(result, value.as_ref()) };
-        }
+    let value = match value {
+        StoredRtdValue::Number(value) => VariantValue::Number(*value),
+        StoredRtdValue::Boolean(value) => VariantValue::Boolean(*value),
+        StoredRtdValue::Integer(value) => VariantValue::Integer(*value),
+        StoredRtdValue::String(value) => VariantValue::Text(value.as_ref()),
         StoredRtdValue::Error(value) => {
-            variant.Anonymous.Anonymous.vt = VT_ERROR;
             // Excel Automation expects a failure SCODE in the control facility.
-            variant.Anonymous.Anonymous.Anonymous.scode =
-                (0x800A_0000_u32 | (2000 + value.code()) as u32) as i32;
+            VariantValue::ErrorCode((0x800A_0000_u32 | (2000 + value.code()) as u32) as i32)
         }
-        StoredRtdValue::Empty => {
-            variant.Anonymous.Anonymous.vt = VT_EMPTY;
-        }
-    }
-
-    // SAFETY: `result` was validated as non-null and points to writable VARIANT
-    // storage supplied by the caller.
-    unsafe { *result = variant };
-
-    S_OK
+        StoredRtdValue::Empty => VariantValue::Empty,
+    };
+    // SAFETY: the enclosing Automation boundary controls the empty output slot.
+    unsafe { write_variant(result, value) }
 }
 
-/// Raw Automation primitives used only by the private refresh ownership core.
-/// These functions do not issue batch delivery authority.
+/// Native array adapter. The private refresh publication core still owns
+/// release evidence and sole write/commit authority.
 pub(crate) enum WindowsRefreshArrayApi {}
 impl WindowsRefreshArrayApi {
     pub(crate) fn create(count: u32) -> Result<NonNull<SAFEARRAY>, i32> {
-        let Some(cells) = (count as usize).checked_mul(2) else {
-            return Err(E_INVALIDARG);
-        };
-        if std::alloc::Layout::array::<VARIANT>(cells).is_err() {
-            return Err(E_INVALIDARG);
-        }
-        let mut bounds = [
-            SAFEARRAYBOUND {
-                cElements: 2,
-                lLbound: 0,
-            },
-            SAFEARRAYBOUND {
-                cElements: count,
-                lLbound: 0,
-            },
-        ];
-        // SAFETY: bounds remain live and describe a two-dimensional VARIANT array.
-        NonNull::new(unsafe { SafeArrayCreate(VT_VARIANT, 2, bounds.as_mut_ptr()) })
-            .ok_or(E_OUTOFMEMORY)
+        VariantArray::create(count)
     }
 
     pub(crate) unsafe fn access(array: NonNull<SAFEARRAY>) -> Result<*mut VARIANT, i32> {
-        let mut data = ptr::null_mut();
-        // SAFETY: the ownership core retains this fresh, unlocked array.
-        let status = unsafe { SafeArrayAccessData(array.as_ptr(), &mut data) };
-        if status < 0 {
-            Err(status)
-        } else {
-            Ok(data.cast())
-        }
+        // SAFETY: the private refresh owner supplies the fresh, unlocked array.
+        unsafe { VariantArray::access(array) }
     }
 
     pub(crate) unsafe fn fill(data: *mut VARIANT, updates: &[RtdUpdate]) -> Result<(), i32> {
@@ -817,16 +712,13 @@ impl WindowsRefreshArrayApi {
     }
 
     pub(crate) unsafe fn unaccess(array: NonNull<SAFEARRAY>) -> Result<(), i32> {
-        // SAFETY: this is the one data access retained by the ownership core.
-        let status = unsafe { SafeArrayUnaccessData(array.as_ptr()) };
-        if status < 0 { Err(status) } else { Ok(()) }
+        // SAFETY: the private refresh owner retains exactly one access.
+        unsafe { VariantArray::unaccess(array) }
     }
 
     pub(crate) unsafe fn destroy(array: NonNull<SAFEARRAY>) {
-        // SAFETY: the ownership core destroys only its untransferred unlocked array.
-        if unsafe { SafeArrayDestroy(array.as_ptr()) } < 0 {
-            xlfn_kernel::invariant::fail_stop();
-        }
+        // SAFETY: the private refresh owner proves this array unlocked and untransferred.
+        unsafe { VariantArray::destroy(array) };
     }
 
     pub(crate) fn retained(status: i32) {
@@ -834,10 +726,7 @@ impl WindowsRefreshArrayApi {
         // retains the allocation without a second unlock or destruction attempt.
         crate::diagnostics::report_no_unwind(
             "RTD SafeArrayUnaccessData retained array",
-            &XllError::WindowsApi {
-                function: "SafeArrayUnaccessData",
-                code: status,
-            },
+            &crate::error::construct::windows_api("SafeArrayUnaccessData", status),
         );
     }
 }

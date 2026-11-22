@@ -38,12 +38,7 @@
 #![deny(unsafe_code)]
 
 #[cfg(target_os = "windows")]
-#[allow(
-    unsafe_code,
-    clippy::undocumented_unsafe_blocks,
-    reason = "Windows C-ABI integration"
-)]
-pub(crate) mod win32;
+pub(crate) use xlfn_host::win32;
 
 #[doc(hidden)]
 pub mod __private;

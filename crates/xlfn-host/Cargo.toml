@@ -1,0 +1,30 @@
+[package]
+name = "xlfn-host"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Excel and Windows host adapter primitives for xlfn"
+
+[features]
+# Native facade tests inject startup refusals across the adapter boundary.
+dispatch-test-hooks = []
+
+[dependencies]
+smallvec.workspace = true
+xlfn-common.workspace = true
+xlfn-engine.workspace = true
+xlfn-kernel.workspace = true
+xlfn-sys.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-link.workspace = true
+
+[lints]
+workspace = true
+
+[[example]]
+name = "fp12_quota_image"
+crate-type = ["cdylib"]

@@ -370,6 +370,7 @@ mod tests {
             Err(XllError::ExcelApi {
                 function: ExcelApiFunction::Free,
                 failure: ExcelApiFailure::Status(ExcelCallbackStatus::Failed(XLRET_FAILED)),
+                ..
             })
         ));
         for status in [XLRET_ABORT, XLRET_FAILED] {
@@ -377,8 +378,7 @@ mod tests {
                 observe(multi, status, XLRET_SUCCESS),
                 Err(XllError::ExcelApi {
                     function: ExcelApiFunction::Rtd,
-                    failure: ExcelApiFailure::Status(actual),
-                }) if actual == ExcelCallbackStatus::from_raw(status)
+                    failure: ExcelApiFailure::Status(actual), .. }) if actual == crate::error::callback_status_from_raw(status)
             ));
         }
     }

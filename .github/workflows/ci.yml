@@ -275,6 +275,10 @@ jobs:
                     exit 1
                   }
 
+            - name: Qualify FP12 quota across physical DLL unload and reload
+              shell: pwsh
+              run: ./tests/fp12-multi-image/qualify.ps1 -Target ${{ matrix.target }}
+
             - name: Run Windows-targeted tests
               shell: pwsh
               env:

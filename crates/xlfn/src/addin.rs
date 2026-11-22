@@ -1505,7 +1505,7 @@ mod tests {
             assert_eq!(crate::test_callback::free_calls(), 1);
             assert_eq!(
                 callbacks.terminal_status(),
-                Some(crate::ExcelCallbackStatus::from_raw(status))
+                Some(crate::error::callback_status_from_raw(status))
             );
         }
     }
@@ -1622,6 +1622,7 @@ mod tests {
                             failure: crate::ExcelApiFailure::Status(
                                 crate::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED,)
                             ),
+                            ..
                         })
                     ));
                 })

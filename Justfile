@@ -84,6 +84,7 @@ miri:
     # Layer metadata reads wall-clock time, so run these reentry cases without isolation.
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --lib --locked -- scalar_publication_survives --test-threads=1
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-kernel --lib --locked -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-host --lib --locked -- drain::threaded::tests::miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features handles --lib --locked -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async-builtin --lib --locked -- miri_ --test-threads=1
     just miri-async
@@ -94,6 +95,7 @@ miri:
     just miri-cache-endpoints
     just miri-cache-resident-entry
     just miri-cache-residency
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-host --lib --locked -- process_quota::tests::miri_
 
 # Executor-independent registry accounting under both aliasing models.
 # Strict provenance is limited to calculation pins: parking_lot's blocking
@@ -111,19 +113,19 @@ miri-async-handles:
 
 # Creator rollback, final-pin ordering and zero-budget Box recovery.
 miri-cache-ownership:
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::tests::miri_
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::tests::miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +{{miri-toolchain}} miri test -p xlfn-services --no-default-features --features cache --lib --locked -- cache::tests::miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn-services --no-default-features --features cache --lib --locked -- cache::tests::miri_
 
 # Resident pointer tags preserve provenance and release ownership exactly once.
 miri-cache-resident-entry:
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-strict-provenance" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::resident_index::tests
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::resident_index::tests
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-strict-provenance" cargo +{{miri-toolchain}} miri test -p xlfn-services --no-default-features --features cache --lib --locked -- cache::resident_index::tests
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn-services --no-default-features --features cache --lib --locked -- cache::resident_index::tests
 
 # Non-owning TLS endpoint references must survive owner moves and reject reuse
 # after owner destruction under both aliasing models.
 miri-cache-endpoints:
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::endpoint_cache::tests::miri_
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::endpoint_cache::tests::miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +{{miri-toolchain}} miri test -p xlfn-services --no-default-features --features cache --lib --locked -- cache::endpoint_cache::tests::miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn-services --no-default-features --features cache --lib --locked -- cache::endpoint_cache::tests::miri_
 
 # Verus formal verification of concurrent kernel primitives.
 verus:
@@ -225,10 +227,15 @@ deny:
 semver:
     # Derive compatibility requirements from each crate's actual version.
     # A workspace-wide major override would skip checks even for crates
-    # whose compatibility line has not changed.
+    # whose compatibility line has not changed. Each implementation-only
+    # crate omitted here lacks a 0.1.0 tag baseline; the facade snapshots also
+    # track the definitions it re-exports from those crates.
     cargo semver-checks \
         --workspace \
         --exclude xlfn-kernel \
+        --exclude xlfn-engine \
+        --exclude xlfn-host \
+        --exclude xlfn-services \
         --baseline-rev 0.1.0
 
 # Assemble and build registry-ready archives without invoking publication.
@@ -349,8 +356,8 @@ bench-check:
 
 # Full-cache residency and lease ownership; leak and alias checks remain enabled.
 miri-cache-residency:
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib cache::residency_tests --locked
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib cache::residency_tests --locked
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +{{miri-toolchain}} miri test -p xlfn-services --no-default-features --features cache --lib cache::residency_tests --locked
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn-services --no-default-features --features cache --lib cache::residency_tests --locked
 
 # Standalone lifetime model, including compile-fail escape and brand checks.
 ghostcell-model:

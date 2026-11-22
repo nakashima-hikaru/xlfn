@@ -375,7 +375,8 @@ fn publication_rejects_lifetime_key_collision_without_overwriting_existing_topic
     assert!(matches!(
         result,
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_TOPIC_COLLISION
+            diagnostic_id: crate::diagnostics::catalog::HANDLE_TOPIC_COLLISION,
+            ..
         })
     ));
 
@@ -887,10 +888,10 @@ fn handle_lease_as_ref_and_identity_match_the_synchronous_handle() {
             .unwrap();
         (identity, pending)
     });
-    let brand = GenerationLeaseBrand::new();
+    let pins = TaskPins::new();
     let scope = crate::async_udf::AsyncTaskScope::new(
         crate::generation::RuntimeGeneration::new(1).unwrap(),
-        &brand,
+        &pins,
     );
     let lease = pending.bind(scope).unwrap();
     assert_eq!(lease.object_id(), identity);
@@ -908,7 +909,8 @@ fn csprng_failure_is_a_stable_initialization_error_not_a_panic() {
     assert!(matches!(
         error,
         XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_ENTROPY
+            diagnostic_id: crate::diagnostics::catalog::HANDLE_ENTROPY,
+            ..
         }
     ));
 }
@@ -1948,23 +1950,35 @@ fn excel_topic_id_cannot_be_connected_to_two_formula_topics() {
     assert_eq!(runtime.len(), 1);
 }
 
-#[test]
-fn handle_lease_keeps_payload_alive_after_binding_retirement() {
+fn prepare_pinned_counted_record(
+    runtime: &FormulaHandleService,
+    label: &str,
+) -> (
+    Arc<AtomicUsize>,
+    String,
+    crate::handle::PendingHandleLease<CountedDataRecord>,
+) {
     let drops = Arc::new(AtomicUsize::new(0));
-    let runtime = FormulaHandleService::new(8);
-    let key = test_topic_key("handle-lease-retirement");
     let token = runtime
-        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
+        .prepare(test_topic_key(label), || {
+            Ok(CountedDataRecord(Arc::clone(&drops)))
+        })
         .unwrap()
         .into_token();
-
-    let pinned = with_decode_scope_and_state(&runtime, |runtime, scope| {
+    let pinned = with_decode_scope_and_state(runtime, |runtime, scope| {
         runtime
             .lookup::<CountedDataRecord>(scope, &token)
             .unwrap()
             .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
             .unwrap()
     });
+    (drops, token, pinned)
+}
+
+#[test]
+fn handle_lease_keeps_payload_alive_after_binding_retirement() {
+    let runtime = FormulaHandleService::new(8);
+    let (drops, token, pinned) = prepare_pinned_counted_record(&runtime, "handle-lease-retirement");
     runtime
         .store
         .registry
@@ -2025,21 +2039,8 @@ fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
         }
     }
 
-    let drops = Arc::new(AtomicUsize::new(0));
     let handles = FormulaHandleService::new(8);
-    let token = handles
-        .prepare(test_topic_key("scoped-task-drain"), || {
-            Ok(CountedDataRecord(Arc::clone(&drops)))
-        })
-        .unwrap()
-        .into_token();
-    let pending = with_decode_scope_and_state(&handles, |handles, scope| {
-        handles
-            .lookup::<CountedDataRecord>(scope, &token)
-            .unwrap()
-            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
-            .unwrap()
-    });
+    let (drops, token, pending) = prepare_pinned_counted_record(&handles, "scoped-task-drain");
     handles
         .store
         .registry
@@ -2084,29 +2085,16 @@ fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
 
 #[test]
 fn handle_lease_survives_terminal_runtime_close() {
-    let drops = Arc::new(AtomicUsize::new(0));
     let runtime = FormulaHandleService::new(8);
-    let key = test_topic_key("handle-lease-close");
-    let token = runtime
-        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
-        .unwrap()
-        .into_token();
-
-    let pinned = with_decode_scope_and_state(&runtime, |runtime, scope| {
-        runtime
-            .lookup::<CountedDataRecord>(scope, &token)
-            .unwrap()
-            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
-            .unwrap()
-    });
+    let (drops, _token, pinned) = prepare_pinned_counted_record(&runtime, "handle-lease-close");
     let sealed = runtime.seal().unwrap();
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     assert_eq!(pinned.value_for_test().0.load(Ordering::SeqCst), 0);
     assert!(matches!(
         sealed.finish_quiescence(),
-        Err(XllError::Internal { diagnostic_id })
-            if diagnostic_id == crate::diagnostics::id::DiagnosticId::HANDLE_PINS
+        Err(XllError::Internal { diagnostic_id, .. })
+            if diagnostic_id == crate::diagnostics::catalog::HANDLE_PINS
     ));
     drop(pinned);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -2310,6 +2298,19 @@ fn panicking_factory_does_not_publish_a_topic() {
     );
 }
 
+fn assert_published_data_record(
+    runtime: &FormulaHandleService,
+    preparation: crate::handle::runtime::HandlePreparation,
+    expected: u32,
+) {
+    assert!(preparation.is_published());
+    let token = preparation.into_token();
+    assert_eq!(
+        with_handle::<DataRecord, _>(runtime, &token, |value| value.0).unwrap(),
+        expected
+    );
+}
+
 #[test]
 fn same_thread_factory_reentry_returns_an_error_without_waiting() {
     let runtime = FormulaHandleService::new(8);
@@ -2321,13 +2322,7 @@ fn same_thread_factory_reentry_returns_an_error_without_waiting() {
             Ok(DataRecord(1))
         })
         .unwrap();
-    let created = preparation.is_published();
-    let token = preparation.into_token();
-    assert!(created);
-    assert_eq!(
-        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
-        1
-    );
+    assert_published_data_record(&runtime, preparation, 1);
 }
 
 #[test]
@@ -2365,13 +2360,7 @@ fn different_key_factory_reentry_is_allowed() {
             Ok(DataRecord(1))
         })
         .unwrap();
-    let created = preparation.is_published();
-    let token = preparation.into_token();
-    assert!(created);
-    assert_eq!(
-        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
-        1
-    );
+    assert_published_data_record(&runtime, preparation, 1);
     assert_eq!(runtime.len(), 2);
 }
 
@@ -2390,13 +2379,7 @@ fn same_thread_observer_reentry_returns_an_error_without_waiting() {
             },
         )
         .unwrap();
-    let created = preparation.is_published();
-    let token = preparation.into_token();
-    assert!(created);
-    assert_eq!(
-        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
-        1
-    );
+    assert_published_data_record(&runtime, preparation, 1);
 }
 
 #[test]
@@ -2415,13 +2398,7 @@ fn different_key_observer_reentry_is_allowed() {
             },
         )
         .unwrap();
-    let created = preparation.is_published();
-    let token = preparation.into_token();
-    assert!(created);
-    assert_eq!(
-        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
-        1
-    );
+    assert_published_data_record(&runtime, preparation, 1);
     assert_eq!(runtime.len(), 2);
 }
 
@@ -2455,12 +2432,12 @@ fn failed_observation_does_not_publish_a_topic_and_allows_retry() {
         key,
         || Ok(DataRecord(1)),
         |_, _| {
-            Err(XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::Rtd,
-                failure: crate::error::ExcelApiFailure::Status(
+            Err(crate::error::construct::excel_api(
+                crate::error::ExcelApiFunction::Rtd,
+                crate::error::ExcelApiFailure::Status(
                     crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
                 ),
-            })
+            ))
         },
     );
     assert!(matches!(first, Err(XllError::ExcelApi { .. })));
@@ -2497,12 +2474,12 @@ fn cache_hit_observe_failure_does_not_invalidate_object() {
             Ok(DataRecord(2))
         },
         |_, _| {
-            Err(XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::Rtd,
-                failure: crate::error::ExcelApiFailure::Status(
+            Err(crate::error::construct::excel_api(
+                crate::error::ExcelApiFunction::Rtd,
+                crate::error::ExcelApiFailure::Status(
                     crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
                 ),
-            })
+            ))
         },
     );
     assert!(matches!(result, Err(XllError::ExcelApi { .. })));
@@ -2534,12 +2511,12 @@ fn cache_hit_observe_failure_preserves_existing_topic() {
         key,
         || Ok(DataRecord(20)),
         |_, _| {
-            Err(XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::Rtd,
-                failure: crate::error::ExcelApiFailure::Status(
+            Err(crate::error::construct::excel_api(
+                crate::error::ExcelApiFunction::Rtd,
+                crate::error::ExcelApiFailure::Status(
                     crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
                 ),
-            })
+            ))
         },
     );
     assert!(matches!(result, Err(XllError::ExcelApi { .. })));
@@ -2852,12 +2829,12 @@ fn concurrent_waiter_retries_after_observation_failure() {
             |_, _| {
                 observing_tx.send(()).unwrap();
                 finish_rx.recv().unwrap();
-                Err(XllError::ExcelApi {
-                    function: crate::error::ExcelApiFunction::Rtd,
-                    failure: crate::error::ExcelApiFailure::Status(
+                Err(crate::error::construct::excel_api(
+                    crate::error::ExcelApiFunction::Rtd,
+                    crate::error::ExcelApiFailure::Status(
                         crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
                     ),
-                })
+                ))
             },
         )
     });
@@ -4237,12 +4214,12 @@ fn miri_pending_handle_lease_rejects_foreign_generation_before_exposing_value() 
         .unwrap();
         handles.terminate_all_topics();
         assert_eq!(drops.load(Ordering::Acquire), 0);
-        let brand = GenerationLeaseBrand::new();
-        let scope = AsyncTaskScope::new(RuntimeGeneration::new(scope_generation).unwrap(), &brand);
+        let pins = TaskPins::new();
+        let scope = AsyncTaskScope::new(RuntimeGeneration::new(scope_generation).unwrap(), &pins);
         let mut accesses = 0;
         let outcome = pending.bind(scope).map(|lease| {
             accesses += 1;
-            drop(lease);
+            assert_eq!(lease.0.load(Ordering::Acquire), 0);
         });
         if scope_generation == 1 {
             assert!(outcome.is_ok());
@@ -4251,11 +4228,58 @@ fn miri_pending_handle_lease_rejects_foreign_generation_before_exposing_value() 
             assert!(matches!(outcome, Err(XllError::StaleHandle)));
             assert_eq!(accesses, 0);
         }
-        // Rejection consumes and releases exactly the original raw pin; it
-        // neither returns a retryable pending owner nor exposes a typed borrow.
+        // Rejection releases the original pin immediately; success transfers
+        // it into the framework's owner, not into the projected lease.
+        assert_eq!(
+            drops.load(Ordering::Acquire),
+            usize::from(scope_generation == 2)
+        );
+        drop(pins);
         assert_eq!(drops.load(Ordering::Acquire), 1);
         handles.seal().unwrap();
     }
+}
+
+#[cfg(all(feature = "async", feature = "handles"))]
+#[test]
+fn miri_task_pin_storage_spill_preserves_prior_projections() {
+    use crate::async_udf::AsyncTaskScope;
+    use crate::generation::RuntimeGeneration;
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let handles = FormulaHandleService::new(1);
+    let token = handles
+        .prepare(test_topic_key("task pin storage spill"), || {
+            Ok(CountedDataRecord(Arc::clone(&drops)))
+        })
+        .unwrap()
+        .into_token();
+    let generation = RuntimeGeneration::new(1).unwrap();
+    let pending: Vec<_> = (0..6)
+        .map(|_| {
+            with_handle::<CountedDataRecord, _>(&handles, &token, |handle| {
+                handle.into_pending(generation)
+            })
+            .unwrap()
+            .unwrap()
+        })
+        .collect();
+    handles.terminate_all_topics();
+
+    {
+        let pins = TaskPins::new();
+        let scope = AsyncTaskScope::new(generation, &pins);
+        let leases: Vec<_> = pending
+            .into_iter()
+            .map(|lease| lease.bind(scope).unwrap())
+            .collect();
+        for lease in leases {
+            assert_eq!(lease.0.load(Ordering::Acquire), 0);
+        }
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+    }
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+    handles.seal().unwrap();
 }
 
 #[test]
@@ -4326,6 +4350,8 @@ fn miri_ghostcell_scope_releases_permits_during_unwind() {
 #[test]
 fn ghostcell_handle_authority_stays_thread_bound() {
     static_assertions::assert_not_impl_any!(Handle<'static, DataRecord>: Send, Sync);
+    static_assertions::assert_impl_all!(crate::handle::HandleLease<'static, DataRecord>: Send, Sync, Unpin);
+    static_assertions::assert_not_impl_any!(crate::handle::HandleLease<'static, DataRecord>: std::panic::UnwindSafe, std::panic::RefUnwindSafe);
     static_assertions::assert_not_impl_any!(crate::handle::HandleDomainPermit: Send, Sync);
     static_assertions::assert_not_impl_any!(crate::call::CallStorage<'static, 'static>: Send, Sync);
     static_assertions::assert_not_impl_any!(crate::value::DecodeCallContext<'static, 'static>: Send, Sync);

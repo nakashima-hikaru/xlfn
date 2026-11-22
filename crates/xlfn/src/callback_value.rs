@@ -7,7 +7,8 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use xlfn_sys::{XLOPER12, excel_free, excel12_with_invocation, excel12_with_invocation_scratch};
+use xlfn_host::{RawCallback, dispatch, dispatch_with_scratch, excel_free};
+use xlfn_sys::XLOPER12;
 
 pub(crate) enum CallbackArguments<'call> {
     Borrowed(&'call [NonNull<XLOPER12>]),
@@ -216,22 +217,25 @@ impl<'session> ExcelCallbackValue<'session> {
     ) -> Result<(i32, CallbackResult<'session>), crate::callback_gate::CallbackAdmissionSuppressed>
     {
         let callback_admission = crate::callback_gate::enter_callback()?;
-        let (status, raw, callback_invoked) = match arguments {
-            CallbackArguments::Borrowed(arguments) => {
-                // SAFETY: The caller supplies live callback arguments.
-                unsafe { excel12_with_invocation(function, arguments) }
-            }
-            CallbackArguments::Scratch(arguments) => {
-                // SAFETY: The caller supplies live callback arguments and a
-                // writable raw slice with no non-null invariant to invalidate.
-                unsafe { excel12_with_invocation_scratch(function, arguments) }
-            }
+        // Callback admission remains held through transfer to the typed
+        // cleanup owner below.
+        let invocation = match arguments {
+            // SAFETY: the caller guarantees the borrowed operands remain live.
+            CallbackArguments::Borrowed(arguments) => unsafe { dispatch(function, arguments) },
+            // SAFETY: the caller's live operands and exclusive scratch are
+            // valid for the synchronous native callback.
+            CallbackArguments::Scratch(arguments) => unsafe {
+                dispatch_with_scratch(function, arguments)
+            },
         };
-        let callback_status = ExcelCallbackStatus::from_raw(status);
-        if !callback_invoked {
-            drop(callback_admission);
-            return Ok((status, CallbackResult::Empty));
-        }
+        let (status, raw) = match invocation {
+            RawCallback::NotInvoked(status) => {
+                drop(callback_admission);
+                return Ok((status, CallbackResult::Empty));
+            }
+            RawCallback::Invoked { status, value } => (status, value),
+        };
+        let callback_status = crate::error::callback_status_from_raw(status);
         // Classification constructs the fresh owner itself. A value whose
         // cleanup already started cannot be supplied to this issuing path.
         let make_owner = |state| CallbackOwner {
@@ -277,7 +281,7 @@ impl<'session> ExcelCallbackValue<'session> {
     }
 
     pub(crate) fn value_type(&self) -> XllResult<XlValueType> {
-        XlValueType::from_raw(self.owner.raw.base_type()).ok_or_else(|| {
+        crate::value::xl_value_type_from_raw(self.owner.raw.base_type()).ok_or_else(|| {
             XllError::input(
                 "<callback>",
                 crate::error::InputError::Malformed("unknown base xltype"),
@@ -306,10 +310,10 @@ impl CallbackOwner<'_> {
         match self.state {
             CallbackValueReleaseState::Released => return Ok(()),
             CallbackValueReleaseState::Indeterminate { status } => {
-                return Err(XllError::ExcelApi {
-                    function: crate::error::ExcelApiFunction::Free,
-                    failure: crate::error::ExcelApiFailure::Indeterminate(status),
-                });
+                return Err(crate::error::construct::excel_api(
+                    crate::error::ExcelApiFunction::Free,
+                    crate::error::ExcelApiFailure::Indeterminate(status),
+                ));
             }
             CallbackValueReleaseState::Live | CallbackValueReleaseState::CleanupOnly => {}
         }
@@ -336,7 +340,7 @@ impl CallbackOwner<'_> {
         let raw_status = unsafe { release(&mut self.raw) };
         drop(permit);
 
-        let status = ExcelCallbackStatus::from_raw(raw_status);
+        let status = crate::error::callback_status_from_raw(raw_status);
         if let Some(session) = self.session {
             session.observe(status);
         }
@@ -353,10 +357,10 @@ impl CallbackOwner<'_> {
             if audit_failures {
                 record_callback_value_debt(CallbackCleanupDebt { status });
             }
-            Err(XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::Free,
-                failure: crate::error::ExcelApiFailure::Status(status),
-            })
+            Err(crate::error::construct::excel_api(
+                crate::error::ExcelApiFunction::Free,
+                crate::error::ExcelApiFailure::Status(status),
+            ))
         }
     }
 }
@@ -537,7 +541,7 @@ mod tests {
             FREE_CALLS.store(0, Ordering::Relaxed);
             let mut value = CallbackOwner::from_callback_for_test(
                 XLOPER12::integer(1),
-                ExcelCallbackStatus::from_raw(status),
+                crate::error::callback_status_from_raw(status),
                 successful_free,
             );
             assert_eq!(value.state, CallbackValueReleaseState::CleanupOnly);

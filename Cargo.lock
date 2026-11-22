@@ -1522,7 +1522,6 @@ dependencies = [
  "papaya",
  "parking_lot 0.13.0",
  "proptest",
- "quick_cache",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -1536,14 +1535,38 @@ dependencies = [
  "trybuild",
  "windows-link 0.100.0",
  "xlfn-common",
+ "xlfn-engine",
+ "xlfn-host",
  "xlfn-kernel",
  "xlfn-macros",
+ "xlfn-services",
  "xlfn-sys",
 ]
 
 [[package]]
 name = "xlfn-common"
 version = "0.2.0"
+
+[[package]]
+name = "xlfn-engine"
+version = "0.1.0"
+dependencies = [
+ "parking_lot 0.13.0",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "xlfn-host"
+version = "0.1.0"
+dependencies = [
+ "smallvec",
+ "windows-link 0.100.0",
+ "xlfn-common",
+ "xlfn-engine",
+ "xlfn-kernel",
+ "xlfn-sys",
+]
 
 [[package]]
 name = "xlfn-kernel"
@@ -1586,6 +1609,23 @@ dependencies = [
  "trybuild",
  "windows-link 0.100.0",
  "xlfn-common",
+]
+
+[[package]]
+name = "xlfn-services"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-utils",
+ "indexmap",
+ "loom",
+ "papaya",
+ "quick_cache",
+ "rustc-hash",
+ "smallvec",
+ "static_assertions",
+ "triomphe",
+ "xlfn-engine",
+ "xlfn-kernel",
 ]
 
 [[package]]

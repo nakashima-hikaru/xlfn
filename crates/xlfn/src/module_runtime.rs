@@ -2,6 +2,7 @@ use crate::callback_gate::{ModuleCallbackAdmission, ModuleCallbackLifecycle};
 #[cfg(any(feature = "rtd", feature = "handles"))]
 use crate::excel_rtd_protocol::RtdModuleState;
 use crate::ingress::{ExportIngress, ExportsDrained};
+use crate::sync::Mutex;
 use std::sync::LazyLock;
 
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
@@ -15,6 +16,9 @@ use crate::excel_rtd::ComModuleLifetime;
 /// cross-component transitions used by the runtime, so a new protocol cannot
 /// accidentally introduce a second module epoch owner.
 pub(crate) struct ModuleRuntime {
+    // Serialize new epoch allocation with a quarantine owner's last
+    // current-epoch check and callback-admission closure.
+    epoch_transition: Mutex<()>,
     ingress: ExportIngress,
     callback_admission: ModuleCallbackAdmission,
     #[cfg(any(feature = "rtd", feature = "handles"))]
@@ -118,8 +122,9 @@ pub(crate) enum ModuleCleanupAuthority {
 
 /// Claiming cleanup distinguishes a deliberately retained epoch from a lost
 /// affine authority. The retained capability remains in lifecycle state.
-pub(crate) enum ModuleCleanupClaim {
-    Ready(ModuleCleanupReady),
+pub(crate) enum ModuleCleanupClaim<W = ModuleCleanupReady> {
+    Ready(W),
+    StaleEpoch,
     /// Canonical lifecycle still has a live opening or finalization owner.
     /// Its resources are retained until that owner resolves the request.
     DeferredOwner,
@@ -297,22 +302,49 @@ impl UnavailableModuleAuthority {
 }
 
 impl ModuleCleanupReady {
-    /// Completes cleanup only for authority that can still make progress.
-    /// Retained undrained epochs have no `finish` operation.
-    pub(crate) fn finish(self) -> Result<(), (crate::XllError, ModuleCleanupAuthority)> {
+    pub(crate) fn id(&self) -> ModuleEpochId {
+        match self {
+            Self::Closing(closing) => closing.id(),
+            Self::Drained(drained) => drained.id(),
+        }
+    }
+
+    pub(crate) fn retain_without_draining(self) -> ModuleCleanupAuthority {
         match self {
             Self::Closing(closing) => {
-                let drained = match closing.seal_and_drain() {
-                    Ok(drained) => drained,
-                    Err((error, retained)) => {
-                        return Err((error, ModuleCleanupAuthority::RetainedUndrained(retained)));
-                    }
-                };
-                drained.close_callbacks();
+                ModuleCleanupAuthority::RetainedUndrained(ModuleRetainedUndrained { closing })
             }
-            Self::Drained(drained) => drained.close_callbacks(),
+            Self::Drained(drained) => ModuleCleanupAuthority::Drained(drained),
         }
-        Ok(())
+    }
+
+    /// Run waits with the exact owner still on this stack. A failure or unwind
+    /// retains that owner without reconstructing a pre-drain capability.
+    pub(crate) fn finish(self) -> Result<(), (crate::XllError, ModuleCleanupAuthority)> {
+        use crate::panic_boundary::catch_no_unwind;
+        use std::panic::AssertUnwindSafe;
+        let drained = match self {
+            Self::Closing(closing) => {
+                let result = catch_no_unwind(AssertUnwindSafe(|| {
+                    closing.module.seal_and_drain_internal()
+                }))
+                .unwrap_or(Err(crate::XllError::Panic));
+                match result {
+                    Ok(exports) => ModuleExportsDrained {
+                        module: closing.module,
+                        id: closing.id,
+                        exports,
+                    },
+                    Err(error) => {
+                        return Err((error, Self::Closing(closing).retain_without_draining()));
+                    }
+                }
+            }
+            Self::Drained(drained) => drained,
+        };
+        catch_no_unwind(AssertUnwindSafe(|| drained.close_exact_callbacks()))
+            .unwrap_or(Err(crate::XllError::Panic))
+            .map_err(|error| (error, ModuleCleanupAuthority::Drained(drained)))
     }
 }
 
@@ -346,6 +378,15 @@ impl ModuleExportsDrained {
     /// module capability, rather than through `global()`.
     pub(crate) fn close_callbacks(&self) {
         self.module.close_callbacks_internal();
+    }
+
+    fn close_exact_callbacks(&self) -> crate::XllResult<()> {
+        let _transition = self.module.epoch_transition.lock();
+        if !self.id.is_current() {
+            return Err(crate::XllError::Closing);
+        }
+        self.module.close_callbacks_internal();
+        Ok(())
     }
 
     pub(crate) fn certify(
@@ -408,6 +449,7 @@ impl ModuleQuiescent {
 impl ModuleRuntime {
     fn new() -> Self {
         Self {
+            epoch_transition: Mutex::new(()),
             ingress: ExportIngress::new(),
             callback_admission: ModuleCallbackAdmission::new(ModuleCallbackLifecycle::Closed),
             #[cfg(any(feature = "rtd", feature = "handles"))]
@@ -443,6 +485,10 @@ impl ModuleRuntime {
     /// order.  Runtime admission is reopened by `Runtime` immediately before
     /// this transition; this method owns the module-local portion.
     fn begin_open_internal(&'static self) -> crate::XllResult<ModuleOpening> {
+        let _transition = self.epoch_transition.lock();
+        if self.ingress.phase() != crate::ingress::PHASE_CLOSED {
+            return Err(crate::XllError::Closing);
+        }
         self.callback_admission.try_reopen()?;
         #[cfg(any(feature = "rtd", feature = "handles"))]
         self.rtd.begin_open();
@@ -520,6 +566,18 @@ pub(crate) fn ingress() -> &'static ExportIngress {
     global().ingress()
 }
 
+/// A completed export drain for the synthetic logical-finalization fixture.
+/// Its module storage is separate from both the global runtime and the
+/// deliberately retained, non-Miri ownership fixtures below.
+#[cfg(test)]
+pub(crate) fn finalizing_epoch_for_test() -> ModuleEpochId {
+    static MODULE: LazyLock<ModuleRuntime> = LazyLock::new(ModuleRuntime::new);
+    let closing = MODULE.begin_open_internal().unwrap().rollback(|| {});
+    let epoch = closing.id();
+    let _drained = closing.seal_and_drain().unwrap();
+    epoch
+}
+
 #[cfg(test)]
 pub(crate) fn isolated_closing_for_test() -> ModuleClosing {
     Box::leak(Box::new(ModuleRuntime::new()))
@@ -534,6 +592,25 @@ mod tests {
         ModuleAuthority, ModuleCleanupAuthority, ModuleCleanupReady, ModuleRuntime,
         UnavailableModuleAuthority,
     };
+
+    #[test]
+    fn stale_quarantine_cleanup_cannot_close_a_replacement_epochs_callbacks() {
+        let module = Box::leak(Box::new(ModuleRuntime::new()));
+        let prior = module
+            .begin_open_internal()
+            .unwrap()
+            .rollback(|| {})
+            .seal_and_drain()
+            .unwrap();
+        let replacement = module.begin_open_internal().unwrap();
+        assert!(matches!(
+            ModuleCleanupReady::Drained(prior).finish(),
+            Err((crate::XllError::Closing, ModuleCleanupAuthority::Drained(_)))
+        ));
+        assert!(module.callback_admission().enter_for_test().is_ok());
+        let replacement = replacement.rollback(|| {}).seal_and_drain().unwrap();
+        assert!(ModuleCleanupReady::Drained(replacement).finish().is_ok());
+    }
 
     #[test]
     fn reopening_with_a_retained_callback_preserves_the_previous_epoch() {

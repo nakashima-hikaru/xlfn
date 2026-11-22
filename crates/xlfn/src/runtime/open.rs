@@ -12,7 +12,7 @@ use crate::runtime::open_txn::{
 };
 use crate::runtime::rollback::{active_runtime_generation, rollback_open};
 use crate::runtime::transactions::open_addin_inner;
-use crate::runtime::{AddinLifecycleAccess, Runtime};
+use crate::runtime::{AddinLifecycleAccess, Runtime, StaSession};
 
 pub(crate) enum OpenFailure<'runtime, A: Addin> {
     HostAttached {
@@ -123,7 +123,7 @@ pub(crate) struct OpenBoundaryRequest<'a> {
 
 pub(super) fn open_addin_boundary<A>(
     runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
-    lifecycle: &AddinLifecycleAccess<'_, A>,
+    sta: &mut StaSession<'_, A>,
     mut callbacks: HostCallbackSession,
     request: OpenBoundaryRequest<'_>,
     attempted: &mut Option<crate::generation::OpenAttemptId>,
@@ -139,14 +139,13 @@ where
     } = request;
     std::hint::black_box(crate::crt::effective_crt_policy());
     let removal_epoch = runtime.removal_epoch();
-    let mut rebound = None;
     let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
         let recover_pending =
             runtime.phase() == crate::lifecycle::LifecyclePhase::OpenRollbackPending;
         if recover_pending {
             let outcome = rollback_open::<A>(
                 runtime,
-                lifecycle,
+                sta.access(),
                 &mut callbacks,
                 active_runtime_generation(runtime),
             );
@@ -154,9 +153,9 @@ where
                 return Err(XllError::Closing);
             }
             if !outcome.is_finalized() {
-                let error = XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_PENDING,
-                };
+                let error = crate::error::construct::internal(
+                    crate::diagnostics::catalog::OPEN_ROLLBACK_PENDING,
+                );
                 report_boundary_error("xlAutoOpen pending rollback", &error);
                 if let Some(hazard) = outcome.failure_hazard() {
                     crate::runtime::recovery::quarantine_for_hazard(runtime, hazard);
@@ -170,22 +169,20 @@ where
         }
 
         if let Some(status) = callbacks.terminal_status() {
-            return Err(XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::Register,
-                failure: crate::error::ExcelApiFailure::Suppressed(status),
-            });
+            return Err(crate::error::construct::excel_api(
+                crate::error::ExcelApiFunction::Register,
+                crate::error::ExcelApiFailure::Suppressed(status),
+            ));
         }
 
         if recover_pending {
-            rebound = Some(
-                runtime
-                    .bind_addin_lifecycle()
-                    .map_err(crate::lifecycle::lifecycle_access_error)?,
-            );
+            sta.rebind()
+                .map_err(crate::lifecycle::lifecycle_access_error)?;
         }
-        let lifecycle = rebound.as_ref().unwrap_or(lifecycle);
         let transaction = runtime.begin_open_if_epoch(removal_epoch)?;
         *attempted = Some(transaction.attempt_id());
+        sta.handoff_to_open_attempt();
+        let lifecycle = sta.access();
         let mut transaction = transaction.attach_host(callbacks);
         let transaction = match crate::registration::retry_metadata_debt(
             &runtime.host,
@@ -237,14 +234,6 @@ where
             0
         }
     };
-    if opened == 0
-        && attempted.is_none()
-        && runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
-    {
-        // No transaction owns the binding if open was rejected before issue.
-        // A successful pending rollback may already have released the old one.
-        let _ = runtime.release_empty_addin_lifecycle(rebound.as_ref().unwrap_or(lifecycle));
-    }
     // All affine opening/rollback owners have resolved before we claim the
     // quarantined module. Claims still in flight are deferred by recovery.
     if runtime.phase() == crate::lifecycle::LifecyclePhase::Quarantined {

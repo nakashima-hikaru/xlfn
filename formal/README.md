@@ -49,10 +49,11 @@ open / opening / openRollbackPending ──requestExplicitRemoval──> closing
 Any live phase ──teardown hazard──> quarantined
 ```
 
-An ordinary `xlAutoClose` is not represented as a terminal transition: it is a
-host hint and leaves an open generation open. `xlAutoRemove` requests the
-terminal transition. A second `xlAutoOpen` while open performs controlled
-reload by completing the old removal and beginning a new generation.
+Both `xlAutoClose` and `xlAutoRemove` request terminal logical removal, even
+when Excel does not call both exports. Only the close export may subsequently
+present the physical unload boundary, and only with the additional residency
+evidence in the residency model. A second `xlAutoOpen` while open performs
+controlled reload by completing the old removal and beginning a new generation.
 
 `finishOpenRejectedByClose` and the closing form of `failOpen` clear the
 uncommitted open attempt without publishing a generation. A final-close or

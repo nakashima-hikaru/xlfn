@@ -1,7 +1,9 @@
-use super::super::{ClosedState, LifecycleCoordinator, LifecycleState};
+use super::super::{
+    LifecycleCoordinator, LifecycleState, NativeState, StopGoal, StopRecord, StoppingState,
+    TransitionEffect,
+};
 use super::OpenStart;
 use crate::XllError;
-use crate::diagnostics::id::DiagnosticId;
 use crate::generation::{RemovalAttemptId, RemovalEpoch};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use std::sync::atomic::Ordering;
@@ -18,13 +20,13 @@ struct Snapshot {
 }
 
 fn snapshot(coordinator: &LifecycleCoordinator<()>) -> Snapshot {
-    let core = coordinator.core.lock();
+    let core = coordinator.core.access();
     Snapshot {
         canonical_phase: core.state.phase(),
         projected_phase: LifecyclePhase::from_raw(coordinator.phase.load(Ordering::Acquire)),
         host_intent: core.host_intent,
-        next_open_sequence: core.next_lifecycle_attempt,
-        removal_epoch: core.removal_epoch,
+        next_open_sequence: core.sequence.next_open_sequence(),
+        removal_epoch: core.sequence.removal_epoch().get(),
         removal_attempt: core.state.removal_attempt(),
         publication_empty: coordinator.publication.load(Ordering::Acquire).is_null(),
     }
@@ -35,12 +37,14 @@ fn miri_idle_start_keeps_its_lock_and_abandonment_quarantines_only_its_issuer() 
     let issuer = LifecycleCoordinator::<()>::new();
     let other = LifecycleCoordinator::<()>::new();
     let other_before = snapshot(&other);
-    {
-        let mut core = issuer.core.lock();
+    issuer.access().transition(|core| {
         core.host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
-        core.removal_epoch = 9;
-        core.next_lifecycle_attempt = 41;
-    }
+        for _ in 0..9 {
+            core.sequence.request_removal().unwrap();
+        }
+        core.set_next_lifecycle_attempt_for_test(41);
+        ((), TransitionEffect::Keep)
+    });
 
     let start = OpenStart::acquire(&issuer, RemovalEpoch::new(9)).unwrap();
     assert_eq!(start.attempt().get(), 41);
@@ -52,7 +56,7 @@ fn miri_idle_start_keeps_its_lock_and_abandonment_quarantines_only_its_issuer() 
         LifecyclePhase::from_raw(issuer.phase.load(Ordering::Acquire)),
         LifecyclePhase::Opening
     );
-    assert!(issuer.core.try_lock().is_none());
+    assert!(issuer.try_access().is_none());
     assert_eq!(snapshot(&other), other_before);
 
     drop(start);
@@ -69,16 +73,19 @@ fn miri_idle_start_keeps_its_lock_and_abandonment_quarantines_only_its_issuer() 
 fn miri_closed_finalization_cannot_be_mistaken_for_idle_before_start() {
     let coordinator = LifecycleCoordinator::<()>::new();
     let removal = RemovalAttemptId::new(7).unwrap();
-    {
-        let mut core = coordinator.core.lock();
-        core.state = LifecycleState::Closed(ClosedState::Finalizing {
-            attempt: removal,
-            quarantine_requested: false,
-        });
+    coordinator.access().transition(|core| {
+        core.state = LifecycleState::Stopping(StoppingState::Finalizing(StopRecord::new(
+            removal,
+            crate::module_runtime::finalizing_epoch_for_test(),
+            StopGoal::Remove,
+        )));
         core.host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
-        core.removal_epoch = 3;
-        core.next_lifecycle_attempt = 17;
-    }
+        for _ in 0..3 {
+            core.sequence.request_removal().unwrap();
+        }
+        core.set_next_lifecycle_attempt_for_test(17);
+        ((), TransitionEffect::Keep)
+    });
     let before = snapshot(&coordinator);
     assert_eq!(before.canonical_phase, LifecyclePhase::Closed);
     assert_eq!(before.projected_phase, LifecyclePhase::Closed);
@@ -90,7 +97,8 @@ fn miri_closed_finalization_cannot_be_mistaken_for_idle_before_start() {
     assert!(matches!(
         error,
         XllError::Internal {
-            diagnostic_id: DiagnosticId::OPEN_PHASE,
+            diagnostic_id: crate::diagnostics::catalog::OPEN_PHASE,
+            ..
         }
     ));
     assert_eq!(snapshot(&coordinator), before);
@@ -106,12 +114,12 @@ fn miri_closed_finalization_cannot_be_mistaken_for_idle_before_start() {
 #[test]
 fn miri_completed_removal_intent_keeps_its_exact_lock_until_clear() {
     let coordinator = LifecycleCoordinator::<()>::new();
-    coordinator.core.lock().host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
+    coordinator.set_host_intent(HostLifecycleIntent::ExplicitRemovalComplete);
     let intent = coordinator
         .access()
         .into_completed_removal_intent()
         .unwrap_or_else(|_| panic!("completed idle removal"));
-    assert!(coordinator.core.try_lock().is_none());
+    assert!(coordinator.try_access().is_none());
     intent.clear();
     assert_eq!(
         snapshot(&coordinator).host_intent,
@@ -126,7 +134,7 @@ fn miri_completed_removal_intent_keeps_its_exact_lock_until_clear() {
 #[test]
 fn miri_abandoned_removal_intent_keeps_the_pending_host_obligation() {
     let coordinator = LifecycleCoordinator::<()>::new();
-    coordinator.core.lock().host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
+    coordinator.set_host_intent(HostLifecycleIntent::ExplicitRemovalComplete);
     let before = snapshot(&coordinator);
     let intent = coordinator
         .access()
@@ -134,18 +142,20 @@ fn miri_abandoned_removal_intent_keeps_the_pending_host_obligation() {
         .unwrap_or_else(|_| panic!("completed idle removal"));
     drop(intent);
     assert_eq!(snapshot(&coordinator), before);
-    assert!(coordinator.core.try_lock().is_some());
+    assert!(coordinator.try_access().is_some());
 }
 
 #[test]
 fn miri_stale_removal_epoch_is_rejected_without_starting_or_consuming_an_attempt() {
     let coordinator = LifecycleCoordinator::<()>::new();
-    {
-        let mut core = coordinator.core.lock();
+    coordinator.access().transition(|core| {
         core.host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
-        core.removal_epoch = 12;
-        core.next_lifecycle_attempt = 23;
-    }
+        for _ in 0..12 {
+            core.sequence.request_removal().unwrap();
+        }
+        core.set_next_lifecycle_attempt_for_test(23);
+        ((), TransitionEffect::Keep)
+    });
     let before = snapshot(&coordinator);
     let error = OpenStart::acquire(&coordinator, RemovalEpoch::new(11))
         .err()
@@ -153,7 +163,8 @@ fn miri_stale_removal_epoch_is_rejected_without_starting_or_consuming_an_attempt
     assert!(matches!(
         error,
         XllError::Internal {
-            diagnostic_id: DiagnosticId::OPEN_PHASE,
+            diagnostic_id: crate::diagnostics::catalog::OPEN_PHASE,
+            ..
         }
     ));
     assert_eq!(snapshot(&coordinator), before);
@@ -162,12 +173,14 @@ fn miri_stale_removal_epoch_is_rejected_without_starting_or_consuming_an_attempt
 #[test]
 fn miri_attempt_exhaustion_preserves_closed_intent_and_canonical_state() {
     let coordinator = LifecycleCoordinator::<()>::new();
-    {
-        let mut core = coordinator.core.lock();
+    coordinator.access().transition(|core| {
         core.host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
-        core.removal_epoch = 5;
-        core.next_lifecycle_attempt = u64::MAX;
-    }
+        for _ in 0..5 {
+            core.sequence.request_removal().unwrap();
+        }
+        core.set_next_lifecycle_attempt_for_test(u64::MAX);
+        ((), TransitionEffect::Keep)
+    });
     let before = snapshot(&coordinator);
     let error = OpenStart::acquire(&coordinator, RemovalEpoch::new(5))
         .err()
@@ -175,7 +188,8 @@ fn miri_attempt_exhaustion_preserves_closed_intent_and_canonical_state() {
     assert!(matches!(
         error,
         XllError::Internal {
-            diagnostic_id: DiagnosticId::ATTEMPT_OVERFLOW,
+            diagnostic_id: crate::diagnostics::catalog::ATTEMPT_OVERFLOW,
+            ..
         }
     ));
     assert_eq!(snapshot(&coordinator), before);
@@ -215,6 +229,6 @@ fn forgotten_start_retains_its_lock_and_never_publishes_a_generation() {
         LifecyclePhase::from_raw(coordinator.phase.load(Ordering::Acquire)),
         LifecyclePhase::Opening
     );
-    assert!(coordinator.core.try_lock().is_none());
+    assert!(coordinator.try_access().is_none());
     assert!(coordinator.publication.load(Ordering::Acquire).is_null());
 }

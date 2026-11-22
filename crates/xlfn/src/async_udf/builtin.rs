@@ -5,7 +5,6 @@ mod queue;
 mod worker;
 
 use super::{AsyncExecutor, AsyncTask};
-use crate::diagnostics::id::DiagnosticId;
 use crate::sync::{Condvar, Mutex, MutexGuard};
 use crate::{XllError, XllResult};
 use async_task::Runnable;
@@ -323,9 +322,7 @@ impl PoolShared {
 }
 
 fn pool_failure() -> XllError {
-    XllError::Internal {
-        diagnostic_id: DiagnosticId::ASYNC_SPAWN,
-    }
+    crate::error::construct::internal(crate::diagnostics::catalog::ASYNC_SPAWN)
 }
 
 fn drop_runnable(runnable: Runnable) {

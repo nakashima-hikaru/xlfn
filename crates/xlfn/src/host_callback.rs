@@ -51,7 +51,9 @@ impl HostCallbackSession {
     }
 
     pub(crate) fn observe(&self, status: ExcelCallbackStatus) {
-        if status.is_terminal() && matches!(self.state.get(), HostCallbackState::Available) {
+        if crate::error::callback_status_is_terminal(status)
+            && matches!(self.state.get(), HostCallbackState::Available)
+        {
             self.state.set(HostCallbackState::Suppressed(status));
         }
     }
@@ -84,7 +86,7 @@ impl HostCallbackSession {
                     status: suppressed.status,
                 },
             )?;
-        let status = ExcelCallbackStatus::from_raw(raw_status);
+        let status = crate::error::callback_status_from_raw(raw_status);
         self.observe(status);
         Ok((status, result))
     }
@@ -112,7 +114,7 @@ mod tests {
     #[test]
     fn session_rejects_every_callback_after_abort() {
         let session = HostCallbackSession::new();
-        session.suppress_for_test(ExcelCallbackStatus::from_raw(XLRET_ABORT));
+        session.suppress_for_test(crate::error::callback_status_from_raw(XLRET_ABORT));
 
         assert!(!session.permits_callbacks());
         assert_eq!(session.terminal_status(), Some(ExcelCallbackStatus::Abort));
@@ -128,7 +130,7 @@ mod tests {
     #[test]
     fn session_rejects_every_callback_after_uncalced() {
         let session = HostCallbackSession::new();
-        session.suppress_for_test(ExcelCallbackStatus::from_raw(XLRET_UNCALCED));
+        session.suppress_for_test(crate::error::callback_status_from_raw(XLRET_UNCALCED));
 
         assert!(!session.permits_callbacks());
         assert_eq!(
@@ -156,7 +158,7 @@ mod tests {
             // SAFETY: the installed script implements the callback ABI and
             // this operation has no arguments to borrow.
             let (status, mut value) = unsafe { session.call(xlfn_sys::XLF_CALLER, &[]) }.unwrap();
-            assert_eq!(status, ExcelCallbackStatus::from_raw(raw_status));
+            assert_eq!(status, crate::error::callback_status_from_raw(raw_status));
             assert!(value.readable().is_err());
             drop(value);
             assert_eq!(session.terminal_status(), Some(status));

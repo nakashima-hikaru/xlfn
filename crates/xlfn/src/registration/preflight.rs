@@ -164,21 +164,17 @@ pub(crate) fn preflight_registration(
 }
 
 const fn registry_error() -> XllError {
-    XllError::Internal {
-        diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRY,
-    }
+    crate::error::construct::internal(crate::diagnostics::catalog::REGISTRY)
 }
 
 fn validate_excel_string(s: &str) -> XllResult<()> {
-    xlfn_common::validate_excel_string(s).map_err(|_| XllError::Internal {
-        diagnostic_id: crate::diagnostics::id::DiagnosticId::STRING_LENGTH,
-    })
+    xlfn_common::validate_excel_string(s)
+        .map_err(|_| crate::error::construct::internal(crate::diagnostics::catalog::STRING_LENGTH))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagnostics::id::DiagnosticId;
     use crate::registration::{ArgumentAbi, ArgumentDescriptor, RegistrationSignature, ReturnAbi};
     use xlfn_common::{ExecutionKind, FunctionVisibility};
 
@@ -218,7 +214,8 @@ mod tests {
             assert!(matches!(
                 preflight_registration(&[first, second]),
                 Err(XllError::Internal {
-                    diagnostic_id: DiagnosticId::REGISTRY,
+                    diagnostic_id: crate::diagnostics::catalog::REGISTRY,
+                    ..
                 })
             ));
         }
@@ -287,13 +284,15 @@ mod tests {
         assert!(matches!(
             preflight_registration(&[first, second]),
             Err(XllError::Internal {
-                diagnostic_id: DiagnosticId::REGISTRY,
+                diagnostic_id: crate::diagnostics::catalog::REGISTRY,
+                ..
             })
         ));
         assert!(matches!(
             preflight_registration(&[first]),
             Err(XllError::Internal {
-                diagnostic_id: DiagnosticId::STRING_LENGTH,
+                diagnostic_id: crate::diagnostics::catalog::STRING_LENGTH,
+                ..
             })
         ));
     }
@@ -349,7 +348,8 @@ mod tests {
         assert!(matches!(
             preflight_registration(&[invalid]),
             Err(XllError::Internal {
-                diagnostic_id: DiagnosticId::STRING_LENGTH,
+                diagnostic_id: crate::diagnostics::catalog::STRING_LENGTH,
+                ..
             })
         ));
     }

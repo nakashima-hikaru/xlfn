@@ -48,9 +48,20 @@ impl<A: crate::Addin> Drop for RemovalClaimGuard<'_, A> {
     fn drop(&mut self) {
         let lifecycle = crate::lifecycle::LifecycleControl::new(self.lifecycle);
         let mut control = lifecycle.access();
+        #[cfg(test)]
+        let finished_epoch = control.phase() == crate::lifecycle::LifecyclePhase::Closed
+            && control.removal_attempt() == Some(self.attempt);
         lifecycle.release_removal_claim(&mut control, self.attempt, self.finalization_failed);
         self.observer.release_cleanup_owner();
         lifecycle.notify_all();
+        #[cfg(test)]
+        if finished_epoch {
+            drop(control);
+            // The real host boundary retains its epoch through TLS release
+            // and return processing. Test epochs must not become reusable
+            // earlier or an unrelated fixture can supersede this StopRecord.
+            drop(self.lifecycle.test_module_lease.lock().take());
+        }
     }
 }
 
@@ -96,12 +107,30 @@ impl<'runtime, A: crate::Addin> RemovalClaimGuard<'runtime, A> {
     pub(super) fn mark_finalization_failed(&mut self) {
         self.finalization_failed = true;
     }
-    pub(super) fn complete_finalization(&mut self) -> crate::XllResult<()> {
+    pub(super) fn record_binding_release(&self) -> crate::XllResult<()> {
         let lifecycle = crate::lifecycle::LifecycleControl::new(self.lifecycle);
-        let control = lifecycle.access();
-        lifecycle.complete_boundary_finalization(&control, self.attempt)?;
+        lifecycle.record_binding_release(&mut lifecycle.access(), self.attempt)
+    }
+
+    pub(super) fn complete_finalization(
+        &mut self,
+        goal: crate::lifecycle::StopGoal,
+    ) -> crate::XllResult<()> {
+        let lifecycle = crate::lifecycle::LifecycleControl::new(self.lifecycle);
+        lifecycle.complete_boundary_finalization(&mut lifecycle.access(), self.attempt, goal)?;
         self.finalization_failed = false;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(in crate::runtime) fn complete_stages_for_test(
+        &mut self,
+        goal: crate::lifecycle::StopGoal,
+    ) {
+        // Certificate-only fixtures isolate the state machine. Production
+        // records binding release only after EmptyLifecycle actually releases.
+        self.record_binding_release().unwrap();
+        self.complete_finalization(goal).unwrap();
     }
 
     pub(super) fn belongs_to(&self, lifecycle: &crate::lifecycle::LifecycleCoordinator<A>) -> bool {

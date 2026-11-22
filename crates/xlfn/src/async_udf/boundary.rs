@@ -8,14 +8,18 @@ use super::transport::ExcelAsyncResponder;
 use crate::call_return::ExcelReturn;
 use crate::cancellation::{CancellationGuarantee, CancellationToken};
 mod launch;
-use crate::execution::{CallId, CallMetadata, InstrumentationPlan};
+#[cfg(all(test, feature = "handles", feature = "async-builtin"))]
+use crate::execution::CallMetadata;
+use crate::execution::{CallId, InstrumentationPlan};
 use crate::panic_boundary::catch_no_unwind;
 use crate::runtime::Runtime;
 #[cfg(test)]
 use crate::sync::Mutex;
 use crate::{XllError, XllResult};
 use futures_util::Future;
-use launch::CapturedLaunch;
+#[cfg(feature = "handles")]
+use launch::ScopedStart;
+use launch::{AsyncStart, CapturedLaunch, LaunchOwner, PlainStart};
 use std::panic::AssertUnwindSafe;
 use xlfn_sys::XLOPER12;
 
@@ -45,6 +49,17 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
+    // SAFETY: forwarded from this function's raw-handle contract.
+    unsafe { run_async_boundary(runtime, udf_id, excel_name, raw_handle, PlainStart(start)) };
+}
+
+unsafe fn run_async_boundary<A: crate::Addin>(
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    udf_id: &'static str,
+    excel_name: &'static str,
+    raw_handle: *mut XLOPER12,
+    start: impl AsyncStart<A>,
+) {
     // Only synchronous launch owns this epoch. Reentrant numeric siblings
     // remain live through admission, user preparation, and call teardown.
     let _numeric = crate::return_abi::numeric::Fp12CallGuard::enter();
@@ -70,7 +85,7 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
     let result = catch_no_unwind(AssertUnwindSafe(|| {
         // SAFETY: forwarded from this function's raw-handle contract.
         unsafe {
-            async_udf_boundary_named_inner(&call, udf_id, excel_name, raw_handle, start);
+            run_admitted_async(&call, udf_id, excel_name, raw_handle, start);
         }
     }));
 
@@ -109,6 +124,7 @@ unsafe fn reject_async_admission(
     }
 }
 
+#[cfg(all(test, feature = "async-builtin"))]
 pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
     guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
@@ -125,101 +141,69 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
-    let instrumentation = InstrumentationPlan::for_call(guard);
-    if instrumentation.enabled() {
-        // SAFETY: forwarded from this function's raw-handle contract.
-        unsafe {
-            async_udf_boundary_instrumented(
-                guard,
-                udf_id,
-                excel_name,
-                raw_handle,
-                start,
-                instrumentation,
-            );
-        }
-    } else {
-        // SAFETY: forwarded from this function's raw-handle contract.
-        unsafe {
-            async_udf_boundary_uninstrumented(guard, udf_id, raw_handle, start);
-        }
-    }
+    // SAFETY: forwarded from this test entry point's raw-handle contract.
+    unsafe { run_admitted_async(guard, udf_id, excel_name, raw_handle, PlainStart(start)) };
 }
 
-unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
+unsafe fn run_admitted_async<A: crate::Addin>(
     guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
     raw_handle: *mut XLOPER12,
-    start: Start,
-    instrumentation: InstrumentationPlan<A>,
-) where
-    A: crate::Addin,
-    Start: FnOnce(
-        &crate::runtime::CallGuard<'_, A>,
-        crate::generation::ExecutionLease<A>,
-        CancellationToken,
-    ) -> XllResult<Fut>,
-    Fut: Future<Output = XllResult<T>> + Send + 'static,
-    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
-{
+    start: impl AsyncStart<A>,
+) {
+    let instrumentation = InstrumentationPlan::for_call(guard);
+    if !instrumentation.enabled() {
+        let launch = CapturedLaunch::capture(guard).into_launch();
+        // SAFETY: forwarded from this function's raw-handle contract.
+        unsafe { prepare_async_launch(launch, udf_id, raw_handle, start, NoObservation) };
+        return;
+    }
     let call_id = CallId::new(guard.next_call_id());
-    let timer = crate::execution::CallTimer::start();
-    let captured = CapturedLaunch::capture(guard);
-    let calculation_id = captured.calculation_id();
-    let concurrent_calls = crate::module_runtime::ingress().active_udfs();
-    let metadata = CallMetadata {
-        udf_id,
-        excel_name,
-        call_id,
-        calculation_id,
-        started_at: std::time::SystemTime::now(),
-        concurrent_calls,
-    };
-    let layers = if instrumentation.has_layers() {
-        match crate::execution::enter_layers(guard.layers(), &metadata, |error| {
-            // SAFETY: forwarded from this function's raw-handle contract.
-            let delivery = unsafe { return_error(raw_handle, &error) };
-            (
-                AsyncCompletion {
-                    completion: OwnedCompletionOutcome::Error(error),
-                    delivery,
-                },
-                timer.elapsed(),
-            )
-        }) {
-            Ok(layers) => Some(layers),
-            Err((completion, elapsed)) => {
-                report_completion(udf_id, &completion);
-                if instrumentation.trace_enabled() {
-                    super::instrumentation::trace_rejected_launch(&metadata, elapsed, &completion);
-                }
-                return;
-            }
+    let (entry, captured) = instrumentation.start(udf_id, excel_name, call_id, || {
+        let captured = CapturedLaunch::capture(guard);
+        (captured.calculation_id(), captured)
+    });
+    let observed = match entry.enter(guard.layers(), |error, timer| {
+        // SAFETY: forwarded from this function's raw-handle contract.
+        let delivery = unsafe { return_error(raw_handle, &error) };
+        (
+            AsyncCompletion {
+                completion: OwnedCompletionOutcome::Error(error),
+                delivery,
+            },
+            timer.elapsed(),
+        )
+    }) {
+        Ok(observed) => observed,
+        Err(rejection) => {
+            rejection.finish(|(completion, _)| report_completion(udf_id, completion));
+            return;
         }
-    } else {
-        None
     };
-    // Excel does not raise CalculationEnded/CalculationCanceled for every
-    // programmatic recalculation, so the public token cannot promise complete
-    // calculation scoping even though event-driven generations are linearized.
+    // The issuer was captured before any user layer ran. Allocate cancellation
+    // ownership only after successful entry. Excel events still do not scope
+    // every programmatic calculation, so the public token is best-effort.
     let launch = captured.into_launch();
-    let token = launch.token();
-    let observation = AsyncObservation::new(
-        &metadata,
-        timer,
-        layers,
-        instrumentation.trace_enabled(),
-        token,
-    );
+    let observation = AsyncObservation::from_call(observed, launch.token());
+    // SAFETY: forwarded from this function's raw-handle contract.
+    unsafe { prepare_async_launch(launch, udf_id, raw_handle, start, observation) };
+}
+
+unsafe fn prepare_async_launch<A: crate::Addin, S: AsyncStart<A>>(
+    launch: LaunchOwner<'_, '_, A>,
+    udf_id: &'static str,
+    raw_handle: *mut XLOPER12,
+    start: S,
+    observation: impl CompletionObserver + Send + 'static,
+) {
     // SAFETY: forwarded from this function's raw-handle contract.
     let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
         Ok(responder) => responder,
         Err(error) => {
-            let delivery = OwnedDeliveryOutcome::Unobserved;
             let completion = AsyncCompletion {
                 completion: OwnedCompletionOutcome::Error(error),
-                delivery,
+                delivery: OwnedDeliveryOutcome::Unobserved,
             };
             report_completion(udf_id, &completion);
             observation.finish(&completion);
@@ -228,46 +212,9 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
     };
     if let Some(reservation) = launch
         .prepare(start, responder, observation)
-        .and_then(|prepared| prepared.reserve())
+        .and_then(launch::PreparedLaunch::reserve)
     {
-        reservation.commit();
-    }
-}
-
-unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
-    guard: &crate::runtime::AsyncCallGuard<'_, A>,
-    udf_id: &'static str,
-    raw_handle: *mut XLOPER12,
-    start: Start,
-) where
-    A: crate::Addin,
-    Start: FnOnce(
-        &crate::runtime::CallGuard<'_, A>,
-        crate::generation::ExecutionLease<A>,
-        CancellationToken,
-    ) -> XllResult<Fut>,
-    Fut: Future<Output = XllResult<T>> + Send + 'static,
-    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
-{
-    let launch = CapturedLaunch::capture(guard).into_launch();
-    // SAFETY: forwarded from this function's raw-handle contract.
-    let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
-        Ok(responder) => responder,
-        Err(error) => {
-            let delivery = OwnedDeliveryOutcome::Unobserved;
-            let completion = AsyncCompletion {
-                completion: OwnedCompletionOutcome::Error(error),
-                delivery,
-            };
-            report_completion(udf_id, &completion);
-            return;
-        }
-    };
-    if let Some(reservation) = launch
-        .prepare(start, responder, NoObservation)
-        .and_then(|prepared| prepared.reserve())
-    {
-        reservation.commit();
+        S::commit(reservation);
     }
 }
 
@@ -292,204 +239,16 @@ pub(crate) unsafe fn async_udf_boundary_named_handle<A, Start, Build, T>(
     Build: HandleScopedBuilder<T> + Send + 'static,
     T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
-    // The guard remains on the launch stack; no async task captures it.
-    // Keep it through teardown, which can itself reenter a worksheet UDF.
-    let _numeric = crate::return_abi::numeric::Fp12CallGuard::enter();
-    let ingress = match crate::module_runtime::ingress()
-        .enter_udf_with(|| {})
-        .into_admitted()
-    {
-        Ok(ingress) => ingress,
-        Err(_) => return,
-    };
-    let _external = runtime.observer().observe_external();
-
-    let call = match runtime.enter_async(&ingress) {
-        Ok(call) => call,
-        Err(error) => {
-            // SAFETY: the caller keeps the raw handle live, and ingress is
-            // retained until this rejected launch has finished its callback.
-            unsafe { reject_async_admission(&ingress, udf_id, raw_handle, error) };
-            return;
-        }
-    };
-
-    let result = catch_no_unwind(AssertUnwindSafe(|| {
-        // SAFETY: forwarded from this function's raw-handle contract.
-        unsafe {
-            async_udf_boundary_named_handle_inner(&call, udf_id, excel_name, raw_handle, start);
-        }
-    }));
-
-    if result.is_err() {
-        crate::diagnostics::report_no_unwind(udf_id, &XllError::Panic);
-    }
-
-    drop(call);
-}
-
-#[cfg(feature = "handles")]
-unsafe fn async_udf_boundary_named_handle_inner<A, Start, Build, T>(
-    guard: &crate::runtime::AsyncCallGuard<'_, A>,
-    udf_id: &'static str,
-    excel_name: &'static str,
-    raw_handle: *mut XLOPER12,
-    start: Start,
-) where
-    A: crate::Addin,
-    Start: FnOnce(
-        &crate::runtime::CallGuard<'_, A>,
-        crate::generation::ExecutionLease<A>,
-        CancellationToken,
-    ) -> XllResult<Build>,
-    Build: HandleScopedBuilder<T> + Send + 'static,
-    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
-{
-    let instrumentation = InstrumentationPlan::for_call(guard);
-    if instrumentation.enabled() {
-        // SAFETY: forwarded from this function's raw-handle contract.
-        unsafe {
-            async_udf_boundary_instrumented_handle(
-                guard,
-                udf_id,
-                excel_name,
-                raw_handle,
-                start,
-                instrumentation,
-            );
-        }
-    } else {
-        // SAFETY: forwarded from this function's raw-handle contract.
-        unsafe {
-            async_udf_boundary_uninstrumented_handle(guard, udf_id, raw_handle, start);
-        }
-    }
-}
-
-#[cfg(feature = "handles")]
-unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
-    guard: &crate::runtime::AsyncCallGuard<'_, A>,
-    udf_id: &'static str,
-    excel_name: &'static str,
-    raw_handle: *mut XLOPER12,
-    start: Start,
-    instrumentation: InstrumentationPlan<A>,
-) where
-    A: crate::Addin,
-    Start: FnOnce(
-        &crate::runtime::CallGuard<'_, A>,
-        crate::generation::ExecutionLease<A>,
-        CancellationToken,
-    ) -> XllResult<Build>,
-    Build: HandleScopedBuilder<T> + Send + 'static,
-    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
-{
-    let call_id = CallId::new(guard.next_call_id());
-    let timer = crate::execution::CallTimer::start();
-    let captured = CapturedLaunch::capture(guard);
-    let calculation_id = captured.calculation_id();
-    let concurrent_calls = crate::module_runtime::ingress().active_udfs();
-    let metadata = CallMetadata {
-        udf_id,
-        excel_name,
-        call_id,
-        calculation_id,
-        started_at: std::time::SystemTime::now(),
-        concurrent_calls,
-    };
-    let layers = if instrumentation.has_layers() {
-        match crate::execution::enter_layers(guard.layers(), &metadata, |error| {
-            // SAFETY: forwarded from this function's raw-handle contract.
-            let delivery = unsafe { return_error(raw_handle, &error) };
-            (
-                AsyncCompletion {
-                    completion: OwnedCompletionOutcome::Error(error),
-                    delivery,
-                },
-                timer.elapsed(),
-            )
-        }) {
-            Ok(layers) => Some(layers),
-            Err((completion, elapsed)) => {
-                report_completion(udf_id, &completion);
-                if instrumentation.trace_enabled() {
-                    super::instrumentation::trace_rejected_launch(&metadata, elapsed, &completion);
-                }
-                return;
-            }
-        }
-    } else {
-        None
-    };
-    // The public cancellation token remains best effort; the task drain is
-    // the stronger lifetime guarantee for raw object pins.
-    let launch = captured.into_launch();
-    let token = launch.token();
-    let observation = AsyncObservation::new(
-        &metadata,
-        timer,
-        layers,
-        instrumentation.trace_enabled(),
-        token,
-    );
     // SAFETY: forwarded from this function's raw-handle contract.
-    let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
-        Ok(responder) => responder,
-        Err(error) => {
-            let delivery = OwnedDeliveryOutcome::Unobserved;
-            let completion = AsyncCompletion {
-                completion: OwnedCompletionOutcome::Error(error),
-                delivery,
-            };
-            report_completion(udf_id, &completion);
-            observation.finish(&completion);
-            return;
-        }
+    unsafe {
+        run_async_boundary(
+            runtime,
+            udf_id,
+            excel_name,
+            raw_handle,
+            ScopedStart::<_, T>::new(start),
+        )
     };
-    if let Some(reservation) = launch
-        .prepare_scoped(start, responder, observation)
-        .and_then(|prepared| prepared.reserve())
-    {
-        reservation.commit::<T>();
-    }
-}
-
-#[cfg(feature = "handles")]
-unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
-    guard: &crate::runtime::AsyncCallGuard<'_, A>,
-    udf_id: &'static str,
-    raw_handle: *mut XLOPER12,
-    start: Start,
-) where
-    A: crate::Addin,
-    Start: FnOnce(
-        &crate::runtime::CallGuard<'_, A>,
-        crate::generation::ExecutionLease<A>,
-        CancellationToken,
-    ) -> XllResult<Build>,
-    Build: HandleScopedBuilder<T> + Send + 'static,
-    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
-{
-    let launch = CapturedLaunch::capture(guard).into_launch();
-    // SAFETY: forwarded from this function's raw-handle contract.
-    let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
-        Ok(responder) => responder,
-        Err(error) => {
-            let delivery = OwnedDeliveryOutcome::Unobserved;
-            let completion = AsyncCompletion {
-                completion: OwnedCompletionOutcome::Error(error),
-                delivery,
-            };
-            report_completion(udf_id, &completion);
-            return;
-        }
-    };
-    if let Some(reservation) = launch
-        .prepare_scoped(start, responder, NoObservation)
-        .and_then(|prepared| prepared.reserve())
-    {
-        reservation.commit::<T>();
-    }
 }
 
 pub(super) fn report_completion(udf_id: &'static str, completion: &AsyncCompletion) {

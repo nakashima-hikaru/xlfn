@@ -101,3 +101,6 @@ cargo clippy --manifest-path tests/xlfn-e2e-fixture/Cargo.toml --all-targets --l
 Callback-denial and malformed-host-response cases belong to the framework's
 mocked callback tests. The native runner exercises workbook attribution and
 settings through Excel's actual callback implementation.
+
+For the broader 32/64-bit release checks, see the
+[Windows desktop Excel qualification runbook](../excel-qualification/README.md).

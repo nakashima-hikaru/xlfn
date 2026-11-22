@@ -266,7 +266,8 @@ fn batched_publish_overflow_keeps_the_accepted_prefix_deliverable() {
     assert!(matches!(
         result,
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_OVERFLOW,
+            diagnostic_id: crate::diagnostics::catalog::REFERENCE_OVERFLOW,
+            ..
         })
     ));
     let batch = server.begin_refresh().unwrap();
@@ -1635,9 +1636,9 @@ unsafe impl RtdSubscription for FailingDisconnectSubscription {
     fn request_cancel(&self) {}
 
     fn disconnect_and_wait(self) -> XllResult<()> {
-        Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL,
-        })
+        Err(crate::error::construct::internal(
+            crate::diagnostics::catalog::TEST_SENTINEL,
+        ))
     }
 }
 
@@ -1684,13 +1685,15 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
     assert!(matches!(
         res_owner,
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
+            ..
         }) | Err(XllError::Panic)
     ));
     assert!(matches!(
         res_waiter,
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
+            ..
         }) | Err(XllError::Panic)
     ));
 }
@@ -1768,7 +1771,8 @@ fn disconnect_propagates_subscription_cleanup_error() {
     assert!(matches!(
         error,
         XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
+            ..
         }
     ));
 }
@@ -1798,7 +1802,8 @@ fn rollback_records_subscription_cleanup_error() {
     assert!(matches!(
         runtime.cleanup_result(),
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
+            ..
         })
     ));
 }
@@ -1868,7 +1873,8 @@ fn miri_connection_unwind_allows_reentrant_cleanup_before_releasing_admission() 
     assert!(matches!(
         runtime.cleanup_result(),
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_DISCONNECT
+            diagnostic_id: crate::diagnostics::catalog::PANIC_DISCONNECT,
+            ..
         })
     ));
 }
@@ -2032,14 +2038,16 @@ fn install_failure_during_closing_propagates_cleanup_error() {
     assert!(matches!(
         res,
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
+            ..
         })
     ));
 
     assert!(matches!(
         runtime.cleanup_result(),
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
+            ..
         })
     ));
 }
@@ -2141,23 +2149,63 @@ fn revoked_preparation_cannot_commit_after_server_detaches() {
 }
 
 #[test]
-fn fresh_preparation_can_commit_after_an_older_reservation_is_revoked() {
-    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
-    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
-    let server = runtime.register_test_server(1);
-    let topic = RtdTopic::single("fresh-preparation").unwrap();
-    let old = runtime.prepare(&source, topic.borrowed()).unwrap();
-    let id = old.id();
-    runtime.claim_server(server.generation(), id).unwrap();
-    runtime.terminate_server(server.generation()).unwrap();
-    let fresh = runtime.prepare(&source, topic.borrowed()).unwrap();
-    assert_eq!(fresh.id(), id);
-    fresh.commit();
-    old.commit();
+fn fresh_preparation_gets_a_new_incarnation_while_old_quota_is_retained() {
+    for commit_old in [false, true] {
+        let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+        let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+        let server = runtime.register_test_server(1);
+        let topic = RtdTopic::single("fresh-preparation").unwrap();
+        let old = runtime.prepare(&source, topic.borrowed()).unwrap();
+        let stale = old.id();
+        runtime.claim_server(server.generation(), stale).unwrap();
+        runtime.terminate_server(server.generation()).unwrap();
+        let next = runtime.register_test_server(2);
+        let fresh = runtime.prepare(&source, topic.borrowed()).unwrap();
+        let live = fresh.id();
+        assert_ne!(live, stale);
+        assert_ne!(fresh.key(), old.key());
+        assert!(matches!(
+            runtime.claim_server(next.generation(), stale),
+            Err(XllError::Closing)
+        ));
+        assert!(matches!(
+            runtime.connect_transaction(&next, TopicId(1), stale),
+            Err(XllError::Closing)
+        ));
 
-    let catalog = runtime.catalog.lock();
-    assert_eq!(catalog.pending_len(), 1);
-    catalog.assert_identity_invariants();
+        {
+            let catalog = runtime.catalog.lock();
+            assert_eq!(catalog.pending_len(), 2);
+            assert_eq!(catalog.quota.topic_bytes(), 2 * topic.byte_len());
+            catalog.assert_identity_invariants();
+        }
+
+        // Finish the old xlfRtd first; it must not consume the new ticket.
+        if commit_old {
+            old.commit();
+        } else {
+            old.rollback();
+        }
+        {
+            let catalog = runtime.catalog.lock();
+            assert_eq!(catalog.pending_len(), 1);
+            assert_eq!(catalog.quota.topic_bytes(), topic.byte_len());
+            assert!(!catalog.entries.contains_key(&stale));
+        }
+
+        fresh.commit();
+        runtime
+            .connect_transaction(&next, TopicId(1), live)
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert_eq!(runtime.catalog.lock().pending_len(), 0);
+        runtime.disconnect(&next, TopicId(1)).unwrap();
+        let catalog = runtime.catalog.lock();
+        assert!(catalog.entries.is_empty());
+        assert_eq!(catalog.quota.topic_bytes(), 0);
+        catalog.assert_identity_invariants();
+    }
 }
 
 #[test]
@@ -2212,7 +2260,7 @@ fn same_handle_reuses_active_subscription_identity() {
             .lock()
             .entries
             .get(&id)
-            .is_some_and(|entry| entry.is_active())
+            .is_some_and(|entry| entry.state().is_active())
     );
 }
 
@@ -2282,35 +2330,6 @@ fn failed_pending_admission_rolls_back_new_source_identity() {
     ));
 
     assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 0);
-}
-
-#[test]
-fn source_refcount_tracks_live_subscription_identities() {
-    let mut index = SubscriptionIdentityIndex::default();
-    let (_arena, source, _, _) = publishing_source::<f64>(None);
-    let first_identity =
-        SubscriptionIdentityKey::new(SourceId(source.id), &RtdTopic::single("first").unwrap());
-    let second_identity =
-        SubscriptionIdentityKey::new(SourceId(source.id), &RtdTopic::single("second").unwrap());
-    let first_id = SubscriptionId(1);
-    let second_id = SubscriptionId(2);
-
-    index.insert(first_identity, first_id, 16).unwrap();
-    index.insert(second_identity, second_id, 16).unwrap();
-    assert_eq!(
-        index.source_ref_count(source.id).map(|refs| refs.get()),
-        Some(2)
-    );
-    assert_eq!(index.distinct_source_count(), 1);
-
-    assert!(index.remove(first_identity, first_id));
-    assert_eq!(
-        index.source_ref_count(source.id).map(|refs| refs.get()),
-        Some(1)
-    );
-    assert!(index.remove(second_identity, second_id));
-    assert_eq!(index.distinct_source_count(), 0);
-    index.assert_invariants();
 }
 
 #[test]
@@ -2398,26 +2417,6 @@ fn source_limit_rejects_a_second_live_source() {
 }
 
 #[test]
-fn duplicate_index_id_does_not_change_source_refcount() {
-    let mut index = SubscriptionIdentityIndex::default();
-    let (_arena, source, _, _) = publishing_source::<f64>(None);
-    let identity =
-        SubscriptionIdentityKey::new(SourceId(source.id), &RtdTopic::single("duplicate").unwrap());
-    let first_id = SubscriptionId(1);
-
-    index.insert(identity, first_id, 1).unwrap();
-    assert!(matches!(
-        index.insert(identity, first_id, 1),
-        Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_DUPLICATE
-        })
-    ));
-    assert_eq!(index.source_ref_count(source.id).map(|n| n.get()), Some(1));
-    assert_eq!(index.ids_by_key.len(), 1);
-    index.assert_invariants();
-}
-
-#[test]
 fn colliding_topics_remain_distinct_and_survive_either_removal_order() {
     for remove_first in [true, false] {
         let (arena, source, _, _) = publishing_source::<f64>(None);
@@ -2438,7 +2437,7 @@ fn colliding_topics_remain_distinct_and_survive_either_removal_order() {
         }
         {
             let catalog = runtime.catalog.lock();
-            assert_eq!(catalog.identities.ids_by_key.len(), 1);
+            assert_eq!(catalog.identities.buckets().len(), 1);
             assert_eq!(
                 catalog
                     .identities
@@ -2482,32 +2481,11 @@ fn colliding_topics_remain_distinct_and_survive_either_removal_order() {
         survivor.rollback();
 
         let catalog = runtime.catalog.lock();
-        assert!(catalog.identities.ids_by_key.is_empty());
+        assert!(catalog.identities.buckets().is_empty());
         assert!(catalog.entries.is_empty());
         assert_eq!(catalog.identities.distinct_source_count(), 0);
         catalog.assert_identity_invariants();
     }
-}
-
-#[test]
-fn missing_collision_candidate_does_not_change_source_refcount() {
-    let mut index = SubscriptionIdentityIndex::default();
-    let (_arena, source, _, _) = publishing_source::<f64>(None);
-    let key =
-        SubscriptionIdentityKey::new(SourceId(source.id), &RtdTopic::single("topic").unwrap());
-    index.insert(key, SubscriptionId(1), 1).unwrap();
-    index.insert(key, SubscriptionId(2), 1).unwrap();
-    assert!(!index.remove(key, SubscriptionId(3)));
-    assert_eq!(
-        index.candidates(key),
-        &[SubscriptionId(1), SubscriptionId(2)]
-    );
-    assert_eq!(index.source_ref_count(source.id).unwrap().get(), 2);
-    index.assert_invariants();
-    index.clear();
-    assert!(index.candidates(key).is_empty());
-    assert!(!index.remove(key, SubscriptionId(1)));
-    index.assert_invariants();
 }
 
 #[test]
@@ -2527,7 +2505,8 @@ fn identity_lookup_reports_orphaned_candidate() {
     assert!(matches!(
         catalog.find_identity(SourceId(source.id), &topic.borrowed()),
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN
+            diagnostic_id: crate::diagnostics::catalog::RTD_INDEX_ORPHAN,
+            ..
         })
     ));
     catalog.identities.clear();
@@ -2733,7 +2712,7 @@ fn miri_rejected_topic_admission_never_reads_parts_to_copy_them() {
         let catalog = runtime.catalog.lock();
         assert_eq!(catalog.next_subscription_id, next_id);
         assert!(catalog.entries.is_empty());
-        assert_eq!(catalog.retained_topic_bytes, 0);
+        assert_eq!(catalog.quota.topic_bytes(), 0);
         catalog.assert_identity_invariants();
     }
 }
@@ -2864,7 +2843,7 @@ fn identity_index_is_removed_after_final_unbind() {
 
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
-    assert!(catalog.identities.ids_by_key.is_empty());
+    assert!(catalog.identities.buckets().is_empty());
     catalog.assert_identity_invariants();
 }
 
@@ -2886,10 +2865,10 @@ fn catalog_entries_are_canonical_for_subscription_identity() {
 
     let catalog = runtime.catalog.lock();
     catalog.assert_identity_invariants();
-    assert_eq!(catalog.identities.ids_by_key.len(), 2);
+    assert_eq!(catalog.identities.buckets().len(), 2);
     assert_eq!(catalog.entries.len(), 2);
 
-    for (key, ids) in &catalog.identities.ids_by_key {
+    for (key, ids) in catalog.identities.buckets() {
         for id in ids {
             let entry = catalog.entries.get(id).unwrap();
             assert_eq!(entry.source_id, key.source_id);
@@ -2903,7 +2882,7 @@ fn catalog_entries_are_canonical_for_subscription_identity() {
 
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
-    assert!(catalog.identities.ids_by_key.is_empty());
+    assert!(catalog.identities.buckets().is_empty());
     catalog.assert_identity_invariants();
 }
 
@@ -3289,7 +3268,7 @@ fn connection_notification_panic_rolls_back_catalog_and_allows_retry() {
     );
     assert!(disconnected.load(Ordering::Acquire));
     assert!(sink_slot.lock().is_none());
-    assert!(!runtime.catalog.lock().entries[&id].is_active());
+    assert!(!runtime.catalog.lock().entries[&id].state().is_active());
     assert_eq!(runtime.services.active_quota.used(), 0);
     assert_eq!(runtime.services.queued_update_quota.used(), 0);
     runtime.catalog.lock().assert_identity_invariants();
@@ -3299,7 +3278,7 @@ fn connection_notification_panic_rolls_back_catalog_and_allows_retry() {
         .unwrap()
         .commit()
         .unwrap();
-    assert!(runtime.catalog.lock().entries[&id].is_active());
+    assert!(runtime.catalog.lock().entries[&id].state().is_active());
     sink_slot.lock().as_ref().unwrap().publish(2).unwrap();
     let refresh = server.begin_refresh().unwrap();
     assert_eq!(refresh.updates()[0].value, StoredRtdValue::Integer(2));
@@ -3335,7 +3314,7 @@ fn connection_notification_reentrant_refresh_observes_committed_publication() {
     sink_slot.lock().as_ref().unwrap().publish(42).unwrap();
     connection.commit().unwrap();
     assert!(refreshed.load(Ordering::Acquire));
-    assert!(runtime.catalog.lock().entries[&id].is_active());
+    assert!(runtime.catalog.lock().entries[&id].state().is_active());
 }
 
 #[test]
@@ -3498,7 +3477,11 @@ fn concurrent_provisional_disconnect_preserves_a_replacement_connection() {
         assert!(old_disconnected.load(Ordering::Acquire));
         assert!(old_sink.lock().is_none());
         assert!(!replacement_disconnected.load(Ordering::Acquire));
-        assert!(runtime.catalog.lock().entries[&replacement_id].is_active());
+        assert!(
+            runtime.catalog.lock().entries[&replacement_id]
+                .state()
+                .is_active()
+        );
         assert!(
             server
                 .test_server()
@@ -3788,7 +3771,7 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
         catalog
             .entries
             .get(&id)
-            .is_some_and(|entry| entry.is_active())
+            .is_some_and(|entry| entry.state().is_active())
     );
     assert_eq!(catalog.pending_len(), 0);
 }
@@ -3855,7 +3838,7 @@ fn preparation_rejects_missing_source_without_catalog_reservation() {
     ));
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
-    assert_eq!(catalog.retained_topic_bytes, 0);
+    assert_eq!(catalog.quota.topic_bytes(), 0);
     catalog.assert_identity_invariants();
 }
 
@@ -3890,7 +3873,7 @@ fn rejected_connection_source_leaves_preparation_pending() {
     {
         let mut catalog = runtime.catalog.lock();
         let entry = catalog.entries.get_mut(&id).unwrap();
-        assert!(!entry.is_connected());
+        assert!(!entry.state().is_connected());
         entry.source_id = SourceId(source.id);
         catalog.assert_identity_invariants();
     }
@@ -4869,8 +4852,8 @@ fn runtime_close_reclaims_all_inflight_slots() {
     }
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
-    assert_eq!(catalog.pending_count, 0);
-    assert_eq!(catalog.retained_topic_bytes, 0);
+    assert_eq!(catalog.quota.pending(), 0);
+    assert_eq!(catalog.quota.topic_bytes(), 0);
 }
 
 #[test]
@@ -4945,7 +4928,7 @@ fn active_topics_keep_their_byte_charge_until_removal() {
         .unwrap();
     first.commit();
     assert_eq!(runtime.catalog.lock().pending_len(), 0);
-    assert_eq!(runtime.catalog.lock().retained_topic_bytes, 6);
+    assert_eq!(runtime.catalog.lock().quota.topic_bytes(), 6);
     assert!(matches!(
         runtime.prepare(&source, BorrowedTopicParts::new(&["next"]).unwrap()),
         Err(XllError::Overloaded)
@@ -4953,7 +4936,7 @@ fn active_topics_keep_their_byte_charge_until_removal() {
     runtime
         .terminate_server(ServerGeneration::new(1).unwrap())
         .unwrap();
-    assert_eq!(runtime.catalog.lock().retained_topic_bytes, 0);
+    assert_eq!(runtime.catalog.lock().quota.topic_bytes(), 0);
     runtime
         .prepare(&source, BorrowedTopicParts::new(&["next"]).unwrap())
         .unwrap()

@@ -25,10 +25,44 @@ pub(crate) trait OpeningState<A: crate::Addin>: Sized {
     fn abandon(self, deps: &OpenDeps<'_, A>, binding: Self::Binding<'_>);
 }
 
-type ServiceInputs<A> = crate::runtime_components::GenerationServiceInputs<
+type RawServiceInputs<A> = crate::runtime_components::GenerationServiceInputs<
     crate::addin_impl::AddinSubscription<A>,
     crate::addin_impl::AddinSources<A>,
 >;
+enum ServiceInputs<A: crate::Addin> {
+    Unprepared(Option<RawServiceInputs<A>>),
+    Prepared(PreparedServices<A>),
+}
+
+impl<A: crate::Addin> ServiceInputs<A> {
+    fn arm(
+        &mut self,
+        attempt: OpenAttemptId,
+        config: crate::addin_impl::RuntimeConfig,
+    ) -> XllResult<()> {
+        let Self::Unprepared(inputs) = self else {
+            return Err(open_state_error());
+        };
+        let inputs = inputs.take().ok_or_else(open_state_error)?;
+        #[cfg(feature = "handles")]
+        let inputs = {
+            let mut inputs = inputs;
+            inputs.prepare_handles(config.handle_config())?;
+            inputs
+        };
+        let services = GenerationServices::arm_generation(
+            attempt.into_runtime_generation(),
+            config,
+            #[cfg(feature = "rtd")]
+            crate::excel_rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
+            inputs,
+        )?
+        .commit();
+        *self = Self::Prepared(services);
+        Ok(())
+    }
+}
+
 type InitializedOpenCore<A> = OpenCore<A, ServiceInputs<A>>;
 type RollbackOpenCore<A> = OpenCore<A, Option<ServiceInputs<A>>>;
 
@@ -54,8 +88,8 @@ impl<A: crate::Addin> OpenCore<A> {
         }
     }
 
-    fn initialized(self, inputs: ServiceInputs<A>) -> InitializedOpenCore<A> {
-        self.map_inputs(|()| inputs)
+    fn initialized(self, inputs: RawServiceInputs<A>) -> InitializedOpenCore<A> {
+        self.map_inputs(|()| ServiceInputs::Unprepared(Some(inputs)))
     }
 
     fn into_rollback(self) -> RollbackOpenCore<A> {
@@ -677,9 +711,9 @@ impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
             })) {
                 Ok(outcome) if outcome.is_finalized() || outcome.cleanup_owned_elsewhere() => {}
                 Ok(outcome) => {
-                    let error = XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_FAILURE,
-                    };
+                    let error = crate::error::construct::internal(
+                        crate::diagnostics::catalog::OPEN_ROLLBACK_FAILURE,
+                    );
                     report_boundary_error("xlAutoOpen rollback", &error);
                     if let Some(hazard) = outcome.failure_hazard() {
                         recovery.quarantine(Some(hazard));
@@ -942,17 +976,12 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initialized<A>> {
 }
 
 impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
-    #[cfg(feature = "handles")]
-    pub(crate) fn prepare_handles(
+    pub(crate) fn prepare_services(
         &mut self,
-        config: crate::addin_impl::HandleConfig,
+        config: crate::addin_impl::RuntimeConfig,
     ) -> XllResult<()> {
-        self.pending
-            .get_mut()
-            .state
-            .core
-            .service_inputs
-            .prepare_handles(config)
+        let core = &mut self.pending.get_mut().state.core;
+        core.service_inputs.arm(core.attempt_id, config)
     }
 
     pub(crate) fn install_lifecycle(
@@ -1129,21 +1158,30 @@ impl<'runtime, A: crate::Addin> PreparingServices<'runtime, A> {
             context.reject(|| module.rollback(|| {}));
             return Err(XllError::Closing);
         }
+        // Production arms all private services while rollback and the
+        // original host callback session are still available. Synthetic
+        // test/benchmark opens intentionally skip that host preparation.
+        #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
         let config = control.opening_config().ok_or_else(open_state_error)?;
-        // These private slots admit no users yet. Prepare and, on failure,
-        // destroy them outside canonical and ingress locks, since an RTD
-        // source destructor can reenter runtime code.
         drop(control);
         #[cfg(test)]
         check_open_commit_fault(1)?;
-        let services = GenerationServices::arm_generation(
-            self.0.get().context.attempt.into_runtime_generation(),
-            config,
-            #[cfg(feature = "rtd")]
-            crate::excel_rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
-            service_inputs,
-        )?
-        .commit();
+        let services = match service_inputs {
+            ServiceInputs::Prepared(services) => services,
+            #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
+            mut raw @ ServiceInputs::Unprepared(_) => {
+                raw.arm(self.0.get().context.attempt, config)?;
+                let ServiceInputs::Prepared(services) = raw else {
+                    return Err(open_state_error());
+                };
+                services
+            }
+            #[cfg(not(any(test, feature = "bench-internals", feature = "refinement")))]
+            raw @ ServiceInputs::Unprepared(_) => {
+                discard_open_inputs(raw);
+                return Err(open_state_error());
+            }
+        };
         Ok(ServicesPrepared {
             services,
             module: self.0,
@@ -1163,17 +1201,14 @@ impl<'runtime, A: crate::Addin> ServicesPrepared<'runtime, A> {
         let UncommittedModule { context, module } = module.complete();
         // ModuleOpening::commit only repacks the epoch owner. No external
         // effect or callback separates disarming this guard from arming the next.
-        let bundle = UnpublishedGeneration {
-            services,
-            module_epoch: module.commit(),
-        };
+        let bundle = UnpublishedGeneration::prepare(services, module.commit());
         PublicationReady(RollbackGuard::new(ReadyForPublication { context, bundle }))
     }
 }
 
 struct ReadyForPublication<'runtime, A: crate::Addin> {
     context: OpenCommitContext<'runtime, A>,
-    bundle: UnpublishedGeneration<A>,
+    bundle: Box<UnpublishedGeneration<A>>,
 }
 
 struct UnpublishedEpoch<'runtime, A: crate::Addin> {
@@ -1197,7 +1232,8 @@ impl<'runtime, A: crate::Addin> ReadyForPublication<'runtime, A> {
         let UnpublishedGeneration {
             services,
             module_epoch,
-        } = bundle;
+            ..
+        } = *bundle;
         let epoch = RollbackGuard::new(UnpublishedEpoch {
             context,
             module_epoch,
@@ -1221,33 +1257,46 @@ impl<'runtime, A: crate::Addin> PublicationReady<'runtime, A> {
     fn publish(self) -> XllResult<GenerationPublished<'runtime, A>> {
         let deps = self.0.get().context.deps;
         let attempt = self.0.get().context.attempt;
-        let mut control = deps.lifecycle().access();
-        if control.phase() != LifecyclePhase::Opening {
-            drop(control);
-            let (epoch, disposed) = self.0.complete().dispose_services();
-            if !disposed {
-                return Err(XllError::Panic);
-            }
-            let UnpublishedEpoch {
-                context,
-                module_epoch,
-            } = epoch.complete();
-            context.reject(|| module_epoch.begin_close(|| {}));
-            return Err(XllError::Closing);
-        }
         let lifecycle = LifecycleControl::new(deps.lifecycle());
+        let (mut control, ingress) = loop {
+            {
+                let control = deps.lifecycle().access();
+                if control.phase() != LifecyclePhase::Opening {
+                    drop(control);
+                    return self.reject_interrupted();
+                }
+                lifecycle.validate_open_attempt(&control, attempt)?;
+            }
+
+            // Drain rejected entries without holding lifecycle state. Once
+            // admission is held, never block in the reverse lock order.
+            let Ok(ingress) = crate::module_runtime::ingress().opening_publication() else {
+                return self.reject_interrupted();
+            };
+            if let Some(control) = deps.lifecycle().try_access() {
+                break (control, ingress);
+            }
+            drop(ingress);
+            std::thread::yield_now();
+        };
+
+        if !self.0.get().bundle.module_epoch.id().is_current() {
+            // Only this opening owns the affine module epoch. A new epoch
+            // cannot exist until it has given that owner back and drained.
+            opening_publication_lost();
+        }
+        if control.phase() != LifecyclePhase::Opening {
+            drop(ingress);
+            drop(control);
+            return self.reject_interrupted();
+        }
         lifecycle.validate_open_attempt(&control, attempt)?;
-        let ingress = crate::module_runtime::ingress()
-            .opening_publication()
-            .unwrap_or_else(|_| opening_publication_lost());
         let ReadyForPublication { context, bundle } = self.0.complete();
         let receipt = match lifecycle.publish_generation_state(&mut control, attempt, bundle) {
             Ok(receipt) => receipt,
             Err(bundle) => {
-                let refused = PublicationReady(RollbackGuard::new(ReadyForPublication {
-                    context,
-                    bundle: *bundle,
-                }));
+                let refused =
+                    PublicationReady(RollbackGuard::new(ReadyForPublication { context, bundle }));
                 drop(ingress);
                 drop(control);
                 drop(refused);
@@ -1259,6 +1308,19 @@ impl<'runtime, A: crate::Addin> PublicationReady<'runtime, A> {
             ingress,
             pending: RollbackGuard::new(PublishedOpen { context, control }),
         })
+    }
+
+    fn reject_interrupted(self) -> XllResult<GenerationPublished<'runtime, A>> {
+        let (epoch, disposed) = self.0.complete().dispose_services();
+        if !disposed {
+            return Err(XllError::Panic);
+        }
+        let UnpublishedEpoch {
+            context,
+            module_epoch,
+        } = epoch.complete();
+        context.reject(|| module_epoch.begin_close(|| {}));
+        Err(XllError::Closing)
     }
 }
 
@@ -1361,18 +1423,14 @@ fn prepare_commit<'runtime, A: crate::Addin>(
 }
 
 fn open_state_error() -> XllError {
-    XllError::Internal {
-        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-    }
+    crate::error::construct::internal(crate::diagnostics::catalog::OPEN_STATE)
 }
 
 #[cold]
 fn opening_publication_lost() -> ! {
     crate::boundary::fail_stop_invariant(
         "xlAutoOpen opening publication",
-        &XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-        },
+        &crate::error::construct::internal(crate::diagnostics::catalog::OPEN_STATE),
     )
 }
 
@@ -1642,7 +1700,7 @@ mod owner_tests {
         drop(access);
         drop(PublicationReady(RollbackGuard::new(ReadyForPublication {
             context,
-            bundle: *bundle,
+            bundle,
         })));
         let control = runtime.lifecycle.access();
         assert_eq!(control.phase(), LifecyclePhase::Quarantined);

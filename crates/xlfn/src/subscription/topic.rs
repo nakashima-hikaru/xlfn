@@ -220,6 +220,14 @@ pub(crate) struct SubscriptionIdentityKey {
     pub(crate) topic_hash: u64,
 }
 
+impl xlfn_services::rtd::index::IdentityKey for SubscriptionIdentityKey {
+    type Source = SourceHandleId;
+
+    fn source(self) -> Self::Source {
+        self.source_id.0
+    }
+}
+
 impl SubscriptionIdentityKey {
     pub(crate) fn new(source_id: SourceId, topic: &RtdTopic) -> Self {
         Self {

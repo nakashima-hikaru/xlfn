@@ -241,11 +241,13 @@ async fn async_evaluate(dataset: HandleLease<'_, Dataset>, time: f64) -> XllResu
 }
 ```
 
-Enable `handles` and either `async-builtin` or `async` with an external executor. The lease keeps the object readable across
-`.await` for this framework-managed task. It is released when the task
-completes, is cancelled, panics, or is dropped during shutdown. It cannot be
-returned, stored in `'static` state, or moved into an independently spawned
-thread. `Handle<'_, T>` remains synchronous and call-scoped.
+Enable `handles` and either `async-builtin` or `async` with an external executor.
+The framework owns the pin and keeps the object readable across `.await`.
+It releases the pin after disposing of the evaluation, before delivery, on
+completion, cancellation, panic, or shutdown. Dropping the lease does not
+release the pin early. The lease cannot be returned, stored in `'static`
+state, or moved into an independently spawned thread. `Handle<'_, T>` remains
+synchronous and call-scoped.
 
 There is no `Handle::pin()` escape from that scope. For synchronous object
 sharing, use another formula binding through `HandleAlias`; see

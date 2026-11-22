@@ -111,6 +111,49 @@ pub const MAX_EXCEL_FUNCTION_ARGUMENTS: usize = 255;
 /// Maximum length of an Excel counted string, measured in UTF-16 code units.
 pub const EXCEL_STRING_LIMIT: usize = 32_767;
 
+/// Counts UTF-16 code units without allocating or decoding to scalar values.
+#[inline]
+pub fn utf16_code_units(text: &str) -> usize {
+    if text.is_ascii() {
+        text.len()
+    } else {
+        non_ascii_utf16_len(text)
+    }
+}
+
+// Keep the vector reduction's register/stack setup off the ASCII return path.
+#[inline(never)]
+fn non_ascii_utf16_len(text: &str) -> usize {
+    // Valid UTF-8 contributes one UTF-16 unit per leading byte, plus
+    // one more for each four-byte scalar (a surrogate pair). Counting
+    // independent bytes can vectorize and avoids decoding characters
+    // merely to determine the allocation size.
+    text.as_bytes()
+        .chunks(64)
+        .map(|chunk| {
+            // At most two units per byte: a 64-byte subtotal fits u8.
+            usize::from(
+                chunk
+                    .iter()
+                    .map(|&byte| u8::from(byte & 0xc0 != 0x80) + u8::from(byte >= 0xf0))
+                    .sum::<u8>(),
+            )
+        })
+        .sum()
+}
+
+/// Converts fixed UTF-8 triples; caller must prove all scalars are three-byte
+/// BMP (byte count is exactly three times the exact UTF-16 length).
+#[doc(hidden)]
+#[inline]
+pub fn fixed_bmp_units(text: &str) -> impl ExactSizeIterator<Item = u16> + '_ {
+    let (triples, tail) = text.as_bytes().as_chunks::<3>();
+    debug_assert!(tail.is_empty());
+    triples.iter().map(|&[first, second, third]| {
+        (u16::from(first & 0x0f) << 12) | (u16::from(second & 0x3f) << 6) | u16::from(third & 0x3f)
+    })
+}
+
 /// Maximum length of an Excel function name, measured in UTF-16 code units.
 pub const EXCEL_FUNCTION_NAME_LIMIT: usize = 255;
 

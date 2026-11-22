@@ -54,8 +54,10 @@ enum Destination {
 impl Destination {
     fn restore<A: crate::Addin>(self, resources: CloseResources<A>) -> LifecycleState<A> {
         match self {
-            Self::Closing => LifecycleState::Closing(ClosingState::Ready { resources }),
-            Self::Rollback => LifecycleState::OpenRollbackPending(resources),
+            Self::Closing => {
+                LifecycleState::Stopping(StoppingState::Remove(ClosingState::Ready { resources }))
+            }
+            Self::Rollback => LifecycleState::Stopping(StoppingState::RollbackOpen(resources)),
             Self::Quarantine => LifecycleState::Quarantined(resources),
         }
     }
@@ -84,7 +86,7 @@ impl<A: crate::Addin> PreparedAuthorityInstall<A> {
         authority: ModuleAuthority,
     ) -> Result<Self, (LifecycleState<A>, ModuleAuthority)> {
         let (resources, destination) = match state {
-            LifecycleState::Closed(ClosedState::Idle) => (
+            LifecycleState::Closed => (
                 CloseResources::Unowned {
                     payload: ClosePayload::Empty,
                 },
@@ -108,11 +110,11 @@ impl<A: crate::Addin> PreparedAuthorityInstall<A> {
                 },
                 Destination::Rollback,
             ),
-            LifecycleState::Closing(ClosingState::OpeningActive {
+            LifecycleState::Stopping(StoppingState::Remove(ClosingState::OpeningActive {
                 quarantine_requested,
                 resources: ActiveOpeningClose::AwaitingAbort { payload },
                 ..
-            }) => (
+            })) => (
                 CloseResources::Unowned {
                     payload: payload.into_close_payload(),
                 },
@@ -122,10 +124,12 @@ impl<A: crate::Addin> PreparedAuthorityInstall<A> {
                     Destination::Closing
                 },
             ),
-            LifecycleState::Closing(ClosingState::Ready { resources }) => {
+            LifecycleState::Stopping(StoppingState::Remove(ClosingState::Ready { resources })) => {
                 (resources, Destination::Closing)
             }
-            LifecycleState::OpenRollbackPending(resources) => (resources, Destination::Rollback),
+            LifecycleState::Stopping(StoppingState::RollbackOpen(resources)) => {
+                (resources, Destination::Rollback)
+            }
             LifecycleState::Quarantined(resources) => (resources, Destination::Quarantine),
             other => return Err((other, authority)),
         };
@@ -387,10 +391,9 @@ mod tests {
         {
             let mut access = issuer.access();
             access.transition(|core| {
-                core.state = LifecycleState::Closed(ClosedState::Finalizing {
-                    attempt,
-                    quarantine_requested: true,
-                });
+                let mut record = StopRecord::new(attempt, authority().id(), StopGoal::Remove);
+                record.request_quarantine();
+                core.state = LifecycleState::Stopping(StoppingState::Finalizing(record));
                 ((), TransitionEffect::Keep)
             });
         }
@@ -411,10 +414,8 @@ mod tests {
         assert_eq!(access.removal_attempt(), Some(attempt));
         assert!(matches!(
             access.canonical_state(),
-            LifecycleState::Closed(ClosedState::Finalizing {
-                quarantine_requested: true,
-                ..
-            })
+            LifecycleState::Stopping(StoppingState::Finalizing(record))
+                if record.quarantine_requested()
         ));
         let vault = crate::runtime_components::QuarantineVault::<()>::new();
         vault.retain_module_authority(incoming);

@@ -142,10 +142,7 @@ fn deferred_termination_worker<E: RtdSubscription, C: crate::RtdSourceCatalog<E>
             if status != S_OK {
                 crate::diagnostics::report_no_unwind(
                     "IRtdServer::deferred termination",
-                    &XllError::WindowsApi {
-                        function: "IRtdServer::ServerTerminate",
-                        code: status,
-                    },
+                    &crate::error::construct::windows_api("IRtdServer::ServerTerminate", status),
                 );
             }
             drop(access);
@@ -153,15 +150,13 @@ fn deferred_termination_worker<E: RtdSubscription, C: crate::RtdSourceCatalog<E>
         if let Err(error) = result {
             crate::diagnostics::report_no_unwind(
                 "IRtdServer::deferred termination wait",
-                &XllError::Internal {
-                    diagnostic_id: match error {
-                        ServerCloseError::WaitFailed(status) => {
-                            crate::diagnostics::id::DiagnosticId::RTD_WINDOW_STATUS
-                                .with_low_u32(status as u32)
-                        }
-                        _ => crate::diagnostics::id::DiagnosticId::RTD_WINDOW_FAILURE,
-                    },
-                },
+                &crate::error::construct::internal(match error {
+                    ServerCloseError::WaitFailed(status) => crate::diagnostics::id::with_low_u32(
+                        crate::diagnostics::catalog::RTD_WINDOW_STATUS,
+                        status as u32,
+                    ),
+                    _ => crate::diagnostics::catalog::RTD_WINDOW_FAILURE,
+                }),
             );
             // Reopening after a committed spawn would strand a completed
             // worker handle on a reusable server. A live event cannot fail.

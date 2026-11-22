@@ -185,11 +185,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
 {
     pub(super) fn finish(self) -> XllResult<()> {
         {
-            let mut catalog = self.runtime.catalog.lock();
-            catalog.identities.clear();
-            catalog.retained_topic_bytes = 0;
-            catalog.pending_count = 0;
-            catalog.entries.clear();
+            self.runtime.catalog.lock().clear();
         }
         self.owner.complete(self.runtime.cleanup_result())
     }

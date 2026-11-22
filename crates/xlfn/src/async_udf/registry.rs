@@ -244,9 +244,9 @@ impl<'a> RegistryClose<'a, TasksCancelled> {
         timeout: std::time::Duration,
     ) -> XllResult<RegistryClose<'a, TasksDrained>> {
         if !self.claim.registry().wait_idle_timeout(timeout) {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_TIME,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::ASYNC_TIME,
+            ));
         }
         Ok(RegistryClose {
             state: TasksDrained,

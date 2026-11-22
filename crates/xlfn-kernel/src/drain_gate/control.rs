@@ -57,8 +57,7 @@ impl<'a> GateControl<'a, GateUnknown> {
     /// Open-gate idle observation only; this does not produce a drained
     /// capability and cannot authorize reopening or allocation reclamation.
     pub fn wait_idle(self) -> Self {
-        self.gate.wait_until_idle();
-        self.gate.counter.clear_waiting();
+        self.gate.wait_until_idle(&self.claim);
         self
     }
 
@@ -68,7 +67,7 @@ impl<'a> GateControl<'a, GateUnknown> {
         if !self.gate.is_sealed() {
             return Err(self);
         }
-        self.gate.wait_until_idle();
+        self.gate.wait_until_idle(&self.claim);
         Ok(GateControl {
             gate: self.gate,
             claim: self.claim,
@@ -83,7 +82,7 @@ impl<'a> GateControl<'a, GateUnknown> {
         let Some(_notification) = self.gate.idle.lock.try_lock() else {
             return Err(self);
         };
-        if self.gate.counter.mark_waiting() != 0 {
+        if self.gate.counter.active() != 0 {
             return Err(self);
         }
         Ok(GateControl {
@@ -96,7 +95,7 @@ impl<'a> GateControl<'a, GateUnknown> {
 
 impl<'a> GateControl<'a, GateSealed> {
     pub fn wait(self) -> GateControl<'a, GateDrained> {
-        self.gate.wait_until_idle();
+        self.gate.wait_until_idle(&self.claim);
         GateControl {
             gate: self.gate,
             claim: self.claim,
@@ -154,13 +153,10 @@ impl<'a, Phase, const N: usize> StripedGateControl<'a, Phase, N> {
 }
 
 impl<'a, const N: usize> StripedGateControl<'a, GateUnknown, N> {
-    /// Idle snapshot while admission can remain open. No stable drain proof
-    /// is created by this observation.
+    /// Observes each stripe idle, not necessarily at the same instant while
+    /// admission remains open. Does not authorize reclamation or reopen.
     pub fn wait_idle(self) -> Self {
-        self.gate.wait_until_idle();
-        for counter in &self.gate.counters {
-            counter.clear_waiting();
-        }
+        self.gate.wait_until_idle(&self.claim);
         self
     }
 
@@ -168,7 +164,7 @@ impl<'a, const N: usize> StripedGateControl<'a, GateUnknown, N> {
         if !self.gate.is_sealed() {
             return Err(self);
         }
-        self.gate.wait_until_idle();
+        self.gate.wait_until_idle(&self.claim);
         Ok(StripedGateControl {
             gate: self.gate,
             claim: self.claim,
@@ -191,7 +187,7 @@ impl<'a, const N: usize> StripedGateControl<'a, GateUnknown, N> {
     // the notification guard through reopen eliminates a blocking re-lock.
     pub(crate) fn try_prepare_reopen(self) -> Option<PreparedStripedReopen<'a, N>> {
         let notification = self.gate.idle.lock.try_lock()?;
-        if !self.gate.is_sealed() || !self.gate.observe_stripes_idle() {
+        if !self.gate.is_sealed() || !self.gate.observe_stripes_idle(&notification) {
             return None;
         }
         Some(PreparedStripedReopen {
@@ -227,7 +223,7 @@ impl<'a, const N: usize> StripedGateControl<'a, GateUnknown, N> {
 
 impl<'a, const N: usize> StripedGateControl<'a, GateSealed, N> {
     pub fn wait(self) -> StripedGateControl<'a, GateDrained, N> {
-        self.gate.wait_until_idle();
+        self.gate.wait_until_idle(&self.claim);
         StripedGateControl {
             gate: self.gate,
             claim: self.claim,

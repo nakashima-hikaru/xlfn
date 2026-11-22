@@ -125,6 +125,28 @@ renamed = { package = "api", path = "../api", version = "=0.1.0" }
         self.assertIn("target.cfg(windows).dev-dependencies.renamed", errors[0])
         self.assertIn("'=0.2.0'", errors[0])
 
+    def test_implementation_dependency_directions_reject_a_renamed_facade(self):
+        for crate, old in (("xlfn", "api"), ("xlfn-engine", "kernel")):
+            path = self.root / f"crates/{old}/Cargo.toml"
+            self.write(
+                f"crates/{old}/Cargo.toml",
+                path.read_text().replace(f'name = "{old}"', f'name = "{crate}"'),
+            )
+        self.append(
+            "crates/kernel/Cargo.toml",
+            """
+[target.'cfg(windows)'.build-dependencies]
+renamed_facade = { package = "xlfn", path = "../api", version = "=0.2.0" }
+""",
+        )
+        self.assertEqual(
+            check(self.root),
+            [
+                "xlfn-engine:target.cfg(windows).build-dependencies.renamed_facade: "
+                "forbidden dependency on xlfn"
+            ],
+        )
+
     def test_missing_version_and_nonexact_requirement_are_rejected(self):
         self.append(
             "crates/api/Cargo.toml",

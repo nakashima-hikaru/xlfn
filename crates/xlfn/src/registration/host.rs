@@ -6,7 +6,7 @@
 //! recovery journals remain in `registrar.rs` and `recovery.rs`.
 
 use crate::callback_value::ExcelCallbackValue;
-use crate::error::{ExcelApiFailure, ExcelApiFunction, InputError};
+use crate::error::{ExcelApiFailure, ExcelApiFunction};
 use crate::host_api::{ExcelHost, HostInvocation};
 use crate::host_callback::HostCallbackSession;
 use crate::return_abi::ExcelCallbackStatus;
@@ -17,16 +17,17 @@ use crate::value::{
     DecodeCallContext, ExcelParameter, FromExcel, InputMode, XlValueRef, XlValueType,
 };
 use crate::{XllError, XllResult};
-use smallvec::SmallVec;
 use std::path::PathBuf;
 use std::ptr::NonNull;
 
 use super::RegistrationId;
 use super::preflight::ValidatedRegistration;
 use super::schema::FunctionVisibility;
+pub(crate) use xlfn_host::registration::{CountedModuleName, RegistrationScratch};
+use xlfn_host::registration::{CountedString, RegistrationArgs, TemporaryString};
 use xlfn_sys::{
     XL_EVENT_REGISTER, XL_GET_NAME, XLERR_NAME, XLF_EVALUATE, XLF_REGISTER, XLF_SET_NAME,
-    XLF_UNREGISTER, XLOPER12, XLOPER12Value, XLTYPE_STR,
+    XLF_UNREGISTER, XLOPER12,
 };
 
 /// The result of a host-side registration mutation.
@@ -86,8 +87,36 @@ impl<'call> RegistrationHost<'call> {
         registration: &ValidatedRegistration,
         scratch: &mut RegistrationScratch,
     ) -> RegistrationMutation<RegistrationId> {
-        match scratch.prepare(registration) {
-            Ok(()) => scratch.invoke(self.excel, module, registration),
+        let descriptor = registration.descriptor();
+        let args = RegistrationArgs {
+            export_name: descriptor.export_name,
+            excel_name: descriptor.excel_name,
+            signature: registration.signature_text(),
+            argument_names: registration.argument_names(),
+            macro_type: macro_type(descriptor.visibility),
+            category: descriptor.category,
+            help_topic: descriptor.help_topic,
+            function_help: descriptor.description,
+            argument_help: registration
+                .argument_help()
+                .iter()
+                .map(|argument| argument.description),
+        };
+        match scratch.prepare(args, encode_registration_into) {
+            Ok(prepared) => prepared.with_arguments(module, |pointers| {
+                // SAFETY: the prepared frame owns and pins each operand through
+                // the synchronous invocation and typed result release.
+                let invocation = unsafe {
+                    invoke_operation_with_scratch(
+                        self.excel,
+                        Register {
+                            excel_name: descriptor.excel_name,
+                        },
+                        pointers,
+                    )
+                };
+                mutation_from_invocation(invocation)
+            }),
             Err(error) => RegistrationMutation::Rejected { error },
         }
     }
@@ -97,7 +126,7 @@ impl<'call> RegistrationHost<'call> {
         procedure: &'static str,
         event: i32,
     ) -> RegistrationMutation<i32> {
-        let mut procedure_value = match TemporaryString::new(procedure) {
+        let mut procedure_value = match temporary_string(procedure) {
             Ok(value) => value,
             Err(error) => return RegistrationMutation::Rejected { error },
         };
@@ -113,7 +142,7 @@ impl<'call> RegistrationHost<'call> {
         &self,
         excel_name: &'static str,
     ) -> XllResult<Option<RegistrationId>> {
-        let mut name = TemporaryString::new(excel_name)?;
+        let mut name = temporary_string(excel_name)?;
         let arguments = [name.pointer()];
         self.excel.invoke(
             XLF_EVALUATE,
@@ -127,7 +156,7 @@ impl<'call> RegistrationHost<'call> {
     /// can already be defined there with any worksheet value, independent of
     /// the narrower numeric registration-ID contract used during recovery.
     pub(super) fn is_name_bound(&self, excel_name: &'static str) -> XllResult<bool> {
-        let mut name = TemporaryString::new(excel_name)?;
+        let mut name = temporary_string(excel_name)?;
         let arguments = [name.pointer()];
         self.excel.invoke(
             XLF_EVALUATE,
@@ -167,7 +196,7 @@ impl<'call> RegistrationHost<'call> {
                     self.delete_name(excel_name)
                 } else {
                     RegistrationMutation::Rejected {
-                        error: XllError::MetadataDebtBindingChanged { name: excel_name },
+                        error: crate::error::construct::metadata_debt_binding_changed(excel_name),
                     }
                 }
             }
@@ -176,7 +205,7 @@ impl<'call> RegistrationHost<'call> {
     }
 
     fn delete_name(&self, excel_name: &'static str) -> RegistrationMutation<()> {
-        let mut name = match TemporaryString::new(excel_name) {
+        let mut name = match temporary_string(excel_name) {
             Ok(value) => value,
             Err(error) => return RegistrationMutation::Rejected { error },
         };
@@ -292,27 +321,27 @@ fn mutation_from_invocation<O: RegistrationOperation>(
     let invocation = invocation.evidence;
     match invocation {
         HostInvocation::Suppressed { status } => RegistrationMutation::Rejected {
-            error: XllError::ExcelApi {
+            error: crate::error::construct::excel_api(
                 function,
-                failure: ExcelApiFailure::Suppressed(status),
-            },
+                ExcelApiFailure::Suppressed(status),
+            ),
         },
         HostInvocation::Failed { status, cleanup } => {
             let status = status.status();
-            if status.is_terminal() {
+            if crate::error::callback_status_is_terminal(status) {
                 return RegistrationMutation::Indeterminate {
                     status,
-                    error: cleanup.err().unwrap_or(XllError::ExcelApi {
+                    error: cleanup.err().unwrap_or(crate::error::construct::excel_api(
                         function,
-                        failure: ExcelApiFailure::Status(status),
-                    }),
+                        ExcelApiFailure::Status(status),
+                    )),
                 };
             }
             RegistrationMutation::Rejected {
-                error: cleanup.err().unwrap_or(XllError::ExcelApi {
+                error: cleanup.err().unwrap_or(crate::error::construct::excel_api(
                     function,
-                    failure: ExcelApiFailure::Status(status),
-                }),
+                    ExcelApiFailure::Status(status),
+                )),
             }
         }
         HostInvocation::Decoded { decoded, cleanup } => match decoded {
@@ -413,233 +442,22 @@ fn decode_event_registration_id(result: &ExcelCallbackValue<'_>) -> XllResult<i3
     // Rejecting the sign aborts xlAutoOpen before any UDF is registered.
     // This does not qualify the separate, undocumented removal convention.
     if value == 0 {
-        return Err(XllError::ExcelApi {
-            function: ExcelApiFunction::EventRegister,
-            failure: ExcelApiFailure::InvalidRegistrationId(value),
-        });
+        return Err(crate::error::construct::excel_api(
+            ExcelApiFunction::EventRegister,
+            ExcelApiFailure::InvalidRegistrationId(value),
+        ));
     }
     Ok(value)
 }
 
 fn unexpected_result(function: ExcelApiFunction) -> XllError {
-    XllError::ExcelApi {
-        function,
-        failure: ExcelApiFailure::UnexpectedResult,
-    }
+    crate::error::construct::excel_api(function, ExcelApiFailure::UnexpectedResult)
 }
 
 pub(crate) fn valid_registration_id(id: f64) -> bool {
     // Excel registration IDs are opaque numeric tokens, not positive counters.
     // Windows Excel can return a negative ID for a successful xlfRegister call.
     id.is_finite() && id != 0.0
-}
-
-/// A counted Excel module name owned once by the registration transaction.
-/// Every xlfRegister invocation borrows its unchanged UTF-16 buffer.
-pub(crate) struct CountedModuleName {
-    units: Box<[u16]>,
-}
-
-impl CountedModuleName {
-    pub(crate) fn from_units(units: &[u16]) -> XllResult<Self> {
-        if units.len() > crate::utf16::EXCEL_STRING_LIMIT {
-            return Err(XllError::input(
-                "registration",
-                InputError::TooLarge {
-                    limit: crate::utf16::EXCEL_STRING_LIMIT,
-                    actual: units.len(),
-                },
-            ));
-        }
-        let mut counted = Vec::with_capacity(units.len() + 1);
-        counted.push(units.len() as u16);
-        counted.extend_from_slice(units);
-        Ok(Self {
-            units: counted.into_boxed_slice(),
-        })
-    }
-}
-
-static EMPTY_COUNTED: [u16; 1] = [0];
-
-/// The literal, if any, used by the preceding registration in this ABI slot.
-/// Each slot retains at most one encoding and skips the UTF-16 conversion
-/// when adjacent registrations supply the same text.
-#[derive(Default)]
-struct LastRegistrationText {
-    text: &'static str,
-    units: SmallVec<[u16; 64]>,
-}
-
-impl LastRegistrationText {
-    fn prepare(&mut self, text: &'static str) -> XllResult<()> {
-        if !std::ptr::eq(self.text, text) && self.text != text {
-            if text.is_empty() {
-                self.units.clear();
-            } else {
-                encode_registration_text(&mut self.units, text)?;
-            }
-            self.text = text;
-        }
-        Ok(())
-    }
-
-    fn units(&self) -> &[u16] {
-        if self.text.is_empty() {
-            &EMPTY_COUNTED
-        } else {
-            self.units.as_slice()
-        }
-    }
-}
-
-fn encode_registration_text(units: &mut SmallVec<[u16; 64]>, text: &str) -> XllResult<()> {
-    crate::utf16::encode_counted_into(
-        text,
-        "registration",
-        crate::utf16::EXCEL_STRING_LIMIT,
-        units,
-    )
-}
-
-fn store_validated_units(
-    storage: &mut SmallVec<[u16; 64]>,
-    length: usize,
-    units: impl Iterator<Item = u16>,
-) {
-    if length > crate::utf16::EXCEL_STRING_LIMIT {
-        xlfn_kernel::invariant::fail_stop();
-    }
-    storage.clear();
-    storage.reserve(length + 1);
-    storage.push(length as u16);
-    storage.extend(units);
-    if storage.len() != length + 1 {
-        xlfn_kernel::invariant::fail_stop();
-    }
-}
-
-fn string_operand(units: &[u16]) -> XLOPER12 {
-    debug_assert_eq!(units.len(), usize::from(units[0]) + 1);
-    XLOPER12 {
-        value: XLOPER12Value {
-            // The xlfRegister input is read-only despite the ABI's *mut.
-            string: units.as_ptr().cast_mut(),
-        },
-        xltype: XLTYPE_STR,
-    }
-}
-
-/// Storage owned by one registration batch, never shared with a nested one.
-/// UTF-16, operand and pointer allocations survive successive callbacks.
-/// Form pointers only after their respective backing stores stop growing.
-#[derive(Default)]
-pub(super) struct RegistrationScratch {
-    procedure: SmallVec<[u16; 64]>,
-    signature: SmallVec<[u16; 64]>,
-    function: SmallVec<[u16; 64]>,
-    arguments: SmallVec<[u16; 64]>,
-    category: LastRegistrationText,
-    help_topic: LastRegistrationText,
-    function_help: LastRegistrationText,
-    argument_help: SmallVec<[LastRegistrationText; 4]>,
-    frame: RegistrationFrame,
-}
-
-impl RegistrationScratch {
-    fn prepare(&mut self, registration: &ValidatedRegistration) -> XllResult<()> {
-        let descriptor = registration.descriptor();
-        encode_registration_text(&mut self.procedure, descriptor.export_name)?;
-        let (signature_length, signature) = registration.signature_text();
-        store_validated_units(&mut self.signature, signature_length, signature);
-        encode_registration_text(&mut self.function, descriptor.excel_name)?;
-        let (argument_length, argument_names) = registration.argument_names();
-        store_validated_units(&mut self.arguments, argument_length, argument_names);
-        self.category.prepare(descriptor.category)?;
-        self.help_topic.prepare(descriptor.help_topic)?;
-        self.function_help.prepare(descriptor.description)?;
-        let arguments = registration.argument_help();
-        // Keep inactive slots so a shorter intervening signature does not
-        // free retained text buffers that the next long signature can reuse.
-        if self.argument_help.len() < arguments.len() {
-            self.argument_help
-                .resize_with(arguments.len(), LastRegistrationText::default);
-        }
-        for (cached, argument) in self.argument_help.iter_mut().zip(arguments) {
-            cached.prepare(argument.description)?;
-        }
-        Ok(())
-    }
-
-    fn invoke(
-        &mut self,
-        excel: ExcelHost<'_>,
-        module: &CountedModuleName,
-        registration: &ValidatedRegistration,
-    ) -> RegistrationMutation<RegistrationId> {
-        let descriptor = registration.descriptor();
-        let argument_help = &self.argument_help[..registration.argument_help().len()];
-        let mut call = RegistrationCall(&mut self.frame);
-        call.0.operands.extend([
-            string_operand(&module.units),
-            string_operand(&self.procedure),
-            string_operand(&self.signature),
-            string_operand(&self.function),
-            string_operand(&self.arguments),
-            XLOPER12::number(macro_type(descriptor.visibility)),
-            string_operand(self.category.units()),
-            string_operand(&EMPTY_COUNTED),
-            string_operand(self.help_topic.units()),
-            string_operand(self.function_help.units()),
-        ]);
-        call.0.operands.extend(
-            argument_help
-                .iter()
-                .map(|help| string_operand(help.units())),
-        );
-        if !argument_help.is_empty() {
-            call.0.operands.push(string_operand(&EMPTY_COUNTED));
-        }
-        call.invoke(excel, descriptor.excel_name)
-    }
-}
-
-#[derive(Default)]
-struct RegistrationFrame {
-    operands: SmallVec<[XLOPER12; 16]>,
-    pointers: SmallVec<[*mut XLOPER12; 16]>,
-}
-
-/// Clears the frame on ordinary return and unwind without releasing capacity.
-/// Its exclusive loan keeps the freshly formed pointers private until the
-/// registration callback and its result release have both finished.
-struct RegistrationCall<'frame>(&'frame mut RegistrationFrame);
-
-impl RegistrationCall<'_> {
-    fn invoke(
-        &mut self,
-        excel: ExcelHost<'_>,
-        excel_name: &'static str,
-    ) -> RegistrationMutation<RegistrationId> {
-        self.0
-            .pointers
-            .extend(self.0.operands.iter_mut().map(std::ptr::from_mut));
-        // SAFETY: operands and counted text have all finished growing and
-        // belong to this batch alone. Reentry receives a different batch.
-        // Excel may rewrite the raw pointer array but not the operands it
-        // points to. The frame guard only clears it after result release.
-        let invocation = unsafe {
-            invoke_operation_with_scratch(excel, Register { excel_name }, &mut self.0.pointers)
-        };
-        mutation_from_invocation(invocation)
-    }
-}
-
-impl Drop for RegistrationCall<'_> {
-    fn drop(&mut self) {
-        self.0.pointers.clear();
-        self.0.operands.clear();
-    }
 }
 
 const fn macro_type(visibility: FunctionVisibility) -> f64 {
@@ -649,31 +467,18 @@ const fn macro_type(visibility: FunctionVisibility) -> f64 {
     }
 }
 
-pub(crate) struct TemporaryString {
-    storage: SmallVec<[u16; 64]>,
-    oper: XLOPER12,
+fn encode_registration_into(units: &mut CountedString, text: &str) -> XllResult<()> {
+    crate::utf16::encode_counted_into(
+        text,
+        "registration",
+        crate::utf16::EXCEL_STRING_LIMIT,
+        units,
+    )
 }
 
-impl TemporaryString {
-    pub(crate) fn new(text: &str) -> XllResult<Self> {
-        let storage =
-            crate::utf16::encode_counted(text, "registration", crate::utf16::EXCEL_STRING_LIMIT)?;
-        Ok(Self {
-            storage,
-            oper: XLOPER12::nil(),
-        })
-    }
-
-    pub(crate) fn pointer(&mut self) -> NonNull<XLOPER12> {
-        debug_assert_eq!(self.storage.len(), self.storage[0] as usize + 1);
-        self.oper = XLOPER12 {
-            value: XLOPER12Value {
-                string: self.storage.as_mut_ptr(),
-            },
-            xltype: XLTYPE_STR,
-        };
-        NonNull::from_mut(&mut self.oper)
-    }
+fn temporary_string(text: &str) -> XllResult<TemporaryString> {
+    crate::utf16::encode_counted(text, "registration", crate::utf16::EXCEL_STRING_LIMIT)
+        .map(TemporaryString::from_counted)
 }
 
 pub(crate) struct ModuleName {
@@ -740,7 +545,7 @@ impl ModuleName {
         #[cfg(not(target_os = "windows"))]
         let path = PathBuf::from(
             String::from_utf16(&units)
-                .map_err(|_| XllError::input(argument, InputError::InvalidUtf16))?,
+                .map_err(|_| XllError::input(argument, crate::error::InputError::InvalidUtf16))?,
         );
         Ok(Self { path, units })
     }
@@ -1100,7 +905,6 @@ mod tests {
         // Ten fixed operands plus n help strings and their blank trailer
         // exercise empty, inline-full, and spilled help and pointer storage,
         // then shrink the active help list and reuse the spilled frame.
-        let mut spilled = None;
         for count in [0, 1, 3, 4, 5, 6, 1, 0, 6] {
             let description = if count % 2 == 0 {
                 "機能の説明"
@@ -1126,12 +930,12 @@ mod tests {
             let script =
                 CallbackScript::install([Reply::success(XLF_REGISTER, XLOPER12::number(42.0))]);
             script.overwrite_registration_array();
-            let expected_module_pointer = prepared_module.units.as_ptr().addr();
+            let expected_module_pointer = prepared_module.as_counted().as_ptr().addr();
             script.on_arguments(XLF_REGISTER, move |arguments| {
                 // SAFETY: the registration call retains its immutable module
                 // storage throughout the host callback.
                 let oper = unsafe { &*arguments[0] };
-                assert_eq!(oper.xltype, XLTYPE_STR);
+                assert_eq!(oper.xltype, xlfn_sys::XLTYPE_STR);
                 let module_pointer = {
                     // SAFETY: The preceding tag check proved XLTYPE_STR, so
                     // this reads the active string union member.
@@ -1175,59 +979,12 @@ mod tests {
             }
             script.assert_registration_arguments(&expected);
             script.assert_calls(&[XLF_REGISTER]);
-            assert!(cached_text.frame.operands.is_empty());
-            assert!(cached_text.frame.pointers.is_empty());
-            if (1..=5).contains(&count) && spilled.is_none() {
-                assert!(!cached_text.frame.operands.spilled());
-                assert!(!cached_text.frame.pointers.spilled());
-            }
-            if count == 6 {
-                assert!(cached_text.frame.operands.spilled());
-                assert!(cached_text.frame.pointers.spilled());
-                assert!(cached_text.argument_help[1].units.spilled());
-                let retained = (
-                    cached_text.frame.operands.as_ptr(),
-                    cached_text.frame.pointers.as_ptr(),
-                    cached_text.argument_help[1].units.as_ptr(),
-                );
-                if let Some(previous) = spilled {
-                    assert_eq!(retained, previous);
-                }
-                spilled = Some(retained);
-            }
         }
     }
 
     #[test]
-    fn registration_metadata_reuses_equal_counted_text_and_replaces_changed_text() {
-        static LONG: [u8; 96] = [b'x'; 96];
-        static ALTERNATE: [u8; 96] = [b'x'; 96];
-        let long = std::str::from_utf8(&LONG).unwrap();
-        let alternate = std::str::from_utf8(&ALTERNATE).unwrap();
-        assert!(!std::ptr::eq(long, alternate));
-        assert_eq!(long, alternate);
-
-        let mut text = LastRegistrationText::default();
-        assert!(std::ptr::eq(text.units(), &EMPTY_COUNTED));
-        text.prepare(long).unwrap();
-        let counted = text.units().as_ptr();
-        text.prepare(alternate).unwrap();
-        assert_eq!(text.units().as_ptr(), counted);
-
-        text.prepare("価格💡").unwrap();
-        assert_eq!(text.units.as_ptr(), counted);
-        let expected: Vec<_> = std::iter::once(4).chain("価格💡".encode_utf16()).collect();
-        assert_eq!(text.units(), expected);
-        text.prepare("").unwrap();
-        assert!(std::ptr::eq(text.units(), &EMPTY_COUNTED));
-        assert_eq!(text.units.as_ptr(), counted);
-        text.prepare(long).unwrap();
-        assert_eq!(text.units.as_ptr(), counted);
-    }
-
-    #[test]
     fn temporary_strings_are_counted_utf16() {
-        let mut text = TemporaryString::new("価格").unwrap();
+        let mut text = temporary_string("価格").unwrap();
         let pointer = text.pointer();
         // SAFETY: the pointer is non-null and valid for the live temporary.
         let oper = unsafe { &*pointer.as_ptr() };
@@ -1361,6 +1118,7 @@ mod tests {
                 Err(XllError::ExcelApi {
                     function: ExcelApiFunction::Unregister,
                     failure: ExcelApiFailure::UnexpectedResult,
+                    ..
                 })
             ));
         }

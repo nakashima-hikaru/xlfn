@@ -184,12 +184,12 @@ impl<E: AsyncExecutor> RuntimeReservation<'_, E> {
         // reenter cancellation/calculation rotation.
         self.commit(
             async move {
-                let brand = crate::handle::GenerationLeaseBrand::new();
-                let scope = super::task_scope::AsyncTaskScope::new(generation, &brand);
+                let pins = crate::handle::TaskPins::new();
+                let scope = super::task_scope::AsyncTaskScope::new(generation, &pins);
                 let (future, delivery) = build.build_task(scope);
-                // The inner future borrows this task's brand until delivery and
-                // destruction finish. The enclosing task owns all captured data,
-                // so it remains 'static without erasing the inner lifetime.
+                // The inner future borrows the task's pins until delivery and
+                // destruction finish. The enclosing task owns all captures and
+                // stays 'static without erasing the inner lifetime.
                 B::deliver(delivery, future).await;
             },
             cancellation,
@@ -357,10 +357,7 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
         #[cfg(windows)]
         let _apartment =
             crate::drain_wait::windows::ComApartmentGuard::enter().map_err(|code| {
-                XllError::WindowsApi {
-                    function: "CoInitializeEx(async shutdown)",
-                    code,
-                }
+                crate::error::construct::windows_api("CoInitializeEx(async shutdown)", code)
             })?;
         let Some(closing) = self.take_for_close() else {
             return Ok(crate::shutdown::StopOutcome {

@@ -164,6 +164,12 @@ impl<'runtime, A: Addin, K: TerminalCertificateKind> LogicalCompleted<'runtime, 
 
 impl<'runtime, A: Addin, K: TerminalCertificateKind> BindingReleased<'runtime, A, K> {
     fn finalize(mut self) -> FinalizationResult<'runtime, A, K, Finalized<'runtime, A, K>> {
+        if let Err(error) = K::record_binding_release(&self.completed) {
+            return Err(Box::new(FinalizationFailure {
+                error,
+                recovery: FailedFinalization::Boundary(self),
+            }));
+        }
         #[cfg(test)]
         if QUARANTINE_AFTER_BINDING_RELEASE.with(|request| request.replace(false)) {
             self.deps.quarantine_state();

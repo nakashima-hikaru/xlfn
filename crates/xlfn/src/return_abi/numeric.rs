@@ -142,6 +142,14 @@ pub(crate) struct Fp12CallGuard {
 }
 
 impl Fp12CallGuard {
+    /// Every synchronous UDF and async launch keeps this frame around its
+    /// ingress guard. It cannot drain itself during same-thread Excel reentry.
+    pub(crate) fn on_current_thread() -> bool {
+        THREAD_STATE
+            .try_with(|state| state.get().depth != 0)
+            .unwrap_or(true)
+    }
+
     pub(crate) fn enter() -> Self {
         THREAD_STATE.with(|slot| {
             let mut state = slot.get();

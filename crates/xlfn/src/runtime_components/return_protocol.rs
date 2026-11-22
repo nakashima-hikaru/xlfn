@@ -163,9 +163,7 @@ impl ReturnsDrained {
 }
 
 fn return_quiescence_error() -> crate::XllError {
-    crate::XllError::Internal {
-        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-    }
+    crate::error::construct::internal(crate::diagnostics::catalog::CLOSE_CERTIFICATE)
 }
 
 /// Excel return ownership and call/calculation identity state.

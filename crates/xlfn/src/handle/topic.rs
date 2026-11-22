@@ -548,9 +548,9 @@ impl TopicTable {
                 entry
             }
             _ => {
-                return Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_TOPIC_COLLISION,
-                });
+                return Err(crate::error::construct::internal(
+                    crate::diagnostics::catalog::HANDLE_TOPIC_COLLISION,
+                ));
             }
         };
         let lifetime_key = publication.lifetime_key.clone();
