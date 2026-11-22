@@ -301,6 +301,22 @@ pub(crate) fn encode_counted(
     if ascii {
         units.push(text.len() as u16);
         units.extend(text.as_bytes().iter().map(|&byte| u16::from(byte)));
+    } else if text.len() == (capacity - 1) * 3 {
+        // Only the exact-count path can satisfy this for non-empty text.
+        // Three UTF-8 bytes per UTF-16 unit is the maximum; equality means
+        // every scalar is a three-byte BMP scalar, never a surrogate pair.
+        units.push((capacity - 1) as u16);
+        units.extend(
+            text.as_bytes()
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|&[first, second, third]| {
+                    (u16::from(first & 0x0f) << 12)
+                        | (u16::from(second & 0x3f) << 6)
+                        | u16::from(third & 0x3f)
+                }),
+        );
     } else {
         let pointer = units.as_mut_ptr();
         let mut initialized = 1;
@@ -437,6 +453,18 @@ mod tests {
             let actual = encode_counted(&text, "test", EXCEL_STRING_LIMIT).unwrap();
             assert_eq!(usize::from(actual[0]), expected.len());
             assert_eq!(&actual[1..], expected);
+        }
+    }
+
+    #[test]
+    fn miri_counted_three_byte_bmp_preserves_prefix_and_units() {
+        let scalars = ['\u{0800}', '\u{d7ff}', '\u{e000}', '\u{fffe}', '日'];
+        for len in [21, 22, 63, 64, 65, 256] {
+            let text: String = scalars.into_iter().cycle().take(len).collect();
+            let units = encode_counted(&text, "test", EXCEL_STRING_LIMIT).unwrap();
+            assert_eq!(usize::from(units[0]), len);
+            assert!(units[1..].iter().copied().eq(text.encode_utf16()));
+            assert_eq!(units.spilled(), len >= INLINE_UTF16_CAPACITY);
         }
     }
 

@@ -40,6 +40,8 @@ fn counted_utf16_benchmarks(c: &mut Criterion) {
         ("ascii_1k", "x".repeat(1_024)),
         ("unicode_short", "日本語💡".to_owned()),
         ("unicode_1k", "日本語💡".repeat(80)),
+        ("japanese_64", "日".repeat(64)),
+        ("japanese_1k", "日".repeat(1_024)),
         ("unicode_limit", "あ".repeat(32_767)),
     ] {
         group.throughput(Throughput::Bytes(payload.len() as u64));
