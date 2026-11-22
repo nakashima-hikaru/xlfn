@@ -4106,10 +4106,8 @@ fn sta_notification_pump_dispatches_during_worker_state_drop() {
     let git = unsafe { super::global_interface_table::get_git() }.unwrap();
     let mut cookie = 0;
     // SAFETY: the live interface, IID, and writable cookie are valid here.
-    assert_eq!(
-        unsafe { git.register(probe.as_ptr(), &IID_IUNKNOWN, &mut cookie) },
-        S_OK
-    );
+    let status = unsafe { git.register(probe.as_ptr(), &IID_IUNKNOWN, &mut cookie) };
+    assert_eq!(status, S_OK);
 
     let pump = crate::excel_rtd::notification::NotificationPump::start_with_state(
         move || WorkerCleanup {
@@ -4124,7 +4122,8 @@ fn sta_notification_pump_dispatches_during_worker_state_drop() {
     drop(pump);
     assert!(dispatched.load(Ordering::Acquire));
     // SAFETY: dropping the pump joined the worker, and no proxy retains the cookie.
-    assert_eq!(unsafe { git.revoke(cookie) }, S_OK);
+    let status = unsafe { git.revoke(cookie) };
+    assert_eq!(status, S_OK);
 }
 
 #[test]
