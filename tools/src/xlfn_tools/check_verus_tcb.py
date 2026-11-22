@@ -16,11 +16,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._repository import ROOT
+from ._rust_lexer import blank_rust_comments_and_literals
 
 ALLOWLIST_PATH = ROOT / "tools/verus_external_allowlist.json"
 
-RAW_STRING = re.compile(r'(?:br|cr|r)(#*)"')
-CHARACTER = re.compile(r"(?:b)?'(?:[^'\\\n]|\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.))'")
 TOKEN = re.compile(r"r#[A-Za-z_][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*|::|[^\s]")
 ASSUMPTIONS = {"assume", "admit", "assume_specification"}
 # Audited against rust_verify/src/attributes.rs at the pinned d17fbd0 commit.
@@ -170,71 +169,6 @@ def trust_boundaries(sanitized: str) -> tuple[set[int], set[int]]:
     return assumptions, externals
 
 
-def strip_rust_comments_and_strings(source: str) -> str:
-    """Blank comments and literals while preserving line numbers and offsets."""
-    output = list(source)
-    size = len(source)
-    index = 0
-
-    def blank(start: int, end: int) -> None:
-        for position in range(start, end):
-            if source[position] not in "\r\n":
-                output[position] = " "
-
-    while index < size:
-        if source.startswith("//", index):
-            end = source.find("\n", index)
-            end = size if end == -1 else end
-            blank(index, end)
-            index = end
-        elif source.startswith("/*", index):
-            start = index
-            index += 2
-            depth = 1
-            while index < size and depth:
-                if source.startswith("/*", index):
-                    depth += 1
-                    index += 2
-                elif source.startswith("*/", index):
-                    depth -= 1
-                    index += 2
-                else:
-                    index += 1
-            blank(start, index)
-        else:
-            raw = RAW_STRING.match(source, index)
-            if raw:
-                hashes = len(raw.group(1))
-                end_marker = '"' + "#" * hashes
-                end = source.find(end_marker, raw.end())
-                if end == -1:
-                    raise ValueError("unterminated raw string")
-                blank(index, end + len(end_marker))
-                index = end + len(end_marker)
-            elif source[index] == '"':
-                start = index
-                index += 1
-                while index < size:
-                    char = source[index]
-                    if char == "\\":
-                        index += 2
-                    elif char == '"':
-                        index += 1
-                        break
-                    else:
-                        index += 1
-                blank(start, index)
-            else:
-                char_match = CHARACTER.match(source, index)
-                if char_match:
-                    blank(index, char_match.end())
-                    index = char_match.end()
-                else:
-                    index += 1
-
-    return "".join(output)
-
-
 def audit_verus_files(search_paths: list[Path], allowlist: set[str]) -> tuple[list[str], list[str]]:
     assumes: list[str] = []
     unapproved_externals: list[str] = []
@@ -244,7 +178,7 @@ def audit_verus_files(search_paths: list[Path], allowlist: set[str]) -> tuple[li
             continue
         for file_path in base_path.rglob("*.rs"):
             content = file_path.read_text(encoding="utf-8")
-            sanitized = strip_rust_comments_and_strings(content)
+            sanitized = blank_rust_comments_and_literals(content)
 
             try:
                 display_path = file_path.relative_to(ROOT)
