@@ -1,4 +1,4 @@
-"""Compare the facade's supported API to reviewed, platform-specific snapshots."""
+"""Compare the facade's supported API to reviewed, cross-target snapshots."""
 
 import argparse
 import difflib
@@ -61,14 +61,14 @@ def extract(package: str, target: str, features: str, original_lock: bytes) -> s
     return output
 
 
-def write_or_compare(path: Path, actual: str, update: bool) -> bool:
+def write_or_compare(path: Path, actual: str, label: str, update: bool) -> bool:
     if update:
         path.write_text(actual)
         print(f"updated {path.name}")
         return True
     expected = path.read_text() if path.exists() else ""
     if actual == expected:
-        print(f"verified {path.name}")
+        print(f"verified {path.name} ({label})")
         return True
     print(
         "".join(
@@ -76,11 +76,47 @@ def write_or_compare(path: Path, actual: str, update: bool) -> bool:
                 expected.splitlines(keepends=True),
                 actual.splitlines(keepends=True),
                 fromfile=str(path),
-                tofile="current public API",
+                tofile=f"current public API ({label})",
             )
         )
     )
     return False
+
+
+def check_snapshot_group(
+    directory: Path,
+    name: str,
+    actual_by_target: dict[str, str],
+    update: bool,
+) -> bool:
+    shared_path = directory / f"{name}.txt"
+    per_target_paths = {target: directory / f"{target}-{name}.txt" for target in TARGETS}
+    if update:
+        unique_outputs = set(actual_by_target.values())
+        if len(unique_outputs) == 1:
+            shared_output = next(iter(unique_outputs))
+            write_or_compare(shared_path, shared_output, "shared", update=True)
+            for path in per_target_paths.values():
+                if path.exists():
+                    path.unlink()
+                    print(f"removed redundant {path.name}")
+            return True
+        if shared_path.exists():
+            shared_path.unlink()
+            print(f"removed shared {shared_path.name} (target APIs diverged)")
+        for target, path in per_target_paths.items():
+            write_or_compare(path, actual_by_target[target], target, update=True)
+        return True
+
+    has_per_target = any(path.exists() for path in per_target_paths.values())
+    if has_per_target and shared_path.exists():
+        print(f"ambiguous snapshots for {name}: both {shared_path.name} and per-target files exist")
+        return False
+    passed = True
+    for target, actual in actual_by_target.items():
+        path = per_target_paths[target] if has_per_target else shared_path
+        passed &= write_or_compare(path, actual, target, update=False)
+    return passed
 
 
 def main() -> int:
@@ -94,17 +130,16 @@ def main() -> int:
     directory = ROOT / "crates/xlfn/public-api"
     directory.mkdir(exist_ok=True)
     passed = True
-    for target in TARGETS:
-        for configuration, features in FEATURES.items():
-            # Rust-only BLAKE3 lets rustdoc run without an assembler or macOS compiler.
-            facade_features = f"{features},blake3/pure" if features else ""
-            header = (
-                f"# {TOOLCHAIN}; {PUBLIC_API_VERSION}; features={facade_features or '(none)'}\n"
+    for configuration, features in FEATURES.items():
+        # Rust-only BLAKE3 lets rustdoc run without an assembler or macOS compiler.
+        facade_features = f"{features},blake3/pure" if features else ""
+        header = f"# {TOOLCHAIN}; {PUBLIC_API_VERSION}; features={facade_features or '(none)'}\n"
+        facade_by_target: dict[str, str] = {}
+        reexports_by_target: dict[str, str] = {}
+        for target in TARGETS:
+            facade_by_target[target] = header + extract(
+                "xlfn", target, facade_features, original_lock
             )
-            name = f"{target}-{configuration}"
-            facade = extract("xlfn", target, facade_features, original_lock)
-            passed &= write_or_compare(directory / f"{name}.txt", header + facade, args.update)
-
             # Cache definitions are present only with the public feature enabled.
             engine_features = "serde" if features else ""
             engine = contracts(
@@ -119,9 +154,11 @@ def main() -> int:
                     SERVICE_CONTRACTS,
                     "xlfn-services",
                 )
-            passed &= write_or_compare(
-                directory / f"{name}-reexports.txt", header + engine + service, args.update
-            )
+            reexports_by_target[target] = header + engine + service
+        passed &= check_snapshot_group(directory, configuration, facade_by_target, args.update)
+        passed &= check_snapshot_group(
+            directory, f"{configuration}-reexports", reexports_by_target, args.update
+        )
     if not passed:
         print("Review API changes, then run just public-api-update to accept the snapshots.")
     return int(not passed)
