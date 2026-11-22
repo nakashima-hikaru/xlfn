@@ -352,7 +352,7 @@ mod budget_tests {
         DiagnosticEventMetadata {
             udf_id: "byte-budget",
             argument: None,
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::from_u64(1),
+            diagnostic_id: crate::diagnostics::id::from_u64(1),
             timestamp: SystemTime::UNIX_EPOCH,
         }
     }

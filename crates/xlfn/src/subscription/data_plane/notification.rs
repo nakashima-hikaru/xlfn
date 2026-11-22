@@ -136,9 +136,9 @@ impl<H: SubscriptionHost> NotificationAttempt<'_, H> {
                 Ok(outcome) => publish.finish_notification_attempt(ticket, outcome),
                 Err(panic_payload) => {
                     drop(pending);
-                    let err = XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_NOTIFY,
-                    };
+                    let err = crate::error::construct::internal(
+                        crate::diagnostics::catalog::PANIC_NOTIFY,
+                    );
                     publish.services().record_cleanup_result(Err(err));
                     std::panic::resume_unwind(panic_payload);
                 }

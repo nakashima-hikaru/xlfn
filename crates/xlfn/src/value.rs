@@ -83,16 +83,10 @@ pub(crate) use matrix::validate_matrix_dimensions;
 pub use matrix::{BoundedVarArgs, Column, Matrix, MatrixRef, Row};
 pub use numeric::NumericMatrixRef;
 pub(crate) use raw::GridView;
-pub(crate) use raw::{XlArrayRef, XlStrRef, XlValueRef, XlValueType};
+pub(crate) use raw::{XlArrayRef, XlStrRef, XlValueRef, XlValueType, xl_value_type_from_raw};
 
-/// The number of rows and columns in an Excel array or Rust matrix.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct Shape {
-    /// The number of rows.
-    pub rows: usize,
-    /// The number of columns.
-    pub columns: usize,
-}
+#[doc(inline)]
+pub use xlfn_engine::value_types::Shape;
 
 const EXCEL_MAX_ROWS: usize = 1_048_576;
 const EXCEL_MAX_COLUMNS: usize = 16_384;

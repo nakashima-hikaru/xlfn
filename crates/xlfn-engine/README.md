@@ -1,27 +1,26 @@
 # xlfn-engine
 
-Host-independent lifecycle contracts for xlfn. Add-ins use the `xlfn` facade.
+Host-independent execution control for xlfn. Add-ins use the `xlfn` facade.
 
-The crate owns the identity vocabulary, the classification of host mutations,
-and the ordered stop record. Numerical identities are observations, not
-capabilities. The coordinator owns and validates affine cleanup and publication
-tickets; the engine's stop record cannot manufacture them.
+The engine owns open/removal identity allocation, the quarantine claim state
+machine, portable outcomes and error contracts, and ordered stop progress.
+Numeric identities identify observations; they do not by themselves confer a
+right to publish, retire, or reclaim a generation.
 
 | Boundary | Owns |
 | --- | --- |
-| Engine | Identity, host mutation outcomes, stop goal and completion order |
+| Engine | Lifecycle sequencing, claim arbitration, host mutation outcomes, and stop progress |
 | Kernel | Atomic gates, notification tails, and allocation retirement |
-| Services | Host-independent admission and accounting for generation resources |
-| Host | Platform operations and actual native references |
-| Facade | Public API, add-in bridge, and composition of the private owners |
+| Services | Cache, handle payload ownership, and subscription state and accounting |
+| Host | Native waits, physical resource ownership, and the FP12 process ledger |
+| Facade | Public add-in surface, canonical host-typed payloads, and composition of the owners |
 
-A stop publishes logical closure first, releases the STA binding second, and
-authorizes a successful return third. A quarantine may still record a native
-action that already completed, but cannot commit success. Open attempt,
-removal attempt, runtime generation, and RTD generations must not be conflated.
-Physical module release requires separate host evidence.
+The facade drives payload-dependent transitions and holds the canonical lifecycle
+lock. The engine arbitrates quarantine under that same lock. A matching claim
+confers the responsibility to finish, defer, or retain the native payload; a
+stale claim may not operate on a new module epoch. Logical close precedes
+release of the STA binding, which precedes successful return. Physical module
+release requires separate host evidence.
 
-The facade presently composes the lifecycle coordinator and service implementations
-against these types. Moving a module across crates must not widen the
-constructors of publisher/drain/quiescence witnesses or make a private Arc,
-pointer, or OS handle into a public authority.
+In a crate migration, never widen the constructors of publication, drain, or
+quiescence witnesses just to move a caller.

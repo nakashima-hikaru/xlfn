@@ -6,10 +6,37 @@ rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Host-independent service accounting for xlfn"
+description = "Host-independent service backends for xlfn"
+
+[features]
+default = []
+rtd = ["dep:rustc-hash", "dep:smallvec"]
+cache = ["dep:crossbeam-utils", "dep:indexmap", "dep:papaya", "dep:quick_cache", "dep:rustc-hash", "dep:smallvec", "dep:triomphe", "dep:xlfn-engine"]
+bench-internals = []
 
 [dependencies]
 xlfn-kernel.workspace = true
+xlfn-engine = { workspace = true, optional = true }
+crossbeam-utils = { workspace = true, optional = true }
+indexmap = { workspace = true, optional = true }
+papaya = { workspace = true, optional = true }
+rustc-hash = { workspace = true, optional = true }
+smallvec = { workspace = true, optional = true }
+triomphe = { workspace = true, optional = true }
+
+# Linux/Miri uses Quick Cache's unsynchronized policy with the kernel's
+# non-poisoning mutex. Other hosts use its concurrent parking_lot backend.
+[target.'cfg(target_os = "linux")'.dependencies]
+quick_cache = { workspace = true, optional = true }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+quick_cache = { workspace = true, features = ["parking_lot"], optional = true }
+
+[dev-dependencies]
+static_assertions.workspace = true
+
+[target.'cfg(not(all(target_os = "windows", target_arch = "x86")))'.dev-dependencies]
+loom.workspace = true
 
 [lints]
 workspace = true

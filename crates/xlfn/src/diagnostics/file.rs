@@ -786,7 +786,7 @@ mod bounded_text_tests {
             udf_id: "contended_event",
             argument: None,
             error: &error,
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::from_u64(7),
+            diagnostic_id: crate::diagnostics::id::from_u64(7),
             timestamp: std::time::SystemTime::UNIX_EPOCH,
         };
         let held = LogLock::acquire(&path).unwrap();

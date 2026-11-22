@@ -8,7 +8,12 @@ license.workspace = true
 repository.workspace = true
 description = "Lifecycle identities and host mutation contracts for xlfn"
 
+[features]
+serde = ["dep:serde"]
+
 [dependencies]
+serde = { workspace = true, features = ["derive"], optional = true }
+thiserror.workspace = true
 
 [lints]
 workspace = true

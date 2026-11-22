@@ -42,7 +42,7 @@ MODULES = {
     "async_udf/completion": Path("crates/xlfn/src/async_udf/completion.rs"),
     "async_udf/instrumentation": Path("crates/xlfn/src/async_udf/instrumentation.rs"),
     "cancellation": Path("crates/xlfn/src/cancellation.rs"),
-    "drain_wait/windows": Path("crates/xlfn/src/drain_wait/windows.rs"),
+    "host/drain/windows": Path("crates/xlfn-host/src/drain/windows.rs"),
     "excel_rtd/windows/server": Path("crates/xlfn/src/excel_rtd/windows/server.rs"),
     "excel_rtd/windows/server/termination": Path(
         "crates/xlfn/src/excel_rtd/windows/server/termination.rs"
@@ -57,9 +57,7 @@ MODULES = {
     "subscription/runtime": Path("crates/xlfn/src/subscription/runtime.rs"),
     "runtime/residency": Path("crates/xlfn/src/runtime/residency.rs"),
     "return_abi/numeric": Path("crates/xlfn/src/return_abi/numeric.rs"),
-    "return_abi/numeric/process/windows": Path(
-        "crates/xlfn/src/return_abi/numeric/process/windows.rs"
-    ),
+    "host/process_quota/windows": Path("crates/xlfn-host/src/process_quota/windows.rs"),
     "return_abi": Path("crates/xlfn/src/return_abi.rs"),
     "return_abi/ownership": Path("crates/xlfn/src/return_abi/ownership.rs"),
     "macro_abi": Path("crates/xlfn/src/__private.rs"),
@@ -91,7 +89,7 @@ MODULES = {
     "handle/domain": Path("crates/xlfn/src/handle/domain.rs"),
     "registration/host": Path("crates/xlfn/src/registration/host.rs"),
     "value": Path("crates/xlfn/src/value.rs"),
-    "cache": Path("crates/xlfn/src/cache.rs"),
+    "cache": Path("crates/xlfn-services/src/cache.rs"),
     "runtime": Path("crates/xlfn/src/runtime.rs"),
     "lifecycle/state": Path("crates/xlfn/src/lifecycle/state.rs"),
     "runtime/open_txn": Path("crates/xlfn/src/runtime/open_txn.rs"),
@@ -101,10 +99,10 @@ MODULES = {
     "excel_rtd/windows": Path("crates/xlfn/src/excel_rtd/windows.rs"),
 }
 WINDOWS_MODULES = {
-    "drain_wait/windows",
+    "host/drain/windows",
     "excel_rtd/windows/server/termination",
     "excel_rtd/windows/server_gate",
-    "return_abi/numeric/process/windows",
+    "host/process_quota/windows",
     "excel_rtd/windows",
     "excel_rtd/windows/server",
     "subscription/data_plane/refresh/publication",
@@ -193,9 +191,18 @@ def check_fixture(
         if fixture.module.startswith("kernel/")
         else "xlfn-macros"
         if fixture.module.startswith("macros/")
+        else "xlfn-host"
+        if fixture.module.startswith("host/")
+        else "xlfn-services"
+        if fixture.module == "cache"
         else "xlfn"
     )
-    features = (*FEATURES, *extra_features) if package == "xlfn" else ()
+    if package == "xlfn":
+        features = (*FEATURES, *extra_features)
+    elif package == "xlfn-services":
+        features = ("cache",)
+    else:
+        features = ()
     if fixture.module == "async_udf/builtin" and "async-builtin" not in features:
         features = (*features, "async-builtin")
     command = [

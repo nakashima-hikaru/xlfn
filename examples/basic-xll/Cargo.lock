@@ -444,6 +444,9 @@ version = "0.2.0"
 [[package]]
 name = "xlfn-engine"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "xlfn-host"

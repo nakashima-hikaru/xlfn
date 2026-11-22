@@ -79,9 +79,10 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceRegistration<E, C>
         Ok(handles)
     }
     fn registration_id(&self) -> XllResult<u64> {
-        self.registration_id.ok_or(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
-        })
+        self.registration_id
+            .ok_or(crate::error::construct::internal(
+                crate::diagnostics::catalog::RTD_SUBSCRIPTION_ID_OVERFLOW,
+            ))
     }
     pub(crate) fn finish(self) -> SourceArena<E, C> {
         SourceArena {
@@ -106,9 +107,9 @@ impl<E: RtdSubscription> SourceRegistration<E> {
         let sequence = u64::try_from(sources.len())
             .ok()
             .and_then(|n| n.checked_add(1))
-            .ok_or(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
-            })?;
+            .ok_or(crate::error::construct::internal(
+                crate::diagnostics::catalog::RTD_SUBSCRIPTION_ID_OVERFLOW,
+            ))?;
         sources.push(Box::new(SourceAdapter {
             source,
             _subscription: PhantomData,

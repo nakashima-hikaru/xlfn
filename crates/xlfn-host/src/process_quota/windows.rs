@@ -13,12 +13,12 @@
 //! fail closed, but this protocol is not isolation from an equal-authority user.
 
 use super::ProcessState;
-use crate::{ExcelError, XllError, XllResult};
 use core::ffi::c_void;
 use std::mem::{align_of, size_of};
 use std::ptr::NonNull;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
+use xlfn_engine::error::{ExcelError, XllError, XllResult};
 
 mod security;
 

@@ -3,8 +3,13 @@
 //! to publish, retire, or reclaim a generation. Such tickets are issued by the
 //! coordinator that owns the corresponding resource.
 
+pub mod diagnostic_id;
+pub mod error;
 pub mod generation;
+pub mod lifecycle_sequence;
 pub mod panic_boundary;
+pub mod quarantine;
+pub mod value_types;
 
 /// Distinguishes a known host mutation from rejection or uncertainty.
 pub enum HostMutation<T, Status, Error> {

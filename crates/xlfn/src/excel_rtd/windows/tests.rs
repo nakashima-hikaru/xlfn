@@ -1854,10 +1854,10 @@ fn failed_git_revocation_is_retained_and_retryable() {
     let cookie = NonZeroU32::new(41).unwrap();
     module_lifetime().git_cookie_registered();
     module_lifetime().git_cookie_revocation_deferred(cookie);
-    let error = XllError::WindowsApi {
-        function: "IGlobalInterfaceTable::RevokeInterfaceFromGlobal",
-        code: E_FAIL,
-    };
+    let error = crate::error::construct::windows_api(
+        "IGlobalInterfaceTable::RevokeInterfaceFromGlobal",
+        E_FAIL,
+    );
     assert_eq!(module_lifetime().snapshot().outstanding_git_cookies, 0);
     assert_eq!(module_lifetime().snapshot().revocation_debt, 1);
     assert_eq!(module_lifetime().queued_git_revocation_debt(), vec![cookie]);
@@ -2182,9 +2182,9 @@ impl DispatchTestSource {
         self.sink
             .lock()
             .as_ref()
-            .ok_or(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_DISPATCH,
-            })?
+            .ok_or(crate::error::construct::internal(
+                crate::diagnostics::catalog::RTD_DISPATCH,
+            ))?
             .publish(value)
     }
 }
@@ -5357,6 +5357,7 @@ fn registration_mutex_timeout_is_bounded_and_does_not_release_other_owner() {
             Err(XllError::WindowsApi {
                 function: "CoWaitForMultipleHandles(RTD registration mutex)",
                 code: crate::win32::RPC_S_CALLPENDING,
+                ..
             })
         ));
         assert!(started.elapsed() < Duration::from_secs(2));

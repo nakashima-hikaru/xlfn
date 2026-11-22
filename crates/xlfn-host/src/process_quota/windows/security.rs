@@ -1,11 +1,11 @@
 //! Explicit security for the accounting section, including existing objects.
 
 use super::{invalid_state, os_error};
-use crate::XllResult;
 use crate::win32::*;
 use core::ffi::c_void;
 use std::mem::{MaybeUninit, offset_of};
 use std::ptr::NonNull;
+use xlfn_engine::error::XllResult;
 
 const OWNER_AND_DACL: u32 = (OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION) as u32;
 

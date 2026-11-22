@@ -136,7 +136,7 @@ fn publication_guard_probe(table: &BindingTable, index: usize) {
                 "FAIL: native Cache baseline does not compile\n" + baseline.stdout + baseline.stderr
             )
         command.append("--offline")
-        cache_path = tree / "crates/xlfn/src/cache.rs"
+        cache_path = tree / "crates/xlfn-services/src/cache.rs"
         cache_source = cache_path.read_text()
         anchor = "impl<V> std::ops::Deref for CacheLease<'_, V> {"
         probe = """
@@ -166,13 +166,13 @@ fn borrowed_cache_lease_probe<V>(lease: CacheLease<'_, V>) {
         cache_path.write_text(cache_source)
         # Raw recovery is private to this child module; a probe in cache.rs
         # would test privacy rather than consumption of the retirement owner.
-        reclaim_path = tree / "crates/xlfn/src/cache/reclamation.rs"
+        reclaim_path = tree / "crates/xlfn-services/src/cache/reclamation.rs"
         reclaim_source = reclaim_path.read_text()
-        anchor = "unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>) {"
+        anchor = "unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>, report: CachePanicReporter) {"
         probe = """
 unsafe fn duplicate_cache_reclamation_probe<V>(entry: ReclaimEntry<V>) {
-    unsafe { reclaim_cache_node(entry); }
-    unsafe { reclaim_cache_node(entry); }
+    unsafe { reclaim_cache_node(entry, super::ignore_cache_panic); }
+    unsafe { reclaim_cache_node(entry, super::ignore_cache_panic); }
 }
 """
         if reclaim_source.count(anchor) != 1:

@@ -2,7 +2,7 @@
 //! No borrowed runtime state is retained here; rollback can leave the descriptor inert.
 use super::server::ACTIVE_SERVER;
 use crate::sync::Mutex;
-use crate::{RtdSubscription, XllError, XllResult};
+use crate::{RtdSubscription, XllResult};
 use std::any::TypeId;
 use std::ffi::c_void;
 
@@ -41,9 +41,9 @@ pub(crate) fn register_server_type<E: RtdSubscription, C: crate::RtdSourceCatalo
         .as_ref()
         .is_some_and(|active| active.subscription_type != descriptor.identity)
     {
-        return Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_MULTI,
-        });
+        return Err(crate::error::construct::internal(
+            crate::diagnostics::catalog::RTD_MULTI,
+        ));
     }
     *SERVER_TYPE.lock() = Some(descriptor);
     Ok(())

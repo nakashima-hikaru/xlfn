@@ -5,8 +5,6 @@
 //! their own affine claims; this view never returns detached acquisition parts.
 //! It does not own a `Runtime` reference.
 
-#[cfg(test)]
-use crate::XllError;
 use crate::addin_impl::Addin;
 use crate::generation::{ExecutionGeneration, OpenAttemptId, OpeningGeneration, RuntimeGeneration};
 use crate::lifecycle::{LifecycleControl, LifecyclePhase, OpenFailureDisposition};
@@ -127,9 +125,9 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
                 .unwrap_or_else(|| {
                     crate::boundary::fail_stop_invariant(
                         "test removal owner lacks module close authority",
-                        &XllError::Internal {
-                            diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
-                        },
+                        &crate::error::construct::internal(
+                            crate::diagnostics::catalog::CLOSE_RUNTIME,
+                        ),
                     )
                 });
             true

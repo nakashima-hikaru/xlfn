@@ -66,9 +66,7 @@ pub(crate) struct FinalRemoval;
 pub(crate) struct OpenRollback;
 
 fn close_certificate_error() -> XllError {
-    XllError::Internal {
-        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-    }
+    crate::error::construct::internal(crate::diagnostics::catalog::CLOSE_CERTIFICATE)
 }
 
 pub(crate) type LogicalCompletionResult<'runtime, A, K> = Result<
@@ -339,9 +337,9 @@ impl<'runtime, A: crate::Addin> RemovalClaimGuard<'runtime, A> {
             || !deps.residency().callbacks_retained_safely()
         {
             return Err((
-                XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_CERTIFICATE,
-                },
+                crate::error::construct::internal(
+                    crate::diagnostics::catalog::OPEN_ROLLBACK_CERTIFICATE,
+                ),
                 self,
             ));
         }
@@ -437,9 +435,7 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
         };
         if expected_generation.is_some() && expected_generation != last_committed_generation {
             return Err((
-                XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_LEASE_GATE,
-                },
+                crate::error::construct::internal(crate::diagnostics::catalog::CLOSE_LEASE_GATE),
                 Box::new(self),
             ));
         }

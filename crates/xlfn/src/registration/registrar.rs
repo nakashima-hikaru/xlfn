@@ -75,9 +75,7 @@ impl HostRegistrar {
             .map_err(RegistrationTransactionError::new)?
         {
             return Err(RegistrationTransactionError::new(
-                XllError::RegistrationConflict {
-                    name: names.excel_name,
-                },
+                crate::error::construct::registration_conflict(names.excel_name),
             ));
         }
 
@@ -95,7 +93,9 @@ impl HostRegistrar {
             RegistrationMutation::Rejected { error } => {
                 Err(RegistrationTransactionError::new(error))
             }
-            RegistrationMutation::Indeterminate { status, error } if status.is_terminal() => {
+            RegistrationMutation::Indeterminate { status, error }
+                if crate::error::callback_status_is_terminal(status) =>
+            {
                 let mut transaction_error = RegistrationTransactionError::new(error.clone());
                 transaction_error
                     .journal
@@ -267,7 +267,8 @@ mod tests {
             assert!(matches!(
                 preflight_registration(&[descriptor]),
                 Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRY,
+                    diagnostic_id: crate::diagnostics::catalog::REGISTRY,
+                    ..
                 })
             ));
         }
@@ -310,7 +311,7 @@ mod tests {
             };
             assert!(matches!(
                 *error.source,
-                XllError::RegistrationConflict { name: NAME }
+                XllError::RegistrationConflict { name: NAME, .. }
             ));
             script.assert_calls(&[XLF_EVALUATE]);
         }
@@ -371,10 +372,11 @@ mod tests {
                 attempts.set(attempt);
                 if attempt == 2 {
                     callbacks.suppress_for_test(ExcelCallbackStatus::Abort);
-                    let mut error = RegistrationTransactionError::new(XllError::ExcelApi {
-                        function: crate::error::ExcelApiFunction::Register,
-                        failure: crate::error::ExcelApiFailure::Status(ExcelCallbackStatus::Abort),
-                    });
+                    let mut error =
+                        RegistrationTransactionError::new(crate::error::construct::excel_api(
+                            crate::error::ExcelApiFunction::Register,
+                            crate::error::ExcelApiFailure::Status(ExcelCallbackStatus::Abort),
+                        ));
                     error.journal.mark_unknown(UnknownRegistrationState {
                         export_name: "second_export",
                         excel_name: descriptor,
@@ -422,12 +424,10 @@ mod tests {
                 let mut result = UnregisterResult::new(registrations.len());
                 result.failed.push((
                     registrations.into_iter().next().unwrap(),
-                    XllError::ExcelApi {
-                        function: crate::error::ExcelApiFunction::Unregister,
-                        failure: crate::error::ExcelApiFailure::Status(
-                            ExcelCallbackStatus::Uncalced,
-                        ),
-                    },
+                    crate::error::construct::excel_api(
+                        crate::error::ExcelApiFunction::Unregister,
+                        crate::error::ExcelApiFailure::Status(ExcelCallbackStatus::Uncalced),
+                    ),
                 ));
                 result
             },
@@ -450,10 +450,10 @@ mod tests {
         let error = reconcile_malformed_registration_result_with(
             &host,
             descriptor,
-            XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::Register,
-                failure: crate::error::ExcelApiFailure::UnexpectedResult,
-            },
+            crate::error::construct::excel_api(
+                crate::error::ExcelApiFunction::Register,
+                crate::error::ExcelApiFailure::UnexpectedResult,
+            ),
             |_host, _name| Err(RegistrationTransactionError::new(XllError::Closing)),
             |_host, _registrations| panic!("unknown registration must not be unregistered"),
         );
@@ -528,7 +528,10 @@ mod tests {
             assert_eq!(outcome.metadata_debt.len(), 1);
             assert!(matches!(
                 outcome.metadata_debt[0].last_error(),
-                XllError::MetadataDebtBindingChanged { name: "TEST.OWNED" }
+                XllError::MetadataDebtBindingChanged {
+                    name: "TEST.OWNED",
+                    ..
+                }
             ));
             assert_eq!(outcome.metadata_debt[0].expected_registration_id(), -7.0);
             script.assert_calls(&[XLF_UNREGISTER, XLF_EVALUATE]);

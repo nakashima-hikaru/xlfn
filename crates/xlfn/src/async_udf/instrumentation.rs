@@ -1,4 +1,5 @@
 use super::completion::{AsyncCompletion, OwnedCompletionOutcome, OwnedDeliveryOutcome};
+#[cfg(test)]
 use crate::XllError;
 use crate::cancellation::CancellationToken;
 #[cfg(test)]
@@ -70,9 +71,9 @@ impl<G: UdfLayerGuard> Rollback for ActiveUdfInstrumentation<G> {
         let completion = if self.cancellation.is_cancelled() {
             OwnedCompletionOutcome::Cancelled
         } else {
-            OwnedCompletionOutcome::Error(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_COMPLETION,
-            })
+            OwnedCompletionOutcome::Error(crate::error::construct::internal(
+                crate::diagnostics::catalog::ASYNC_COMPLETION,
+            ))
         };
         finish_active(
             self,

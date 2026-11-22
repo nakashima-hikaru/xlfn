@@ -9,6 +9,10 @@ pub mod drain;
 #[cfg(windows)]
 pub mod com_wait;
 
+/// Process-owned FP12 accounting and platform mapping.
+#[doc(hidden)]
+pub mod process_quota;
+
 /// Generated Windows ABI used by the platform adapter.
 #[doc(hidden)]
 #[cfg(windows)]

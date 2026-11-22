@@ -1,4 +1,4 @@
-// module: return_abi/numeric/process/windows
+// module: host/process_quota/windows
 use super::Mapping;
 
 fn retain(mapping: Mapping) {

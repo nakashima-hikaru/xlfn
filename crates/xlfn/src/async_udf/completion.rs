@@ -130,9 +130,9 @@ impl<O: CompletionObserver> DeliveryParts<O> {
         } else if panicked {
             OwnedCompletionOutcome::Error(XllError::Panic)
         } else {
-            OwnedCompletionOutcome::Error(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_COMPLETION,
-            })
+            OwnedCompletionOutcome::Error(crate::error::construct::internal(
+                crate::diagnostics::catalog::ASYNC_COMPLETION,
+            ))
         };
         let error = if panicked && !cancelled {
             XllError::Panic
@@ -349,11 +349,12 @@ pub(crate) unsafe fn async_return(
     handle: NonNull<XLOPER12>,
     result: NonNull<XLOPER12>,
 ) -> XllResult<()> {
-    let callback_admission =
-        crate::callback_gate::enter_callback().map_err(|suppressed| XllError::ExcelApi {
-            function: crate::error::ExcelApiFunction::AsyncReturn,
-            failure: crate::error::ExcelApiFailure::Suppressed(suppressed.status),
-        })?;
+    let callback_admission = crate::callback_gate::enter_callback().map_err(|suppressed| {
+        crate::error::construct::excel_api(
+            crate::error::ExcelApiFunction::AsyncReturn,
+            crate::error::ExcelApiFailure::Suppressed(suppressed.status),
+        )
+    })?;
     // SAFETY: both XLOPER12 pointers are live for this call. The specialized
     // raw wrapper intentionally does not expose the worker-thread-forbidden
     // xlFree cleanup path.
@@ -361,7 +362,7 @@ pub(crate) unsafe fn async_return(
         unsafe { xlfn_sys::excel12_async_return(handle, result) };
     drop(callback_admission);
     check_async_acceptance(
-        ExcelCallbackStatus::from_raw(raw_status),
+        crate::error::callback_status_from_raw(raw_status),
         callback_result,
         invoked,
     )
@@ -383,10 +384,10 @@ fn check_async_acceptance(
         } else {
             crate::error::ExcelApiFailure::Status(status)
         };
-        let error = XllError::ExcelApi {
-            function: crate::error::ExcelApiFunction::AsyncReturn,
+        let error = crate::error::construct::excel_api(
+            crate::error::ExcelApiFunction::AsyncReturn,
             failure,
-        };
+        );
         return Err(error);
     }
     Ok(())
@@ -434,19 +435,19 @@ mod tests {
     #[test]
     fn uninvoked_async_return_preserves_the_callback_failure_status() {
         use crate::error::{ExcelApiFailure, ExcelApiFunction};
-        let failed = ExcelCallbackStatus::from_raw(xlfn_sys::XLRET_FAILED);
+        let failed = crate::error::callback_status_from_raw(xlfn_sys::XLRET_FAILED);
         assert!(matches!(
             check_async_acceptance(failed, XLOPER12::nil(), false),
             Err(XllError::ExcelApi {
                 function: ExcelApiFunction::AsyncReturn,
-                failure: ExcelApiFailure::Status(status),
-            }) if status == failed
+                failure: ExcelApiFailure::Status(status), .. }) if status == failed
         ));
         assert!(matches!(
             check_async_acceptance(ExcelCallbackStatus::Success, XLOPER12::boolean(false), true),
             Err(XllError::ExcelApi {
                 function: ExcelApiFunction::AsyncReturn,
                 failure: ExcelApiFailure::UnexpectedResult,
+                ..
             })
         ));
     }

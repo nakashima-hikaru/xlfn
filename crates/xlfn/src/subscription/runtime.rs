@@ -111,8 +111,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             servers: Mutex::new(FxHashMap::default()),
             catalog: Mutex::new(SubscriptionCatalog {
                 entries: FxHashMap::default(),
-                retained_topic_bytes: 0,
-                pending_count: 0,
+                quota: xlfn_services::rtd::quota::CatalogQuota::default(),
                 identities: super::identity::SubscriptionIdentityIndex::default(),
                 next_subscription_id: 1,
             }),
@@ -194,9 +193,9 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
 
         let mut servers = self.servers.lock();
         if servers.contains_key(&generation) {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SERVER_DUE,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::RTD_SERVER_DUE,
+            ));
         }
         let pointer = NonNull::from(server.as_ref());
         servers.insert(generation, server);
@@ -267,9 +266,9 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
 
             let ticket = catalog
                 .with_entry(existing_id, SubscriptionEntry::add_reservation)
-                .ok_or(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN,
-                })??;
+                .ok_or(crate::error::construct::internal(
+                    crate::diagnostics::catalog::RTD_INDEX_ORPHAN,
+                ))??;
 
             return Ok(PreparedSubscription::reserved(self, existing_key, ticket));
         }
@@ -352,13 +351,15 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     current.checked_add(1)
                 })
-                .map_err(|_| XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
+                .map_err(|_| {
+                    crate::error::construct::internal(
+                        crate::diagnostics::catalog::RTD_SUBSCRIPTION_OVERFLOW,
+                    )
                 })?,
         )
-        .ok_or(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
-        })?;
+        .ok_or(crate::error::construct::internal(
+            crate::diagnostics::catalog::RTD_SUBSCRIPTION_OVERFLOW,
+        ))?;
 
         let (source, topic, ticket) = {
             let mut catalog = runtime.catalog.lock();
@@ -410,9 +411,9 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             Ok(Err(err)) => return Err(err),
             Err(panic_payload) => {
                 let _ = transaction.rollback_with_result();
-                runtime.record_cleanup_result(Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_SUBSCRIPTION,
-                }));
+                runtime.record_cleanup_result(Err(crate::error::construct::internal(
+                    crate::diagnostics::catalog::PANIC_SUBSCRIPTION,
+                )));
                 std::panic::resume_unwind(panic_payload);
             }
         };

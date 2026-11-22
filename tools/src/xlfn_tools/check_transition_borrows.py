@@ -201,8 +201,8 @@ def main() -> None:
         cache_proof = Path("verification/verus/cache_lease")
         shutil.copytree(ROOT / cache_proof, tree / cache_proof, dirs_exist_ok=True)
         for dependency in (
-            Path("crates/xlfn/src/cache/pin_transitions.rs"),
-            Path("crates/xlfn/src/cache/node_layout.rs"),
+            Path("crates/xlfn-services/src/cache/pin_transitions.rs"),
+            Path("crates/xlfn-services/src/cache/node_layout.rs"),
         ):
             (tree / dependency).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / dependency, tree / dependency)
@@ -299,7 +299,7 @@ def main() -> None:
         print("PASS: borrow checker rejects acquiring a Cache pin after ending its observation")
 
         path.write_text(source)
-        path = tree / "crates/xlfn/src/cache/pin_transitions.rs"
+        path = tree / "crates/xlfn-services/src/cache/pin_transitions.rs"
         source = path.read_text()
         anchor = "            match $acquire {"
         if source.count(anchor) != 1:

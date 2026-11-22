@@ -190,12 +190,12 @@ pub(crate) fn observe_handle<E: crate::RtdSubscription, C: crate::RtdSourceCatal
             host,
             std::marker::PhantomData::<(E, C)>,
         );
-        Err(crate::XllError::ExcelApi {
-            function: crate::error::ExcelApiFunction::Rtd,
-            failure: crate::error::ExcelApiFailure::Status(
-                crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
-            ),
-        })
+        Err(crate::error::construct::excel_api(
+            crate::error::ExcelApiFunction::Rtd,
+            crate::error::ExcelApiFailure::Status(crate::return_abi::ExcelCallbackStatus::Failed(
+                xlfn_sys::XLRET_FAILED,
+            )),
+        ))
     }
 }
 
@@ -212,12 +212,12 @@ pub(crate) fn observe_subscription<E: crate::RtdSubscription, C: crate::RtdSourc
     #[cfg(not(all(target_os = "windows", feature = "rtd")))]
     {
         let _ = (subscriptions, key, host);
-        Err(crate::XllError::ExcelApi {
-            function: crate::error::ExcelApiFunction::Rtd,
-            failure: crate::error::ExcelApiFailure::Status(
-                crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
-            ),
-        })
+        Err(crate::error::construct::excel_api(
+            crate::error::ExcelApiFunction::Rtd,
+            crate::error::ExcelApiFailure::Status(crate::return_abi::ExcelCallbackStatus::Failed(
+                xlfn_sys::XLRET_FAILED,
+            )),
+        ))
     }
 }
 

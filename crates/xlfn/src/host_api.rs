@@ -129,15 +129,15 @@ impl<'call> ExcelHost<'call> {
         decode: impl FnOnce(&mut ExcelCallbackValue<'_>) -> XllResult<T>,
     ) -> XllResult<T> {
         match self.invoke_protocol(function_id, arguments, decode) {
-            HostInvocation::Suppressed { status } => Err(XllError::ExcelApi {
+            HostInvocation::Suppressed { status } => Err(crate::error::construct::excel_api(
                 function,
-                failure: ExcelApiFailure::Suppressed(status),
-            }),
+                ExcelApiFailure::Suppressed(status),
+            )),
             HostInvocation::Failed { status, cleanup } => {
-                Err(cleanup.err().unwrap_or(XllError::ExcelApi {
+                Err(cleanup.err().unwrap_or(crate::error::construct::excel_api(
                     function,
-                    failure: ExcelApiFailure::Status(status.status()),
-                }))
+                    ExcelApiFailure::Status(status.status()),
+                )))
             }
             HostInvocation::Decoded {
                 decoded: Err(error),
@@ -244,10 +244,10 @@ impl<'call> ExcelHost<'call> {
                     crate::value::XlValueType::Error => Err(XllError::ExcelValue(
                         <crate::ExcelError as FromExcel>::from_excel(value, "reference")?,
                     )),
-                    _ => Err(XllError::ExcelApi {
-                        function: ExcelApiFunction::GetDocument,
-                        failure: ExcelApiFailure::UnexpectedResult,
-                    }),
+                    _ => Err(crate::error::construct::excel_api(
+                        ExcelApiFunction::GetDocument,
+                        ExcelApiFailure::UnexpectedResult,
+                    )),
                 }
             },
         )
@@ -310,10 +310,10 @@ impl<'call> ExcelHost<'call> {
                                     // worksheet identity returned by Excel.
                                     let sheet_id = unsafe { value.raw().value.mref.sheet_id };
                                     if sheet_id == 0 {
-                                        return Err(XllError::ExcelApi {
-                                            function: ExcelApiFunction::SheetId,
-                                            failure: ExcelApiFailure::UnexpectedResult,
-                                        });
+                                        return Err(crate::error::construct::excel_api(
+                                            ExcelApiFunction::SheetId,
+                                            ExcelApiFailure::UnexpectedResult,
+                                        ));
                                     }
                                     Ok(sheet_id)
                                 },
@@ -348,10 +348,10 @@ fn workbook_name_counted(sheet: &[u16]) -> XllResult<SmallVec<[u16; 64]>> {
         })
         .map(|index| &sheet[1..index])
         .filter(|name| !name.contains(&u16::from(b'[')) && !name.contains(&0))
-        .ok_or(XllError::ExcelApi {
-            function: ExcelApiFunction::SheetName,
-            failure: ExcelApiFailure::UnexpectedResult,
-        })?;
+        .ok_or(crate::error::construct::excel_api(
+            ExcelApiFunction::SheetName,
+            ExcelApiFailure::UnexpectedResult,
+        ))?;
 
     // The source is an Excel counted string, so the substring fits the same
     // 16-bit length bound. Small workbook names stay inside SmallVec.
@@ -464,7 +464,7 @@ mod date_tests {
                 });
             assert!(matches!(result, HostInvocation::Failed {
                 status: ref observed, cleanup: Ok(())
-            } if observed.status() == ExcelCallbackStatus::from_raw(status)));
+            } if observed.status() == crate::error::callback_status_from_raw(status)));
             if status == xlfn_sys::XLRET_ABORT {
                 let suppressed: HostInvocation<()> =
                     host.invoke_protocol(xlfn_sys::XLF_EVALUATE, &[], |_| {
@@ -575,6 +575,7 @@ mod date_tests {
                     Err(XllError::ExcelApi {
                         function: ExcelApiFunction::SheetName,
                         failure: ExcelApiFailure::UnexpectedResult,
+                        ..
                     })
                 )),
             }
@@ -709,7 +710,8 @@ mod date_tests {
                     error,
                     XllError::ExcelApi {
                         function: ExcelApiFunction::GetDocument,
-                        failure: ExcelApiFailure::UnexpectedResult
+                        failure: ExcelApiFailure::UnexpectedResult,
+                        ..
                     }
                 ));
             }
@@ -769,7 +771,7 @@ mod date_tests {
                 assert!(
                     matches!(host.workbook_date_system(&reference(&raw)), Err(XllError::ExcelApi {
                     failure: ExcelApiFailure::Status(actual), ..
-                }) if actual == ExcelCallbackStatus::from_raw(status))
+                }) if actual == crate::error::callback_status_from_raw(status))
                 );
                 if status != xlfn_sys::XLRET_FAILED {
                     assert!(matches!(
@@ -870,6 +872,7 @@ mod tests {
                     Err(XllError::ExcelApi {
                         function: ExcelApiFunction::SheetId,
                         failure: ExcelApiFailure::UnexpectedResult,
+                        ..
                     })
                 ));
             } else {

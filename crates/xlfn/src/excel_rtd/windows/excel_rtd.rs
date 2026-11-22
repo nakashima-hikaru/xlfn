@@ -6,8 +6,6 @@ use super::server::ensure_server_without_handles;
 use super::server::{SERVER_STARTED, ServerObservation};
 #[cfg(any(test, feature = "rtd"))]
 use super::subscription_backend::BackendSubscriptions;
-#[cfg(feature = "handles")]
-use crate::XllError;
 use crate::XllResult;
 #[cfg(feature = "handles")]
 use crate::excel_rtd::counted_string::CountedString;
@@ -60,9 +58,9 @@ pub(crate) fn observe<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     drop(registration);
 
     if !matched {
-        return Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_HANDLE,
-        });
+        return Err(crate::error::construct::internal(
+            crate::diagnostics::catalog::RTD_HANDLE,
+        ));
     }
 
     observation.commit();

@@ -86,26 +86,23 @@ impl Drop for CallbackDropHook {
 }
 
 fn revoke_git_cookie(cookie: NonZeroU32) -> XllResult<()> {
-    let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::WindowsApi {
-        function: "CoInitializeEx",
-        code,
-    })?;
+    let _apartment = ComApartmentGuard::enter()
+        .map_err(|code| crate::error::construct::windows_api("CoInitializeEx", code))?;
     // SAFETY: this thread has entered a COM apartment. `get_git` returns one
     // owned GIT wrapper. Its COM reference is released exactly once after the
     // synchronous revocation attempt.
     unsafe {
-        let git = get_git().map_err(|status| XllError::WindowsApi {
-            function: "CoCreateInstance(IGlobalInterfaceTable)",
-            code: status,
+        let git = get_git().map_err(|status| {
+            crate::error::construct::windows_api("CoCreateInstance(IGlobalInterfaceTable)", status)
         })?;
         let status = git.revoke(cookie.get());
         if status >= 0 {
             Ok(())
         } else {
-            Err(XllError::WindowsApi {
-                function: "IGlobalInterfaceTable::RevokeInterfaceFromGlobal",
-                code: status,
-            })
+            Err(crate::error::construct::windows_api(
+                "IGlobalInterfaceTable::RevokeInterfaceFromGlobal",
+                status,
+            ))
         }
     }
 }
@@ -194,32 +191,32 @@ impl RetainedUpdateCallback {
 }
 
 fn notify_cookie(cookie: u32) -> XllResult<()> {
-    let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::WindowsApi {
-        function: "CoInitializeEx",
-        code,
-    })?;
+    let _apartment = ComApartmentGuard::enter()
+        .map_err(|code| crate::error::construct::windows_api("CoInitializeEx", code))?;
 
     // SAFETY: this thread has entered a COM apartment. `get_git` returns
     // one live IGlobalInterfaceTable wrapper on success, and the wrapper
     // validates the GIT output before returning its owned reference.
     unsafe {
-        let git = get_git().map_err(|_| XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::GIT_NULL,
+        let git = get_git().map_err(|_| {
+            crate::error::construct::internal(crate::diagnostics::catalog::GIT_NULL)
         })?;
         let proxy = git
             .get_interface(cookie, &IID_IRTD_UPDATE_EVENT)
-            .map_err(|code| XllError::WindowsApi {
-                function: "IGlobalInterfaceTable::GetInterfaceFromGlobal",
-                code,
+            .map_err(|code| {
+                crate::error::construct::windows_api(
+                    "IGlobalInterfaceTable::GetInterfaceFromGlobal",
+                    code,
+                )
             })?;
         let event = OwnedRtdUpdateEvent::from_raw(proxy.cast());
         let notify_status = event.notify();
 
         if notify_status != S_OK {
-            return Err(XllError::WindowsApi {
-                function: "IRTDUpdateEvent::UpdateNotify",
-                code: notify_status,
-            });
+            return Err(crate::error::construct::windows_api(
+                "IRTDUpdateEvent::UpdateNotify",
+                notify_status,
+            ));
         }
     }
 

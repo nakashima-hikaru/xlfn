@@ -9,6 +9,8 @@ use crate::sync::{Condvar, Mutex, MutexGuard};
 use std::mem;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use xlfn_engine::lifecycle_sequence::{LifecycleSequence, OpenClaimError};
+use xlfn_engine::quarantine::{CleanupClaim, CleanupObservation, CleanupOutcome, CleanupProtocol};
 use xlfn_kernel::drain_gate::{
     DEFAULT_STRIPE_COUNT, DrainGate, StripedDrainGate, StripedDrainPermit,
 };
@@ -1390,26 +1392,16 @@ pub(crate) struct OpenRollbackReady {
     _private: (),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct CleanupStamp {
-    id: u64,
-    epoch: ModuleEpochId,
-}
-
-enum QuarantineProgress {
-    Idle,
-    Pending,
-    Running(CleanupStamp),
-    Drained(ModuleEpochId),
-    Retained(ModuleEpochId),
-}
+// The borrowed outer ticket prevents its coordinator from moving while a
+// claim is outstanding; the address is compared only as an issuer identity.
+type CleanupTicket = CleanupClaim<usize, ModuleEpochId>;
 
 /// Affine ticket to one issuer's cleanup for one module epoch.  The module
 /// owner is moved out under the same lock that publishes Running.
 #[must_use = "complete cleanup or retain its authority"]
 pub(crate) struct QuarantineWork<'coordinator, A: crate::Addin> {
     issuer: &'coordinator LifecycleCoordinator<A>,
-    stamp: CleanupStamp,
+    stamp: CleanupTicket,
     owner: Option<ModuleCleanupReady>,
 }
 
@@ -1418,12 +1410,12 @@ impl<A: crate::Addin> QuarantineWork<'_, A> {
         let owner = self.owner.take().unwrap_or_else(|| {
             lifecycle_invariant_violation("cleanup ticket lost its own module authority")
         });
-        let result = if self.stamp.epoch.is_current() {
+        let result = if self.stamp.epoch().is_current() {
             owner.finish()
         } else {
             Err((crate::XllError::Closing, owner.retain_without_draining()))
         };
-        self.issuer.complete_quarantine(self.stamp, result)
+        self.issuer.complete_quarantine(&self.stamp, result)
     }
 
     #[cfg(test)]
@@ -1438,13 +1430,13 @@ impl<A: crate::Addin> Drop for QuarantineWork<'_, A> {
             return;
         };
         let failure = Err((crate::XllError::Closing, owner.retain_without_draining()));
-        if let Err((_, Some(rejected))) = self.issuer.complete_quarantine(self.stamp, failure) {
+        if let Err((_, Some(rejected))) = self.issuer.complete_quarantine(&self.stamp, failure) {
             // A different epoch must not receive this authority. Retain the
             // old ticket's resources separately from the current state.
             self.issuer
                 .retained_cleanup
                 .lock()
-                .push((self.stamp, std::mem::ManuallyDrop::new(rejected)));
+                .push((self.stamp.epoch(), std::mem::ManuallyDrop::new(rejected)));
         }
     }
 }
@@ -1453,12 +1445,9 @@ impl<A: crate::Addin> Drop for QuarantineWork<'_, A> {
 struct LifecycleCore<A: crate::Addin> {
     state: LifecycleState<A>,
     host_intent: HostLifecycleIntent,
-    next_lifecycle_attempt: u64,
-    next_removal_attempt: RemovalAttemptId,
+    sequence: LifecycleSequence,
     last_committed_generation: Option<RuntimeGeneration>,
-    removal_epoch: u64,
-    next_cleanup_claim: u64,
-    quarantine: QuarantineProgress,
+    quarantine: CleanupProtocol<usize, ModuleEpochId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1478,12 +1467,9 @@ impl<A: crate::Addin> LifecycleCore<A> {
         Self {
             state: LifecycleState::Closed,
             host_intent: HostLifecycleIntent::None,
-            next_lifecycle_attempt: 1,
-            next_removal_attempt: RemovalAttemptId::ONE,
+            sequence: LifecycleSequence::new(),
             last_committed_generation: None,
-            removal_epoch: 0,
-            next_cleanup_claim: 1,
-            quarantine: QuarantineProgress::Idle,
+            quarantine: CleanupProtocol::new(),
         }
     }
 
@@ -1526,7 +1512,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
     }
 
     const fn removal_epoch(&self) -> u64 {
-        self.removal_epoch
+        self.sequence.removal_epoch().get()
     }
 
     fn removal_attempt(&self) -> Option<RemovalAttemptId> {
@@ -1535,7 +1521,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
 
     #[cfg(test)]
     fn set_next_lifecycle_attempt_for_test(&mut self, value: u64) {
-        self.next_lifecycle_attempt = value;
+        self.sequence = mem::take(&mut self.sequence).seeded_next_open_for_test(value);
     }
 
     #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
@@ -1680,7 +1666,7 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
 
     /// Monotonic identity boundary for residency held across an opening call.
     pub(crate) fn next_open_sequence(&self) -> u64 {
-        self.core.next_lifecycle_attempt
+        self.core.sequence.next_open_for_test()
     }
 
     /// Classify once while locked, then retain that exact guard through the
@@ -1698,7 +1684,7 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
     }
 
     pub(crate) fn matches_latest_open_attempt(&self, generation: RuntimeGeneration) -> bool {
-        generation.get().checked_add(1) == Some(self.core.next_lifecycle_attempt)
+        self.core.sequence.is_latest_open(generation)
     }
 
     pub(crate) fn open_attempt(&self) -> Option<OpenAttemptId> {
@@ -1773,7 +1759,7 @@ pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
     publication_readers: StripedDrainGate<DEFAULT_STRIPE_COUNT>,
     service_readers: DrainGate,
     core: Mutex<LifecycleCore<A>>,
-    retained_cleanup: Mutex<Vec<(CleanupStamp, std::mem::ManuallyDrop<ModuleAuthority>)>>,
+    retained_cleanup: Mutex<Vec<(ModuleEpochId, std::mem::ManuallyDrop<ModuleAuthority>)>>,
     changed: Condvar,
     #[cfg(test)]
     pub(crate) test_module_lease: Mutex<Option<crate::ingress::TestModuleLease>>,
@@ -1881,27 +1867,17 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     ) -> ModuleCleanupClaim<QuarantineWork<'_, A>> {
         let mut access = self.access();
         access.transition(|core| {
-            let prior = match core.quarantine {
-                QuarantineProgress::Running(stamp) => {
-                    Some((stamp.epoch, ModuleCleanupClaim::DeferredOwner))
+            let prior = match core.quarantine.observe(ModuleEpochId::is_current) {
+                CleanupObservation::SelectOwner => None,
+                CleanupObservation::Running => Some(ModuleCleanupClaim::DeferredOwner),
+                CleanupObservation::Drained => Some(ModuleCleanupClaim::NoModuleAuthority),
+                CleanupObservation::Retained(epoch) => {
+                    Some(ModuleCleanupClaim::RetainedUndrained(epoch))
                 }
-                QuarantineProgress::Drained(epoch) => {
-                    Some((epoch, ModuleCleanupClaim::NoModuleAuthority))
-                }
-                QuarantineProgress::Retained(epoch) => {
-                    Some((epoch, ModuleCleanupClaim::RetainedUndrained(epoch)))
-                }
-                QuarantineProgress::Idle | QuarantineProgress::Pending => None,
+                CleanupObservation::Stale => Some(ModuleCleanupClaim::StaleEpoch),
             };
-            if let Some((epoch, outcome)) = prior {
-                return (
-                    if epoch.is_current() {
-                        outcome
-                    } else {
-                        ModuleCleanupClaim::StaleEpoch
-                    },
-                    TransitionEffect::Keep,
-                );
+            if let Some(outcome) = prior {
+                return (outcome, TransitionEffect::Keep);
             }
             let state = mem::replace(&mut core.state, LifecycleState::Closed);
             let (authority, state) = match state {
@@ -1941,17 +1917,12 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             };
             let authority = match authority {
                 CleanupSelection::Ready(authority) => {
-                    let stamp = CleanupStamp {
-                        id: core.next_cleanup_claim,
-                        epoch: authority.id(),
-                    };
-                    core.next_cleanup_claim =
-                        core.next_cleanup_claim.checked_add(1).unwrap_or_else(|| {
-                            lifecycle_invariant_violation(
-                                "quarantine cleanup claim sequence exhausted",
-                            )
+                    let stamp = core
+                        .quarantine
+                        .claim(std::ptr::from_ref(self).addr(), authority.id())
+                        .unwrap_or_else(|| {
+                            lifecycle_invariant_violation("quarantine cleanup claim unavailable")
                         });
-                    core.quarantine = QuarantineProgress::Running(stamp);
                     ModuleCleanupClaim::Ready(QuarantineWork {
                         issuer: self,
                         stamp,
@@ -1979,7 +1950,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             };
             core.state = state;
             if matches!(authority, ModuleCleanupClaim::DeferredOwner) {
-                core.quarantine = QuarantineProgress::Pending;
+                core.quarantine.defer();
             }
             (authority, TransitionEffect::Keep)
         })
@@ -1987,26 +1958,29 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
 
     fn complete_quarantine(
         &self,
-        stamp: CleanupStamp,
+        stamp: &CleanupTicket,
         result: Result<(), (crate::XllError, ModuleCleanupAuthority)>,
     ) -> Result<(), (crate::XllError, Option<ModuleAuthority>)> {
         let mut access = self.access();
-        if !matches!(access.core.quarantine, QuarantineProgress::Running(active) if active == stamp)
-            || !stamp.epoch.is_current()
-        {
+        let outcome = match result {
+            Ok(()) => CleanupOutcome::Drained,
+            Err(_) => CleanupOutcome::Retained,
+        };
+        if !access.core.quarantine.complete(
+            std::ptr::from_ref(self).addr(),
+            stamp,
+            ModuleEpochId::is_current,
+            outcome,
+        ) {
             let retained = result.err().map(|(_, owner)| owner.into_authority());
             return Err((crate::XllError::Closing, retained));
         }
         match result {
-            Ok(()) => {
-                access.core.quarantine = QuarantineProgress::Drained(stamp.epoch);
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err((error, owner)) => {
                 let rejected = self
                     .install_returned_authority(&mut access, owner.into_authority())
                     .err();
-                access.core.quarantine = QuarantineProgress::Retained(stamp.epoch);
                 Err((error, rejected))
             }
         }
@@ -2147,7 +2121,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
 
     fn advance_removal_epoch(&self, access: &mut LifecycleAccess<'_, A>) {
         access.transition(|core| {
-            core.removal_epoch = core.removal_epoch.checked_add(1).unwrap_or_else(|| {
+            core.sequence.request_removal().unwrap_or_else(|| {
                 lifecycle_invariant_violation("lifecycle close epoch exhausted");
             });
             ((), TransitionEffect::Keep)
@@ -2210,38 +2184,25 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         expected_removal_epoch: crate::generation::RemovalEpoch,
     ) -> crate::XllResult<OpenAttemptId> {
         access.transition(|core| {
-            match (
-                &core.state,
-                core.removal_epoch == expected_removal_epoch.get(),
+            let attempt = match core.sequence.claim_open(
+                matches!(core.state, LifecycleState::Closed),
+                expected_removal_epoch,
             ) {
-                (LifecycleState::Closed, true) => {}
-                _ => {
+                Ok(attempt) => attempt,
+                Err(rejection) => {
+                    let diagnostic_id = match rejection {
+                        OpenClaimError::Unavailable => crate::diagnostics::catalog::OPEN_PHASE,
+                        OpenClaimError::Exhausted => crate::diagnostics::catalog::ATTEMPT_OVERFLOW,
+                        OpenClaimError::InvalidSequence => {
+                            crate::diagnostics::catalog::ATTEMPT_ZERO
+                        }
+                    };
                     return (
-                        Err(crate::XllError::Internal {
-                            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_PHASE,
-                        }),
+                        Err(crate::error::construct::internal(diagnostic_id)),
                         TransitionEffect::Keep,
                     );
                 }
-            }
-            let attempt_id = core.next_lifecycle_attempt;
-            let Some(next) = attempt_id.checked_add(1) else {
-                return (
-                    Err(crate::XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::ATTEMPT_OVERFLOW,
-                    }),
-                    TransitionEffect::Keep,
-                );
             };
-            let Some(attempt) = OpenAttemptId::new(attempt_id) else {
-                return (
-                    Err(crate::XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::ATTEMPT_ZERO,
-                    }),
-                    TransitionEffect::Keep,
-                );
-            };
-            core.next_lifecycle_attempt = next;
             core.host_intent = HostLifecycleIntent::None;
             core.state = LifecycleState::Opening {
                 attempt,
@@ -2275,9 +2236,9 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                             payload: OpeningPayload::Published(bundle),
                         };
                         return (
-                            Err(crate::XllError::Internal {
-                                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                            }),
+                            Err(crate::error::construct::internal(
+                                crate::diagnostics::catalog::OPEN_STATE,
+                            )),
                             TransitionEffect::Keep,
                         );
                     }
@@ -2288,9 +2249,9 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 other => {
                     core.state = other;
                     (
-                        Err(crate::XllError::Internal {
-                            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                        }),
+                        Err(crate::error::construct::internal(
+                            crate::diagnostics::catalog::OPEN_STATE,
+                        )),
                         TransitionEffect::Keep,
                     )
                 }
@@ -2402,13 +2363,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 LifecycleState::Stopping(StoppingState::Remove(ClosingState::Ready {
                     resources: CloseResources::Available(available),
                 })) => {
-                    let attempt = core.next_removal_attempt;
-                    core.next_removal_attempt =
-                        core.next_removal_attempt.checked_next().unwrap_or_else(|| {
-                            lifecycle_invariant_violation(
-                                "lifecycle removal-attempt identity exhausted",
-                            )
-                        });
+                    let attempt = core.sequence.claim_removal().unwrap_or_else(|| {
+                        lifecycle_invariant_violation(
+                            "lifecycle removal-attempt identity exhausted",
+                        )
+                    });
                     let (resources, module_closing) = available.claim(attempt);
                     (
                         Some(RemovalClaim {
@@ -2423,13 +2382,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 LifecycleState::Stopping(StoppingState::RollbackOpen(
                     CloseResources::Available(available),
                 )) => {
-                    let attempt = core.next_removal_attempt;
-                    core.next_removal_attempt =
-                        core.next_removal_attempt.checked_next().unwrap_or_else(|| {
-                            lifecycle_invariant_violation(
-                                "lifecycle removal-attempt identity exhausted",
-                            )
-                        });
+                    let attempt = core.sequence.claim_removal().unwrap_or_else(|| {
+                        lifecycle_invariant_violation(
+                            "lifecycle removal-attempt identity exhausted",
+                        )
+                    });
                     let (resources, module_closing) = available.claim(attempt);
                     (
                         Some(RemovalClaim {
@@ -2556,7 +2513,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             core,
             authorization,
             false,
-            crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
+            crate::diagnostics::catalog::CLOSE_RUNTIME,
         )
     }
 
@@ -2569,7 +2526,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             core,
             authorization,
             true,
-            crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_PHASE,
+            crate::diagnostics::catalog::OPEN_ROLLBACK_PHASE,
         )
     }
 
@@ -2581,7 +2538,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         diagnostic_id: crate::diagnostics::id::DiagnosticId,
     ) -> crate::XllResult<()> {
         if !std::ptr::eq(core.coordinator, self) {
-            return Err(crate::XllError::Internal { diagnostic_id });
+            return Err(crate::error::construct::internal(diagnostic_id));
         }
         core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed);
@@ -2624,7 +2581,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 other => {
                     core.state = other;
                     return (
-                        Err(crate::XllError::Internal { diagnostic_id }),
+                        Err(crate::error::construct::internal(diagnostic_id)),
                         TransitionEffect::Keep,
                     );
                 }
@@ -2644,7 +2601,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     }))
                 };
                 return (
-                    Err(crate::XllError::Internal { diagnostic_id }),
+                    Err(crate::error::construct::internal(diagnostic_id)),
                     TransitionEffect::Keep,
                 );
             }
@@ -2795,9 +2752,9 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     core.state = other;
                     (
                         Err((
-                            crate::XllError::Internal {
-                                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                            },
+                            crate::error::construct::internal(
+                                crate::diagnostics::catalog::OPEN_STATE,
+                            ),
                             opening,
                         )),
                         TransitionEffect::Keep,

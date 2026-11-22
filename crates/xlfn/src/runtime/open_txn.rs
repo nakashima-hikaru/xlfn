@@ -711,9 +711,9 @@ impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
             })) {
                 Ok(outcome) if outcome.is_finalized() || outcome.cleanup_owned_elsewhere() => {}
                 Ok(outcome) => {
-                    let error = XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_FAILURE,
-                    };
+                    let error = crate::error::construct::internal(
+                        crate::diagnostics::catalog::OPEN_ROLLBACK_FAILURE,
+                    );
                     report_boundary_error("xlAutoOpen rollback", &error);
                     if let Some(hazard) = outcome.failure_hazard() {
                         recovery.quarantine(Some(hazard));
@@ -1423,18 +1423,14 @@ fn prepare_commit<'runtime, A: crate::Addin>(
 }
 
 fn open_state_error() -> XllError {
-    XllError::Internal {
-        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-    }
+    crate::error::construct::internal(crate::diagnostics::catalog::OPEN_STATE)
 }
 
 #[cold]
 fn opening_publication_lost() -> ! {
     crate::boundary::fail_stop_invariant(
         "xlAutoOpen opening publication",
-        &XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-        },
+        &crate::error::construct::internal(crate::diagnostics::catalog::OPEN_STATE),
     )
 }
 

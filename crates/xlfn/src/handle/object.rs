@@ -12,12 +12,18 @@ use crate::sync::{Mutex, MutexGuard};
 use crate::{XllError, XllResult};
 use crossbeam_utils::CachePadded;
 use rustc_hash::FxHashMap;
-use std::any::{Any, TypeId, type_name};
+#[cfg(test)]
+use std::any::{TypeId, type_name};
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use xlfn_kernel::published_owner::PublishedOwner;
+pub(crate) use xlfn_services::handle_objects::TypedObjectProjection;
+
+pub(crate) type ObjectCell = xlfn_services::handle_objects::ObjectCell<ObjectArena, ObjectId>;
+type ObjectAllocationOwner =
+    xlfn_services::handle_objects::ObjectAllocationOwner<ObjectArena, ObjectId>;
 
 /// A unique identity reserved from, and inseparable from, its original arena.
 /// The allocator is private and monotonic, so insertion cannot overwrite an
@@ -30,7 +36,7 @@ impl FreshObject<'_> {
     /// The registry retains its arena through all bindings and final releases.
     unsafe fn insert<T: Send + Sync + 'static>(self, value: T) -> XllResult<ObjectBinding> {
         let owner = ObjectAllocationOwner::new(self.arena.as_non_null(), self.id, value);
-        let pointer = owner.cell;
+        let pointer = owner.as_non_null();
         let mut state = self.arena.state(self.id).lock();
         if state.sealed {
             return Err(XllError::Closing);
@@ -47,41 +53,6 @@ impl FreshObject<'_> {
         self.arena
             .record(crate::shutdown_trace::ShutdownEvent::AddHandleObject);
         Ok(ObjectBinding { cell: pointer })
-    }
-}
-
-/// A type-checked, non-owning projection into an [`ObjectCell`].
-pub(crate) struct TypedObjectProjection<T: 'static> {
-    pointer: NonNull<T>,
-    // The cached TypeId denotes the exact T, even for covariant payloads.
-    _type: PhantomData<fn(T) -> T>,
-}
-
-impl<T: 'static> Copy for TypedObjectProjection<T> {}
-
-impl<T: 'static> Clone for TypedObjectProjection<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T: 'static> TypedObjectProjection<T> {
-    #[cfg(test)]
-    pub(crate) fn addr(&self) -> usize {
-        self.pointer.addr().get()
-    }
-
-    /// Returns a shared reference to the projected object.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the object's backing cell has not been reclaimed
-    /// and remains pinned, leased, or protected by an active read capability for the
-    /// entire duration of the returned borrow.
-    #[inline]
-    pub(crate) unsafe fn as_ref_unchecked(&self) -> &T {
-        // SAFETY: guaranteed by the caller per contract.
-        unsafe { self.pointer.as_ref() }
     }
 }
 
@@ -212,7 +183,7 @@ impl ObjectArena {
             return Err(XllError::Closing);
         }
         let entry = state.objects.get_mut(&id).ok_or(XllError::StaleHandle)?;
-        if entry.cell.cell != cell {
+        if entry.cell.as_non_null() != cell {
             return Err(XllError::StaleHandle);
         }
         entry.bindings = entry.bindings.checked_add(1).ok_or(XllError::Domain {
@@ -235,7 +206,7 @@ impl ObjectArena {
             code: crate::error::DomainErrorCode::Overflow,
         })?;
         let entry = state.objects.get_mut(&id).ok_or(XllError::StaleHandle)?;
-        if entry.cell.cell != cell {
+        if entry.cell.as_non_null() != cell {
             return Err(XllError::StaleHandle);
         }
         entry.pins = entry.pins.checked_add(1).ok_or(XllError::Domain {
@@ -383,17 +354,17 @@ impl ObjectArena {
             // Reaching this branch after async shutdown is therefore a
             // framework ordering violation, retained as a diagnostic so the
             // existing close certificate reports the failed invariant.
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_PINS,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::HANDLE_PINS,
+            ));
         }
         if states
             .iter()
             .any(|state| !state.objects.is_empty() || state.active_releases != 0)
         {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_OBJECTS,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::HANDLE_OBJECTS,
+            ));
         }
         drop(states);
         // Disposal panics are recorded separately. The exact allocation has
@@ -444,185 +415,6 @@ impl Drop for ObjectArena {
     }
 }
 
-/// Keeps concrete type names available through the vtable for diagnostics,
-/// without storing a name alongside every object. Lookup uses the cached TypeId.
-trait ErasedObject: Any + Send + Sync {
-    fn concrete_type_name(&self) -> &'static str;
-    fn allocation_destructor(&self) -> unsafe fn(NonNull<ObjectCell>);
-}
-
-impl<T: Any + Send + Sync> ErasedObject for T {
-    fn concrete_type_name(&self) -> &'static str {
-        type_name::<T>()
-    }
-
-    fn allocation_destructor(&self) -> unsafe fn(NonNull<ObjectCell>) {
-        if combine_object_allocation::<T>() {
-            destroy_combined::<T>
-        } else {
-            destroy_separate::<T>
-        }
-    }
-}
-
-pub(crate) struct ObjectCell {
-    arena: NonNull<ObjectArena>,
-    id: ObjectId,
-    payload: NonNull<dyn ErasedObject>,
-    type_id: TypeId,
-}
-
-/// The fixed header stays at offset zero; bindings never carry tail metadata.
-#[repr(C)]
-struct ObjectAllocation<T> {
-    cell: ObjectCell,
-    payload: T,
-}
-
-const fn combine_object_allocation<T>() -> bool {
-    // Coallocate only when it removes an allocation without introducing any
-    // header/tail alignment padding. Zero-sized Box payloads allocate nothing.
-    size_of::<T>() != 0
-        && match size_of::<ObjectCell>().checked_add(size_of::<T>()) {
-            Some(size) => size == size_of::<ObjectAllocation<T>>(),
-            None => false,
-        }
-}
-
-/// Unique erased allocation owner. Unlike a Box, moving this owner cannot
-/// retag the published header or payload. Destruction dispatch is shared in the
-/// existing payload vtable rather than retained per object or per binding.
-struct ObjectAllocationOwner {
-    cell: NonNull<ObjectCell>,
-}
-
-impl ObjectAllocationOwner {
-    fn new<T: Send + Sync + 'static>(arena: NonNull<ObjectArena>, id: ObjectId, value: T) -> Self {
-        if !combine_object_allocation::<T>() {
-            return Self::separate(arena, id, value);
-        }
-        let allocation = PublishedOwner::new(ObjectAllocation {
-            cell: ObjectCell {
-                arena,
-                id,
-                payload: NonNull::<T>::dangling(),
-                type_id: TypeId::of::<T>(),
-            },
-            payload: value,
-        });
-        let pointer = allocation.as_non_null();
-        // SAFETY: repr(C) places this nonzero-sized payload at its aligned
-        // field offset within the uniquely owned allocation.
-        let payload = unsafe {
-            pointer
-                .byte_add(std::mem::offset_of!(ObjectAllocation<T>, payload))
-                .cast::<T>()
-        };
-        // repr(C) places cell at offset zero, preserving allocation provenance.
-        let cell = pointer.cast::<ObjectCell>();
-        // SAFETY: this unpublished header is uniquely owned by allocation.
-        let payload_slot = unsafe { &raw mut (*cell.as_ptr()).payload };
-        // SAFETY: the raw slot points to the live, initialized header field;
-        // replacing the initial non-owning pointer cannot drop any payload.
-        unsafe { payload_slot.write(payload) };
-        // Transfer the unique allocation obligation to the matching concrete
-        // destructor without ever recovering or moving a published Box.
-        let _allocation = std::mem::ManuallyDrop::new(allocation);
-        Self { cell }
-    }
-
-    fn separate<T: Send + Sync + 'static>(
-        arena: NonNull<ObjectArena>,
-        id: ObjectId,
-        value: T,
-    ) -> Self {
-        let payload = PublishedOwner::new(value);
-        let cell = PublishedOwner::new(ObjectCell {
-            arena,
-            id,
-            payload: payload.as_non_null(),
-            type_id: TypeId::of::<T>(),
-        });
-        let pointer = cell.as_non_null();
-        let _payload = std::mem::ManuallyDrop::new(payload);
-        let _cell = std::mem::ManuallyDrop::new(cell);
-        Self { cell: pointer }
-    }
-
-    fn as_ref(&self) -> &ObjectCell {
-        // SAFETY: the unique owner keeps this header and its payload alive.
-        unsafe { self.cell.as_ref() }
-    }
-}
-
-unsafe fn destroy_combined<T>(cell: NonNull<ObjectCell>) {
-    // SAFETY: ObjectAllocation<T> is repr(C) with cell at offset zero. The
-    // owner was constructed for this exact T, and all readers have drained.
-    unsafe { drop(Box::from_non_null(cell.cast::<ObjectAllocation<T>>())) };
-}
-
-unsafe fn destroy_separate<T>(cell: NonNull<ObjectCell>) {
-    // SAFETY: the separate constructor transferred these exact Box allocations
-    // and their unique ownership. All header/payload readers have drained.
-    let cell = unsafe { Box::from_non_null(cell) };
-    // SAFETY: the constructor paired this concrete payload pointer with T.
-    let payload = unsafe { Box::from_non_null(cell.payload.cast::<T>()) };
-    // cell remains the allocation guard if payload destruction panics.
-    drop(payload);
-    drop(cell);
-}
-
-impl Drop for ObjectAllocationOwner {
-    fn drop(&mut self) {
-        // Resolve the concrete destructor while the payload is still live.
-        // Copy only pointer/function values out of these borrows: recovering
-        // the allocation must never free the receiver of a live vtable call.
-        let payload = self.as_ref().payload;
-        // SAFETY: this unique owner retains the payload throughout this call.
-        let destroy = unsafe { payload.as_ref() }.allocation_destructor();
-        // SAFETY: the private blanket implementation selects the same layout
-        // as construction. All source borrows above ended before consumption,
-        // and the arena has drained every published binding and pin.
-        unsafe { destroy(self.cell) };
-    }
-}
-
-// SAFETY: construction requires Send + Sync payloads and the header is immutable.
-unsafe impl Send for ObjectAllocationOwner {}
-// SAFETY: shared owner access exposes only the immutable header and payload.
-unsafe impl Sync for ObjectAllocationOwner {}
-
-impl ObjectCell {
-    pub(crate) fn id(&self) -> ObjectId {
-        self.id
-    }
-
-    #[cfg(test)]
-    pub(crate) fn type_id(&self) -> TypeId {
-        self.type_id
-    }
-
-    pub(crate) fn type_name(&self) -> &'static str {
-        // SAFETY: this header's allocation owner retains the payload.
-        unsafe { self.payload.as_ref() }.concrete_type_name()
-    }
-
-    pub(crate) fn typed_projection<T: 'static>(&self) -> Option<TypedObjectProjection<T>> {
-        (self.type_id == TypeId::of::<T>()).then(|| TypedObjectProjection {
-            // Recover the data pointer from the retained owner after checking
-            // the cached concrete type. The owner stays present until every
-            // binding/read capability and pin has drained.
-            pointer: self.payload.cast(),
-            _type: PhantomData,
-        })
-    }
-}
-
-// SAFETY: ObjectCell is immutable once published and safe to transfer across threads.
-unsafe impl Send for ObjectCell {}
-// SAFETY: ObjectCell contents are immutable and safe to share across threads.
-unsafe impl Sync for ObjectCell {}
-
 /// One counted binding; its registry owns the arena for the entire capability.
 #[repr(transparent)]
 pub(crate) struct ObjectBinding {
@@ -632,11 +424,11 @@ pub(crate) struct ObjectBinding {
 impl ObjectBinding {
     #[inline]
     pub(crate) fn arena(&self) -> NonNull<ObjectArena> {
-        self.object().arena
+        self.object().arena()
     }
 
     pub(crate) fn id(&self) -> ObjectId {
-        self.object().id
+        self.object().id()
     }
 
     pub(crate) fn object(&self) -> &ObjectCell {
@@ -730,7 +522,7 @@ impl Drop for ObjectBinding {
         // checks final-release completion before allowing reclamation.
         let (arena, id) = {
             let cell = self.object();
-            (cell.arena, cell.id)
+            (cell.arena(), cell.id())
         };
         // SAFETY: capture metadata before release can destroy the cell. The
         // registry retains the arena through final-release completion.
@@ -761,7 +553,7 @@ impl Drop for RawObjectLeaseGuard {
         let (arena, id) = {
             // SAFETY: this guard retains one pin, keeping the cell alive.
             let cell = unsafe { self.cell.as_ref() };
-            (cell.arena, cell.id)
+            (cell.arena(), cell.id())
         };
         // SAFETY: metadata was captured before the final release; async drain
         // retains the arena through completion. Do not access the cell again.
@@ -1079,7 +871,8 @@ mod tests {
         assert!(matches!(
             arena.finish_quiescence(),
             Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_PINS,
+                diagnostic_id: crate::diagnostics::catalog::HANDLE_PINS,
+                ..
             })
         ));
         release_unobserved(pin);
@@ -1095,7 +888,7 @@ mod tests {
         let (arena, id) = {
             // SAFETY: the still-counted pin keeps this cell and metadata live.
             let cell = unsafe { pin.cell.as_ref() };
-            (cell.arena, cell.id)
+            (cell.arena(), cell.id())
         };
         // SAFETY: this consumes the pin's one count. No cell/arena access
         // follows the release, including when it retires the last payload.
@@ -1247,7 +1040,8 @@ mod tests {
         assert!(matches!(
             arena.finish_quiescence(),
             Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_OBJECTS,
+                diagnostic_id: crate::diagnostics::catalog::HANDLE_OBJECTS,
+                ..
             })
         ));
         arena.seal();
@@ -1313,7 +1107,7 @@ mod tests {
             }
         }
 
-        assert!(combine_object_allocation::<Payload>());
+        assert!(ObjectAllocationOwner::can_coallocate::<Payload>());
         let arena = PublishedOwner::new(ObjectArena::new());
         let drops = Arc::new(AtomicUsize::new(0));
         // SAFETY: bindings and the final pin drain before arena recovery.
@@ -1357,7 +1151,7 @@ mod tests {
         #[repr(align(256))]
         struct Aligned;
 
-        assert!(!combine_object_allocation::<Aligned>());
+        assert!(!ObjectAllocationOwner::can_coallocate::<Aligned>());
         let arena = PublishedOwner::new(ObjectArena::new());
         // SAFETY: the binding drains before arena recovery.
         let binding = unsafe { ObjectArena::insert(&arena, ObjectId::new(1, 1), Aligned) }.unwrap();
@@ -1397,7 +1191,7 @@ mod tests {
             }
         }
 
-        assert!(!combine_object_allocation::<Payload>());
+        assert!(!ObjectAllocationOwner::can_coallocate::<Payload>());
         for panic in [false, true] {
             let arena = PublishedOwner::new(ObjectArena::new());
             let drops = Arc::new(AtomicUsize::new(0));
@@ -1623,7 +1417,8 @@ mod tests {
                 assert!(matches!(
                     arena.finish_quiescence(),
                     Err(XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_OBJECTS,
+                        diagnostic_id: crate::diagnostics::catalog::HANDLE_OBJECTS,
+                        ..
                     })
                 ));
                 arena.seal();

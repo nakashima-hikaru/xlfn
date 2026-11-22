@@ -18,11 +18,11 @@ pub(crate) use state::{
 pub(crate) fn lifecycle_access_error(error: ThreadAffineError) -> XllError {
     let diagnostic_id = match error {
         ThreadAffineError::WrongThread | ThreadAffineError::StaleAccess => {
-            crate::diagnostics::id::DiagnosticId::LIFECYCLE_THREAD
+            crate::diagnostics::catalog::LIFECYCLE_THREAD
         }
-        _ => crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
+        _ => crate::diagnostics::catalog::LIFECYCLE_SLOT,
     };
-    XllError::Internal { diagnostic_id }
+    crate::error::construct::internal(diagnostic_id)
 }
 
 #[cold]
@@ -284,9 +284,9 @@ mod tests {
             crate::addin_impl::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
-            Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-            })
+            Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::OPEN_STATE,
+            ))
         }
     }
 
@@ -352,9 +352,7 @@ mod tests {
             reporter.warn(
                 "test cleanup",
                 crate::shutdown::CleanupIssueKind::RegistryCleanup,
-                XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_RETRY,
-                },
+                crate::error::construct::internal(crate::diagnostics::catalog::TEST_RETRY),
             );
         }
     }
@@ -560,9 +558,9 @@ mod tests {
             _: &mut Self::SharedState,
             _: &mut Self::LifecycleState,
         ) -> Result<(), Self::Error> {
-            Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::QUIESCENCE_FAILURE,
-            })
+            Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::QUIESCENCE_FAILURE,
+            ))
         }
     }
 
@@ -966,9 +964,7 @@ mod tests {
                 reporter.warn(
                     "Lean checker cleanup trace",
                     crate::shutdown::CleanupIssueKind::RegistryCleanup,
-                    XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::LEAN_TRACE,
-                    },
+                    crate::error::construct::internal(crate::diagnostics::catalog::LEAN_TRACE),
                 );
             }
         }
@@ -1592,9 +1588,7 @@ mod tests {
             reporter.warn(
                 "always fail cleanup",
                 crate::shutdown::CleanupIssueKind::RegistryCleanup,
-                XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::FAILURE,
-                },
+                crate::error::construct::internal(crate::diagnostics::catalog::FAILURE),
             );
         }
     }

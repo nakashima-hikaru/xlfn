@@ -357,10 +357,7 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
         #[cfg(windows)]
         let _apartment =
             crate::drain_wait::windows::ComApartmentGuard::enter().map_err(|code| {
-                XllError::WindowsApi {
-                    function: "CoInitializeEx(async shutdown)",
-                    code,
-                }
+                crate::error::construct::windows_api("CoInitializeEx(async shutdown)", code)
             })?;
         let Some(closing) = self.take_for_close() else {
             return Ok(crate::shutdown::StopOutcome {

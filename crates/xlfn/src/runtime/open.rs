@@ -153,9 +153,9 @@ where
                 return Err(XllError::Closing);
             }
             if !outcome.is_finalized() {
-                let error = XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_PENDING,
-                };
+                let error = crate::error::construct::internal(
+                    crate::diagnostics::catalog::OPEN_ROLLBACK_PENDING,
+                );
                 report_boundary_error("xlAutoOpen pending rollback", &error);
                 if let Some(hazard) = outcome.failure_hazard() {
                     crate::runtime::recovery::quarantine_for_hazard(runtime, hazard);
@@ -169,10 +169,10 @@ where
         }
 
         if let Some(status) = callbacks.terminal_status() {
-            return Err(XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::Register,
-                failure: crate::error::ExcelApiFailure::Suppressed(status),
-            });
+            return Err(crate::error::construct::excel_api(
+                crate::error::ExcelApiFunction::Register,
+                crate::error::ExcelApiFailure::Suppressed(status),
+            ));
         }
 
         if recover_pending {

@@ -172,14 +172,13 @@ impl HandleRegistry {
     {
         let mut entropy = [0_u8; 40];
         if let Err(source) = fill(&mut entropy) {
-            let error = XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_ENTROPY,
-            };
+            let error =
+                crate::error::construct::internal(crate::diagnostics::catalog::HANDLE_ENTROPY);
             if report_failure {
                 let _ = catch_no_unwind(AssertUnwindSafe(|| {
                     tracing::error!(
                         error = ?source,
-                        diagnostic_id = crate::diagnostics::id::DiagnosticId::HANDLE_ENTROPY.as_u64(),
+                        diagnostic_id = crate::diagnostics::catalog::HANDLE_ENTROPY.as_u64(),
                         "OS CSPRNG failed while initializing Excel handle tokens"
                     );
                 }));

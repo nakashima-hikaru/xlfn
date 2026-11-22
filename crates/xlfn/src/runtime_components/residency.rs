@@ -3,9 +3,11 @@
 use crate::sync::Mutex;
 use std::mem::ManuallyDrop;
 
+#[cfg(test)]
+use crate::XllError;
+use crate::XllResult;
 use crate::module_residency::ModuleResidencyLease;
 use crate::registration::{RegistrationHost, RegistrationMutation};
-use crate::{XllError, XllResult};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EventSlot {
@@ -190,9 +192,9 @@ impl ModuleResidency {
                 host.register_event(procedure, selector)
             })?;
             #[cfg(not(feature = "async"))]
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_FEATURE,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::ASYNC_FEATURE,
+            ));
         }
         self.ensure_event(CalculationEvent::Ended, |procedure, selector| {
             host.register_event(procedure, selector)
@@ -209,9 +211,9 @@ impl ModuleResidency {
             match *state.event(event) {
                 EventSlot::Registered(_) => return Ok(()),
                 EventSlot::Registering | EventSlot::Indeterminate => {
-                    return Err(XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
-                    });
+                    return Err(crate::error::construct::internal(
+                        crate::diagnostics::catalog::REGISTRATION_UNKNOWN,
+                    ));
                 }
                 EventSlot::Absent => {}
             }

@@ -813,10 +813,7 @@ impl WindowsRefreshArrayApi {
         // retains the allocation without a second unlock or destruction attempt.
         crate::diagnostics::report_no_unwind(
             "RTD SafeArrayUnaccessData retained array",
-            &XllError::WindowsApi {
-                function: "SafeArrayUnaccessData",
-                code: status,
-            },
+            &crate::error::construct::windows_api("SafeArrayUnaccessData", status),
         );
     }
 }

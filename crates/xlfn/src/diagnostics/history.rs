@@ -140,7 +140,7 @@ impl StoredMessage {
             XllError::Overloaded => Self::Overloaded,
             XllError::ReentrantCall => Self::ReentrantCall,
             XllError::Panic => Self::Panic,
-            XllError::Internal { diagnostic_id } => Self::Internal(*diagnostic_id),
+            XllError::Internal { diagnostic_id, .. } => Self::Internal(*diagnostic_id),
             XllError::Custom {
                 message: Cow::Borrowed(message),
                 ..
@@ -169,9 +169,7 @@ impl StoredMessage {
             Self::Overloaded => XllError::Overloaded,
             Self::ReentrantCall => XllError::ReentrantCall,
             Self::Panic => XllError::Panic,
-            Self::Internal(diagnostic_id) => XllError::Internal {
-                diagnostic_id: *diagnostic_id,
-            },
+            Self::Internal(diagnostic_id) => crate::error::construct::internal(*diagnostic_id),
             Self::Static(text) => return try_text(format_args!("{text}")),
             Self::Text(text) => return try_text(format_args!("{text}")),
         };
@@ -498,7 +496,7 @@ mod tests {
     fn record(history: &DiagnosticHistory, id: u64, error: &XllError) {
         history.record(
             FailureMetadata {
-                diagnostic_id: DiagnosticId::from_u64(id),
+                diagnostic_id: crate::diagnostics::id::from_u64(id),
                 udf_id: "prices",
                 call_id: Some(CallId::new(id)),
                 calculation_id: Some(CalculationId::new(7)),
@@ -591,9 +589,7 @@ mod tests {
             XllError::Overloaded,
             XllError::ReentrantCall,
             XllError::Panic,
-            XllError::Internal {
-                diagnostic_id: DiagnosticId::from_u64(0x1a2b),
-            },
+            crate::error::construct::internal(crate::diagnostics::id::from_u64(0x1a2b)),
             XllError::custom(ExcelError::Number, "static application detail"),
         ];
         for (id, error) in errors.iter().enumerate() {
@@ -616,7 +612,7 @@ mod tests {
         let mut detail = "panic payload with application context".to_owned();
         history.record(
             FailureMetadata {
-                diagnostic_id: DiagnosticId::from_u64(1),
+                diagnostic_id: crate::diagnostics::id::from_u64(1),
                 udf_id: "prices",
                 call_id: None,
                 calculation_id: None,
@@ -653,7 +649,7 @@ mod tests {
         let history = DiagnosticHistory::new();
         history.record(
             FailureMetadata {
-                diagnostic_id: DiagnosticId::from_u64(1),
+                diagnostic_id: crate::diagnostics::id::from_u64(1),
                 udf_id: text,
                 call_id: None,
                 calculation_id: None,

@@ -375,7 +375,8 @@ fn publication_rejects_lifetime_key_collision_without_overwriting_existing_topic
     assert!(matches!(
         result,
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_TOPIC_COLLISION
+            diagnostic_id: crate::diagnostics::catalog::HANDLE_TOPIC_COLLISION,
+            ..
         })
     ));
 
@@ -908,7 +909,8 @@ fn csprng_failure_is_a_stable_initialization_error_not_a_panic() {
     assert!(matches!(
         error,
         XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_ENTROPY
+            diagnostic_id: crate::diagnostics::catalog::HANDLE_ENTROPY,
+            ..
         }
     ));
 }
@@ -2105,8 +2107,8 @@ fn handle_lease_survives_terminal_runtime_close() {
     assert_eq!(pinned.value_for_test().0.load(Ordering::SeqCst), 0);
     assert!(matches!(
         sealed.finish_quiescence(),
-        Err(XllError::Internal { diagnostic_id })
-            if diagnostic_id == crate::diagnostics::id::DiagnosticId::HANDLE_PINS
+        Err(XllError::Internal { diagnostic_id, .. })
+            if diagnostic_id == crate::diagnostics::catalog::HANDLE_PINS
     ));
     drop(pinned);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -2455,12 +2457,12 @@ fn failed_observation_does_not_publish_a_topic_and_allows_retry() {
         key,
         || Ok(DataRecord(1)),
         |_, _| {
-            Err(XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::Rtd,
-                failure: crate::error::ExcelApiFailure::Status(
+            Err(crate::error::construct::excel_api(
+                crate::error::ExcelApiFunction::Rtd,
+                crate::error::ExcelApiFailure::Status(
                     crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
                 ),
-            })
+            ))
         },
     );
     assert!(matches!(first, Err(XllError::ExcelApi { .. })));
@@ -2497,12 +2499,12 @@ fn cache_hit_observe_failure_does_not_invalidate_object() {
             Ok(DataRecord(2))
         },
         |_, _| {
-            Err(XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::Rtd,
-                failure: crate::error::ExcelApiFailure::Status(
+            Err(crate::error::construct::excel_api(
+                crate::error::ExcelApiFunction::Rtd,
+                crate::error::ExcelApiFailure::Status(
                     crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
                 ),
-            })
+            ))
         },
     );
     assert!(matches!(result, Err(XllError::ExcelApi { .. })));
@@ -2534,12 +2536,12 @@ fn cache_hit_observe_failure_preserves_existing_topic() {
         key,
         || Ok(DataRecord(20)),
         |_, _| {
-            Err(XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::Rtd,
-                failure: crate::error::ExcelApiFailure::Status(
+            Err(crate::error::construct::excel_api(
+                crate::error::ExcelApiFunction::Rtd,
+                crate::error::ExcelApiFailure::Status(
                     crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
                 ),
-            })
+            ))
         },
     );
     assert!(matches!(result, Err(XllError::ExcelApi { .. })));
@@ -2852,12 +2854,12 @@ fn concurrent_waiter_retries_after_observation_failure() {
             |_, _| {
                 observing_tx.send(()).unwrap();
                 finish_rx.recv().unwrap();
-                Err(XllError::ExcelApi {
-                    function: crate::error::ExcelApiFunction::Rtd,
-                    failure: crate::error::ExcelApiFailure::Status(
+                Err(crate::error::construct::excel_api(
+                    crate::error::ExcelApiFunction::Rtd,
+                    crate::error::ExcelApiFailure::Status(
                         crate::return_abi::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
                     ),
-                })
+                ))
             },
         )
     });

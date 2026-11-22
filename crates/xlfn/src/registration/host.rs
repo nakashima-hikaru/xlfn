@@ -148,7 +148,7 @@ impl<'call> RegistrationHost<'call> {
                     self.delete_name(excel_name)
                 } else {
                     RegistrationMutation::Rejected {
-                        error: XllError::MetadataDebtBindingChanged { name: excel_name },
+                        error: crate::error::construct::metadata_debt_binding_changed(excel_name),
                     }
                 }
             }
@@ -254,27 +254,27 @@ fn mutation_from_invocation<O: RegistrationOperation>(
     let invocation = invocation.evidence;
     match invocation {
         HostInvocation::Suppressed { status } => RegistrationMutation::Rejected {
-            error: XllError::ExcelApi {
+            error: crate::error::construct::excel_api(
                 function,
-                failure: ExcelApiFailure::Suppressed(status),
-            },
+                ExcelApiFailure::Suppressed(status),
+            ),
         },
         HostInvocation::Failed { status, cleanup } => {
             let status = status.status();
-            if status.is_terminal() {
+            if crate::error::callback_status_is_terminal(status) {
                 return RegistrationMutation::Indeterminate {
                     status,
-                    error: cleanup.err().unwrap_or(XllError::ExcelApi {
+                    error: cleanup.err().unwrap_or(crate::error::construct::excel_api(
                         function,
-                        failure: ExcelApiFailure::Status(status),
-                    }),
+                        ExcelApiFailure::Status(status),
+                    )),
                 };
             }
             RegistrationMutation::Rejected {
-                error: cleanup.err().unwrap_or(XllError::ExcelApi {
+                error: cleanup.err().unwrap_or(crate::error::construct::excel_api(
                     function,
-                    failure: ExcelApiFailure::Status(status),
-                }),
+                    ExcelApiFailure::Status(status),
+                )),
             }
         }
         HostInvocation::Decoded { decoded, cleanup } => match decoded {
@@ -375,19 +375,16 @@ fn decode_event_registration_id(result: &ExcelCallbackValue<'_>) -> XllResult<i3
     // Rejecting the sign aborts xlAutoOpen before any UDF is registered.
     // This does not qualify the separate, undocumented removal convention.
     if value == 0 {
-        return Err(XllError::ExcelApi {
-            function: ExcelApiFunction::EventRegister,
-            failure: ExcelApiFailure::InvalidRegistrationId(value),
-        });
+        return Err(crate::error::construct::excel_api(
+            ExcelApiFunction::EventRegister,
+            ExcelApiFailure::InvalidRegistrationId(value),
+        ));
     }
     Ok(value)
 }
 
 fn unexpected_result(function: ExcelApiFunction) -> XllError {
-    XllError::ExcelApi {
-        function,
-        failure: ExcelApiFailure::UnexpectedResult,
-    }
+    crate::error::construct::excel_api(function, ExcelApiFailure::UnexpectedResult)
 }
 
 pub(crate) fn valid_registration_id(id: f64) -> bool {
@@ -1284,6 +1281,7 @@ mod tests {
                 Err(XllError::ExcelApi {
                     function: ExcelApiFunction::Unregister,
                     failure: ExcelApiFailure::UnexpectedResult,
+                    ..
                 })
             ));
         }

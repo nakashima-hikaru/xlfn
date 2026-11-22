@@ -266,7 +266,8 @@ fn batched_publish_overflow_keeps_the_accepted_prefix_deliverable() {
     assert!(matches!(
         result,
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_OVERFLOW,
+            diagnostic_id: crate::diagnostics::catalog::REFERENCE_OVERFLOW,
+            ..
         })
     ));
     let batch = server.begin_refresh().unwrap();
@@ -1635,9 +1636,9 @@ unsafe impl RtdSubscription for FailingDisconnectSubscription {
     fn request_cancel(&self) {}
 
     fn disconnect_and_wait(self) -> XllResult<()> {
-        Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL,
-        })
+        Err(crate::error::construct::internal(
+            crate::diagnostics::catalog::TEST_SENTINEL,
+        ))
     }
 }
 
@@ -1684,13 +1685,15 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
     assert!(matches!(
         res_owner,
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
+            ..
         }) | Err(XllError::Panic)
     ));
     assert!(matches!(
         res_waiter,
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
+            ..
         }) | Err(XllError::Panic)
     ));
 }
@@ -1768,7 +1771,8 @@ fn disconnect_propagates_subscription_cleanup_error() {
     assert!(matches!(
         error,
         XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
+            ..
         }
     ));
 }
@@ -1798,7 +1802,8 @@ fn rollback_records_subscription_cleanup_error() {
     assert!(matches!(
         runtime.cleanup_result(),
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
+            ..
         })
     ));
 }
@@ -1868,7 +1873,8 @@ fn miri_connection_unwind_allows_reentrant_cleanup_before_releasing_admission() 
     assert!(matches!(
         runtime.cleanup_result(),
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_DISCONNECT
+            diagnostic_id: crate::diagnostics::catalog::PANIC_DISCONNECT,
+            ..
         })
     ));
 }
@@ -2032,14 +2038,16 @@ fn install_failure_during_closing_propagates_cleanup_error() {
     assert!(matches!(
         res,
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
+            ..
         })
     ));
 
     assert!(matches!(
         runtime.cleanup_result(),
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL
+            diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
+            ..
         })
     ));
 }
@@ -2168,7 +2176,7 @@ fn fresh_preparation_gets_a_new_incarnation_while_old_quota_is_retained() {
         {
             let catalog = runtime.catalog.lock();
             assert_eq!(catalog.pending_len(), 2);
-            assert_eq!(catalog.retained_topic_bytes, 2 * topic.byte_len());
+            assert_eq!(catalog.quota.topic_bytes(), 2 * topic.byte_len());
             catalog.assert_identity_invariants();
         }
 
@@ -2181,7 +2189,7 @@ fn fresh_preparation_gets_a_new_incarnation_while_old_quota_is_retained() {
         {
             let catalog = runtime.catalog.lock();
             assert_eq!(catalog.pending_len(), 1);
-            assert_eq!(catalog.retained_topic_bytes, topic.byte_len());
+            assert_eq!(catalog.quota.topic_bytes(), topic.byte_len());
             assert!(!catalog.entries.contains_key(&stale));
         }
 
@@ -2195,7 +2203,7 @@ fn fresh_preparation_gets_a_new_incarnation_while_old_quota_is_retained() {
         runtime.disconnect(&next, TopicId(1)).unwrap();
         let catalog = runtime.catalog.lock();
         assert!(catalog.entries.is_empty());
-        assert_eq!(catalog.retained_topic_bytes, 0);
+        assert_eq!(catalog.quota.topic_bytes(), 0);
         catalog.assert_identity_invariants();
     }
 }
@@ -2448,12 +2456,10 @@ fn duplicate_index_id_does_not_change_source_refcount() {
     index.insert(identity, first_id, 1).unwrap();
     assert!(matches!(
         index.insert(identity, first_id, 1),
-        Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_DUPLICATE
-        })
+        Err(xlfn_services::rtd::index::IndexError::Duplicate)
     ));
     assert_eq!(index.source_ref_count(source.id).map(|n| n.get()), Some(1));
-    assert_eq!(index.ids_by_key.len(), 1);
+    assert_eq!(index.buckets().len(), 1);
     index.assert_invariants();
 }
 
@@ -2478,7 +2484,7 @@ fn colliding_topics_remain_distinct_and_survive_either_removal_order() {
         }
         {
             let catalog = runtime.catalog.lock();
-            assert_eq!(catalog.identities.ids_by_key.len(), 1);
+            assert_eq!(catalog.identities.buckets().len(), 1);
             assert_eq!(
                 catalog
                     .identities
@@ -2522,7 +2528,7 @@ fn colliding_topics_remain_distinct_and_survive_either_removal_order() {
         survivor.rollback();
 
         let catalog = runtime.catalog.lock();
-        assert!(catalog.identities.ids_by_key.is_empty());
+        assert!(catalog.identities.buckets().is_empty());
         assert!(catalog.entries.is_empty());
         assert_eq!(catalog.identities.distinct_source_count(), 0);
         catalog.assert_identity_invariants();
@@ -2567,7 +2573,8 @@ fn identity_lookup_reports_orphaned_candidate() {
     assert!(matches!(
         catalog.find_identity(SourceId(source.id), &topic.borrowed()),
         Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN
+            diagnostic_id: crate::diagnostics::catalog::RTD_INDEX_ORPHAN,
+            ..
         })
     ));
     catalog.identities.clear();
@@ -2773,7 +2780,7 @@ fn miri_rejected_topic_admission_never_reads_parts_to_copy_them() {
         let catalog = runtime.catalog.lock();
         assert_eq!(catalog.next_subscription_id, next_id);
         assert!(catalog.entries.is_empty());
-        assert_eq!(catalog.retained_topic_bytes, 0);
+        assert_eq!(catalog.quota.topic_bytes(), 0);
         catalog.assert_identity_invariants();
     }
 }
@@ -2904,7 +2911,7 @@ fn identity_index_is_removed_after_final_unbind() {
 
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
-    assert!(catalog.identities.ids_by_key.is_empty());
+    assert!(catalog.identities.buckets().is_empty());
     catalog.assert_identity_invariants();
 }
 
@@ -2926,10 +2933,10 @@ fn catalog_entries_are_canonical_for_subscription_identity() {
 
     let catalog = runtime.catalog.lock();
     catalog.assert_identity_invariants();
-    assert_eq!(catalog.identities.ids_by_key.len(), 2);
+    assert_eq!(catalog.identities.buckets().len(), 2);
     assert_eq!(catalog.entries.len(), 2);
 
-    for (key, ids) in &catalog.identities.ids_by_key {
+    for (key, ids) in catalog.identities.buckets() {
         for id in ids {
             let entry = catalog.entries.get(id).unwrap();
             assert_eq!(entry.source_id, key.source_id);
@@ -2943,7 +2950,7 @@ fn catalog_entries_are_canonical_for_subscription_identity() {
 
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
-    assert!(catalog.identities.ids_by_key.is_empty());
+    assert!(catalog.identities.buckets().is_empty());
     catalog.assert_identity_invariants();
 }
 
@@ -3895,7 +3902,7 @@ fn preparation_rejects_missing_source_without_catalog_reservation() {
     ));
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
-    assert_eq!(catalog.retained_topic_bytes, 0);
+    assert_eq!(catalog.quota.topic_bytes(), 0);
     catalog.assert_identity_invariants();
 }
 
@@ -4909,8 +4916,8 @@ fn runtime_close_reclaims_all_inflight_slots() {
     }
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
-    assert_eq!(catalog.pending_count, 0);
-    assert_eq!(catalog.retained_topic_bytes, 0);
+    assert_eq!(catalog.quota.pending(), 0);
+    assert_eq!(catalog.quota.topic_bytes(), 0);
 }
 
 #[test]
@@ -4985,7 +4992,7 @@ fn active_topics_keep_their_byte_charge_until_removal() {
         .unwrap();
     first.commit();
     assert_eq!(runtime.catalog.lock().pending_len(), 0);
-    assert_eq!(runtime.catalog.lock().retained_topic_bytes, 6);
+    assert_eq!(runtime.catalog.lock().quota.topic_bytes(), 6);
     assert!(matches!(
         runtime.prepare(&source, BorrowedTopicParts::new(&["next"]).unwrap()),
         Err(XllError::Overloaded)
@@ -4993,7 +5000,7 @@ fn active_topics_keep_their_byte_charge_until_removal() {
     runtime
         .terminate_server(ServerGeneration::new(1).unwrap())
         .unwrap();
-    assert_eq!(runtime.catalog.lock().retained_topic_bytes, 0);
+    assert_eq!(runtime.catalog.lock().quota.topic_bytes(), 0);
     runtime
         .prepare(&source, BorrowedTopicParts::new(&["next"]).unwrap())
         .unwrap()

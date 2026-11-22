@@ -100,9 +100,7 @@ pub(crate) fn quarantine_runtime_resources<A: Addin>(
         ModuleCleanupClaim::NoModuleAuthority => None,
         ModuleCleanupClaim::Unavailable => fail_stop_invariant(
             "active module epoch lacks affine close authority",
-            &XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
-            },
+            &crate::error::construct::internal(crate::diagnostics::catalog::CLOSE_RUNTIME),
         ),
     };
     let _ = catch_no_unwind(AssertUnwindSafe(|| {

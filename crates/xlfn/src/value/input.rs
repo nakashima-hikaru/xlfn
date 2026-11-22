@@ -1106,9 +1106,9 @@ impl<'brand, 'call> DecodeCallContext<'brand, 'call> {
             DecodeCallAccess::Runtime { storage, token, .. } => {
                 storage.enter_handle_domain(token, domain)
             }
-            DecodeCallAccess::Plain(_) => Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_NO_CONTEXT,
-            }),
+            DecodeCallAccess::Plain(_) => Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::HANDLE_NO_CONTEXT,
+            )),
         }
     }
     /// Erases the brand after decoding without releasing the storage's permits.
@@ -1145,9 +1145,9 @@ impl<'brand, 'call> DecodeCallContext<'brand, 'call> {
         let handles = match &self.access {
             DecodeCallAccess::Runtime { handles, .. } => handles.get()?,
             _ => {
-                return Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_NO_CONTEXT,
-                });
+                return Err(crate::error::construct::internal(
+                    crate::diagnostics::catalog::HANDLE_NO_CONTEXT,
+                ));
             }
         };
         handles.lookup(self, token)

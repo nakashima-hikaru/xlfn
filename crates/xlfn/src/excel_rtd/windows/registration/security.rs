@@ -92,10 +92,10 @@ impl MutexSecurity {
             )
         };
         if status != 0 {
-            return Err(XllError::WindowsApi {
-                function: "GetSecurityInfo(RTD registration mutex)",
-                code: status as i32,
-            });
+            return Err(crate::error::construct::windows_api(
+                "GetSecurityInfo(RTD registration mutex)",
+                status as i32,
+            ));
         }
         if canonical_descriptor(actual.0)? != canonical_descriptor(self.descriptor.0)? {
             return Err(invalid_security(
@@ -321,14 +321,11 @@ fn current_user_sid() -> XllResult<String> {
 fn os_error(function: &'static str) -> XllError {
     // SAFETY: called immediately after failure, on the same thread.
     let code = unsafe { GetLastError() } as i32;
-    XllError::WindowsApi { function, code }
+    crate::error::construct::windows_api(function, code)
 }
 
 fn invalid_security(function: &'static str) -> XllError {
-    XllError::WindowsApi {
-        function,
-        code: E_INVALIDARG,
-    }
+    crate::error::construct::windows_api(function, E_INVALIDARG)
 }
 
 #[cfg(test)]
@@ -380,6 +377,7 @@ mod tests {
             Err(XllError::WindowsApi {
                 function: "RTD registration mutex owner or DACL does not match",
                 code: E_INVALIDARG,
+                ..
             })
         ));
     }

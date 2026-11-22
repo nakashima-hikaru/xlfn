@@ -5,7 +5,7 @@
 //! Copied entries are non-owning: callers must use their lookup domain before
 //! dereferencing them. Notifications never reclaim nodes themselves.
 
-use super::{CacheNode, NodePtr, ResidentPin, VersionedKey, VersionedKeyRef};
+use super::{CacheNode, CachePanicReporter, NodePtr, ResidentPin, VersionedKey, VersionedKeyRef};
 use quick_cache::Equivalent;
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
@@ -189,11 +189,16 @@ where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
+    #[cfg(test)]
     pub(super) fn new(capacity: u64) -> Self {
+        Self::with_reporter(capacity, super::ignore_cache_panic)
+    }
+
+    pub(super) fn with_reporter(capacity: u64, report: CachePanicReporter) -> Self {
         Self {
             index: QuickResidentIndex::new(capacity),
             retired_keys: std::mem::needs_drop::<K>()
-                .then(|| PublishedOwner::new(RetiredKeys::new())),
+                .then(|| PublishedOwner::new(RetiredKeys::new(report))),
         }
     }
 

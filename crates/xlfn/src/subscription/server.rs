@@ -637,9 +637,9 @@ pub(crate) fn disconnect_one_no_unwind<E: RtdSubscription>(
 ) -> XllResult<()> {
     match catch_no_unwind(AssertUnwindSafe(|| subscription.disconnect_and_wait())) {
         Ok(result) => result,
-        Err(_) => Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_DISCONNECT,
-        }),
+        Err(_) => Err(crate::error::construct::internal(
+            crate::diagnostics::catalog::PANIC_DISCONNECT,
+        )),
     }
 }
 

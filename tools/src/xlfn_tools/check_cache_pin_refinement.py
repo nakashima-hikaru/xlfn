@@ -8,9 +8,9 @@ from .verus_mutations import check_mutations
 if __name__ == "__main__":
     check_mutations(
         Path("verification/verus/cache_lease"),
-        Path("crates/xlfn/src/cache/pin_transitions.rs"),
+        Path("crates/xlfn-services/src/cache/pin_transitions.rs"),
         (
-            Path("crates/xlfn/src/cache/node_layout.rs"),
+            Path("crates/xlfn-services/src/cache/node_layout.rs"),
             Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
             Path("verification/verus/published_owner/src/heap_permission.rs"),
             *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),

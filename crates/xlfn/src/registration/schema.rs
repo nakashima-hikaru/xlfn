@@ -37,9 +37,9 @@ impl RegistrationSignature {
             || (self.arguments.contains(&ArgumentAbi::NumericArray12) && self.execution.is_async())
             || (self.return_abi == ReturnAbi::NumericArray12 && self.execution.is_async())
         {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_SIGNATURE,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::REGISTRATION_SIGNATURE,
+            ));
         }
         Ok(())
     }
@@ -245,7 +245,8 @@ mod tests {
             assert!(matches!(
                 signature.encode(),
                 Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_SIGNATURE,
+                    diagnostic_id: crate::diagnostics::catalog::REGISTRATION_SIGNATURE,
+                    ..
                 })
             ));
         }

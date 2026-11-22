@@ -74,9 +74,11 @@ where
     if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
         return Err(transaction.failure(XllError::Closing));
     }
-    let generation = deps.protocol_generation().ok_or(XllError::Internal {
-        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-    });
+    let generation = deps
+        .protocol_generation()
+        .ok_or(crate::error::construct::internal(
+            crate::diagnostics::catalog::OPEN_STATE,
+        ));
     let generation = match generation {
         Ok(generation) => generation,
         Err(error) => return Err(transaction.failure(error)),
@@ -468,9 +470,8 @@ where
         }
     }
     if shutdown_deps.host().registration_state_unknown() && unload_failure.is_none() {
-        let error = XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
-        };
+        let error =
+            crate::error::construct::internal(crate::diagnostics::catalog::REGISTRATION_UNKNOWN);
         report_boundary_error("xlAutoRemove registration state unknown", &error);
         unload_failure = Some((
             crate::shutdown::UnloadHazard::RegistrationStateUnknown,

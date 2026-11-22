@@ -251,10 +251,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop for ServerObservati
             if status != S_OK {
                 crate::diagnostics::report_no_unwind(
                     "RTD failed observation teardown",
-                    &XllError::WindowsApi {
-                        function: "IRtdServer::ServerTerminate",
-                        code: status,
-                    },
+                    &crate::error::construct::windows_api("IRtdServer::ServerTerminate", status),
                 );
             }
         }
@@ -670,10 +667,7 @@ pub(super) fn discard_unpublished_server<E: RtdSubscription, C: crate::RtdSource
     if status != S_OK {
         crate::diagnostics::report_no_unwind(
             "IRtdServer::unpublished server teardown",
-            &XllError::WindowsApi {
-                function: "IRtdServer::ServerTerminate",
-                code: status,
-            },
+            &crate::error::construct::windows_api("IRtdServer::ServerTerminate", status),
         );
     }
     drop(joined);
@@ -743,10 +737,10 @@ pub(crate) fn shutdown<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
         // The capability retains the server and excludes admitted operations.
         let status = joined.teardown_and_remove_active(false);
         if status != S_OK && shutdown_error.is_none() {
-            shutdown_error = Some(XllError::WindowsApi {
-                function: "IRtdServer::ServerTerminate",
-                code: status,
-            });
+            shutdown_error = Some(crate::error::construct::windows_api(
+                "IRtdServer::ServerTerminate",
+                status,
+            ));
         }
 
         // Finish the phase transition while the temporary server reference
@@ -830,10 +824,10 @@ pub(crate) fn shutdown_subscriptions<E: crate::RtdSubscription, C: crate::RtdSou
         // The capability retains the server and excludes admitted operations.
         let status = joined.teardown_and_remove_active(true);
         if status != S_OK && shutdown_error.is_none() {
-            shutdown_error = Some(XllError::WindowsApi {
-                function: "IRtdServer::ServerTerminate",
-                code: status,
-            });
+            shutdown_error = Some(crate::error::construct::windows_api(
+                "IRtdServer::ServerTerminate",
+                status,
+            ));
         }
 
         // Finish the phase transition while the temporary server reference
@@ -882,9 +876,9 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
 
         if let Some(existing) = active.as_ref() {
             if existing.subscription_type != TypeId::of::<(E, C)>() {
-                return Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_MULTI,
-                });
+                return Err(crate::error::construct::internal(
+                    crate::diagnostics::catalog::RTD_MULTI,
+                ));
             }
             let server = existing.pointer as *mut RtdServer<E, C>;
             // Deferred ServerTerminate intentionally leaves ACTIVE_SERVER in place
@@ -937,10 +931,10 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
                 drop(joined);
                 drop(reference);
                 if status != S_OK {
-                    return Err(XllError::WindowsApi {
-                        function: "IRtdServer::ServerTerminate",
-                        code: status,
-                    });
+                    return Err(crate::error::construct::windows_api(
+                        "IRtdServer::ServerTerminate",
+                        status,
+                    ));
                 }
                 if worker_panicked {
                     return Err(XllError::Panic);
@@ -968,9 +962,9 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
                         // SAFETY: active is attached to the server whose lock is held.
                         let active_ref = unsafe { active.as_ref() };
                         if active_ref.identity() != handles.identity() {
-                            return Err(XllError::Internal {
-                                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_MULTI,
-                            });
+                            return Err(crate::error::construct::internal(
+                                crate::diagnostics::catalog::RTD_MULTI,
+                            ));
                         }
                     }
                     None => {
@@ -986,9 +980,9 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
                             (None, backends.subscription_server())
                         }
                         Some(_) => {
-                            return Err(XllError::Internal {
-                                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_MULTI,
-                            });
+                            return Err(crate::error::construct::internal(
+                                crate::diagnostics::catalog::RTD_MULTI,
+                            ));
                         }
                         None => {
                             // SAFETY: admission/shutdown retain the runtime through every typed handle call.
@@ -1041,20 +1035,16 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
         let status = unsafe { CoCreateGuid(&mut class_id) };
 
         if status < 0 {
-            return Err(XllError::WindowsApi {
-                function: "CoCreateGuid",
-                code: status,
-            });
+            return Err(crate::error::construct::windows_api("CoCreateGuid", status));
         }
 
-        let generation =
-            allocate_server_generation(&LAST_SERVER_GENERATION).ok_or(XllError::Internal {
-                diagnostic_id:
-                    crate::diagnostics::id::DiagnosticId::RTD_SERVER_GENERATION_EXHAUSTED,
-            })?;
-        let operations = ServerOperationBarrier::new().map_err(|error| XllError::WindowsApi {
-            function: error.operation,
-            code: error.code as i32,
+        let generation = allocate_server_generation(&LAST_SERVER_GENERATION).ok_or(
+            crate::error::construct::internal(
+                crate::diagnostics::catalog::RTD_SERVER_GENERATION_EXHAUSTED,
+            ),
+        )?;
+        let operations = ServerOperationBarrier::new().map_err(|error| {
+            crate::error::construct::windows_api(error.operation, error.code as i32)
         })?;
         let identity = Arc::new(ServerIdentity::new(class_id)?);
 

@@ -26,14 +26,14 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 refresh_id: active_id,
             } = refresh.phase
             else {
-                return Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::NO_REFERENCE,
-                });
+                return Err(crate::error::construct::internal(
+                    crate::diagnostics::catalog::NO_REFERENCE,
+                ));
             };
             if active_id != refresh_id {
-                return Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_ID_MISMATCH,
-                });
+                return Err(crate::error::construct::internal(
+                    crate::diagnostics::catalog::REFERENCE_ID_MISMATCH,
+                ));
             }
             refresh.ensure_notification_ticket().err()
         };
@@ -127,14 +127,14 @@ impl<H: SubscriptionHost> PublishCore<H> {
             refresh_id: active_id,
         } = refresh.phase
         else {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::NO_REFERENCE,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::NO_REFERENCE,
+            ));
         };
         if active_id != refresh_id {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_ID_MISMATCH,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::REFERENCE_ID_MISMATCH,
+            ));
         }
         refresh.phase = DeliveryPhase::BetweenRefreshes {
             signal: SignalState::Dormant,
@@ -194,22 +194,27 @@ impl<H: SubscriptionHost> PublishCore<H> {
             self.ensure_open()?;
             let mut refresh = self.refresh.lock();
             if matches!(refresh.phase, DeliveryPhase::Refreshing { .. }) {
-                return Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OVERLAPPED_REFERENCE,
-                });
+                return Err(crate::error::construct::internal(
+                    crate::diagnostics::catalog::OVERLAPPED_REFERENCE,
+                ));
             }
             let refresh_id = refresh.next_refresh_id;
-            let next_refresh_id = refresh_id.checked_add(1).ok_or(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_OVERFLOW,
-            })?;
+            let next_refresh_id =
+                refresh_id
+                    .checked_add(1)
+                    .ok_or(crate::error::construct::internal(
+                        crate::diagnostics::catalog::REFERENCE_OVERFLOW,
+                    ))?;
 
             let previous_epoch = self
                 .publish_epoch
                 .try_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
                     epoch.checked_add(1)
                 })
-                .map_err(|_| XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_OVERFLOW,
+                .map_err(|_| {
+                    crate::error::construct::internal(
+                        crate::diagnostics::catalog::REFERENCE_OVERFLOW,
+                    )
                 })?;
             let epoch = previous_epoch + 1;
             refresh.next_refresh_id = next_refresh_id;

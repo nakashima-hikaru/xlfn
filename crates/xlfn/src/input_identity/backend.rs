@@ -415,9 +415,9 @@ impl InputFingerprintBuilder {
         encode: impl FnOnce(&mut InputIdentityEncoder) -> XllResult<R>,
     ) -> XllResult<R> {
         if index != self.next_argument {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::INPUT_FINGERPRINT,
+            ));
         }
         self.root.update(&[0xA0]);
         self.root.update(&(index as u64).to_le_bytes());
@@ -446,9 +446,9 @@ impl InputFingerprintBuilder {
     #[inline]
     pub(crate) fn finish_ref(&self) -> XllResult<InputFingerprint> {
         if self.next_argument != self.expected_arguments {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::INPUT_FINGERPRINT,
+            ));
         }
         Ok(InputFingerprint::from_bytes(
             *self.root.finalize().as_bytes(),

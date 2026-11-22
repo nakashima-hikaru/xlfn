@@ -1522,7 +1522,6 @@ dependencies = [
  "papaya",
  "parking_lot 0.13.0",
  "proptest",
- "quick_cache",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -1551,6 +1550,10 @@ version = "0.2.0"
 [[package]]
 name = "xlfn-engine"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "xlfn-host"
@@ -1609,6 +1612,16 @@ dependencies = [
 name = "xlfn-services"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-utils",
+ "indexmap",
+ "loom",
+ "papaya",
+ "quick_cache",
+ "rustc-hash",
+ "smallvec",
+ "static_assertions",
+ "triomphe",
+ "xlfn-engine",
  "xlfn-kernel",
 ]
 

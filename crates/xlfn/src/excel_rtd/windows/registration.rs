@@ -178,10 +178,7 @@ impl CrossProcessRegistrationGuard {
             // SAFETY: GetLastError has no preconditions and is read immediately
             // after the failed CreateMutexW call.
             let code = (unsafe { GetLastError() }) as i32;
-            return Err(XllError::WindowsApi {
-                function: "CreateMutexW",
-                code,
-            });
+            return Err(crate::error::construct::windows_api("CreateMutexW", code));
         }
         let handle = MutexHandle(handle);
         // CreateMutexW ignores the requested descriptor for an existing
@@ -192,9 +189,8 @@ impl CrossProcessRegistrationGuard {
         // registration. Preserve an existing apartment; initialize one for
         // framework/test threads that have not entered COM. The local
         // maintenance guard rejects reentry throughout this pumping wait.
-        let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::WindowsApi {
-            function: "CoInitializeEx(RTD registration mutex)",
-            code,
+        let _apartment = ComApartmentGuard::enter().map_err(|code| {
+            crate::error::construct::windows_api("CoInitializeEx(RTD registration mutex)", code)
         })?;
         let mut index = u32::MAX;
         // SAFETY: clear the thread's last error as required by CoWait's
@@ -207,18 +203,18 @@ impl CrossProcessRegistrationGuard {
             CoWaitForMultipleHandles(COWAIT_DISPATCH_CALLS, timeout_ms, 1, &handle.0, &mut index)
         };
         if status != S_OK {
-            return Err(XllError::WindowsApi {
-                function: "CoWaitForMultipleHandles(RTD registration mutex)",
-                code: status,
-            });
+            return Err(crate::error::construct::windows_api(
+                "CoWaitForMultipleHandles(RTD registration mutex)",
+                status,
+            ));
         }
         // S_OK plus WAIT_ABANDONED also transfers mutex ownership. Scavenge
         // the previous owner's marked registrations under that same lock.
         if index != 0 && index != WAIT_ABANDONED as u32 {
-            return Err(XllError::WindowsApi {
-                function: "CoWaitForMultipleHandles(RTD registration mutex index)",
-                code: E_UNEXPECTED,
-            });
+            return Err(crate::error::construct::windows_api(
+                "CoWaitForMultipleHandles(RTD registration mutex index)",
+                E_UNEXPECTED,
+            ));
         }
 
         Ok(Self { handle })
@@ -541,19 +537,16 @@ pub(super) fn read_registry_string(path: &str, name: &str) -> XllResult<Option<S
 }
 
 fn registry_error(function: &'static str, status: i32) -> XllError {
-    XllError::WindowsApi {
-        function,
-        code: status,
-    }
+    crate::error::construct::windows_api(function, status)
 }
 
 fn report_unowned_registration() {
     crate::diagnostics::report_no_unwind(
         "RTD registration ownership mismatch; preserving registration",
-        &XllError::WindowsApi {
-            function: "RTD registration ownership validation",
-            code: crate::win32::E_INVALIDARG,
-        },
+        &crate::error::construct::windows_api(
+            "RTD registration ownership validation",
+            crate::win32::E_INVALIDARG,
+        ),
     );
 }
 

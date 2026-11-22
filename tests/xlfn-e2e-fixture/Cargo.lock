@@ -567,6 +567,9 @@ dependencies = [
 [[package]]
 name = "xlfn-engine"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "xlfn-host"
@@ -603,6 +606,8 @@ dependencies = [
 name = "xlfn-services"
 version = "0.1.0"
 dependencies = [
+ "rustc-hash",
+ "smallvec",
  "xlfn-kernel",
 ]
 

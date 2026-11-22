@@ -17,7 +17,10 @@ pub(super) unsafe fn release_node_pin<V>(node_ptr: NonNull<CacheNode<V>>) {
         // initialization, a node that never reached the index needs only
         // the calling cache operation's destruction boundary.
         if !node.published && ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
-            NeverPublished(entry).reclaim();
+            // SAFETY: the caller retains the original domain until this release
+            // completes; save only the function pointer for detached destruction.
+            let report = unsafe { entry.domain.as_ref() }.report;
+            NeverPublished(entry, report).reclaim();
         } else {
             // SAFETY: final-pin ownership retains its original domain through
             // this maintenance tail. No caller can select another receiver.
@@ -28,7 +31,7 @@ pub(super) unsafe fn release_node_pin<V>(node_ptr: NonNull<CacheNode<V>>) {
     }
 }
 
-struct NeverPublished<V>(ReclaimEntry<V>);
+struct NeverPublished<V>(ReclaimEntry<V>, CachePanicReporter);
 impl<V> NeverPublished<V> {
     fn reclaim(self) {
         if destruction_deferred() {
@@ -45,7 +48,7 @@ impl<V> NeverPublished<V> {
         // SAFETY: only the final-release decision above constructs this owner,
         // after observing that the node was never published to the index.
         unsafe {
-            reclaim_cache_node(self.0);
+            reclaim_cache_node(self.0, self.1);
         }
     }
 }
@@ -53,7 +56,7 @@ impl<V> NeverPublished<V> {
 /// Consumes the final-pin retirement entry after all observations have ended.
 /// The caller must establish a matching grace period, or that the node was never
 /// published. Ownership of the entry alone does not establish quiescence.
-unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>) {
+unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>, report: CachePanicReporter) {
     let ReclaimEntry { pointer: ptr, .. } = entry;
     // SAFETY: the caller establishes quiescence; consuming entry transfers the
     // unique retirement ownership into Box without copying the inline payload.
@@ -63,29 +66,29 @@ unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>) {
     // Box's drop glue frees the node even if V's destructor unwinds. All
     // framework locks and the grace-period callback have already been left.
     if catch_no_unwind(AssertUnwindSafe(|| drop(node))).is_err() {
-        let error = XllError::Panic;
-        crate::diagnostics::report_no_unwind("calculation cache value final drop", &error);
+        report_drop_panic(report, "calculation cache value final drop");
     }
 }
 
 pub(super) fn reclaim_cache_entries<V>(entries: ReclaimEntries<'_, V>) {
-    fn reclaim<V>(entries: PendingEntries<V>) {
+    fn reclaim<V>((entries, report): (PendingEntries<V>, CachePanicReporter)) {
         for entry in entries {
             // SAFETY: detached entries have completed their domain grace period.
-            unsafe { reclaim_cache_node::<V>(entry) };
+            unsafe { reclaim_cache_node::<V>(entry, report) };
         }
     }
+    let report = entries.domain.report;
     if destruction_deferred() && !entries.is_empty() {
         // SAFETY: cache nodes are created only by CalculationCache with V: 'static.
         // Detached entries own the allocations independently of the cache/domain;
         // reclaim only consumes their pointers, never the old domain pointer.
-        unsafe { deferred_drop::defer(entries.entries, reclaim::<V>) };
+        unsafe { deferred_drop::defer((entries.entries, report), reclaim::<V>) };
         return;
     }
     for entry in entries.entries {
         // SAFETY: [TR-RECLAIM-1] entry.pointer points to an allocated CacheNode<V> whose grace period has ended.
         unsafe {
-            reclaim_cache_node::<V>(entry);
+            reclaim_cache_node::<V>(entry, report);
         }
     }
 }
@@ -93,7 +96,7 @@ pub(super) fn reclaim_cache_entries<V>(entries: ReclaimEntries<'_, V>) {
 /// A batch detached only after a same-domain grace-period certificate.
 /// The owner borrow keeps the allocation's domain alive through reclamation.
 pub(super) struct ReclaimEntries<'domain, V> {
-    _domain: &'domain CacheLookupDomain<V>,
+    domain: &'domain CacheLookupDomain<V>,
     entries: PendingEntries<V>,
 }
 
@@ -109,15 +112,12 @@ impl<'domain, V> ReclaimEntries<'domain, V> {
             debt.retire(entries.len(), weight);
             domain.pending_nodes.store(debt.nodes, Ordering::Release);
         }
-        ReclaimEntries {
-            _domain: domain,
-            entries,
-        }
+        ReclaimEntries { domain, entries }
     }
 
     fn new(domain: &'domain CacheLookupDomain<V>) -> Self {
         Self {
-            _domain: domain,
+            domain,
             entries: PendingEntries::new(),
         }
     }
@@ -238,7 +238,7 @@ impl<V> CacheLookupDomain<V> {
             consumed = requested - consumed;
         }
         let entries = ReclaimEntries {
-            _domain: self,
+            domain: self,
             entries: records,
         };
         #[cfg(any(test, feature = "bench-internals"))]

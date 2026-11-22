@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ._repository import ROOT
 
-PROTOCOL = Path("crates/xlfn/src/cache/pin_transitions.rs")
+PROTOCOL = Path("crates/xlfn-services/src/cache/pin_transitions.rs")
 TEST = "cache::tests::loom_final_pin_fence_acquires_all_holders_before_retirement"
 MUTATIONS = {
     "missing final-pin acquire fence": (
@@ -43,9 +43,9 @@ def main():
             "cargo",
             "test",
             "-p",
-            "xlfn",
+            "xlfn-services",
             "--features",
-            "cache,handles",
+            "cache",
             "--lib",
             "--locked",
             TEST,

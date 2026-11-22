@@ -93,9 +93,9 @@ impl IntoXllError for DiagnosticTerminalCloseError {
         match self {
             Self::WorkerPanicked => XllError::Panic,
             Self::ReentrantShutdown => XllError::ReentrantCall,
-            Self::InvariantViolation => XllError::Internal {
-                diagnostic_id: DiagnosticId::DIAGNOSTICS_CLOSE,
-            },
+            Self::InvariantViolation => {
+                crate::error::construct::internal(crate::diagnostics::catalog::DIAGNOSTICS_CLOSE)
+            }
         }
     }
 }
@@ -244,7 +244,7 @@ impl DiagnosticRouter {
                     sink.report(&XllError::Panic, || DiagnosticEventMetadata {
                         udf_id: "diagnostic sink replacement",
                         argument: None,
-                        diagnostic_id: DiagnosticId::from_u64(
+                        diagnostic_id: crate::diagnostics::id::from_u64(
                             NEXT_ID.fetch_add(1, Ordering::Relaxed),
                         ),
                         timestamp: SystemTime::now(),
@@ -416,12 +416,12 @@ impl DiagnosticRouter {
             || self.sink.is_active()
             || !self.retiring_workers.lock().is_empty()
         {
-            return Err(XllError::Internal {
-                diagnostic_id: DiagnosticId::DIAGNOSTICS_RESET,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::DIAGNOSTICS_RESET,
+            ));
         }
-        self.sink.reset().map_err(|_| XllError::Internal {
-            diagnostic_id: DiagnosticId::DIAGNOSTICS_RESET,
+        self.sink.reset().map_err(|_| {
+            crate::error::construct::internal(crate::diagnostics::catalog::DIAGNOSTICS_RESET)
         })?;
         *phase = DiagnosticPhase::Open;
         Ok(())
@@ -605,7 +605,7 @@ pub(crate) fn report_udf_failure_with_history_no_unwind(
     if !include_excel_value && matches!(error, XllError::ExcelValue(_)) {
         return;
     }
-    let diagnostic_id = DiagnosticId::from_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    let diagnostic_id = crate::diagnostics::id::from_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
     let timestamp = SystemTime::now();
     history.record(
         history::FailureMetadata {
@@ -629,7 +629,7 @@ pub(crate) fn report_udf_panic_with_history_no_unwind(
     calculation_id: Option<crate::execution::CalculationId>,
     message: &str,
 ) {
-    let diagnostic_id = DiagnosticId::from_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    let diagnostic_id = crate::diagnostics::id::from_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
     let timestamp = SystemTime::now();
     history.record(
         history::FailureMetadata {
@@ -647,7 +647,7 @@ pub(crate) fn report_udf_panic_with_history_no_unwind(
 
 /// Reports framework and application failures, including diagnostic identity.
 pub(crate) fn report_no_unwind(udf_id: &'static str, error: &XllError) -> DiagnosticId {
-    let diagnostic_id = DiagnosticId::from_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    let diagnostic_id = crate::diagnostics::id::from_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
     report_with_id_no_unwind(udf_id, error, diagnostic_id, SystemTime::now);
     diagnostic_id
 }
@@ -715,7 +715,7 @@ mod tests {
         report_with_id_no_unwind(
             "sinkless_timestamp",
             &XllError::Panic,
-            DiagnosticId::from_u64(1),
+            crate::diagnostics::id::from_u64(1),
             sample,
         );
         assert_eq!(samples.get(), 0);
@@ -738,7 +738,7 @@ mod tests {
             report_with_id_no_unwind(
                 "unrelated_timestamp",
                 &XllError::Panic,
-                DiagnosticId::from_u64(3),
+                crate::diagnostics::id::from_u64(3),
                 || SystemTime::UNIX_EPOCH,
             );
         })
@@ -747,7 +747,7 @@ mod tests {
         report_with_id_no_unwind(
             "delivered_timestamp",
             &XllError::Panic,
-            DiagnosticId::from_u64(2),
+            crate::diagnostics::id::from_u64(2),
             sample,
         );
         clear_diagnostic_sink().unwrap();
@@ -1172,7 +1172,7 @@ mod tests {
             udf_id: "test",
             argument: None,
             error: &error,
-            diagnostic_id: DiagnosticId::from_u64(1),
+            diagnostic_id: crate::diagnostics::id::from_u64(1),
             timestamp: SystemTime::now(),
         };
         deliver_no_unwind(&PanickingSink, &event);
@@ -1208,7 +1208,7 @@ mod tests {
             sink.report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "panic payload delivery",
                 argument: None,
-                diagnostic_id: DiagnosticId::from_u64(id),
+                diagnostic_id: crate::diagnostics::id::from_u64(id),
                 timestamp: SystemTime::now(),
             });
         }
@@ -1410,7 +1410,7 @@ mod tests {
             sink.report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "observer ownership",
                 argument: None,
-                diagnostic_id: DiagnosticId::from_u64(id),
+                diagnostic_id: crate::diagnostics::id::from_u64(id),
                 timestamp: SystemTime::UNIX_EPOCH,
             });
         }
@@ -1442,7 +1442,7 @@ mod tests {
             .report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "reload",
                 argument: None,
-                diagnostic_id: DiagnosticId::from_u64(1),
+                diagnostic_id: crate::diagnostics::id::from_u64(1),
                 timestamp: SystemTime::now(),
             });
         router
@@ -1460,7 +1460,7 @@ mod tests {
             .report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "reload",
                 argument: None,
-                diagnostic_id: DiagnosticId::from_u64(2),
+                diagnostic_id: crate::diagnostics::id::from_u64(2),
                 timestamp: SystemTime::now(),
             });
         router.drain_reopenable().unwrap();
@@ -1511,7 +1511,7 @@ mod tests {
             .report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "retiring",
                 argument: None,
-                diagnostic_id: DiagnosticId::from_u64(1),
+                diagnostic_id: crate::diagnostics::id::from_u64(1),
                 timestamp: SystemTime::now(),
             });
         started_rx.recv().unwrap();
@@ -1656,7 +1656,7 @@ mod tests {
             udf_id: "failed_write",
             argument: None,
             error: &error,
-            diagnostic_id: DiagnosticId::from_u64(1),
+            diagnostic_id: crate::diagnostics::id::from_u64(1),
             timestamp: SystemTime::now(),
         });
         assert!(failed_diagnostic_writes() > before);
@@ -1682,7 +1682,7 @@ mod tests {
             udf_id: "native_failure",
             argument: Some("currency"),
             error: &error,
-            diagnostic_id: DiagnosticId::from_u64(42),
+            diagnostic_id: crate::diagnostics::id::from_u64(42),
             timestamp: SystemTime::UNIX_EPOCH,
         });
 
@@ -1757,7 +1757,7 @@ mod tests {
             .report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "terminal-close-race",
                 argument: None,
-                diagnostic_id: DiagnosticId::from_u64(1),
+                diagnostic_id: crate::diagnostics::id::from_u64(1),
                 timestamp: SystemTime::now(),
             });
         started_rx
@@ -1947,7 +1947,7 @@ mod tests {
         sink.report(&XllError::Panic, || DiagnosticEventMetadata {
             udf_id: "bounded",
             argument: None,
-            diagnostic_id: DiagnosticId::from_u64(1),
+            diagnostic_id: crate::diagnostics::id::from_u64(1),
             timestamp: SystemTime::now(),
         });
         started_rx.recv().unwrap();
@@ -1955,7 +1955,7 @@ mod tests {
             sink.report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "bounded",
                 argument: None,
-                diagnostic_id: DiagnosticId::from_u64(diagnostic_id),
+                diagnostic_id: crate::diagnostics::id::from_u64(diagnostic_id),
                 timestamp: SystemTime::now(),
             });
         }
@@ -1985,7 +1985,7 @@ mod tests {
             sink.report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "reservation rollback",
                 argument: None,
-                diagnostic_id: DiagnosticId::from_u64(1),
+                diagnostic_id: crate::diagnostics::id::from_u64(1),
                 timestamp: SystemTime::now(),
             });
         };

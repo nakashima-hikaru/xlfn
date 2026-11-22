@@ -1,7 +1,6 @@
 use super::super::{LifecycleCoordinator, LifecycleState, StopGoal, StopRecord, StoppingState};
 use super::OpenStart;
 use crate::XllError;
-use crate::diagnostics::id::DiagnosticId;
 use crate::generation::{RemovalAttemptId, RemovalEpoch};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use std::sync::atomic::Ordering;
@@ -23,8 +22,8 @@ fn snapshot(coordinator: &LifecycleCoordinator<()>) -> Snapshot {
         canonical_phase: core.state.phase(),
         projected_phase: LifecyclePhase::from_raw(coordinator.phase.load(Ordering::Acquire)),
         host_intent: core.host_intent,
-        next_open_sequence: core.next_lifecycle_attempt,
-        removal_epoch: core.removal_epoch,
+        next_open_sequence: core.sequence.next_open_for_test(),
+        removal_epoch: core.removal_epoch(),
         removal_attempt: core.state.removal_attempt(),
         publication_empty: coordinator.publication.load(Ordering::Acquire).is_null(),
     }
@@ -38,8 +37,10 @@ fn miri_idle_start_keeps_its_lock_and_abandonment_quarantines_only_its_issuer() 
     {
         let mut core = issuer.core.lock();
         core.host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
-        core.removal_epoch = 9;
-        core.next_lifecycle_attempt = 41;
+        for _ in 0..9 {
+            core.sequence.request_removal().unwrap();
+        }
+        core.set_next_lifecycle_attempt_for_test(41);
     }
 
     let start = OpenStart::acquire(&issuer, RemovalEpoch::new(9)).unwrap();
@@ -77,8 +78,10 @@ fn miri_closed_finalization_cannot_be_mistaken_for_idle_before_start() {
             StopGoal::Remove,
         )));
         core.host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
-        core.removal_epoch = 3;
-        core.next_lifecycle_attempt = 17;
+        for _ in 0..3 {
+            core.sequence.request_removal().unwrap();
+        }
+        core.set_next_lifecycle_attempt_for_test(17);
     }
     let before = snapshot(&coordinator);
     assert_eq!(before.canonical_phase, LifecyclePhase::Closed);
@@ -91,7 +94,8 @@ fn miri_closed_finalization_cannot_be_mistaken_for_idle_before_start() {
     assert!(matches!(
         error,
         XllError::Internal {
-            diagnostic_id: DiagnosticId::OPEN_PHASE,
+            diagnostic_id: crate::diagnostics::catalog::OPEN_PHASE,
+            ..
         }
     ));
     assert_eq!(snapshot(&coordinator), before);
@@ -144,8 +148,10 @@ fn miri_stale_removal_epoch_is_rejected_without_starting_or_consuming_an_attempt
     {
         let mut core = coordinator.core.lock();
         core.host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
-        core.removal_epoch = 12;
-        core.next_lifecycle_attempt = 23;
+        for _ in 0..12 {
+            core.sequence.request_removal().unwrap();
+        }
+        core.set_next_lifecycle_attempt_for_test(23);
     }
     let before = snapshot(&coordinator);
     let error = OpenStart::acquire(&coordinator, RemovalEpoch::new(11))
@@ -154,7 +160,8 @@ fn miri_stale_removal_epoch_is_rejected_without_starting_or_consuming_an_attempt
     assert!(matches!(
         error,
         XllError::Internal {
-            diagnostic_id: DiagnosticId::OPEN_PHASE,
+            diagnostic_id: crate::diagnostics::catalog::OPEN_PHASE,
+            ..
         }
     ));
     assert_eq!(snapshot(&coordinator), before);
@@ -166,8 +173,10 @@ fn miri_attempt_exhaustion_preserves_closed_intent_and_canonical_state() {
     {
         let mut core = coordinator.core.lock();
         core.host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
-        core.removal_epoch = 5;
-        core.next_lifecycle_attempt = u64::MAX;
+        for _ in 0..5 {
+            core.sequence.request_removal().unwrap();
+        }
+        core.set_next_lifecycle_attempt_for_test(u64::MAX);
     }
     let before = snapshot(&coordinator);
     let error = OpenStart::acquire(&coordinator, RemovalEpoch::new(5))
@@ -176,7 +185,8 @@ fn miri_attempt_exhaustion_preserves_closed_intent_and_canonical_state() {
     assert!(matches!(
         error,
         XllError::Internal {
-            diagnostic_id: DiagnosticId::ATTEMPT_OVERFLOW,
+            diagnostic_id: crate::diagnostics::catalog::ATTEMPT_OVERFLOW,
+            ..
         }
     ));
     assert_eq!(snapshot(&coordinator), before);

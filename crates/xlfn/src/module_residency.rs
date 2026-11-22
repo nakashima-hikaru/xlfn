@@ -12,7 +12,6 @@
 //! reference retained; it does not certify physical DLL unload.
 
 use crate::XllResult;
-use crate::diagnostics::id::DiagnosticId;
 use crate::error::XllError;
 use xlfn_host::{ModuleReferenceError, NativeModuleReference};
 
@@ -20,9 +19,7 @@ use xlfn_host::{ModuleReferenceError, NativeModuleReference};
 pub(crate) struct ModuleResidencyLease(NativeModuleReference);
 
 fn residency_error(_: ModuleReferenceError) -> XllError {
-    XllError::Internal {
-        diagnostic_id: DiagnosticId::MODULE_RESIDENCY,
-    }
+    crate::error::construct::internal(crate::diagnostics::catalog::MODULE_RESIDENCY)
 }
 
 impl ModuleResidencyLease {

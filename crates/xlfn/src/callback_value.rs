@@ -215,7 +215,7 @@ impl<'session> ExcelCallbackValue<'session> {
         // SAFETY: The caller supplies live callback arguments.
         let (status, raw, callback_invoked) =
             unsafe { excel12_with_invocation(function, arguments) };
-        let callback_status = ExcelCallbackStatus::from_raw(status);
+        let callback_status = crate::error::callback_status_from_raw(status);
         if !callback_invoked {
             drop(callback_admission);
             return Ok((status, CallbackResult::Empty));
@@ -265,7 +265,7 @@ impl<'session> ExcelCallbackValue<'session> {
     }
 
     pub(crate) fn value_type(&self) -> XllResult<XlValueType> {
-        XlValueType::from_raw(self.owner.raw.base_type()).ok_or_else(|| {
+        crate::value::xl_value_type_from_raw(self.owner.raw.base_type()).ok_or_else(|| {
             XllError::input(
                 "<callback>",
                 crate::error::InputError::Malformed("unknown base xltype"),
@@ -294,10 +294,10 @@ impl CallbackOwner<'_> {
         match self.state {
             CallbackValueReleaseState::Released => return Ok(()),
             CallbackValueReleaseState::Indeterminate { status } => {
-                return Err(XllError::ExcelApi {
-                    function: crate::error::ExcelApiFunction::Free,
-                    failure: crate::error::ExcelApiFailure::Indeterminate(status),
-                });
+                return Err(crate::error::construct::excel_api(
+                    crate::error::ExcelApiFunction::Free,
+                    crate::error::ExcelApiFailure::Indeterminate(status),
+                ));
             }
             CallbackValueReleaseState::Live | CallbackValueReleaseState::CleanupOnly => {}
         }
@@ -324,7 +324,7 @@ impl CallbackOwner<'_> {
         let raw_status = unsafe { release(&mut self.raw) };
         drop(permit);
 
-        let status = ExcelCallbackStatus::from_raw(raw_status);
+        let status = crate::error::callback_status_from_raw(raw_status);
         if let Some(session) = self.session {
             session.observe(status);
         }
@@ -341,10 +341,10 @@ impl CallbackOwner<'_> {
             if audit_failures {
                 record_callback_value_debt(CallbackCleanupDebt { status });
             }
-            Err(XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::Free,
-                failure: crate::error::ExcelApiFailure::Status(status),
-            })
+            Err(crate::error::construct::excel_api(
+                crate::error::ExcelApiFunction::Free,
+                crate::error::ExcelApiFailure::Status(status),
+            ))
         }
     }
 }
@@ -525,7 +525,7 @@ mod tests {
             FREE_CALLS.store(0, Ordering::Relaxed);
             let mut value = CallbackOwner::from_callback_for_test(
                 XLOPER12::integer(1),
-                ExcelCallbackStatus::from_raw(status),
+                crate::error::callback_status_from_raw(status),
                 successful_free,
             );
             assert_eq!(value.state, CallbackValueReleaseState::CleanupOnly);

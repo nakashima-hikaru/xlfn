@@ -249,9 +249,9 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
         subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
     ) -> crate::XllResult<SealedGenerationServices> {
         if subscriptions_stopped.generation() != Some(self.generation) {
-            return Err(crate::XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::CLOSE_CERTIFICATE,
+            ));
         }
         #[cfg(feature = "handles")]
         let handles = self.formula_handles.seal(self.generation)?;
@@ -300,9 +300,9 @@ impl SealedGenerationServices {
                 Err(absent) => absent,
             };
             if subscriptions_stopped.generation() != absent.generation() {
-                return Err(crate::XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-                });
+                return Err(crate::error::construct::internal(
+                    crate::diagnostics::catalog::CLOSE_CERTIFICATE,
+                ));
             }
             Ok(Self {
                 handles: crate::shutdown::HandlesSealed::absent_services(absent),

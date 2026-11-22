@@ -1,0 +1,159 @@
+//! Single-writer arbitration for terminal module cleanup.
+//! Host payloads never enter this protocol. The caller must claim, extract,
+//! and later reinstall its opaque owner under its own coordinator lock.
+
+/// An affine authorization for one cleanup incarnation, not a native owner.
+#[must_use]
+pub struct CleanupClaim<Issuer, Epoch> {
+    issuer: Issuer,
+    epoch: Epoch,
+    incarnation: u64,
+}
+
+impl<Issuer, Epoch: Copy> CleanupClaim<Issuer, Epoch> {
+    /// Epoch of the resource the issuer authorized the driver to clean.
+    pub const fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+}
+
+/// How to handle an already-started cleanup before consulting host ownership.
+pub enum CleanupObservation<Epoch> {
+    /// An owner can be selected from the canonical payload.
+    SelectOwner,
+    /// The same epoch's running claim already owns cleanup.
+    Running,
+    /// The same epoch finished draining.
+    Drained,
+    /// The same epoch could not drain and must remain loaded.
+    Retained(Epoch),
+    /// A previous epoch must not affect the current one.
+    Stale,
+}
+
+/// Outcome published only by an exactly matching running claim.
+pub enum CleanupOutcome {
+    Drained,
+    Retained,
+}
+
+enum Progress<Issuer, Epoch> {
+    Idle,
+    Pending,
+    Running {
+        issuer: Issuer,
+        epoch: Epoch,
+        incarnation: u64,
+    },
+    Drained(Epoch),
+    Retained(Epoch),
+}
+
+/// Canonical arbitration state; only its immutable observation is exposed.
+/// This is not a second lifecycle phase: it arbitrates ownership of the
+/// asynchronous cleanup operation within the caller's terminal lifecycle.
+pub struct CleanupProtocol<Issuer, Epoch> {
+    progress: Progress<Issuer, Epoch>,
+    next_incarnation: u64,
+}
+
+impl<Issuer: Copy + Eq, Epoch: Copy + Eq> CleanupProtocol<Issuer, Epoch> {
+    pub const fn new() -> Self {
+        Self {
+            progress: Progress::Idle,
+            next_incarnation: 1,
+        }
+    }
+
+    pub fn observe(&self, current: impl Fn(Epoch) -> bool) -> CleanupObservation<Epoch> {
+        match self.progress {
+            Progress::Idle | Progress::Pending => CleanupObservation::SelectOwner,
+            Progress::Running { epoch, .. } if current(epoch) => CleanupObservation::Running,
+            Progress::Drained(epoch) if current(epoch) => CleanupObservation::Drained,
+            Progress::Retained(epoch) if current(epoch) => CleanupObservation::Retained(epoch),
+            _ => CleanupObservation::Stale,
+        }
+    }
+
+    pub fn defer(&mut self) {
+        if matches!(self.progress, Progress::Idle) {
+            self.progress = Progress::Pending;
+        }
+    }
+
+    /// Call only while the issuer holds its canonical lock and can transfer
+    /// the unique native owner into the returned ticket's driver.
+    pub fn claim(&mut self, issuer: Issuer, epoch: Epoch) -> Option<CleanupClaim<Issuer, Epoch>> {
+        if !matches!(self.progress, Progress::Idle | Progress::Pending) {
+            return None;
+        }
+        let incarnation = self.next_incarnation;
+        self.next_incarnation = incarnation.checked_add(1)?;
+        self.progress = Progress::Running {
+            issuer,
+            epoch,
+            incarnation,
+        };
+        Some(CleanupClaim {
+            issuer,
+            epoch,
+            incarnation,
+        })
+    }
+
+    /// Atomically verifies issuer, incarnation and current epoch before changing
+    /// progress. A rejected completion leaves all decisions untouched.
+    pub fn complete(
+        &mut self,
+        issuer: Issuer,
+        claim: &CleanupClaim<Issuer, Epoch>,
+        current: impl FnOnce(Epoch) -> bool,
+        outcome: CleanupOutcome,
+    ) -> bool {
+        if !matches!(
+            self.progress,
+            Progress::Running { issuer: running_issuer, epoch, incarnation }
+                if issuer == running_issuer && claim.issuer == running_issuer
+                    && claim.epoch == epoch && claim.incarnation == incarnation && current(epoch)
+        ) {
+            return false;
+        }
+        self.progress = match outcome {
+            CleanupOutcome::Drained => Progress::Drained(claim.epoch),
+            CleanupOutcome::Retained => Progress::Retained(claim.epoch),
+        };
+        true
+    }
+}
+
+impl<Issuer: Copy + Eq, Epoch: Copy + Eq> Default for CleanupProtocol<Issuer, Epoch> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CleanupObservation as Obs, CleanupOutcome as Outcome, CleanupProtocol};
+
+    #[test]
+    fn pending_owner_transfers_once_and_completion_authenticates_issuer_and_epoch() {
+        let mut cleanup = CleanupProtocol::new();
+        let mut other = CleanupProtocol::new();
+        cleanup.defer();
+        assert!(matches!(cleanup.observe(|_| true), Obs::SelectOwner));
+        let claim = cleanup.claim(1, 7).unwrap();
+        let foreign = other.claim(2, 7).unwrap();
+        assert!(cleanup.claim(1, 7).is_none());
+        cleanup.defer();
+        assert!(matches!(cleanup.observe(|epoch| epoch == 7), Obs::Running));
+        assert!(matches!(cleanup.observe(|epoch| epoch == 8), Obs::Stale));
+        assert!(!cleanup.complete(1, &foreign, |_| true, Outcome::Drained));
+        assert!(!cleanup.complete(2, &claim, |_| true, Outcome::Drained));
+        assert!(!cleanup.complete(1, &claim, |epoch| epoch == 8, Outcome::Drained));
+        assert!(cleanup.complete(1, &claim, |epoch| epoch == 7, Outcome::Retained));
+        assert!(matches!(cleanup.observe(|_| true), Obs::Retained(7)));
+        assert!(!cleanup.complete(1, &claim, |_| true, Outcome::Drained));
+        assert!(cleanup.claim(1, 8).is_none());
+    }
+}

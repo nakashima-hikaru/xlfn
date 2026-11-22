@@ -27,19 +27,19 @@ features = [
 
 [features]
 default = []
-serde = ["serde/derive"]
+serde = ["serde/derive", "xlfn-engine/serde"]
 jiff = ["dep:jiff"]
 async = ["dep:futures-util"]
 async-builtin = ["async", "dep:async-task", "dep:crossbeam-deque"]
 # Enables the RTD/COM subsystem and its add-in capability surface.
-rtd = ["dep:indexmap", "dep:xlfn-services"]
+rtd = ["dep:indexmap", "dep:xlfn-services", "xlfn-services/rtd"]
 # Formula handles use the private Excel RTD transport internally, but do not
 # expose the generic RTD subscription capability.
-handles = ["dep:blake3", "dep:constant_time_eq", "dep:getrandom", "dep:indexmap", "dep:papaya"]
-cache = ["dep:indexmap", "dep:papaya", "dep:quick_cache"]
+handles = ["dep:blake3", "dep:constant_time_eq", "dep:getrandom", "dep:indexmap", "dep:papaya", "dep:xlfn-services", "xlfn-services/rtd"]
+cache = ["dep:xlfn-services", "xlfn-services/cache"]
 refinement = ["serde/derive"]
 # Internal instrumentation for production-path benchmarks.
-bench-internals = ["handles", "xlfn-sys/abi-probe"]
+bench-internals = ["handles", "xlfn-sys/abi-probe", "xlfn-services?/bench-internals"]
 
 [[bench]]
 name = "async_task_drain"
@@ -182,15 +182,6 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-link.workspace = true
-
-# Linux portability/Miri uses Quick Cache's unsynchronized policy behind the
-# kernel's non-poisoning mutex. Other hosts use the concurrent parking_lot backend.
-# This avoids both the old backend's Miri limitations and std RwLock poisoning.
-[target.'cfg(target_os = "linux")'.dependencies]
-quick_cache = { workspace = true, optional = true }
-
-[target.'cfg(not(target_os = "linux"))'.dependencies]
-quick_cache = { workspace = true, features = ["parking_lot"], optional = true }
 
 [dev-dependencies]
 blake3.workspace = true

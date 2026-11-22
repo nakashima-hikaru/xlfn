@@ -1203,10 +1203,10 @@ impl<D: RtdDeliveryPolicy> Channel<D> {
         if let Some(error) = failure.as_ref() {
             crate::diagnostics::report_no_unwind(
                 "RTD producer",
-                &XllError::RtdProducerFailure {
-                    topic: format!("{:?}", TopicDiagnostic(topic)),
-                    source: Box::new(error.clone()),
-                },
+                &crate::error::construct::rtd_producer_failure(
+                    format!("{:?}", TopicDiagnostic(topic)),
+                    Box::new(error.clone()),
+                ),
             );
         }
     }
@@ -1912,7 +1912,7 @@ mod tests {
                     let sender = sender_rx.recv_timeout(DEADLINE).unwrap();
                     assert!(sender.wait_closed(DEADLINE));
                     let event = events.recv_timeout(DEADLINE).unwrap();
-                    let XllError::RtdProducerFailure { topic, source } = event else {
+                    let XllError::RtdProducerFailure { topic, source, .. } = event else {
                         panic!("missing producer diagnostic context");
                     };
                     assert_eq!(topic, r#"["diagnostic-channel-policy", "引用\"\n"]"#);

@@ -13,6 +13,6 @@ fn remember_same_type(
 }
 
 fn resolve_same_type(registry: &CacheRegistry, endpoint: &CacheEndpoint<u64, String>) {
-    let _: crate::XllResult<NonNull<StoredCache<(), u64, String>>> =
+    let _: super::XllResult<NonNull<StoredCache<(), u64, String>>> =
         registry.resolve_cache_uncached(endpoint);
 }

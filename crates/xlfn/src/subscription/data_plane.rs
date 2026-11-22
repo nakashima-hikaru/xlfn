@@ -640,9 +640,9 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
         self.ensure_open()?;
         if shard.active_by_topic.contains_key(&topic_id) {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::TOPIC_ID_DUPLICATE,
-            });
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::TOPIC_ID_DUPLICATE,
+            ));
         }
         if let std::collections::hash_map::Entry::Vacant(topic_entry) = shard.topic_by_id.entry(id)
         {
@@ -665,9 +665,9 @@ impl<H: SubscriptionHost> PublishCore<H> {
             );
             Ok(())
         } else {
-            Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::TOPIC_KEY_DUPLICATE,
-            })
+            Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::TOPIC_KEY_DUPLICATE,
+            ))
         }
     }
 

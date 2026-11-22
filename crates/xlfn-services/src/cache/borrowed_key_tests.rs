@@ -239,8 +239,8 @@ fn borrowed_misses_reject_reentry_but_resident_hits_remain_available() {
             let error = cache
                 .get_or_try_insert_borrowed("cold", || Ok(2))
                 .unwrap_err();
-            assert!(matches!(error, XllError::Internal { diagnostic_id }
-            if diagnostic_id == crate::diagnostics::id::DiagnosticId::CACHE_REENTRANT));
+            assert!(matches!(error, XllError::Internal { diagnostic_id, .. }
+            if diagnostic_id == CACHE_REENTRANT));
             Ok(3)
         })
         .unwrap();

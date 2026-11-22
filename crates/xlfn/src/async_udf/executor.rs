@@ -1,8 +1,8 @@
 //! Executor extension contract independent of task lifecycle and delivery.
 
 use super::AsyncTask;
+use crate::XllResult;
 use crate::addin_impl::NoAsyncExecutor;
-use crate::{XllError, XllResult};
 use std::future::Future;
 
 /// Schedules framework-owned async tasks on an application-selected executor.
@@ -60,9 +60,9 @@ impl AsyncExecutor for NoAsyncExecutor {
     }
 
     fn reserve(&self) -> XllResult<Self::Reservation> {
-        Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_SPAWN,
-        })
+        Err(crate::error::construct::internal(
+            crate::diagnostics::catalog::ASYNC_SPAWN,
+        ))
     }
 
     fn submit<F>(&self, reservation: Self::Reservation, _task: AsyncTask<F>)

@@ -1,4 +1,15 @@
-//! Host-independent accounting used by xlfn's subscription services.
+//! Host-independent service backends used by xlfn.
+
+pub mod handle_objects;
+
+#[cfg(feature = "cache")]
+pub mod cache;
+#[cfg(feature = "rtd")]
+pub mod rtd;
+#[cfg(feature = "cache")]
+use xlfn_engine::panic_boundary;
+#[cfg(feature = "cache")]
+use xlfn_kernel::sync;
 use xlfn_kernel::sync::Mutex;
 
 #[derive(Clone, Copy, Default, Debug, Eq, PartialEq)]
