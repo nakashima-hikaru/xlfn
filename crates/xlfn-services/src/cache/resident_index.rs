@@ -277,6 +277,11 @@ where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
+    /// The keyed fingerprint shared with the flight table for this request.
+    pub(super) const fn fingerprint(&self) -> u64 {
+        self.hash
+    }
+
     #[inline]
     pub(super) fn get<Q>(&self, key: &Q) -> Option<Entry<V>>
     where

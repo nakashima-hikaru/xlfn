@@ -30,7 +30,7 @@ use crate::sync::{Condvar, Mutex};
 use crossbeam_utils::CachePadded;
 use indexmap::map::{RawEntryApiV1, raw_entry_v1::RawEntryMut};
 use resident_index::{PreparedResident, ResidentEntry, ResidentIndex};
-use rustc_hash::{FxBuildHasher, FxHasher};
+use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
 use std::any::{Any, TypeId};
 use std::cell::{Cell, RefCell};
@@ -902,17 +902,6 @@ impl<K, V> Flight<K, V> {
             changed: Condvar::new(),
         }
     }
-}
-
-fn flight_hash_for<Q: Hash + ?Sized>(key: &VersionedKeyRef<'_, Q>) -> u64 {
-    let mut hasher = FxHasher::default();
-    key.hash(&mut hasher);
-    hasher.finish()
-}
-
-#[cfg(test)]
-fn flight_hash<K: Hash>(key: &VersionedKey<K>) -> u64 {
-    flight_hash_for(&key.as_ref())
 }
 
 /// Key equality is needed only while admitting a caller. Once registered,
@@ -1864,12 +1853,10 @@ where
             return Err(internal(CACHE_REENTRANT));
         }
 
-        // Distinct from the index-specific keyed hash. Compute only on a miss,
-        // outside the coordination lock, and keep across ownership and retries.
-        let hash = flight_hash_for(&VersionedKeyRef {
-            epoch,
-            key: key.get(),
-        });
+        // Share the per-cache keyed fingerprint with the resident index.
+        // Borrowed ownership and retries preserve both the key and epoch;
+        // the flight table still checks epoch and Eq after a fingerprint match.
+        let hash = resident_request.fingerprint();
         'outer: loop {
             let (flight, is_leader) = {
                 let lookup = key.get();
@@ -2044,7 +2031,7 @@ where
         epoch: cache.generation.snapshot(),
         key,
     };
-    let hash = flight_hash(&key);
+    let hash = cache.index.prepare(&key.as_ref()).fingerprint();
     Arc::clone(cache.flights.shard(hash).lock().get(hash, &key).unwrap())
 }
 

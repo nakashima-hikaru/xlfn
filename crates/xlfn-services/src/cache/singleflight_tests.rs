@@ -46,7 +46,7 @@ fn abandoned_leader_detaches_before_follower_retries() {
         epoch: cache.generation.snapshot(),
         key: 7,
     };
-    let hash = flight_hash(&key);
+    let hash = cache.index.prepare(&key.as_ref()).fingerprint();
     let flight = Arc::new(Flight::new(key, hash));
     cache
         .flights
@@ -156,7 +156,9 @@ fn colliding_flights_remove_by_identity_after_table_growth() {
                 fault: StdArc::clone(&fault),
             },
         };
-        let hash = flight_hash(&key);
+        // Exercise a full fingerprint collision independently of the random
+        // seed or the byte stream emitted by the fixture key.
+        let hash = 0_u64;
         assert!(flights.get(hash, &key).is_none());
         let flight = Arc::new(Flight::new(key, hash));
         flights.insert_unique(Arc::clone(&flight));
@@ -216,10 +218,16 @@ fn coordination_uses_both_hash_halves_without_changing_key_identity() {
 fn unrelated_coordination_shard_does_not_block_a_cold_miss() {
     let cache = CalculationCache::<u64, u64>::new(crate::cache::CacheBudget::weight_units(1024));
     let epoch = cache.generation.snapshot();
-    let blocked_hash = flight_hash(&VersionedKey { epoch, key: 0_u64 });
+    let fingerprint = |key| {
+        cache
+            .index
+            .prepare(&VersionedKeyRef { epoch, key: &key })
+            .fingerprint()
+    };
+    let blocked_hash = fingerprint(0_u64);
     let free_key = (1_u64..)
         .find(|&key| {
-            let hash = flight_hash(&VersionedKey { epoch, key });
+            let hash = fingerprint(key);
             FlightRegistry::<u64, u64>::shard_index(hash)
                 != FlightRegistry::<u64, u64>::shard_index(blocked_hash)
         })
@@ -251,7 +259,7 @@ fn clear_keeps_old_followers_and_new_epoch_flights_independent() {
         epoch: old_epoch,
         key: 7_u64,
     };
-    let old_hash = flight_hash(&old_key);
+    let old_hash = cache.index.prepare(&old_key.as_ref()).fingerprint();
     std::thread::scope(|scope| {
         let (started_tx, started_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
