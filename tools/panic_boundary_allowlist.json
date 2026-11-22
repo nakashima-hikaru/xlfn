@@ -446,5 +446,13 @@
     "count": 1,
     "category": "test",
     "reason": "Standalone model catches an intentional panic to verify pinned linked frames pop before reuse."
+  },
+  {
+    "path": "crates/xlfn-kernel/src/drain_gate.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn abandoning_registered_wait_clears_notification",
+    "code": "let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes the fixed test-only string panic after arming the wait bit to verify its unwind cleanup."
   }
 ]

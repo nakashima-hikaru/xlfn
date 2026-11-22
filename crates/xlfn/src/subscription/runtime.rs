@@ -3,7 +3,9 @@
     reason = "subscription runtime resolves stable Box-owned server arena entries through non-owning pointers"
 )]
 
-use super::catalog::{ConnectionTicket, PreparationFinish, SubscriptionCatalog, SubscriptionEntry};
+use super::catalog::{
+    ConnectionTicket, PreparationFinish, PrepareTicket, SubscriptionCatalog, SubscriptionEntry,
+};
 use super::data_plane::PublishCore;
 use super::disconnect::OwnedSubscription;
 use super::host::SubscriptionHost;
@@ -263,31 +265,27 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 });
             }
 
-            let epoch = entry.preparation_epoch();
-            catalog
+            let ticket = catalog
                 .with_entry(existing_id, SubscriptionEntry::add_reservation)
                 .ok_or(XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN,
                 })??;
 
-            return Ok(PreparedSubscription::reserved(
-                self,
-                existing_id,
-                existing_key,
-                epoch,
-            ));
+            return Ok(PreparedSubscription::reserved(self, existing_key, ticket));
         }
 
-        let (id, key) = catalog.insert_pending(self.runtime_id, source.id, topic, self.limits)?;
+        let (ticket, key) =
+            catalog.insert_pending(self.runtime_id, source.id, topic, self.limits)?;
 
-        Ok(PreparedSubscription::reserved(self, id, key, 0))
+        Ok(PreparedSubscription::reserved(self, key, ticket))
     }
 
-    fn finish_preparation(&self, id: SubscriptionId, epoch: u64, committed: bool) {
+    fn finish_preparation(&self, ticket: PrepareTicket, committed: bool) {
+        let id = ticket.id();
         {
             let mut catalog = self.catalog.lock();
             let Some(finish) =
-                catalog.with_entry(id, |entry| entry.finish_preparation(epoch, committed))
+                catalog.with_entry(id, |entry| entry.finish_preparation(ticket, committed))
             else {
                 return;
             };
@@ -756,15 +754,14 @@ struct PendingPreparation<
     C: crate::RtdSourceCatalog<E>,
 > {
     runtime: &'runtime SubscriptionRuntime<H, E, C>,
-    id: SubscriptionId,
-    epoch: u64,
+    ticket: PrepareTicket,
 }
 
 impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Rollback
     for PendingPreparation<'_, H, E, C>
 {
     fn rollback(self) {
-        self.runtime.finish_preparation(self.id, self.epoch, false);
+        self.runtime.finish_preparation(self.ticket, false);
     }
 }
 
@@ -785,18 +782,16 @@ impl<'runtime, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatal
 {
     fn reserved(
         runtime: &'runtime SubscriptionRuntime<H, E, C>,
-        id: SubscriptionId,
         key: SubscriptionKey,
-        epoch: u64,
+        ticket: PrepareTicket,
     ) -> Self {
         Self {
             #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
-            id,
+            id: ticket.id(),
             key,
             obligation: PreparationObligation::Reserved(RollbackGuard::new(PendingPreparation {
                 runtime,
-                id,
-                epoch,
+                ticket,
             })),
         }
     }
@@ -814,8 +809,8 @@ impl<'runtime, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatal
 
     pub(crate) fn commit(self) {
         if let PreparationObligation::Reserved(reservation) = self.obligation {
-            let PendingPreparation { runtime, id, epoch } = reservation.complete();
-            runtime.finish_preparation(id, epoch, true);
+            let PendingPreparation { runtime, ticket } = reservation.complete();
+            runtime.finish_preparation(ticket, true);
         }
     }
 

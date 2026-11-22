@@ -101,58 +101,112 @@ pub(super) struct Scoped<B> {
     generation: crate::generation::RuntimeGeneration,
 }
 
+/// The only distinction between the launch paths is the task body produced by
+/// user preparation and how that body is turned into a reserved task.
+pub(super) trait AsyncStart<A: crate::Addin> {
+    type Body;
+
+    fn start(
+        self,
+        call: &crate::runtime::CallGuard<'_, A>,
+        lease: crate::generation::ExecutionLease<A>,
+        token: CancellationToken,
+    ) -> XllResult<Self::Body>;
+
+    fn commit<O: CompletionObserver + Send + 'static>(
+        reservation: ReservedLaunch<'_, '_, A, Self::Body, O>,
+    );
+}
+
+pub(super) struct PlainStart<S>(pub(super) S);
+
+impl<A, S, F, T> AsyncStart<A> for PlainStart<S>
+where
+    A: crate::Addin,
+    S: FnOnce(
+        &crate::runtime::CallGuard<'_, A>,
+        crate::generation::ExecutionLease<A>,
+        CancellationToken,
+    ) -> XllResult<F>,
+    F: Future<Output = XllResult<T>> + Send + 'static,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
+{
+    type Body = Plain<F>;
+
+    fn start(
+        self,
+        call: &crate::runtime::CallGuard<'_, A>,
+        lease: crate::generation::ExecutionLease<A>,
+        token: CancellationToken,
+    ) -> XllResult<Self::Body> {
+        (self.0)(call, lease, token).map(Plain)
+    }
+
+    fn commit<O: CompletionObserver + Send + 'static>(
+        reservation: ReservedLaunch<'_, '_, A, Self::Body, O>,
+    ) {
+        reservation.commit();
+    }
+}
+
+#[cfg(feature = "handles")]
+pub(super) struct ScopedStart<S, T>(S, std::marker::PhantomData<fn() -> T>);
+
+#[cfg(feature = "handles")]
+impl<S, T> ScopedStart<S, T> {
+    pub(super) fn new(start: S) -> Self {
+        Self(start, std::marker::PhantomData)
+    }
+}
+
+#[cfg(feature = "handles")]
+impl<A, S, B, T> AsyncStart<A> for ScopedStart<S, T>
+where
+    A: crate::Addin,
+    S: FnOnce(
+        &crate::runtime::CallGuard<'_, A>,
+        crate::generation::ExecutionLease<A>,
+        CancellationToken,
+    ) -> XllResult<B>,
+    B: HandleScopedBuilder<T> + Send + 'static,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
+{
+    type Body = Scoped<B>;
+
+    fn start(
+        self,
+        call: &crate::runtime::CallGuard<'_, A>,
+        lease: crate::generation::ExecutionLease<A>,
+        token: CancellationToken,
+    ) -> XllResult<Self::Body> {
+        let generation = lease.generation();
+        (self.0)(call, lease, token).map(|build| Scoped { build, generation })
+    }
+
+    fn commit<O: CompletionObserver + Send + 'static>(
+        reservation: ReservedLaunch<'_, '_, A, Self::Body, O>,
+    ) {
+        reservation.commit::<T>();
+    }
+}
+
 impl<'guard, 'call, A: crate::Addin> LaunchOwner<'guard, 'call, A> {
     pub(super) fn token(&self) -> CancellationToken {
         self.token
     }
 
-    pub(super) fn prepare<F, O: CompletionObserver>(
+    pub(super) fn prepare<S: AsyncStart<A>, O: CompletionObserver>(
         self,
-        start: impl FnOnce(
-            &crate::runtime::CallGuard<'_, A>,
-            crate::generation::ExecutionLease<A>,
-            CancellationToken,
-        ) -> XllResult<F>,
+        start: S,
         responder: ExcelAsyncResponder,
         observation: O,
-    ) -> Option<PreparedLaunch<'guard, 'call, A, Plain<F>, O>> {
+    ) -> Option<PreparedLaunch<'guard, 'call, A, S::Body, O>> {
         // Bind the copied responder before any user preparation can run.
         let delivery = PendingDelivery::new(responder, self.token, observation);
         let body = catch_no_unwind(AssertUnwindSafe(|| {
             self.calculation.preflight()?;
             let lease = self.guard.try_execution_lease()?;
-            start(self.guard, lease, self.token).map(Plain)
-        }))
-        .unwrap_or(Err(XllError::Panic));
-        match body {
-            Ok(body) => Some(PreparedLaunch {
-                owner: self,
-                capture: CaptureOwner::new(body, delivery),
-            }),
-            Err(error) => {
-                delivery.fail(error);
-                None
-            }
-        }
-    }
-
-    #[cfg(feature = "handles")]
-    pub(super) fn prepare_scoped<B, O: CompletionObserver>(
-        self,
-        start: impl FnOnce(
-            &crate::runtime::CallGuard<'_, A>,
-            crate::generation::ExecutionLease<A>,
-            CancellationToken,
-        ) -> XllResult<B>,
-        responder: ExcelAsyncResponder,
-        observation: O,
-    ) -> Option<PreparedLaunch<'guard, 'call, A, Scoped<B>, O>> {
-        let delivery = PendingDelivery::new(responder, self.token, observation);
-        let body = catch_no_unwind(AssertUnwindSafe(|| {
-            self.calculation.preflight()?;
-            let lease = self.guard.try_execution_lease()?;
-            let generation = lease.generation();
-            start(self.guard, lease, self.token).map(|build| Scoped { build, generation })
+            start.start(self.guard, lease, self.token)
         }))
         .unwrap_or(Err(XllError::Panic));
         match body {
@@ -213,8 +267,8 @@ impl<A: crate::Addin, B, O: CompletionObserver + Send + 'static>
         let (Scoped { build, generation }, delivery) = self.capture.into_parts();
         let task = UnbuiltScopedTask::<B, O, T>::with_delivery(build, delivery);
         let future = async move {
-            let brand = crate::handle::GenerationLeaseBrand::new();
-            let scope = AsyncTaskScope::new(generation, &brand);
+            let pins = crate::handle::TaskPins::new();
+            let scope = AsyncTaskScope::new(generation, &pins);
             let (future, delivery) = task.build_task(scope);
             UnbuiltScopedTask::<B, O, T>::deliver(delivery, future).await;
         };
@@ -258,6 +312,7 @@ where
     type Output = XllResult<T>;
     type Delivery = PendingDelivery<O>;
 
+    #[allow(unsafe_code, reason = "Launch exclusively owns the scoped evaluation")]
     fn build_task<'generation>(
         self,
         scope: AsyncTaskScope<'generation>,
@@ -270,6 +325,10 @@ where
             Ok(future) => futures_util::future::Either::Left(future),
             Err(_) => futures_util::future::Either::Right(std::future::ready(Err(XllError::Panic))),
         };
+        // SAFETY: the short-lived scope is created for this single builder.
+        // Only the returned evaluation can access its projections. The
+        // delivery capability and XllResult<T> cannot borrow the scope.
+        let future = unsafe { crate::async_udf::task_scope::with_pin_cleanup(scope, future) };
         (future, delivery)
     }
 

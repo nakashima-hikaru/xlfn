@@ -1,9 +1,10 @@
 use super::completion::{AsyncCompletion, OwnedCompletionOutcome, OwnedDeliveryOutcome};
 use crate::XllError;
 use crate::cancellation::CancellationToken;
+#[cfg(test)]
+use crate::execution::{CallMetadata, CallTimer};
 use crate::execution::{
-    CallMetadata, CallOutcome, CallTimer, UdfCompletionOutcome, UdfDeliveryOutcome, UdfLayerGuard,
-    UdfTraceMetadata, safe_exit, trace,
+    CallObservation, CallOutcome, UdfCompletionOutcome, UdfDeliveryOutcome, UdfLayerGuard,
 };
 use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
@@ -29,18 +30,21 @@ pub(crate) struct AsyncObservation<G: UdfLayerGuard> {
 }
 
 struct ActiveUdfInstrumentation<G: UdfLayerGuard> {
-    udf_id: &'static str,
-    excel_name: &'static str,
-    call_id: crate::execution::CallId,
-    calculation_id: crate::execution::CalculationId,
-    concurrent_calls: usize,
-    timer: CallTimer,
-    layers: Option<G>,
-    trace_enabled: bool,
+    observed: CallObservation<G>,
     cancellation: CancellationToken,
 }
 
 impl<G: UdfLayerGuard> AsyncObservation<G> {
+    pub(crate) fn from_call(observed: CallObservation<G>, cancellation: CancellationToken) -> Self {
+        Self {
+            active: RollbackGuard::new(ActiveUdfInstrumentation {
+                observed,
+                cancellation,
+            }),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn new(
         metadata: &CallMetadata,
         timer: CallTimer,
@@ -48,19 +52,10 @@ impl<G: UdfLayerGuard> AsyncObservation<G> {
         trace_enabled: bool,
         cancellation: CancellationToken,
     ) -> Self {
-        Self {
-            active: RollbackGuard::new(ActiveUdfInstrumentation {
-                udf_id: metadata.udf_id,
-                excel_name: metadata.excel_name,
-                call_id: metadata.call_id,
-                calculation_id: metadata.calculation_id,
-                concurrent_calls: metadata.concurrent_calls,
-                timer,
-                layers,
-                trace_enabled,
-                cancellation,
-            }),
-        }
+        Self::from_call(
+            CallObservation::for_test(metadata, timer, layers, trace_enabled),
+            cancellation,
+        )
     }
 }
 
@@ -93,57 +88,14 @@ fn finish_active<G: UdfLayerGuard>(
     active: ActiveUdfInstrumentation<G>,
     completion: &AsyncCompletion,
 ) {
-    let ActiveUdfInstrumentation {
-        udf_id,
-        excel_name,
-        call_id,
-        calculation_id,
-        concurrent_calls,
-        timer,
-        layers,
-        trace_enabled,
-        cancellation: _,
-    } = active;
-
-    let outcome = call_outcome(completion, timer.elapsed());
-
-    if let Some(layers) = layers {
-        safe_exit(layers, &outcome);
-    }
-    if trace_enabled {
-        let metadata = UdfTraceMetadata {
-            udf_id,
-            excel_name,
-            call_id,
-            calculation_id,
-            concurrent_calls,
-        };
-        trace(&metadata, &outcome);
-    }
+    let outcome = call_outcome(completion, active.observed.elapsed());
+    active.observed.finish(&outcome);
 }
 
 impl crate::execution::LayerRejection for (AsyncCompletion, std::time::Duration) {
     fn outcome(&self) -> CallOutcome<'_> {
         call_outcome(&self.0, self.1)
     }
-}
-
-/// A layer can reject before ownership of a complete guard tuple exists.
-/// That invocation still has an observed response and trace outcome.
-pub(crate) fn trace_rejected_launch(
-    metadata: &CallMetadata,
-    duration: std::time::Duration,
-    completion: &AsyncCompletion,
-) {
-    let outcome = call_outcome(completion, duration);
-    let metadata = UdfTraceMetadata {
-        udf_id: metadata.udf_id,
-        excel_name: metadata.excel_name,
-        call_id: metadata.call_id,
-        calculation_id: metadata.calculation_id,
-        concurrent_calls: metadata.concurrent_calls,
-    };
-    trace(&metadata, &outcome);
 }
 
 fn call_outcome(completion: &AsyncCompletion, duration: std::time::Duration) -> CallOutcome<'_> {

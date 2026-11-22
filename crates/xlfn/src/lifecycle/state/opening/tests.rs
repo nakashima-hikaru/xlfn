@@ -1,4 +1,4 @@
-use super::super::{ClosedState, LifecycleCoordinator, LifecycleState};
+use super::super::{LifecycleCoordinator, LifecycleState, StopGoal, StopRecord, StoppingState};
 use super::OpenStart;
 use crate::XllError;
 use crate::diagnostics::id::DiagnosticId;
@@ -71,10 +71,11 @@ fn miri_closed_finalization_cannot_be_mistaken_for_idle_before_start() {
     let removal = RemovalAttemptId::new(7).unwrap();
     {
         let mut core = coordinator.core.lock();
-        core.state = LifecycleState::Closed(ClosedState::Finalizing {
-            attempt: removal,
-            quarantine_requested: false,
-        });
+        core.state = LifecycleState::Stopping(StoppingState::Finalizing(StopRecord::new(
+            removal,
+            crate::module_runtime::isolated_closing_for_test().id(),
+            StopGoal::Remove,
+        )));
         core.host_intent = HostLifecycleIntent::ExplicitRemovalComplete;
         core.removal_epoch = 3;
         core.next_lifecycle_attempt = 17;

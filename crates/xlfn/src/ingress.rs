@@ -354,6 +354,9 @@ impl ExportIngress {
     pub(crate) fn opening_publication(
         &self,
     ) -> Result<OpeningPublication<'_>, OpeningPublicationLost> {
+        if crate::return_abi::numeric::Fp12CallGuard::on_current_thread() {
+            return Err(OpeningPublicationLost);
+        }
         let guard = self
             .opening_lock
             .lock()
@@ -536,6 +539,12 @@ impl ExportIngress {
                 message: "injected export drain preparation failure".into(),
             });
         }
+        if crate::return_abi::numeric::Fp12CallGuard::on_current_thread() {
+            return Err(crate::XllError::Native {
+                code: -1,
+                message: "export drain would wait for the calling thread's active export".into(),
+            });
+        }
         #[cfg(windows)]
         {
             use crate::drain_wait::{UnstartedDrain, drain_with_com_dispatch};
@@ -669,6 +678,31 @@ impl Drop for ExportCallGuard<'_> {
 mod tests {
     use super::*;
     use std::sync::{Arc, mpsc};
+
+    #[test]
+    fn open_and_close_refuse_to_wait_for_an_export_on_their_own_thread() {
+        let ingress = ExportIngress::new();
+        ingress.begin_opening();
+        {
+            let _sta_udf = crate::return_abi::numeric::Fp12CallGuard::enter();
+            let rejected = ingress.enter_with(|| {});
+            assert!(ingress.opening_publication().is_err());
+            drop(rejected);
+        }
+        ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
+        let sta_udf = crate::return_abi::numeric::Fp12CallGuard::enter();
+        let admitted = ingress.enter_with(|| {});
+        ingress.begin_close_with(|| {});
+        assert!(matches!(
+            ingress.seal_and_drain(),
+            Err(crate::XllError::Native { .. })
+        ));
+        assert_eq!(ingress.phase(), PHASE_CLOSING);
+        drop(admitted);
+        drop(sta_udf);
+        assert!(ingress.seal_and_drain().is_ok());
+        assert_eq!(ingress.phase(), PHASE_CLOSED);
+    }
 
     #[test]
     fn seal_is_linearized_with_the_last_active_guard() {

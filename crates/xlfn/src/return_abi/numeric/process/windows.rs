@@ -1,10 +1,10 @@
 //! One process-owned mapping for all loaded copies of the accounting protocol.
 //!
 //! Each loaded image keeps its own view of the same physical atomic counters.
-//! Each view and its section handle remain until process exit: published FP12
-//! allocations may outlive an image, and later loads must find the same name.
-//! One page of virtual metadata and one handle per physical image load are
-//! deliberate; no address from shared memory is ever dereferenced.
+//! Views remain until process exit because published FP12 allocations can
+//! outlive an image. A shared atomic elects a single section handle to retain
+//! the name across all future images or physical reloads; later attachments
+//! close their temporary handles. No address from shared memory is dereferenced.
 //!
 //! A protected owner/SYSTEM DACL excludes other users and is checked even on
 //! pre-existing objects. Cooperating modules and processes with the same user
@@ -82,9 +82,11 @@ impl Drop for MappingHandle {
 /// A complete mapped view. Partial construction is owned by MappingHandle;
 /// every value of this type has a real view, including during error cleanup.
 struct Mapping {
-    _handle: MappingHandle,
-    view: NonNull<c_void>,
+    view: MappingView,
+    handle: MappingHandle,
 }
+
+struct MappingView(NonNull<c_void>);
 
 impl Mapping {
     fn open(name: &[u16]) -> XllResult<Self> {
@@ -121,19 +123,19 @@ impl Mapping {
         };
         let view = NonNull::new(view).ok_or_else(|| os_error("MapViewOfFile"))?;
         Ok(Self {
-            _handle: handle,
-            view,
+            view: MappingView(view),
+            handle,
         })
     }
 
     fn view(&self) -> NonNull<c_void> {
-        self.view
+        self.view.0
     }
 
     /// Validate before transferring both resources to the process lifetime.
     #[allow(
         clippy::mem_forget,
-        reason = "FP12 output blocks and future DLL loads require the live named section"
+        reason = "FP12 charges require retained views and the process needs one owned section handle"
     )]
     fn initialize_and_retain(self) -> XllResult<&'static ProcessState> {
         let pointer = self.view().cast::<ProcessState>();
@@ -150,13 +152,13 @@ impl Mapping {
         // the output is a writable complete MEMORY_BASIC_INFORMATION.
         let queried = unsafe {
             VirtualQuery(
-                self.view.as_ptr(),
+                self.view().as_ptr(),
                 &mut information,
                 size_of::<MEMORY_BASIC_INFORMATION>(),
             )
         };
         if queried != size_of::<MEMORY_BASIC_INFORMATION>()
-            || information.BaseAddress != self.view.as_ptr()
+            || information.BaseAddress != self.view().as_ptr()
             || information.RegionSize < size_of::<ProcessState>()
             || information.State != MEM_COMMIT as u32
             || information.Type != MEM_MAPPED as u32
@@ -169,21 +171,28 @@ impl Mapping {
         // SAFETY: the view owns sizeof(ProcessState) writable bytes, aligned
         // above. Its atomic fields accept all bit patterns; initialization
         // never resets live accounting from another attachment.
-        unsafe { pointer.as_ref() }.initialize()?;
-        // A view keeps the pages alive, but the name needs a section handle.
-        // Keep both so the next DLL attachment sees the same accounting.
-        std::mem::forget(self);
+        let state = unsafe { pointer.as_ref() };
+        state.initialize()?;
+        let anchors_section = state.claim_section_anchor()?;
+        let Self { view, handle } = self;
+        // Winning the election commits the valid handle to process lifetime.
+        // There is no fallible step between election and this transfer. A
+        // losing attachment can close its temporary handle: the elected
+        // owner already holds a separate handle on the same section.
+        if anchors_section {
+            std::mem::forget(handle);
+        }
+        std::mem::forget(view);
         // SAFETY: the exact initialized view was just permanently retained.
         Ok(unsafe { pointer.as_ref() })
     }
 }
 
-impl Drop for Mapping {
+impl Drop for MappingView {
     fn drop(&mut self) {
         // SAFETY: this owner retains its view and has issued no escaping
-        // reference. Failed unmapping conservatively retains the OS view;
-        // the handle field still performs its independent best-effort close.
-        let _ = unsafe { UnmapViewOfFile(self.view.as_ptr()) };
+        // reference. An unmapping failure does not transfer handle ownership.
+        let _ = unsafe { UnmapViewOfFile(self.0.as_ptr()) };
     }
 }
 

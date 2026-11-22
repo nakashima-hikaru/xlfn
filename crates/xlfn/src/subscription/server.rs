@@ -597,7 +597,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 .collect::<Vec<_>>();
             for id in pending_ids {
                 let Some(should_remove) = catalog.with_entry(id, |entry| {
-                    entry.reset_for_server_termination(resources.server.generation)
+                    entry.revoke_for_server_termination(resources.server.generation)
                         && entry.can_remove()
                 }) else {
                     continue;

@@ -17,15 +17,30 @@ enum PendingCommitment {
     Committed,
 }
 
-struct ActiveReservation {
-    reservations: NonZeroUsize,
+/// A transport key's identity is never reused, even when the same formula
+/// starts another preparation after its old connection was revoked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct EntryIncarnation {
+    runtime: u64,
+    id: SubscriptionId,
+}
+
+pub(super) struct PrepareTicket(EntryIncarnation);
+
+impl PrepareTicket {
+    pub(super) fn id(&self) -> SubscriptionId {
+        self.0.id
+    }
 }
 
 enum SubscriptionPhase {
     Pending {
         reservations: Option<NonZeroUsize>,
         server: Option<ServerGeneration>,
-        commitment: PendingCommitment,
+    },
+    AwaitConnect {
+        reservations: Option<NonZeroUsize>,
+        server: Option<ServerGeneration>,
     },
     Connecting {
         reservations: Option<NonZeroUsize>,
@@ -36,14 +51,17 @@ enum SubscriptionPhase {
     Active {
         server: ServerGeneration,
         connection: ConnectionGeneration,
-        reservation: Option<ActiveReservation>,
+        reservations: Option<NonZeroUsize>,
     },
+    /// Unindexed and unable to connect. Until all old preparations return,
+    /// this entry still owns its pending and topic-byte quota.
+    Revoked { reservations: Option<NonZeroUsize> },
 }
 
-/// Affine authority issued only when a pending entry begins a connection.
-/// The transaction owns this ticket until commit or rollback; the generations
-/// still have to match because server termination can invalidate the entry.
+/// This affine ticket is issued by the entry which begins the connection;
+/// only its exact incarnation and server/connection generations may use it.
 pub(super) struct ConnectionTicket {
+    entry: EntryIncarnation,
     server: ServerGeneration,
     connection: ConnectionGeneration,
 }
@@ -63,7 +81,7 @@ pub(crate) struct SubscriptionEntry {
     pub(crate) source_id: SourceId,
     pub(crate) topic: RtdTopic,
     phase: SubscriptionPhase,
-    preparation_epoch: u64,
+    incarnation: EntryIncarnation,
 }
 
 impl SubscriptionEntry {
@@ -79,126 +97,121 @@ impl SubscriptionEntry {
         matches!(self.phase, SubscriptionPhase::Active { .. })
     }
 
+    fn is_identifiable(&self) -> bool {
+        !matches!(self.phase, SubscriptionPhase::Revoked { .. })
+    }
+
     pub(crate) fn counts_as_pending(&self) -> bool {
         !matches!(
             self.phase,
             SubscriptionPhase::Active {
-                reservation: None,
+                reservations: None,
                 ..
             }
         )
     }
 
     pub(crate) fn can_remove(&self) -> bool {
-        // A committed preparation can precede ConnectData (or its retry).
-        // Keep that transport key valid even after its last reservation ends;
-        // disconnection/server termination revokes the commitment separately.
         matches!(
             self.phase,
             SubscriptionPhase::Pending {
                 reservations: None,
-                commitment: PendingCommitment::Uncommitted,
                 ..
-            }
+            } | SubscriptionPhase::Revoked { reservations: None }
         )
     }
 
     pub(crate) fn server_generation(&self) -> Option<ServerGeneration> {
         match &self.phase {
-            SubscriptionPhase::Pending { server, .. } => *server,
+            SubscriptionPhase::Pending { server, .. }
+            | SubscriptionPhase::AwaitConnect { server, .. } => *server,
             SubscriptionPhase::Connecting { server, .. }
             | SubscriptionPhase::Active { server, .. } => Some(*server),
+            SubscriptionPhase::Revoked { .. } => None,
         }
     }
 
     pub(crate) fn connection_generation(&self) -> Option<ConnectionGeneration> {
         match &self.phase {
-            SubscriptionPhase::Pending { .. } => None,
+            SubscriptionPhase::Pending { .. }
+            | SubscriptionPhase::AwaitConnect { .. }
+            | SubscriptionPhase::Revoked { .. } => None,
             SubscriptionPhase::Connecting { connection, .. }
             | SubscriptionPhase::Active { connection, .. } => Some(*connection),
         }
     }
 
-    pub(crate) fn add_reservation(&mut self) -> XllResult<()> {
+    pub(super) fn add_reservation(&mut self) -> XllResult<PrepareTicket> {
         let reservations = match &mut self.phase {
             SubscriptionPhase::Pending { reservations, .. }
+            | SubscriptionPhase::AwaitConnect { reservations, .. }
             | SubscriptionPhase::Connecting { reservations, .. } => reservations,
             SubscriptionPhase::Active { .. } => {
                 return Err(XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::ACTIVE_KEY_DUPLICATE,
                 });
             }
+            SubscriptionPhase::Revoked { .. } => return Err(XllError::Closing),
         };
-        let next = reservations
-            .map_or(0, NonZeroUsize::get)
-            .checked_add(1)
-            .ok_or(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::RESERVATION_OVERFLOW,
-            })?;
-        *reservations = Some(NonZeroUsize::new(next).expect("reservation count is non-zero"));
-        Ok(())
+        *reservations = Some(
+            reservations
+                .map_or(Some(NonZeroUsize::MIN), |count| count.checked_add(1))
+                .ok_or(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::RESERVATION_OVERFLOW,
+                })?,
+        );
+        Ok(PrepareTicket(self.incarnation))
     }
 
-    pub(crate) fn preparation_epoch(&self) -> u64 {
-        self.preparation_epoch
-    }
-
-    fn revoke_preparations(&mut self) {
-        self.preparation_epoch = self
-            .preparation_epoch
-            .checked_add(1)
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-    }
-
-    pub(crate) fn finish_preparation(&mut self, epoch: u64, committed: bool) -> PreparationFinish {
-        let committed = committed && epoch == self.preparation_epoch;
-        match &mut self.phase {
-            SubscriptionPhase::Pending {
-                reservations,
-                commitment,
-                ..
-            }
-            | SubscriptionPhase::Connecting {
-                reservations,
-                commitment,
-                ..
-            } => {
-                if committed {
+    pub(super) fn finish_preparation(
+        &mut self,
+        ticket: PrepareTicket,
+        committed: bool,
+    ) -> PreparationFinish {
+        if ticket.0 != self.incarnation {
+            return PreparationFinish::Keep;
+        }
+        let reservations = match &mut self.phase {
+            SubscriptionPhase::Pending { reservations, .. }
+            | SubscriptionPhase::AwaitConnect { reservations, .. }
+            | SubscriptionPhase::Connecting { reservations, .. }
+            | SubscriptionPhase::Active { reservations, .. }
+            | SubscriptionPhase::Revoked { reservations } => reservations,
+        };
+        let Some(count) = *reservations else {
+            xlfn_kernel::invariant::fail_stop();
+        };
+        *reservations = NonZeroUsize::new(count.get() - 1);
+        if committed {
+            match &mut self.phase {
+                SubscriptionPhase::Pending {
+                    reservations,
+                    server,
+                } => {
+                    self.phase = SubscriptionPhase::AwaitConnect {
+                        reservations: *reservations,
+                        server: *server,
+                    };
+                }
+                SubscriptionPhase::Connecting { commitment, .. } => {
                     *commitment = PendingCommitment::Committed;
                 }
-                if let Some(current) = reservations {
-                    if current.get() == 1 {
-                        *reservations = None;
-                    } else {
-                        *current = NonZeroUsize::new(current.get() - 1)
-                            .expect("a remaining reservation is non-zero");
-                    }
-                }
-                if self.can_remove() {
-                    PreparationFinish::Remove
-                } else {
-                    PreparationFinish::Keep
-                }
+                SubscriptionPhase::AwaitConnect { .. }
+                | SubscriptionPhase::Active { .. }
+                | SubscriptionPhase::Revoked { .. } => {}
             }
-            SubscriptionPhase::Active { reservation, .. } => {
-                let Some(active) = reservation else {
-                    return PreparationFinish::Keep;
-                };
-                if active.reservations.get() == 1 {
-                    *reservation = None;
-                    PreparationFinish::Keep
-                } else {
-                    active.reservations = NonZeroUsize::new(active.reservations.get() - 1)
-                        .expect("a remaining reservation is non-zero");
-                    PreparationFinish::Keep
-                }
-            }
+        }
+        if self.can_remove() {
+            PreparationFinish::Remove
+        } else {
+            PreparationFinish::Keep
         }
     }
 
     pub(crate) fn claim_server(&mut self, generation: ServerGeneration) -> XllResult<()> {
         let server = match &mut self.phase {
-            SubscriptionPhase::Pending { server, .. } => server,
+            SubscriptionPhase::Pending { server, .. }
+            | SubscriptionPhase::AwaitConnect { server, .. } => server,
             SubscriptionPhase::Connecting { server, .. }
             | SubscriptionPhase::Active { server, .. } => {
                 if *server != generation {
@@ -209,6 +222,7 @@ impl SubscriptionEntry {
                 }
                 return Ok(());
             }
+            SubscriptionPhase::Revoked { .. } => return Err(XllError::Closing),
         };
         if let Some(existing) = *server {
             if existing != generation {
@@ -230,9 +244,12 @@ impl SubscriptionEntry {
         let (reservations, commitment, existing_server) = match &self.phase {
             SubscriptionPhase::Pending {
                 reservations,
-                commitment,
                 server,
-            } => (*reservations, *commitment, *server),
+            } => (*reservations, PendingCommitment::Uncommitted, *server),
+            SubscriptionPhase::AwaitConnect {
+                reservations,
+                server,
+            } => (*reservations, PendingCommitment::Committed, *server),
             SubscriptionPhase::Connecting { .. } => {
                 return Err(XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::CONNECTION_INFLIGHT,
@@ -243,6 +260,7 @@ impl SubscriptionEntry {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::ACTIVE_KEY_DUPLICATE,
                 });
             }
+            SubscriptionPhase::Revoked { .. } => return Err(XllError::Closing),
         };
         if let Some(existing) = existing_server
             && existing != server
@@ -257,7 +275,11 @@ impl SubscriptionEntry {
             connection,
             commitment,
         };
-        Ok(ConnectionTicket { server, connection })
+        Ok(ConnectionTicket {
+            entry: self.incarnation,
+            server,
+            connection,
+        })
     }
 
     pub(super) fn rollback_connection(&mut self, ticket: &ConnectionTicket) -> bool {
@@ -265,17 +287,25 @@ impl SubscriptionEntry {
             SubscriptionPhase::Connecting {
                 reservations,
                 server,
-                connection: current,
+                connection,
                 commitment,
-            } if *current == ticket.connection && *server == ticket.server => {
-                (*reservations, *server, *commitment)
+            } if ticket.entry == self.incarnation
+                && *connection == ticket.connection
+                && *server == ticket.server =>
+            {
+                (*reservations, Some(*server), *commitment)
             }
             _ => return false,
         };
-        self.phase = SubscriptionPhase::Pending {
-            reservations,
-            server: Some(server),
-            commitment,
+        self.phase = match commitment {
+            PendingCommitment::Uncommitted => SubscriptionPhase::Pending {
+                reservations,
+                server,
+            },
+            PendingCommitment::Committed => SubscriptionPhase::AwaitConnect {
+                reservations,
+                server,
+            },
         };
         true
     }
@@ -285,52 +315,43 @@ impl SubscriptionEntry {
             SubscriptionPhase::Connecting {
                 reservations,
                 server,
-                connection: current,
+                connection,
                 ..
-            } if *current == ticket.connection && *server == ticket.server => {
+            } if ticket.entry == self.incarnation
+                && *connection == ticket.connection
+                && *server == ticket.server =>
+            {
                 (*reservations, *server)
             }
             _ => return false,
         };
-        let reservation = reservations.map(|reservations| ActiveReservation { reservations });
         self.phase = SubscriptionPhase::Active {
             server,
             connection: ticket.connection,
-            reservation,
+            reservations,
         };
         true
     }
 
-    pub(crate) fn reset_for_server_termination(&mut self, server: ServerGeneration) -> bool {
-        match &mut self.phase {
+    pub(crate) fn revoke_for_server_termination(&mut self, server: ServerGeneration) -> bool {
+        let reservations = match &self.phase {
             SubscriptionPhase::Pending {
                 server: current,
-                commitment,
-                ..
-            } if *current == Some(server) => {
-                *current = None;
-                *commitment = PendingCommitment::Uncommitted;
-                self.revoke_preparations();
-                true
-            }
-            SubscriptionPhase::Connecting {
                 reservations,
-                server: current,
-                commitment,
-                ..
-            } if *current == server => {
-                let reservations = *reservations;
-                *commitment = PendingCommitment::Uncommitted;
-                self.phase = SubscriptionPhase::Pending {
-                    reservations,
-                    server: None,
-                    commitment: PendingCommitment::Uncommitted,
-                };
-                self.revoke_preparations();
-                true
             }
-            _ => false,
-        }
+            | SubscriptionPhase::AwaitConnect {
+                server: current,
+                reservations,
+            } if *current == Some(server) => *reservations,
+            SubscriptionPhase::Connecting {
+                server: current,
+                reservations,
+                ..
+            } if *current == server => *reservations,
+            _ => return false,
+        };
+        self.phase = SubscriptionPhase::Revoked { reservations };
+        true
     }
 
     pub(crate) fn cleanup_connection(
@@ -338,41 +359,22 @@ impl SubscriptionEntry {
         server: ServerGeneration,
         connection: ConnectionGeneration,
     ) -> (bool, bool) {
-        match &mut self.phase {
+        let reservations = match &self.phase {
             SubscriptionPhase::Connecting {
                 reservations,
                 server: current_server,
                 connection: current_connection,
                 ..
-            } if *current_server == server && *current_connection == connection => {
-                let reservations = *reservations;
-                self.phase = SubscriptionPhase::Pending {
-                    reservations,
-                    server: None,
-                    commitment: PendingCommitment::Uncommitted,
-                };
-                self.revoke_preparations();
-                (true, self.can_remove())
             }
-            SubscriptionPhase::Active {
+            | SubscriptionPhase::Active {
+                reservations,
                 server: current_server,
                 connection: current_connection,
-                reservation,
-            } if *current_server == server && *current_connection == connection => {
-                let Some(active) = reservation.as_ref() else {
-                    return (true, true);
-                };
-                let reservations = active.reservations;
-                self.phase = SubscriptionPhase::Pending {
-                    reservations: Some(reservations),
-                    server: None,
-                    commitment: PendingCommitment::Uncommitted,
-                };
-                self.revoke_preparations();
-                (true, false)
-            }
-            _ => (false, false),
-        }
+            } if *current_server == server && *current_connection == connection => *reservations,
+            _ => return (false, false),
+        };
+        self.phase = SubscriptionPhase::Revoked { reservations };
+        (true, self.can_remove())
     }
 }
 
@@ -388,7 +390,7 @@ struct PendingInsertPlan<'catalog, 'parts, Part: AsRef<str>> {
     entry: std::collections::hash_map::VacantEntry<'catalog, SubscriptionId, SubscriptionEntry>,
     identity: super::identity::IdentityInsertion<'catalog>,
     topic: BorrowedTopicParts<'parts, Part>,
-    id: SubscriptionId,
+    incarnation: EntryIncarnation,
     key: SubscriptionKey,
     source_id: SourceId,
     next_id: &'catalog mut u64,
@@ -398,7 +400,7 @@ struct PendingInsertPlan<'catalog, 'parts, Part: AsRef<str>> {
     retained_topic_bytes: usize,
 }
 impl<Part: AsRef<str>> PendingInsertPlan<'_, '_, Part> {
-    fn commit(self) -> (SubscriptionId, SubscriptionKey) {
+    fn commit(self) -> (PrepareTicket, SubscriptionKey) {
         // User-supplied AsRef conversion may unwind. No map/accounting mutation
         // occurs until this owner has produced its exact canonical topic.
         let topic = self.topic.into_owned();
@@ -406,17 +408,16 @@ impl<Part: AsRef<str>> PendingInsertPlan<'_, '_, Part> {
         self.entry.insert(SubscriptionEntry {
             source_id: self.source_id,
             topic,
-            preparation_epoch: 0,
+            incarnation: self.incarnation,
             phase: SubscriptionPhase::Pending {
                 reservations: Some(NonZeroUsize::MIN),
                 server: None,
-                commitment: PendingCommitment::Uncommitted,
             },
         });
         *self.next_id = self.next_subscription_id;
         *self.retained_bytes = self.retained_topic_bytes;
         *self.pending_count += 1;
-        (self.id, self.key)
+        (PrepareTicket(self.incarnation), self.key)
     }
 }
 
@@ -474,7 +475,10 @@ impl SubscriptionCatalog {
             entry,
             identity,
             topic,
-            id,
+            incarnation: EntryIncarnation {
+                runtime: runtime_id,
+                id,
+            },
             key,
             source_id,
             next_id: &mut self.next_subscription_id,
@@ -485,13 +489,13 @@ impl SubscriptionCatalog {
         })
     }
 
-    pub(crate) fn insert_pending<Part: AsRef<str>>(
+    pub(super) fn insert_pending<Part: AsRef<str>>(
         &mut self,
         runtime_id: u64,
         source_id: SourceHandleId,
         topic: BorrowedTopicParts<'_, Part>,
         limits: RtdLimits,
-    ) -> XllResult<(SubscriptionId, SubscriptionKey)> {
+    ) -> XllResult<(PrepareTicket, SubscriptionKey)> {
         Ok(self
             .plan_pending_insert(runtime_id, source_id, topic, limits)?
             .commit())
@@ -509,7 +513,14 @@ impl SubscriptionCatalog {
     ) -> Option<R> {
         let entry = self.entries.get_mut(&id)?;
         let was_pending = entry.counts_as_pending();
+        let was_identifiable = entry.is_identifiable();
         let result = update(entry);
+        if was_identifiable && !entry.is_identifiable() {
+            let identity_key = SubscriptionIdentityKey::new(entry.source_id, &entry.topic);
+            if !self.identities.remove(identity_key, id) {
+                xlfn_kernel::invariant::fail_stop();
+            }
+        }
         match (was_pending, entry.counts_as_pending()) {
             (false, true) => self.pending_count += 1,
             (true, false) => self.pending_count = checked_sub_or_abort(self.pending_count, 1),
@@ -527,7 +538,7 @@ impl SubscriptionCatalog {
         self.retained_topic_bytes =
             checked_sub_or_abort(self.retained_topic_bytes, removed.topic.byte_len());
         let identity_key = SubscriptionIdentityKey::new(removed.source_id, &removed.topic);
-        if !self.identities.remove(identity_key, id) {
+        if removed.is_identifiable() && !self.identities.remove(identity_key, id) {
             xlfn_kernel::invariant::fail_stop();
         }
         Some(removed)
@@ -546,6 +557,7 @@ impl SubscriptionCatalog {
                     "each subscription is indexed exactly once"
                 );
                 let entry = self.entries.get(id).expect("indexed entry exists");
+                assert!(entry.is_identifiable());
                 assert_eq!(entry.source_id, key.source_id);
                 assert_eq!(entry.topic.identity_hash(), key.topic_hash);
                 for other_id in &ids[..position] {
@@ -553,7 +565,13 @@ impl SubscriptionCatalog {
                 }
             }
         }
-        assert_eq!(seen_ids.len(), self.entries.len());
+        assert_eq!(
+            seen_ids.len(),
+            self.entries
+                .values()
+                .filter(|entry| entry.is_identifiable())
+                .count()
+        );
 
         let expected_retained_bytes = self
             .entries
@@ -570,36 +588,10 @@ impl SubscriptionCatalog {
         );
 
         for entry in self.entries.values() {
-            match &entry.phase {
-                SubscriptionPhase::Pending {
-                    reservations,
-                    server: _,
-                    commitment,
-                } => {
-                    assert!(entry.connection_generation().is_none());
-                    if reservations.is_none() {
-                        assert_eq!(*commitment, PendingCommitment::Committed);
-                    }
-                }
-                SubscriptionPhase::Connecting {
-                    reservations: _,
-                    server: _,
-                    connection: _,
-                    commitment: _,
-                } => {
-                    assert!(entry.connection_generation().is_some());
-                }
-                SubscriptionPhase::Active {
-                    connection: _,
-                    server: _,
-                    reservation,
-                } => {
-                    assert!(entry.connection_generation().is_some());
-                    if let Some(reservation) = reservation {
-                        assert!(reservation.reservations.get() > 0);
-                    }
-                }
-            }
+            assert!(
+                !entry.can_remove(),
+                "remove terminal entries under the catalog lock"
+            );
         }
     }
 }
@@ -623,21 +615,37 @@ mod typestate_tests {
                 sequence: 1,
             }),
             topic: RtdTopic::single("ticket-generation").unwrap(),
-            preparation_epoch: 0,
+            incarnation: EntryIncarnation {
+                runtime: 1,
+                id: SubscriptionId(1),
+            },
             phase: SubscriptionPhase::Pending {
                 reservations: NonZeroUsize::new(1),
                 server: None,
-                commitment: PendingCommitment::Uncommitted,
             },
         };
         let old = entry.begin_connection(server, connection).unwrap();
-        assert!(entry.reset_for_server_termination(server));
-        let current = entry.begin_connection(next_server, connection).unwrap();
-        assert!(!entry.finish_connection(&old));
-        assert!(!entry.rollback_connection(&old));
-        assert!(!entry.is_active());
-        assert_eq!(entry.server_generation(), Some(next_server));
-        assert!(entry.finish_connection(&current));
-        assert!(entry.is_active());
+        assert!(entry.revoke_for_server_termination(server));
+        assert!(entry.begin_connection(next_server, connection).is_err());
+        let mut replacement = SubscriptionEntry {
+            source_id: entry.source_id,
+            topic: entry.topic.clone(),
+            incarnation: EntryIncarnation {
+                runtime: 1,
+                id: SubscriptionId(2),
+            },
+            phase: SubscriptionPhase::AwaitConnect {
+                reservations: None,
+                server: None,
+            },
+        };
+        // Same server/connection numbers still cannot authorize a new entry.
+        let current = replacement.begin_connection(server, connection).unwrap();
+        assert!(!replacement.finish_connection(&old));
+        assert!(!replacement.rollback_connection(&old));
+        assert!(!replacement.is_active());
+        assert_eq!(replacement.server_generation(), Some(server));
+        assert!(replacement.finish_connection(&current));
+        assert!(replacement.is_active());
     }
 }

@@ -29,7 +29,7 @@ macro_rules! release_tail {
 
 macro_rules! wait_loop {
     ($guard:ident, $active:ident;
-     $lock:expr, $observe:expr, $wait:expr, $unlock:expr;
+     $lock:expr, $observe:expr, $wait:expr, $clear:expr, $unlock:expr;
      $($annotations:tt)*) => { protocol_expr!({
         let mut $guard = $lock;
         let mut $active = $observe;
@@ -39,6 +39,7 @@ macro_rules! wait_loop {
             $guard = $wait;
             $active = $observe;
         }
+        $clear;
         $unlock;
     })};
 }

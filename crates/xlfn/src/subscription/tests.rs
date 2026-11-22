@@ -2141,23 +2141,63 @@ fn revoked_preparation_cannot_commit_after_server_detaches() {
 }
 
 #[test]
-fn fresh_preparation_can_commit_after_an_older_reservation_is_revoked() {
-    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
-    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
-    let server = runtime.register_test_server(1);
-    let topic = RtdTopic::single("fresh-preparation").unwrap();
-    let old = runtime.prepare(&source, topic.borrowed()).unwrap();
-    let id = old.id();
-    runtime.claim_server(server.generation(), id).unwrap();
-    runtime.terminate_server(server.generation()).unwrap();
-    let fresh = runtime.prepare(&source, topic.borrowed()).unwrap();
-    assert_eq!(fresh.id(), id);
-    fresh.commit();
-    old.commit();
+fn fresh_preparation_gets_a_new_incarnation_while_old_quota_is_retained() {
+    for commit_old in [false, true] {
+        let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+        let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+        let server = runtime.register_test_server(1);
+        let topic = RtdTopic::single("fresh-preparation").unwrap();
+        let old = runtime.prepare(&source, topic.borrowed()).unwrap();
+        let stale = old.id();
+        runtime.claim_server(server.generation(), stale).unwrap();
+        runtime.terminate_server(server.generation()).unwrap();
+        let next = runtime.register_test_server(2);
+        let fresh = runtime.prepare(&source, topic.borrowed()).unwrap();
+        let live = fresh.id();
+        assert_ne!(live, stale);
+        assert_ne!(fresh.key(), old.key());
+        assert!(matches!(
+            runtime.claim_server(next.generation(), stale),
+            Err(XllError::Closing)
+        ));
+        assert!(matches!(
+            runtime.connect_transaction(&next, TopicId(1), stale),
+            Err(XllError::Closing)
+        ));
 
-    let catalog = runtime.catalog.lock();
-    assert_eq!(catalog.pending_len(), 1);
-    catalog.assert_identity_invariants();
+        {
+            let catalog = runtime.catalog.lock();
+            assert_eq!(catalog.pending_len(), 2);
+            assert_eq!(catalog.retained_topic_bytes, 2 * topic.byte_len());
+            catalog.assert_identity_invariants();
+        }
+
+        // Finish the old xlfRtd first; it must not consume the new ticket.
+        if commit_old {
+            old.commit();
+        } else {
+            old.rollback();
+        }
+        {
+            let catalog = runtime.catalog.lock();
+            assert_eq!(catalog.pending_len(), 1);
+            assert_eq!(catalog.retained_topic_bytes, topic.byte_len());
+            assert!(!catalog.entries.contains_key(&stale));
+        }
+
+        fresh.commit();
+        runtime
+            .connect_transaction(&next, TopicId(1), live)
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert_eq!(runtime.catalog.lock().pending_len(), 0);
+        runtime.disconnect(&next, TopicId(1)).unwrap();
+        let catalog = runtime.catalog.lock();
+        assert!(catalog.entries.is_empty());
+        assert_eq!(catalog.retained_topic_bytes, 0);
+        catalog.assert_identity_invariants();
+    }
 }
 
 #[test]

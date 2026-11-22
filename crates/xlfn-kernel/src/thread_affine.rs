@@ -143,11 +143,19 @@ impl<T: 'static> ThreadAffineSlot<T> {
     }
 
     pub fn bind_current(&self) -> Result<ThreadAffineAccess<'_, T>, ThreadAffineError> {
+        self.bind_current_with_origin().map(|(access, _)| access)
+    }
+
+    /// Acquire the current thread's binding and identify whether this call
+    /// installed it, under the same lock as the binding generation.
+    pub fn bind_current_with_origin(
+        &self,
+    ) -> Result<(ThreadAffineAccess<'_, T>, bool), ThreadAffineError> {
         let current = thread::current().id();
         let mut affinity = self.affinity.lock();
-        match affinity.owner {
+        let newly_bound = match affinity.owner {
             Some(owner) if owner != current => return Err(ThreadAffineError::WrongThread),
-            Some(_) => {}
+            Some(_) => false,
             None => {
                 if affinity.modifying {
                     return Err(ThreadAffineError::ReentrantAccess);
@@ -156,13 +164,17 @@ impl<T: 'static> ThreadAffineSlot<T> {
                     std::process::abort();
                 });
                 affinity.owner = Some(current);
+                true
             }
-        }
-        Ok(ThreadAffineAccess {
-            slot: self,
-            binding: affinity.binding,
-            _not_send_or_sync: PhantomData,
-        })
+        };
+        Ok((
+            ThreadAffineAccess {
+                slot: self,
+                binding: affinity.binding,
+                _not_send_or_sync: PhantomData,
+            },
+            newly_bound,
+        ))
     }
 
     fn verify_access(&self, access: &ThreadAffineAccess<'_, T>) -> Result<(), ThreadAffineError> {

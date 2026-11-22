@@ -32,10 +32,10 @@ jiff = ["dep:jiff"]
 async = ["dep:futures-util"]
 async-builtin = ["async", "dep:async-task", "dep:crossbeam-deque"]
 # Enables the RTD/COM subsystem and its add-in capability surface.
-rtd = ["dep:indexmap"]
+rtd = ["dep:indexmap", "dep:xlfn-services"]
 # Formula handles use the private Excel RTD transport internally, but do not
 # expose the generic RTD subscription capability.
-handles = ["dep:blake3", "dep:constant_time_eq", "dep:getrandom", "dep:indexmap", "dep:papaya"]
+handles = ["dep:blake3", "dep:constant_time_eq", "dep:getrandom", "dep:indexmap", "dep:papaya", "dep:xlfn-services"]
 cache = ["dep:indexmap", "dep:papaya", "dep:quick_cache"]
 refinement = ["serde/derive"]
 # Internal instrumentation for production-path benchmarks.
@@ -173,6 +173,9 @@ tracing.workspace = true
 triomphe.workspace = true
 xlfn-common.workspace = true
 xlfn-kernel.workspace = true
+xlfn-engine.workspace = true
+xlfn-host.workspace = true
+xlfn-services = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

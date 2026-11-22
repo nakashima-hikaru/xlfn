@@ -108,13 +108,22 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
             .finish_open_rollback(control, authorization)
     }
 
-    pub(crate) fn complete_boundary_finalization(
+    pub(crate) fn record_binding_release(
         &self,
-        control: &LifecycleAccess<'_, A>,
+        control: &mut LifecycleAccess<'_, A>,
         attempt: RemovalAttemptId,
     ) -> XllResult<()> {
+        self.coordinator.record_binding_release(control, attempt)
+    }
+
+    pub(crate) fn complete_boundary_finalization(
+        &self,
+        control: &mut LifecycleAccess<'_, A>,
+        attempt: RemovalAttemptId,
+        goal: super::StopGoal,
+    ) -> XllResult<()> {
         self.coordinator
-            .complete_boundary_finalization(control, attempt)
+            .complete_boundary_finalization(control, attempt, goal)
     }
 
     #[allow(
@@ -150,7 +159,7 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         &self,
         control: &mut LifecycleAccess<'_, A>,
         attempt: OpenAttemptId,
-        unpublished: UnpublishedGeneration<A>,
+        unpublished: Box<UnpublishedGeneration<A>>,
     ) -> Result<CanonicalGenerationPublished<'coordinator, A>, Box<UnpublishedGeneration<A>>> {
         self.coordinator
             .publish_opening_generation_locked(control, attempt, unpublished)
@@ -199,14 +208,27 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         self.coordinator.take_module_closing_for_close(control)
     }
 
-    pub(crate) fn take_module_cleanup_authority(&self) -> ModuleCleanupClaim {
+    pub(crate) fn begin_quarantine_cleanup(
+        &self,
+    ) -> ModuleCleanupClaim<super::QuarantineWork<'coordinator, A>> {
         self.coordinator.take_module_cleanup_for_quarantine()
     }
 
-    pub(crate) fn finish_module_cleanup_for_quarantine(&self) {
-        self.coordinator.finish_module_cleanup_for_quarantine();
+    #[cfg(test)]
+    pub(crate) fn take_module_cleanup_authority(&self) -> ModuleCleanupClaim {
+        match self.begin_quarantine_cleanup() {
+            ModuleCleanupClaim::Ready(owner) => ModuleCleanupClaim::Ready(owner.take_for_test()),
+            ModuleCleanupClaim::StaleEpoch => ModuleCleanupClaim::StaleEpoch,
+            ModuleCleanupClaim::DeferredOwner => ModuleCleanupClaim::DeferredOwner,
+            ModuleCleanupClaim::RetainedUndrained(epoch) => {
+                ModuleCleanupClaim::RetainedUndrained(epoch)
+            }
+            ModuleCleanupClaim::NoModuleAuthority => ModuleCleanupClaim::NoModuleAuthority,
+            ModuleCleanupClaim::Unavailable => ModuleCleanupClaim::Unavailable,
+        }
     }
 
+    #[cfg(test)]
     pub(crate) fn retain_failed_module_cleanup(
         &self,
         authority: ModuleCleanupAuthority,

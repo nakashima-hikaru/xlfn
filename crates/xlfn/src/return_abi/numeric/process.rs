@@ -1,7 +1,8 @@
 //! Fixed-layout process accounting shared by cooperating XLL images.
 //!
 //! Windows uses a pagefile mapping independent of any DLL image. Each image
-//! retains its own view until process exit. No destructor,
+//! retains its own view until process exit; precisely one handle keeps the
+//! section name live. No destructor,
 //! allocator handle, or executable address is stored in the shared protocol.
 use crate::error::InputError;
 use crate::{ExcelError, XllError, XllResult};
@@ -12,7 +13,7 @@ mod windows;
 
 /// Provisional limit for all participating xlfn FP12 allocations in a process.
 pub const MAX_PROCESS_NUMERIC_RETURN_BYTES: usize = 512 * 1024 * 1024;
-const SCHEMA: u64 = 0x584c_4650_0002_0040;
+const SCHEMA: u64 = 0x584c_4650_0003_0048;
 
 // This is a cross-image protocol, not a Rust-owned object. Keep every field
 // fixed-width and naturally aligned; never reset an existing mapping. Changing
@@ -27,11 +28,13 @@ pub(super) struct ProcessState {
     published_bytes: AtomicU64,
     published_buffers: AtomicU64,
     peak_published_bytes: AtomicU64,
+    section_anchor: AtomicU64,
 }
 
-const _: () = assert!(size_of::<ProcessState>() == 64);
+const _: () = assert!(size_of::<ProcessState>() == 72);
 const _: () = assert!(align_of::<ProcessState>() == 8);
 const _: () = assert!(std::mem::offset_of!(ProcessState, peak_published_bytes) == 56);
+const _: () = assert!(std::mem::offset_of!(ProcessState, section_anchor) == 64);
 
 impl ProcessState {
     #[cfg(any(not(target_os = "windows"), test))]
@@ -45,6 +48,7 @@ impl ProcessState {
             published_bytes: AtomicU64::new(0),
             published_buffers: AtomicU64::new(0),
             peak_published_bytes: AtomicU64::new(0),
+            section_anchor: AtomicU64::new(0),
         }
     }
 
@@ -89,6 +93,20 @@ impl ProcessState {
             return Err(protocol_error());
         }
         Ok(())
+    }
+
+    /// Elect one process-owned section handle. After winning, the caller
+    /// must retain its already valid handle without fallible work or unwind.
+    #[cfg(any(target_os = "windows", test))]
+    fn claim_section_anchor(&self) -> XllResult<bool> {
+        match self
+            .section_anchor
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(0) => Ok(true),
+            Err(1) => Ok(false),
+            _ => Err(protocol_error()),
+        }
     }
 
     fn reserve(&self, bytes: usize, limit: usize) -> XllResult<()> {
@@ -268,6 +286,35 @@ pub(super) fn read_metrics(metrics: &mut super::NumericReturnMemoryMetrics) -> X
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn section_anchor_can_only_be_selected_once_across_attachments() {
+        let state = ProcessState::new();
+        state.initialize().unwrap();
+        let winners = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    state.initialize().unwrap();
+                    if state.claim_section_anchor().unwrap() {
+                        winners.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        assert_eq!(winners.load(Ordering::Relaxed), 1);
+        state.validate().unwrap();
+        assert!(!state.claim_section_anchor().unwrap());
+    }
+
+    #[test]
+    fn older_accounting_schema_cannot_establish_a_second_anchor() {
+        let state = ProcessState::new();
+        state.schema.store(0x584c_4650_0002_0040, Ordering::Relaxed);
+        assert!(state.initialize().is_err());
+        assert_eq!(state.section_anchor.load(Ordering::Relaxed), 0);
+    }
+
     #[test]
     fn invalid_shared_counters_fail_without_resetting_live_accounting() {
         for counter_index in 0..6 {

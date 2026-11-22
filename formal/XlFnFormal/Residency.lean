@@ -35,7 +35,6 @@ def ResidencyState.Safe (s : ResidencyState) : Prop :=
     s.runtimeQuiescent = true)
 
 inductive ResidencyEvent where
-  | autoCloseHint
   | terminalRemoval
   | quarantine (reason : Shutdown.Failure)
   | autoCloseAfterRemoval
@@ -43,9 +42,6 @@ inductive ResidencyEvent where
   deriving DecidableEq, Repr
 
 inductive ResidencyStep : ResidencyState → ResidencyEvent → ResidencyState → Prop where
-  | autoCloseHint {s : ResidencyState} :
-      ResidencyStep s .autoCloseHint s
-
   | terminalRemoval {s : ResidencyState}
       (hOpen : s.logicalPhase = .open)
       (hLease : s.leaseHeld = true)
@@ -80,12 +76,24 @@ inductive ResidencyStep : ResidencyState → ResidencyEvent → ResidencyState �
       (hRoot : s.rtdComRoots = n + 1) :
       ResidencyStep s .releaseRtdComRoot { s with rtdComRoots := n }
 
-theorem autoCloseHint_is_noop
-    {s t : ResidencyState}
-    (hStep : ResidencyStep s .autoCloseHint t) :
-    t = s := by
-  cases hStep
-  rfl
+/-- Both exports route to the same logical removal driver. Only AutoClose
+may subsequently present proof for a physical release. -/
+inductive DeactivationExport where
+  | autoClose
+  | autoRemove
+  deriving DecidableEq, Repr
+
+def DeactivationExport.logicalEvent (_ : DeactivationExport) : ResidencyEvent :=
+  .terminalRemoval
+
+def DeactivationExport.mayPresentPhysicalRelease : DeactivationExport → Bool
+  | .autoClose => true
+  | .autoRemove => false
+
+example : DeactivationExport.autoClose.logicalEvent = .terminalRemoval := rfl
+example : DeactivationExport.autoRemove.logicalEvent = .terminalRemoval := rfl
+example : DeactivationExport.autoClose.mayPresentPhysicalRelease = true := rfl
+example : DeactivationExport.autoRemove.mayPresentPhysicalRelease = false := rfl
 
 theorem terminalRemoval_retains_lease
     {s t : ResidencyState}
@@ -99,11 +107,10 @@ theorem terminalRemoval_retains_lease
 
 theorem ResidencyStep.safe_preserved
     {s t : ResidencyState} {event : ResidencyEvent}
-    (hSafe : s.Safe)
+    (_hSafe : s.Safe)
     (hStep : ResidencyStep s event t) :
     t.Safe := by
   cases hStep with
-  | autoCloseHint => exact hSafe
   | terminalRemoval hOpen hLease hCallbacks hGeneration hRuntime =>
       simp [ResidencyState.Safe, hLease]
   | quarantine hLive hLease =>
@@ -138,7 +145,7 @@ theorem resident_events_prevent_lease_release
 
 theorem safe_with_resident_events_retains_lease
     {s : ResidencyState}
-    (hSafe : s.Safe)
+    (_hSafe : s.Safe)
     (hEvents : s.residentEventRegistrations > 0) :
     s.leaseHeld = true := by
   rcases hSafe with hHeld | hClosed
@@ -164,7 +171,7 @@ theorem late_com_release_keeps_closed_module_resident
 
 theorem safe_with_retained_com_roots_retains_lease
     {s : ResidencyState}
-    (hSafe : s.Safe)
+    (_hSafe : s.Safe)
     (hRoots : s.rtdComRoots > 0) :
     s.leaseHeld = true := by
   rcases hSafe with hHeld | hClosed

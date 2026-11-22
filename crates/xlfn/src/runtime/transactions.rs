@@ -163,17 +163,12 @@ where
         layers,
         init_config: runtime_config,
     };
-    let transaction = transaction.stage_generation(opening)?;
-    // Construct the entropy-dependent handle service while host rollback
-    // is still available, before starting workers or registering exports.
-    #[cfg(feature = "handles")]
-    let transaction = {
-        let mut transaction = transaction;
-        if let Err(error) = transaction.prepare_handles(runtime_config.handle_config()) {
-            return Err(transaction.failure(error));
-        }
-        transaction
-    };
+    let mut transaction = transaction.stage_generation(opening)?;
+    // Prepare the entire generation service bundle while the transaction
+    // still owns the rollback session, before workers or host registration.
+    if let Err(error) = transaction.prepare_services(runtime_config) {
+        return Err(transaction.failure(error));
+    }
     #[cfg(feature = "async")]
     if let Err(error) = transaction
         .deps()

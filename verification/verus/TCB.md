@@ -34,8 +34,14 @@ underflow use fail-stop transitions.
 
 Production, Loom and Verus share DrainGate's release tail and wait-loop control.
 The slow final release locks, releases, notifies if idle, then unlocks; no backend
-access follows unlock. Waiting registers and reobserves after wakes and returns
-only on an actual zero observation. Arbitrary sampled interference includes
+access follows unlock. A blocking wait registers and reobserves after wakes.
+The unique controller clears registration before normal unlock; RAII also
+clears on unwinding while the controller still excludes replacement waiters.
+A nonblocking poll uses Acquire count observations under the notification lock
+without arming notification. Native and Loom both use Acquire for successful
+and rejected admission; rejection only synchronizes with the seal it observes,
+not completion of outstanding permits. Verus checks state transitions, not
+native Acquire/Release synchronization. Arbitrary sampled interference includes
 spurious wakes; it supplies no termination theorem.
 
 Resource invariants conserve instance-bound permits (`DG-1`, `DG-2`). Drain

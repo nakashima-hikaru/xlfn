@@ -1,0 +1,19 @@
+[package]
+name = "xlfn-host"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Excel and Windows host adapter primitives for xlfn"
+
+[dependencies]
+xlfn-engine.workspace = true
+xlfn-sys.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-link.workspace = true
+
+[lints]
+workspace = true

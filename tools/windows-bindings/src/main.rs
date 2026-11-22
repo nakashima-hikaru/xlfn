@@ -14,7 +14,7 @@ const BINDINGS: &[(&str, &str)] = &[
     ),
     (
         "tools/windows-bindings/filters/xlfn.txt",
-        "crates/xlfn/src/win32.rs",
+        "crates/xlfn-host/src/win32.rs",
     ),
 ];
 

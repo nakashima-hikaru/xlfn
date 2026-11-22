@@ -2,7 +2,9 @@
 use crate::call_return::ReturnPayload;
 #[cfg(test)]
 use crate::call_return::{ExcelReturn, ReturnContext};
-use crate::execution::{CallId, CallMetadata, CallOutcome};
+#[cfg(test)]
+use crate::execution::CallMetadata;
+use crate::execution::{CallId, CallOutcome};
 #[cfg(test)]
 use crate::execution::{UdfCompletionOutcome, UdfDeliveryOutcome, UdfErrorKind};
 use crate::panic_boundary::catch_no_unwind;
@@ -639,39 +641,15 @@ where
             }
         };
     }
-    let concurrent_calls = crate::module_runtime::ingress().active_udfs();
-    let timer = crate::execution::CallTimer::start();
-    let trace_metadata = crate::execution::UdfTraceMetadata {
-        udf_id,
-        excel_name,
-        call_id,
-        calculation_id,
-        concurrent_calls,
-    };
-    let layers = if instrumentation.has_layers() {
-        let metadata = CallMetadata {
-            udf_id,
-            excel_name,
-            call_id,
-            calculation_id,
-            started_at: std::time::SystemTime::now(),
-            concurrent_calls,
-        };
-        match crate::execution::enter_layers(guard.layers(), &metadata, |err| {
-            (err, timer.elapsed())
-        }) {
-            Ok(layers) => Some(layers),
-            Err((error, elapsed)) => {
-                report_sync_failure::<A, B>(runtime, udf_id, Some(call_id), calculation_id, &error);
-                let outcome = CallOutcome::from_error(&error, elapsed);
-                if instrumentation.trace_enabled() {
-                    crate::execution::trace(&trace_metadata, &outcome);
-                }
-                return B::error(&error);
-            }
+    let (entry, ()) = instrumentation.start(udf_id, excel_name, call_id, || (calculation_id, ()));
+    let observation = match entry.enter(guard.layers(), |error, timer| (error, timer.elapsed())) {
+        Ok(observation) => observation,
+        Err(rejection) => {
+            let (error, _) = rejection.finish(|(error, _)| {
+                report_sync_failure::<A, B>(runtime, udf_id, Some(call_id), calculation_id, error);
+            });
+            return B::error(&error);
         }
-    } else {
-        None
     };
     let caught = crate::panic_boundary::catch_udf_no_unwind(AssertUnwindSafe(|| {
         B::prepare(operation(guard.state(), guard)?, numeric)
@@ -684,20 +662,15 @@ where
         }
     };
     let outcome = match &result {
-        Ok(_) => CallOutcome::success(timer.elapsed()),
+        Ok(_) => CallOutcome::success(observation.elapsed()),
         Err(error) => {
             if !panic_reported {
                 report_sync_failure::<A, B>(runtime, udf_id, Some(call_id), calculation_id, error);
             }
-            CallOutcome::from_error(error, timer.elapsed())
+            CallOutcome::from_error(error, observation.elapsed())
         }
     };
-    if let Some(layers) = layers {
-        crate::execution::exit_layers(layers, &outcome);
-    }
-    if instrumentation.trace_enabled() {
-        crate::execution::trace(&trace_metadata, &outcome);
-    }
+    observation.finish(&outcome);
     match result {
         Ok(pointer) => pointer,
         Err(error) => B::error(&error),

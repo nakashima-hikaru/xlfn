@@ -96,6 +96,45 @@ impl<A: crate::Addin> Runtime<A, LogicalUnload> {
 pub(crate) type AddinLifecycleAccess<'runtime, A> =
     ThreadAffineAccess<'runtime, <A as crate::Addin>::LifecycleState>;
 
+/// Host-thread scope for an opening (or controlled replacement) invocation.
+/// The slot's access witness makes the scope !Send and !Sync.
+pub(crate) struct StaSession<'runtime, A: crate::Addin> {
+    slot: &'runtime ThreadAffineSlot<A::LifecycleState>,
+    access: AddinLifecycleAccess<'runtime, A>,
+    tentative: bool,
+}
+
+impl<'runtime, A: crate::Addin> StaSession<'runtime, A> {
+    pub(crate) fn access(&self) -> &AddinLifecycleAccess<'runtime, A> {
+        &self.access
+    }
+
+    pub(crate) fn rebind(&mut self) -> Result<(), ThreadAffineError> {
+        let (access, newly_bound) = self.slot.bind_current_with_origin()?;
+        self.access = access;
+        self.tentative |= newly_bound;
+        Ok(())
+    }
+
+    fn handoff_to_open_attempt(&mut self) {
+        self.tentative = false;
+    }
+}
+
+impl<A: crate::Addin> Drop for StaSession<'_, A> {
+    fn drop(&mut self) {
+        // Never release a pre-existing generation's binding or a binding
+        // handed to an affine lifecycle transaction. A failed or completed
+        // rollback may already have invalidated this exact access.
+        if self.tentative
+            && let Ok(xlfn_kernel::thread_affine::BindingState::Empty(empty)) =
+                self.slot.binding(&self.access)
+        {
+            let _ = empty.release();
+        }
+    }
+}
+
 impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     pub(in crate::runtime) fn lifecycle_control(
         &self,
@@ -117,12 +156,12 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
 
     pub(crate) fn open_addin_boundary(
         &self,
-        lifecycle: &AddinLifecycleAccess<'_, A>,
+        sta: &mut StaSession<'_, A>,
         callbacks: crate::host_callback::HostCallbackSession,
         request: OpenBoundaryRequest<'_>,
         attempted: &mut Option<crate::generation::OpenAttemptId>,
     ) -> i32 {
-        open::open_addin_boundary(self, lifecycle, callbacks, request, attempted)
+        open::open_addin_boundary(self, sta, callbacks, request, attempted)
     }
 
     pub(crate) fn remove_addin(
@@ -445,6 +484,15 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
                 panic!("test runtime must install its lifecycle state: {reason:?}");
             }
         }
+    }
+
+    pub(crate) fn begin_sta_session(&self) -> Result<StaSession<'_, A>, ThreadAffineError> {
+        let (access, tentative) = self.addin_lifecycle.bind_current_with_origin()?;
+        Ok(StaSession {
+            slot: &self.addin_lifecycle,
+            access,
+            tentative,
+        })
     }
 
     pub(crate) fn bind_addin_lifecycle(
@@ -1003,10 +1051,10 @@ pub(crate) mod tests {
             )
             .map_err(|(error, _owner)| error)
             .unwrap();
-        let (_witness, _removal_attempt) = certificate
+        let (_witness, mut removal_attempt) = certificate
             .finish()
             .unwrap_or_else(|(error, _certificate)| panic!("{error}"));
-        runtime.release_test_module_lease();
+        removal_attempt.complete_stages_for_test(crate::lifecycle::StopGoal::Remove);
     }
 
     fn finish_test_open_rollback<'a, A: crate::Addin>(
@@ -1027,10 +1075,10 @@ pub(crate) mod tests {
             )
             .map_err(|(error, _owner)| error)
             .unwrap();
-        let rollback_attempt = certificate
+        let mut rollback_attempt = certificate
             .finish()
             .unwrap_or_else(|(error, _certificate)| panic!("{error}"));
-        runtime.release_test_module_lease();
+        rollback_attempt.complete_stages_for_test(crate::lifecycle::StopGoal::RollbackOpen);
         rollback_attempt
     }
 
@@ -1220,19 +1268,67 @@ pub(crate) mod tests {
         runtime.lifecycle_orchestrator().quarantine();
 
         let control = runtime.lifecycle_control();
-        let ModuleCleanupClaim::Ready(owner) = control.take_module_cleanup_authority() else {
+        let ModuleCleanupClaim::Ready(owner) = control.begin_quarantine_cleanup() else {
             panic!("quarantine did not claim the original cleanup authority");
         };
         assert!(matches!(
-            control.take_module_cleanup_authority(),
+            control.begin_quarantine_cleanup(),
             ModuleCleanupClaim::DeferredOwner
         ));
         assert!(owner.finish().is_ok());
-        control.finish_module_cleanup_for_quarantine();
         assert!(matches!(
-            control.take_module_cleanup_authority(),
+            control.begin_quarantine_cleanup(),
             ModuleCleanupClaim::NoModuleAuthority
         ));
+    }
+
+    #[test]
+    fn abandoned_quarantine_ticket_retains_the_undrained_epoch() {
+        use crate::module_runtime::ModuleCleanupClaim;
+        let fixture = StaticTestRuntime::<TestU32Addin>::new();
+        let runtime = fixture.runtime();
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime.publish(opening, 23, ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
+        let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
+        runtime.lifecycle_orchestrator().quarantine();
+        let control = runtime.lifecycle_control();
+        let ModuleCleanupClaim::Ready(owner) = control.begin_quarantine_cleanup() else {
+            panic!("quarantine ticket missing");
+        };
+        drop(owner);
+        assert!(matches!(control.begin_quarantine_cleanup(),
+            ModuleCleanupClaim::RetainedUndrained(retained) if retained == epoch));
+        assert_eq!(
+            crate::module_runtime::ingress().phase(),
+            crate::ingress::PHASE_CLOSING
+        );
+    }
+
+    #[test]
+    fn sta_session_releases_only_an_empty_binding_it_acquired() {
+        let runtime = Runtime::<()>::new();
+        drop(runtime.begin_sta_session().unwrap());
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| assert!(runtime.begin_sta_session().is_ok()))
+                .join()
+                .unwrap();
+        });
+        let existing = runtime.bind_addin_lifecycle().unwrap();
+        drop(runtime.begin_sta_session().unwrap());
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    assert!(matches!(
+                        runtime.begin_sta_session(),
+                        Err(ThreadAffineError::WrongThread)
+                    ));
+                })
+                .join()
+                .unwrap();
+        });
+        runtime.release_empty_addin_lifecycle(&existing).unwrap();
     }
 
     #[test]
@@ -1562,9 +1658,10 @@ pub(crate) mod tests {
         }
         assert_ne!(runtime.removal_epoch(), removal_epoch);
 
-        let (_witness, removal_attempt) = certificate
+        let (_witness, mut removal_attempt) = certificate
             .finish()
             .unwrap_or_else(|(error, _certificate)| panic!("{error}"));
+        removal_attempt.complete_stages_for_test(crate::lifecycle::StopGoal::Remove);
         drop(removal_attempt);
         waiter.join().unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
@@ -1683,9 +1780,10 @@ pub(crate) mod tests {
             )
             .map_err(|(error, _)| error)
             .unwrap();
-        let (_witness, _claim) = certificate
+        let (_witness, mut claim) = certificate
             .finish()
             .unwrap_or_else(|(error, _)| panic!("{error}"));
+        claim.complete_stages_for_test(crate::lifecycle::StopGoal::Remove);
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
     }
 

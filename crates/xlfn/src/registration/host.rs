@@ -29,26 +29,7 @@ use xlfn_sys::{
     XLF_UNREGISTER, XLOPER12, XLOPER12Value, XLTYPE_STR,
 };
 
-/// The result of a host-side registration mutation.
-///
-/// `Applied` means the host-side mutation is known to have taken effect.  The
-/// returned value remains useful even when releasing Excel's result fails,
-/// because the mutation must not be repeated.  `Rejected` means the operation
-/// was not accepted as a mutation.  `Indeterminate` means the callback may
-/// have changed host state but the result cannot establish what happened.
-pub(crate) enum RegistrationMutation<T> {
-    Applied {
-        value: T,
-        cleanup: XllResult<()>,
-    },
-    Rejected {
-        error: XllError,
-    },
-    Indeterminate {
-        status: ExcelCallbackStatus,
-        error: XllError,
-    },
-}
+pub(crate) type RegistrationMutation<T> = xlfn_host::HostMutation<T, ExcelCallbackStatus, XllError>;
 
 /// Registration operations available to the transaction layer.
 #[derive(Clone, Copy)]

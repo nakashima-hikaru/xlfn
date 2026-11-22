@@ -1,4 +1,4 @@
---out crates/xlfn/src/win32.rs
+--out crates/xlfn-host/src/win32.rs
 --flat
 --sys
 --filter

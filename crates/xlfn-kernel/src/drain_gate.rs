@@ -104,13 +104,31 @@ fn release_and_notify<W: IdleWait>(
         idle.lock(), release(), idle.notify_all(), drop(guard))
 }
 
-fn wait_for_idle<W: IdleWait>(idle: &W, mut register_and_observe: impl FnMut() -> usize) {
+// The unique wait/control claim outlives this cleanup; a releaser that
+// already retained its count can still finish its notification under idle.lock.
+struct WaitRegistration<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> Drop for WaitRegistration<F> {
+    fn drop(&mut self) {
+        if let Some(clear) = self.0.take() {
+            clear();
+        }
+    }
+}
+
+fn wait_for_idle<W: IdleWait>(
+    idle: &W,
+    mut register_and_observe: impl FnMut() -> usize,
+    clear: impl FnOnce(),
+) {
+    // On unwind, clear only our registration; the exclusive control claim
+    // prevents a replacement waiter from registering until this returns.
+    let registration = WaitRegistration(Some(clear));
     // Register through each counter's RMW under this mutex. Either the last
     // release won that RMW and we observe zero, or it must retain its count
-    // until we atomically unlock and park. Re-register after waking because
-    // a serialized reopen may have started a new generation in the meantime.
+    // until we atomically unlock and park. Re-observe after every wake.
     protocol::wait_loop!(guard, active;
-        idle.lock(), register_and_observe(), idle.wait(guard), drop(guard);)
+        idle.lock(), register_and_observe(), idle.wait(guard), drop(registration), drop(guard);)
 }
 
 /// Default stripe count for scalable concurrency without false sharing or cache-line bouncing.
@@ -264,8 +282,12 @@ impl DrainGate {
 
     /// Waits for an idle observation. Seal admission first when that
     /// observation must remain valid for reclamation or shutdown.
-    fn wait_until_idle(&self) {
-        wait_for_idle(&self.idle, || self.counter.mark_waiting());
+    fn wait_until_idle(&self, _claim: &MutexGuard<'_, ()>) {
+        wait_for_idle(
+            &self.idle,
+            || self.counter.mark_waiting(),
+            || self.counter.clear_waiting(),
+        );
     }
 
     #[inline]
@@ -467,16 +489,30 @@ impl<const N: usize> StripedDrainGate<N> {
         };
         // Synchronize with the final release's notification tail, not only
         // its zero count. A successful check is stable after admission seals.
-        self.observe_stripes_idle()
+        self.observe_stripes_idle(&_guard)
     }
 
     /// Waits until every stripe is observed idle. Seal all stripes first when
     /// an owner needs a stable grace period rather than an open-gate snapshot.
-    fn wait_until_idle(&self) {
-        wait_for_idle(&self.idle, || usize::from(!self.observe_stripes_idle()));
+    fn wait_until_idle(&self, _claim: &MutexGuard<'_, ()>) {
+        wait_for_idle(
+            &self.idle,
+            || usize::from(!self.register_stripes_and_observe_idle()),
+            || {
+                self.counters
+                    .iter()
+                    .for_each(|counter| counter.clear_waiting())
+            },
+        );
     }
 
-    fn observe_stripes_idle(&self) -> bool {
+    // Load-only poll: a failed call does not register future notification.
+    // The caller must also exclude admission and reopen to certify drainage.
+    fn observe_stripes_idle(&self, _notification: &MutexGuard<'_, ()>) -> bool {
+        self.counters.iter().all(|counter| counter.active() == 0)
+    }
+
+    fn register_stripes_and_observe_idle(&self) -> bool {
         protocol::observe_stripes!(index, idle;
             N, self.counters[index].mark_waiting();
         )
@@ -642,8 +678,7 @@ impl TerminalDrainGate {
         unsafe { self.gate.try_enter_detached() }
     }
     pub(crate) fn wait(&self) {
-        self.gate.seal();
-        self.gate.wait_until_idle();
+        let _drained = self.gate.control().seal().wait();
     }
 }
 
@@ -672,6 +707,52 @@ mod tests {
                 Some(ReleaseOutcome::BecameIdle)
             );
         }
+    }
+
+    #[test]
+    fn failed_drain_poll_does_not_register_notification() {
+        let gate = DrainGate::new_open();
+        gate.try_acquire().unwrap();
+        drop(gate.control().seal());
+        assert!(gate.control().try_drained().is_err());
+        assert_eq!(
+            gate.counter.try_release_without_notification(),
+            Some(ReleaseOutcome::BecameIdle)
+        );
+        assert!(gate.control().try_drained().is_ok());
+
+        let gate = StripedDrainGate::<2>::new_open();
+        gate.counters[1].try_acquire().unwrap();
+        drop(gate.control().seal());
+        assert!(gate.control().try_drained().is_err());
+        assert!(gate.control().try_prepare_reopen().is_none());
+        assert_eq!(
+            gate.counters[1].try_release_without_notification(),
+            Some(ReleaseOutcome::BecameIdle)
+        );
+        assert!(gate.control().try_drained().is_ok());
+    }
+
+    #[test]
+    fn abandoning_registered_wait_clears_notification() {
+        let gate = DrainGate::new_open();
+        let _claim = gate.control();
+        gate.try_acquire().unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for_idle(
+                &gate.idle,
+                || {
+                    assert_eq!(gate.counter.mark_waiting(), 1);
+                    panic!("abandon wait after registering");
+                },
+                || gate.counter.clear_waiting(),
+            );
+        }));
+        assert!(outcome.is_err());
+        assert_eq!(
+            gate.counter.try_release_without_notification(),
+            Some(ReleaseOutcome::BecameIdle)
+        );
     }
 
     #[test]
@@ -726,7 +807,7 @@ mod tests {
         let waiter = std::thread::spawn(move || {
             // Keep the public wrapper's counter observation in the tested
             // path; the native condvar reports entry while holding its lock.
-            waiting.wait_until_idle();
+            let _drained = waiting.control().seal().wait();
             done_tx.send(()).unwrap();
         });
         let entered = entered_rx.recv_timeout(Duration::from_secs(10)).is_ok();
@@ -757,7 +838,7 @@ mod tests {
         assert!(gate.reopen().is_err());
         drop(first);
         drop(second);
-        gate.wait_until_idle();
+        drop(gate.control().seal().wait());
         gate.reopen().unwrap();
         assert_eq!(gate.active(), 0);
     }
@@ -809,7 +890,7 @@ mod tests {
         zero_rx.recv().unwrap();
         let waiting_gate = Arc::clone(&gate);
         let waiter = std::thread::spawn(move || {
-            waiting_gate.wait_until_idle();
+            let _drained = waiting_gate.control().seal().wait();
             assert!(released.load(Ordering::Acquire));
             drained_tx.send(()).unwrap();
         });
@@ -858,6 +939,7 @@ mod loom_tests {
     struct ModelGate<const N: usize> {
         counters: [Counter; N],
         idle: ModelNotification,
+        control: Mutex<()>,
     }
 
     impl<const N: usize> ModelGate<N> {
@@ -869,6 +951,7 @@ mod loom_tests {
                     changed: Condvar::new(),
                     reclaimed: AtomicBool::new(false),
                 },
+                control: Mutex::new(()),
             }
         }
 
@@ -885,20 +968,27 @@ mod loom_tests {
         }
 
         fn wait(&self) {
-            wait_for_idle(&self.idle, || {
-                let idle = super::protocol::observe_stripes!(index, idle;
-                    N, self.counters[index].mark_waiting();
-                );
-                usize::from(!idle)
-            });
+            let _claim = self.control.lock().unwrap();
+            wait_for_idle(
+                &self.idle,
+                || {
+                    let idle = super::protocol::observe_stripes!(index, idle;
+                        N, self.counters[index].mark_waiting();
+                    );
+                    usize::from(!idle)
+                },
+                || self.counters.iter().for_each(Counter::clear_waiting),
+            );
         }
 
         fn seal(&self) {
+            let _claim = self.control.lock().unwrap();
             let _guard = self.idle.lock();
             super::protocol::seal_all_stripes!(index; N, self.counters[index].seal(););
         }
 
         fn reopen(&self) {
+            let _claim = self.control.lock().unwrap();
             let _guard = self.idle.lock();
             let opened = super::protocol::reopen_stripes!(index;
                 N, self.counters[index].reopen().is_ok();
@@ -984,7 +1074,7 @@ mod loom_tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn loom_multiple_waiters_survive_reopen_before_every_waiter_resumes() {
+    fn loom_wait_claim_serializes_drain_and_reopen() {
         let mut model = loom::model::Builder::new();
         model.preemption_bound = Some(2);
         model.check(|| {

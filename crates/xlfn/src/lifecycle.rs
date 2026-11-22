@@ -12,7 +12,7 @@ pub(crate) use state::{
     AbsentGenerationServices, CanonicalGenerationPublished, CommittedOpen, CompletedRemovalIntent,
     FinalCloseDecision, FinalRemovalReady, GenerationAdmission, IssuedRemovalClaim,
     LifecycleAccess, LifecycleCoordinator, OpenFailureDisposition, OpenRollbackReady, OpenStart,
-    RollbackDecision, UnpublishedGeneration,
+    QuarantineWork, RollbackDecision, StopGoal, UnpublishedGeneration,
 };
 
 pub(crate) fn lifecycle_access_error(error: ThreadAffineError) -> XllError {

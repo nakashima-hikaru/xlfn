@@ -91,6 +91,9 @@ pub(crate) trait TerminalCertificateKind: Sized {
     fn arm_finalization<'runtime, A: crate::Addin>(
         certificate: &mut Self::Certificate<'runtime, A>,
     );
+    fn record_binding_release<'runtime, A: crate::Addin>(
+        _completed: &Self::Completed<'runtime, A>,
+    ) -> crate::XllResult<()>;
     fn complete_finalization<'runtime, A: crate::Addin>(
         completed: &mut Self::Completed<'runtime, A>,
     ) -> crate::XllResult<()>;
@@ -127,10 +130,17 @@ impl TerminalCertificateKind for FinalRemoval {
             }
         };
     }
+    fn record_binding_release<'runtime, A: crate::Addin>(
+        completed: &Self::Completed<'runtime, A>,
+    ) -> crate::XllResult<()> {
+        completed.1.record_binding_release()
+    }
     fn complete_finalization<'runtime, A: crate::Addin>(
         completed: &mut Self::Completed<'runtime, A>,
     ) -> crate::XllResult<()> {
-        completed.1.complete_finalization()
+        completed
+            .1
+            .complete_finalization(crate::lifecycle::StopGoal::Remove)
     }
     fn finish<'runtime, A: crate::Addin>(
         certificate: Self::Certificate<'runtime, A>,
@@ -165,10 +175,15 @@ impl TerminalCertificateKind for OpenRollback {
         super::finalization::check_arm_fault();
         certificate.owner.mark_finalization_failed();
     }
+    fn record_binding_release<'runtime, A: crate::Addin>(
+        completed: &Self::Completed<'runtime, A>,
+    ) -> crate::XllResult<()> {
+        completed.record_binding_release()
+    }
     fn complete_finalization<'runtime, A: crate::Addin>(
         completed: &mut Self::Completed<'runtime, A>,
     ) -> crate::XllResult<()> {
-        completed.complete_finalization()
+        completed.complete_finalization(crate::lifecycle::StopGoal::RollbackOpen)
     }
     fn finish<'runtime, A: crate::Addin>(
         certificate: Self::Certificate<'runtime, A>,
@@ -380,13 +395,9 @@ impl<'runtime, A: crate::Addin> OpenRollbackCertificate<'runtime, A> {
             return Err((error, Box::new(self)));
         }
 
-        #[cfg(test)]
-        let deps = self.deps;
         let OpenRollbackCertificate { proof, owner, .. } = self;
         let _quiescence = proof;
         lifecycle.notify_all();
-        #[cfg(test)]
-        deps.release_test_module_lease();
         Ok(owner)
     }
 }
@@ -473,8 +484,6 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
             ClosedWitness::uncommitted()
         };
         lifecycle.notify_all();
-        #[cfg(test)]
-        deps.release_test_module_lease();
         Ok((witness, owner))
     }
 }
@@ -577,7 +586,7 @@ mod tests {
     fn canonical_retirement_and_completion_reject_substituted_and_replayed_authority() {
         let runtime = Runtime::<()>::new();
         let other = Runtime::<()>::new();
-        let (owner, generation, epoch) = retired(&runtime);
+        let (mut owner, generation, epoch) = retired(&runtime);
         let lifecycle = runtime.lifecycle_control();
         let proof = QuiescenceProof::for_test(Some(generation), epoch);
         let next_attempt = RemovalAttemptId::new(u64::MAX).unwrap();
@@ -671,6 +680,7 @@ mod tests {
                     .is_err()
             );
         }
+        owner.complete_stages_for_test(crate::lifecycle::StopGoal::Remove);
         drop(owner);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
     }
@@ -736,9 +746,10 @@ mod tests {
         let certificate = owner
             .certify::<FinalRemoval>(proof, runtime.shutdown_deps())
             .unwrap_or_else(|_| panic!("returned owner lost authority"));
-        let (_, owner) = certificate
+        let (_, mut owner) = certificate
             .finish()
             .unwrap_or_else(|_| panic!("valid final completion"));
+        owner.complete_stages_for_test(crate::lifecycle::StopGoal::Remove);
         drop(owner);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(other.phase(), crate::lifecycle::LifecyclePhase::Closed);

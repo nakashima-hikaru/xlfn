@@ -1,7 +1,6 @@
 //! Owned accounting shared by channels without retaining a runtime capability.
 
 use super::topic::{RtdCapacity, RtdLimits};
-use crate::sync::Mutex;
 use crate::{XllError, XllResult};
 use std::num::NonZeroUsize;
 use triomphe::Arc;
@@ -164,22 +163,9 @@ impl Default for RtdSourceLimits {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug, Eq, PartialEq)]
-struct Usage {
-    subscriptions: usize,
-    values: usize,
-    bytes: usize,
-    workers: usize,
-}
+use xlfn_services::{Accounting, Usage};
 
-struct State {
-    limit: Usage,
-    used: Usage,
-}
-
-pub(super) struct ChannelBudget {
-    state: Mutex<State>,
-}
+pub(super) struct ChannelBudget(Accounting);
 
 impl ChannelBudget {
     pub(super) fn source(limits: RtdSourceLimits) -> Self {
@@ -201,93 +187,19 @@ impl ChannelBudget {
     }
 
     fn new(limit: Usage) -> Self {
-        Self {
-            state: Mutex::new(State {
-                limit,
-                used: Usage::default(),
-            }),
-        }
+        Self(Accounting::new(limit))
     }
 
     pub(super) fn configure_source(&self, limits: RtdSourceLimits) {
-        let mut state = self.state.lock();
-        state.limit.subscriptions = limits.subscriptions.get();
-        state.limit.values = limits.values.get();
-        state.limit.bytes = limits.bytes.get();
+        self.0.configure_source(
+            limits.subscriptions.get(),
+            limits.values.get(),
+            limits.bytes.get(),
+        );
     }
 
     pub(super) fn configure_worker_limit(&self, limit: NonZeroUsize) {
-        self.state.lock().limit.workers = limit.get();
-    }
-
-    fn acquire(&self, amount: Usage) -> bool {
-        let mut state = self.state.lock();
-        let add = |used: usize, amount: usize, limit: usize| {
-            // Lowering one limit must not stop unrelated resources already
-            // admitted under it (for example, existing subscriptions publishing).
-            if amount == 0 {
-                Some(used)
-            } else {
-                used.checked_add(amount).filter(|next| *next <= limit)
-            }
-        };
-        let Some(subscriptions) = add(
-            state.used.subscriptions,
-            amount.subscriptions,
-            state.limit.subscriptions,
-        ) else {
-            return false;
-        };
-        let Some(values) = add(state.used.values, amount.values, state.limit.values) else {
-            return false;
-        };
-        let Some(bytes) = add(state.used.bytes, amount.bytes, state.limit.bytes) else {
-            return false;
-        };
-        let Some(workers) = add(state.used.workers, amount.workers, state.limit.workers) else {
-            return false;
-        };
-        state.used = Usage {
-            subscriptions,
-            values,
-            bytes,
-            workers,
-        };
-        true
-    }
-
-    #[inline]
-    fn acquire_buffered(&self, values: usize, bytes: usize) -> bool {
-        let mut state = self.state.lock();
-        let Some(next_values) = state.used.values.checked_add(values) else {
-            return false;
-        };
-        let Some(next_bytes) = state.used.bytes.checked_add(bytes) else {
-            return false;
-        };
-        if (values != 0 && next_values > state.limit.values)
-            || (bytes != 0 && next_bytes > state.limit.bytes)
-        {
-            return false;
-        }
-        state.used.values = next_values;
-        state.used.bytes = next_bytes;
-        true
-    }
-
-    #[inline]
-    fn release_buffered(&self, values: usize, bytes: usize) {
-        let mut state = self.state.lock();
-        state.used.values -= values;
-        state.used.bytes -= bytes;
-    }
-
-    fn release(&self, amount: Usage) {
-        let mut state = self.state.lock();
-        state.used.subscriptions -= amount.subscriptions;
-        state.used.values -= amount.values;
-        state.used.bytes -= amount.bytes;
-        state.used.workers -= amount.workers;
+        self.0.configure_worker_limit(limit.get());
     }
 
     pub(super) fn try_subscription(this: &Arc<Self>) -> XllResult<SubscriptionPermit> {
@@ -295,7 +207,7 @@ impl ChannelBudget {
             subscriptions: 1,
             ..Usage::default()
         };
-        if !this.acquire(amount) {
+        if !this.0.acquire(amount) {
             return Err(XllError::Overloaded);
         }
         Ok(SubscriptionPermit(Arc::clone(this)))
@@ -306,7 +218,7 @@ impl ChannelBudget {
             workers: 1,
             ..Usage::default()
         };
-        if !this.acquire(amount) {
+        if !this.0.acquire(amount) {
             return Err(XllError::Overloaded);
         }
         Ok(WorkerPermit(Arc::clone(this)))
@@ -316,7 +228,7 @@ impl ChannelBudget {
 pub(super) struct SubscriptionPermit(Arc<ChannelBudget>);
 impl Drop for SubscriptionPermit {
     fn drop(&mut self) {
-        self.0.release(Usage {
+        self.0.0.release(Usage {
             subscriptions: 1,
             ..Usage::default()
         });
@@ -326,7 +238,7 @@ impl Drop for SubscriptionPermit {
 pub(super) struct WorkerPermit(Arc<ChannelBudget>);
 impl Drop for WorkerPermit {
     fn drop(&mut self) {
-        self.0.release(Usage {
+        self.0.0.release(Usage {
             workers: 1,
             ..Usage::default()
         });
@@ -345,11 +257,11 @@ impl BudgetPair {
 
     #[inline]
     fn acquire(&self, values: usize, bytes: usize) -> bool {
-        if !self.source.acquire_buffered(values, bytes) {
+        if !self.source.0.acquire_buffered(values, bytes) {
             return false;
         }
-        if !self.runtime.acquire_buffered(values, bytes) {
-            self.source.release_buffered(values, bytes);
+        if !self.runtime.0.acquire_buffered(values, bytes) {
+            self.source.0.release_buffered(values, bytes);
             return false;
         }
         true
@@ -357,8 +269,8 @@ impl BudgetPair {
 
     #[inline]
     fn release(&self, values: usize, bytes: usize) {
-        self.source.release_buffered(values, bytes);
-        self.runtime.release_buffered(values, bytes);
+        self.source.0.release_buffered(values, bytes);
+        self.runtime.0.release_buffered(values, bytes);
     }
 
     #[cfg(test)]
@@ -511,17 +423,17 @@ mod tests {
         let batch = queue.split(&pair, 2, 3).unwrap();
         assert!(!queue.try_push(&pair, 1));
         assert!(pair.try_value(1).is_none());
-        assert_eq!(source.state.lock().used.values, 3);
-        assert_eq!(source.state.lock().used.bytes, 6);
+        assert_eq!(source.0.usage().values, 3);
+        assert_eq!(source.0.usage().bytes, 6);
         // Discarding the remaining queue cannot release in-flight capacity.
         drop(queue.take_all(&pair));
-        assert_eq!(runtime.state.lock().used.values, 2);
-        assert_eq!(runtime.state.lock().used.bytes, 3);
+        assert_eq!(runtime.0.usage().values, 2);
+        assert_eq!(runtime.0.usage().bytes, 3);
         assert!(queue.try_push(&pair, 3));
         drop(queue.take_all(&pair));
-        assert_eq!(runtime.state.lock().used.values, 2);
+        assert_eq!(runtime.0.usage().values, 2);
         drop(batch);
-        assert_eq!(source.state.lock().used, Usage::default());
+        assert_eq!(source.0.usage(), Usage::default());
         // The pair owns accounting even after the original source/runtime owners drop.
         let mut queue = BufferLedger::default();
         assert!(queue.try_push(&pair, 6));
@@ -548,12 +460,12 @@ mod tests {
             panic!("injected publication unwind after batch transfer");
         }));
         assert!(result.is_err());
-        assert_eq!(runtime.state.lock().used.values, 1);
-        assert_eq!(runtime.state.lock().used.bytes, 20);
+        assert_eq!(runtime.0.usage().values, 1);
+        assert_eq!(runtime.0.usage().bytes, 20);
         drop(pair.try_value(1).unwrap());
         drop(queue.take_all(&pair));
-        assert_eq!(source.state.lock().used, Usage::default());
-        assert_eq!(runtime.state.lock().used, Usage::default());
+        assert_eq!(source.0.usage(), Usage::default());
+        assert_eq!(runtime.0.usage(), Usage::default());
     }
 
     #[test]
@@ -567,13 +479,13 @@ mod tests {
         let pair = BudgetPair::new(Arc::clone(&source), Arc::clone(&runtime));
         let permit = pair.try_value(10).unwrap();
         assert!(pair.try_value(1).is_none());
-        assert_eq!(source.state.lock().used.values, 1);
-        assert_eq!(source.state.lock().used.bytes, 10);
+        assert_eq!(source.0.usage().values, 1);
+        assert_eq!(source.0.usage().bytes, 10);
         drop(permit);
         assert!(pair.try_value(21).is_none());
-        assert_eq!(source.state.lock().used, Usage::default());
+        assert_eq!(source.0.usage(), Usage::default());
         drop(pair.try_value(20).unwrap());
-        assert_eq!(runtime.state.lock().used, Usage::default());
+        assert_eq!(runtime.0.usage(), Usage::default());
     }
 
     #[test]
@@ -589,14 +501,14 @@ mod tests {
         let pair = BudgetPair::new(Arc::clone(&source), Arc::clone(&runtime));
         let mut permit = pair.try_value(10).unwrap();
         assert!(!permit.resize(13));
-        assert_eq!(source.state.lock().used.bytes, 10);
-        assert_eq!(runtime.state.lock().used.bytes, 10);
+        assert_eq!(source.0.usage().bytes, 10);
+        assert_eq!(runtime.0.usage().bytes, 10);
         assert!(permit.resize(12));
-        assert_eq!(source.state.lock().used.values, 1);
+        assert_eq!(source.0.usage().values, 1);
         assert!(permit.resize(2));
-        assert_eq!(runtime.state.lock().used.bytes, 2);
+        assert_eq!(runtime.0.usage().bytes, 2);
         drop(permit);
-        assert_eq!(source.state.lock().used, Usage::default());
+        assert_eq!(source.0.usage(), Usage::default());
     }
 
     #[test]
@@ -618,7 +530,7 @@ mod tests {
         drop(one);
         drop(same_source.try_value(1).unwrap());
         drop(two);
-        assert_eq!(runtime.state.lock().used, Usage::default());
+        assert_eq!(runtime.0.usage(), Usage::default());
     }
 
     #[test]

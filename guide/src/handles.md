@@ -179,8 +179,9 @@ async fn async_evaluate(
 ```
 
 `HandleLease<'generation, T>` is supplied by the generated async boundary.
-It keeps the object readable before and after `.await` until that task ends.
-The lease cannot be returned, stored in `'static` state, or moved into an
+The framework retains its pin until it disposes of the evaluation, before
+delivering the result. Dropping or forgetting the lease does not release the
+pin early. The lease cannot be returned, stored in `'static` state, or moved into an
 independently spawned thread. See [Async handle inputs](async-functions.md#async-handle-inputs).
 
 `HandleLease` is an async input, not an Excel return value. A saved token can

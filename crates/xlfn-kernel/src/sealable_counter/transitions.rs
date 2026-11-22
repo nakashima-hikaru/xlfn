@@ -453,6 +453,24 @@ macro_rules! mark_waiting {
 pub(crate) use mark_waiting;
 
 #[cfg_attr(verus_only, allow(unused_macros))]
+macro_rules! clear_waiting {
+    ($state:expr, $waiting:expr) => {
+        $state.fetch_and(!$waiting, Ordering::Relaxed)
+    };
+}
+pub(crate) use clear_waiting;
+
+// Native and Loom use the same Acquire observation on both outcomes.
+#[cfg(not(verus_only))]
+macro_rules! try_admission {
+    ($state:expr, $update:ident, $transition:expr) => {
+        $state.$update(Ordering::Acquire, Ordering::Acquire, $transition)
+    };
+}
+#[cfg(not(verus_only))]
+pub(crate) use try_admission;
+
+#[cfg_attr(verus_only, allow(unused_macros))]
 macro_rules! idle_seal_logic {
     ($state:ident, $sealed:expr, $mask:expr) => {
         if $state & ($sealed | $mask) == 0 {

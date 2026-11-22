@@ -545,8 +545,11 @@ dependencies = [
  "triomphe",
  "windows-link 0.100.0",
  "xlfn-common",
+ "xlfn-engine",
+ "xlfn-host",
  "xlfn-kernel",
  "xlfn-macros",
+ "xlfn-services",
  "xlfn-sys",
 ]
 
@@ -559,6 +562,19 @@ name = "xlfn-e2e-fixture"
 version = "0.2.0"
 dependencies = [
  "xlfn",
+]
+
+[[package]]
+name = "xlfn-engine"
+version = "0.1.0"
+
+[[package]]
+name = "xlfn-host"
+version = "0.1.0"
+dependencies = [
+ "windows-link 0.100.0",
+ "xlfn-engine",
+ "xlfn-sys",
 ]
 
 [[package]]
@@ -580,6 +596,13 @@ dependencies = [
  "quote",
  "syn",
  "xlfn-common",
+]
+
+[[package]]
+name = "xlfn-services"
+version = "0.1.0"
+dependencies = [
+ "xlfn-kernel",
 ]
 
 [[package]]

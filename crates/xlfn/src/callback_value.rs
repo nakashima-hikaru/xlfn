@@ -7,7 +7,8 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use xlfn_sys::{XLOPER12, excel_free, excel12_with_invocation};
+use xlfn_host::{excel_free, excel12_with_invocation};
+use xlfn_sys::XLOPER12;
 
 const CALLBACK_CLEANUP_AUDIT_CAPACITY: usize = 64;
 
