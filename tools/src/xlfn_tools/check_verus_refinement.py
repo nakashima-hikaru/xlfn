@@ -33,7 +33,10 @@ PROOFS = (
 
 SHARED_BASELINE_SOURCES = {
     "sealable_counter": (Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),),
-    "operation_gate": (Path("crates/xlfn-engine/src/quarantine/transitions.rs"),),
+    "operation_gate": (
+        Path("crates/xlfn-engine/src/quarantine/transitions.rs"),
+        Path("crates/xlfn-services/src/rtd/transitions.rs"),
+    ),
 }
 
 

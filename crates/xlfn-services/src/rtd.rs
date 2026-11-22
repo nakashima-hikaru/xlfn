@@ -2,6 +2,9 @@
 
 pub mod index;
 pub mod quota;
+mod transitions;
+
+use transitions::{finish_preparation, revoke_connection, revoke_server};
 
 use std::num::NonZeroUsize;
 
@@ -183,39 +186,19 @@ impl<Id: Copy + Eq, Server: Copy + Eq, Connection: Copy + Eq> EntryState<Id, Ser
         ticket: PrepareTicket<Id>,
         committed: bool,
     ) -> PreparationFinish {
-        if ticket.0 != self.incarnation {
-            return PreparationFinish::Keep;
-        }
-        let reservations = match &mut self.phase {
-            SubscriptionPhase::Pending { reservations, .. }
-            | SubscriptionPhase::AwaitConnect { reservations, .. }
-            | SubscriptionPhase::Connecting { reservations, .. }
-            | SubscriptionPhase::Active { reservations, .. }
-            | SubscriptionPhase::Revoked { reservations } => reservations,
-        };
-        let Some(count) = *reservations else {
-            xlfn_kernel::invariant::fail_stop();
-        };
-        *reservations = NonZeroUsize::new(count.get() - 1);
-        if committed {
-            match &mut self.phase {
-                SubscriptionPhase::Pending {
-                    reservations,
-                    server,
-                } => {
-                    self.phase = SubscriptionPhase::AwaitConnect {
-                        reservations: *reservations,
-                        server: *server,
-                    };
-                }
-                SubscriptionPhase::Connecting { commitment, .. } => {
-                    *commitment = PendingCommitment::Committed;
-                }
-                SubscriptionPhase::AwaitConnect { .. }
-                | SubscriptionPhase::Active { .. }
-                | SubscriptionPhase::Revoked { .. } => {}
+        let next = finish_preparation!(
+            self.phase, self.incarnation, ticket.0, committed,
+            reservations => {
+                let Some(count) = reservations else {
+                    xlfn_kernel::invariant::fail_stop();
+                };
+                NonZeroUsize::new(count.get() - 1)
             }
-        }
+        );
+        let Some(next) = next else {
+            return PreparationFinish::Keep;
+        };
+        self.phase = next;
         if self.can_remove() {
             PreparationFinish::Remove
         } else {
@@ -341,42 +324,18 @@ impl<Id: Copy + Eq, Server: Copy + Eq, Connection: Copy + Eq> EntryState<Id, Ser
     }
 
     pub fn revoke_for_server_termination(&mut self, server: Server) -> bool {
-        let reservations = match &self.phase {
-            SubscriptionPhase::Pending {
-                server: current,
-                reservations,
-            }
-            | SubscriptionPhase::AwaitConnect {
-                server: current,
-                reservations,
-            } if *current == Some(server) => *reservations,
-            SubscriptionPhase::Connecting {
-                server: current,
-                reservations,
-                ..
-            } if *current == server => *reservations,
-            _ => return false,
+        let Some(next) = revoke_server!(self.phase, server) else {
+            return false;
         };
-        self.phase = SubscriptionPhase::Revoked { reservations };
+        self.phase = next;
         true
     }
 
     pub fn cleanup_connection(&mut self, server: Server, connection: Connection) -> (bool, bool) {
-        let reservations = match &self.phase {
-            SubscriptionPhase::Connecting {
-                reservations,
-                server: current_server,
-                connection: current_connection,
-                ..
-            }
-            | SubscriptionPhase::Active {
-                reservations,
-                server: current_server,
-                connection: current_connection,
-            } if *current_server == server && *current_connection == connection => *reservations,
-            _ => return (false, false),
+        let Some(next) = revoke_connection!(self.phase, server, connection) else {
+            return (false, false);
         };
-        self.phase = SubscriptionPhase::Revoked { reservations };
+        self.phase = next;
         (true, self.can_remove())
     }
 }
@@ -432,7 +391,7 @@ mod tests {
         assert!(!replacement.finish_connection(&old_connection));
         assert!(!replacement.rollback_connection(&old_connection));
         assert!(matches!(
-            replacement.finish_preparation(old_prepare, false),
+            replacement.finish_preparation(old_prepare, true),
             PreparationFinish::Keep
         ));
         assert!(replacement.finish_connection(&current_connection));
@@ -449,6 +408,31 @@ mod tests {
         assert!(!next_entry.finish_connection(&current_connection));
         assert!(!next_entry.rollback_connection(&current_connection));
         assert!(next_entry.finish_connection(&current));
+    }
+
+    #[test]
+    fn revoked_entry_never_reestablishes_commitment_even_with_live_preparation() {
+        let (mut old, old_ticket) = State::new_pending(1, 7);
+        let (mut new, new_ticket) = State::new_pending(1, 8);
+        let other_old = old.add_reservation().unwrap();
+        old.claim_server(11).unwrap();
+        assert!(old.revoke_for_server_termination(11));
+
+        assert!(matches!(
+            new.finish_preparation(other_old, true),
+            PreparationFinish::Keep
+        ));
+        assert!(matches!(new.phase, SubscriptionPhase::Pending { .. }));
+        assert!(matches!(
+            old.finish_preparation(old_ticket, true),
+            PreparationFinish::Keep
+        ));
+        assert!(matches!(old.phase, SubscriptionPhase::Revoked { .. }));
+        assert!(!old.is_identifiable());
+        assert!(matches!(
+            new.finish_preparation(new_ticket, false),
+            PreparationFinish::Remove
+        ));
     }
 
     #[test]

@@ -41,6 +41,21 @@ drain and return on failure or panic. The proof does not treat a numeric
 identity as native authority or prove that those observations stay valid
 outside the lock.
 
+### RTD preparation and revocation
+
+The runtime and `operation_gate::rtd` execute the same preparation,
+server-termination and disconnect transition expressions. Wrong runtime or
+entry identity leaves the entire replacement phase untouched. Completing
+any matching revoked preparation cannot reestablish commitment or become
+AwaitConnect. Server termination and disconnect only enter Revoked, and
+subsequent revocation cannot resurrect the entry.
+
+The native catalog lock, fresh incarnation issuance and identity equality,
+ticket uniqueness, actual reservation decrement/fail-stop, catalog indexing,
+quota retention/removal, and host publication remain outside this proof.
+Reservation payload is carried unchanged in the model; no quota arithmetic
+or concurrent/live-host behavior is proved here.
+
 ### SealableCounter and DrainGate
 
 The counter transition kernel is instantiated for both u32 and u64. Its named
