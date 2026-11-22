@@ -410,6 +410,7 @@ impl<A: crate::Addin> ClosePayload<A> {
         matches!(self, Self::Staged(_))
     }
 
+    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
     fn opening(&self) -> Option<&OpeningGeneration<A>> {
         match self {
             Self::Staged(opening) => Some(opening),
@@ -478,6 +479,7 @@ impl<A: crate::Addin> OpenAbortPayload<A> {
         matches!(self, Self::Staged(_))
     }
 
+    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
     fn opening(&self) -> Option<&OpeningGeneration<A>> {
         match self {
             Self::Staged(opening) => Some(opening),
@@ -715,6 +717,7 @@ impl<A: crate::Addin> CloseResources<A> {
         }
     }
 
+    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
     fn opening(&self) -> Option<&OpeningGeneration<A>> {
         match self {
             Self::AwaitingOpenAbort { payload, .. } => payload.opening(),
@@ -978,6 +981,7 @@ impl<A: crate::Addin> ClosingState<A> {
         }
     }
 
+    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
     fn opening(&self) -> Option<&OpeningGeneration<A>> {
         match self {
             Self::OpeningActive {
@@ -1243,6 +1247,7 @@ impl<A: crate::Addin> LifecycleState<A> {
         }
     }
 
+    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
     fn opening(&self) -> Option<&OpeningGeneration<A>> {
         match self {
             Self::Opening { payload, .. } => match payload {
@@ -1533,6 +1538,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
         self.next_lifecycle_attempt = value;
     }
 
+    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
     fn opening_config(&self) -> Option<crate::addin_impl::RuntimeConfig> {
         self.state.opening().map(|opening| opening.init_config)
     }
@@ -1724,6 +1730,7 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
         self.core.removal_attempt()
     }
 
+    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
     pub(crate) fn opening_config(&self) -> Option<crate::addin_impl::RuntimeConfig> {
         self.core.opening_config()
     }
