@@ -404,6 +404,37 @@ mod tests {
     }
 
     #[test]
+    fn miri_fp12_fingerprint_distinguishes_zero_sign_shape_and_order() {
+        use crate::value::input::{ArgumentContext, FormulaInputMode};
+        fn fingerprint(raw: &NumericInput<2>) -> [u8; 32] {
+            crate::call::with_excel_call_scope_and_state(raw, |raw, scope| {
+                // SAFETY: the header has exactly two initialized double cells.
+                let value =
+                    unsafe { NumericMatrixRef::from_raw(std::ptr::from_ref(raw).cast(), "arg") }
+                        .unwrap();
+                let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                arguments.record_numeric_matrix(0, "arg", value).unwrap();
+                arguments.finish().unwrap().unwrap()
+            })
+        }
+
+        let mut raw = NumericInput {
+            rows: 1,
+            columns: 2,
+            values: [-0.0, 1.0],
+        };
+        let negative_zero = fingerprint(&raw);
+        raw.values[0] = 0.0;
+        let positive_zero = fingerprint(&raw);
+        assert_ne!(negative_zero, positive_zero);
+        raw.values.swap(0, 1);
+        assert_ne!(positive_zero, fingerprint(&raw));
+        raw.values.swap(0, 1);
+        (raw.rows, raw.columns) = (2, 1);
+        assert_ne!(positive_zero, fingerprint(&raw));
+    }
+
+    #[test]
     fn miri_numeric_matrix_identity_matches_the_same_strict_numeric_values() {
         assert_numeric_matrix_identity::<2>();
         // Two dimension words precede the values: 14 values fill the inline
