@@ -166,11 +166,37 @@ fn distribution_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("win-x64");
     let staging = directory.path().join("staging");
-    fs::create_dir_all(&destination).unwrap();
-    fs::create_dir_all(&staging).unwrap();
-    fs::write(destination.join("old.xll"), b"old").unwrap();
-    fs::write(staging.join("new.xll"), b"new").unwrap();
+    create_test_previous(&destination);
+    create_test_staging(&staging, b"new");
     (directory, destination, staging)
+}
+
+fn create_test_staging(staging: &Path, contents: &[u8]) {
+    fs::create_dir(staging).unwrap();
+    fs::write(staging.join("new.xll"), contents).unwrap();
+}
+
+fn create_test_previous(path: &Path) {
+    fs::create_dir(path).unwrap();
+    fs::write(path.join("old.xll"), b"old").unwrap();
+}
+
+fn stale_transaction(parent: &Path, suffix: &str) -> (PathBuf, PrivateStagingDirectory) {
+    let path = parent.join(format!(".win-x64.transaction-{suffix}"));
+    let capability = PrivateStagingDirectory::create(&path).unwrap();
+    (path, capability)
+}
+
+fn test_commit_guard(parent: &Path) -> DistributionCommitGuard {
+    DistributionCommitGuard::acquire(parent, "win-x64").unwrap()
+}
+
+fn recover_test_distribution(
+    parent: &Path,
+    guard: &DistributionCommitGuard,
+    file_ops: &impl DistributionFileOps,
+) -> DistributionResult {
+    recover_stale_transactions(parent, "win-x64", guard, file_ops)
 }
 
 fn prepared_test_directory(staging: &Path) -> crate::PreparedDirectoryCommit {
@@ -236,16 +262,10 @@ fn write_stale_journal(
 
 #[test]
 fn distribution_commit_preserves_unrelated_previous_directory() {
-    let directory = tempfile::tempdir().unwrap();
-    let destination = directory.path().join("win-x64");
+    let (directory, destination, staging) = distribution_fixture();
     let unrelated = directory.path().join("win-x64.previous");
-    let staging = directory.path().join("staging");
-    fs::create_dir_all(&destination).unwrap();
     fs::create_dir_all(&unrelated).unwrap();
-    fs::create_dir_all(&staging).unwrap();
-    fs::write(destination.join("old.xll"), b"old").unwrap();
     fs::write(unrelated.join("sentinel.txt"), b"keep").unwrap();
-    fs::write(staging.join("new.xll"), b"new").unwrap();
 
     let prepared = prepared_test_directory(&staging);
     crate::PreparedDistribution::new(prepared)
@@ -323,14 +343,9 @@ fn committed_cleanup_failure_never_restores_previous_distribution() {
         .expect("failed backup cleanup must leave the committed journal");
     fs::remove_dir_all(&destination).unwrap();
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    let error = recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap_err();
+    let guard = test_commit_guard(directory.path());
+    let error = recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps)
+        .unwrap_err();
     let DistributionError::Quarantined(error) = error else {
         panic!("a missing committed destination must be quarantined");
     };
@@ -375,8 +390,7 @@ fn locked_committed_backup_allows_later_commits_and_eventual_cleanup() {
     // Its retained journal must no longer depend on the destination's identity.
     for (revision, contents) in [b"second".as_slice(), b"third"].into_iter().enumerate() {
         let staging = directory.path().join(format!("staging-{revision}"));
-        fs::create_dir(&staging).unwrap();
-        fs::write(staging.join("new.xll"), contents).unwrap();
+        create_test_staging(&staging, contents);
         let outcome = crate::PreparedDistribution::new(prepared_test_directory(&staging))
             .commit_with(&destination, &file_ops)
             .unwrap();
@@ -394,14 +408,8 @@ fn locked_committed_backup_allows_later_commits_and_eventual_cleanup() {
     }
 
     // Releasing the old image permits cleanup without touching the current XLL.
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
+    let guard = test_commit_guard(directory.path());
+    recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps).unwrap();
     assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"third");
     assert!(transaction_directories(directory.path()).is_empty());
 }
@@ -420,12 +428,12 @@ fn cleanup_only_recovery_still_rejects_replaced_backup_identity() {
     else {
         panic!("the injected deletion failure must retain the backup");
     };
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+    let guard = test_commit_guard(directory.path());
     let blocked = InjectedFileOps {
         blocked_remove_paths: [backup.clone()].into_iter().collect(),
         ..InjectedFileOps::default()
     };
-    recover_stale_transactions(directory.path(), "win-x64", &guard, &blocked).unwrap();
+    recover_test_distribution(directory.path(), &guard, &blocked).unwrap();
     assert_eq!(
         read_transaction_journal(&transaction.join(TRANSACTION_JOURNAL))
             .unwrap()
@@ -437,8 +445,7 @@ fn cleanup_only_recovery_still_rejects_replaced_backup_identity() {
     fs::create_dir(backup).unwrap();
     fs::write(backup.join("foreign.xll"), b"foreign").unwrap();
     let file_ops = InjectedFileOps::default();
-    let error =
-        recover_stale_transactions(directory.path(), "win-x64", &guard, &file_ops).unwrap_err();
+    let error = recover_test_distribution(directory.path(), &guard, &file_ops).unwrap_err();
     assert!(
         error
             .to_string()
@@ -459,8 +466,7 @@ fn failed_cleanup_handoff_durability_prevents_the_next_install() {
         panic!("the injected deletion failure must retain the backup");
     };
     let next_staging = directory.path().join("next-staging");
-    fs::create_dir(&next_staging).unwrap();
-    fs::write(next_staging.join("new.xll"), b"next").unwrap();
+    create_test_staging(&next_staging, b"next");
     let file_ops = InjectedFileOps {
         blocked_remove_paths: [backup.clone()].into_iter().collect(),
         failed_syncs: [1].into_iter().collect(),
@@ -586,8 +592,7 @@ fn post_commit_verification_failure_without_previous_removes_install() {
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("win-x64");
     let staging = directory.path().join("staging");
-    fs::create_dir_all(&staging).unwrap();
-    fs::write(staging.join("new.xll"), b"new").unwrap();
+    create_test_staging(&staging, b"new");
     let file_ops = InjectedFileOps::default();
     let prepared = prepared_test_directory(&staging);
 
@@ -632,11 +637,9 @@ fn post_commit_verification_failure_without_previous_removes_install() {
 fn stale_distribution_transaction_restores_previous_distribution() {
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("win-x64");
-    let transaction = directory.path().join(".win-x64.transaction-stale");
-    let transaction_directory = crate::PrivateStagingDirectory::create(&transaction).unwrap();
+    let (transaction, transaction_directory) = stale_transaction(directory.path(), "stale");
     let previous = transaction.join("previous");
-    fs::create_dir_all(&previous).unwrap();
-    fs::write(previous.join("old.xll"), b"old").unwrap();
+    create_test_previous(&previous);
     let previous_identity = directory_identity(&previous).unwrap();
     write_stale_journal(
         directory.path(),
@@ -649,14 +652,8 @@ fn stale_distribution_transaction_restores_previous_distribution() {
     );
     drop(transaction_directory);
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
+    let guard = test_commit_guard(directory.path());
+    recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps).unwrap();
 
     assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
     assert!(!transaction.exists());
@@ -666,11 +663,10 @@ fn stale_distribution_transaction_restores_previous_distribution() {
 fn stale_prepared_transaction_restores_backup_after_first_rename() {
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("win-x64");
-    let transaction = directory.path().join(".win-x64.transaction-before-journal");
-    let transaction_directory = crate::PrivateStagingDirectory::create(&transaction).unwrap();
+    let (transaction, transaction_directory) =
+        stale_transaction(directory.path(), "before-journal");
     let previous = transaction.join("previous");
-    fs::create_dir_all(&previous).unwrap();
-    fs::write(previous.join("old.xll"), b"old").unwrap();
+    create_test_previous(&previous);
     let previous_identity = directory_identity(&previous).unwrap();
     write_stale_journal(
         directory.path(),
@@ -683,14 +679,8 @@ fn stale_prepared_transaction_restores_backup_after_first_rename() {
     );
     drop(transaction_directory);
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
+    let guard = test_commit_guard(directory.path());
+    recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps).unwrap();
 
     assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
     assert!(!transaction.exists());
@@ -699,18 +689,11 @@ fn stale_prepared_transaction_restores_backup_after_first_rename() {
 #[test]
 fn stale_empty_transaction_without_journal_is_removed() {
     let directory = tempfile::tempdir().unwrap();
-    let transaction = directory.path().join(".win-x64.transaction-private-empty");
-    let transaction_directory = crate::PrivateStagingDirectory::create(&transaction).unwrap();
+    let (transaction, transaction_directory) = stale_transaction(directory.path(), "private-empty");
     drop(transaction_directory);
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
+    let guard = test_commit_guard(directory.path());
+    recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps).unwrap();
 
     assert!(!transaction.exists());
 }
@@ -718,10 +701,8 @@ fn stale_empty_transaction_without_journal_is_removed() {
 #[test]
 fn private_prepared_journal_does_not_depend_on_the_old_destination() {
     let (directory, destination, _staging) = distribution_fixture();
-    let transaction = directory
-        .path()
-        .join(".win-x64.transaction-private-prepared");
-    let transaction_directory = PrivateStagingDirectory::create(&transaction).unwrap();
+    let (transaction, transaction_directory) =
+        stale_transaction(directory.path(), "private-prepared");
     write_stale_journal(
         directory.path(),
         &transaction,
@@ -736,14 +717,8 @@ fn private_prepared_journal_does_not_depend_on_the_old_destination() {
     fs::create_dir(&destination).unwrap();
     fs::write(destination.join("replacement.xll"), b"replacement").unwrap();
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
+    let guard = test_commit_guard(directory.path());
+    recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps).unwrap();
 
     assert!(!transaction.exists());
     assert_eq!(
@@ -756,11 +731,9 @@ fn private_prepared_journal_does_not_depend_on_the_old_destination() {
 fn stale_journal_next_is_promoted_before_recovery() {
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("win-x64");
-    let transaction = directory.path().join(".win-x64.transaction-next");
-    let transaction_directory = crate::PrivateStagingDirectory::create(&transaction).unwrap();
+    let (transaction, transaction_directory) = stale_transaction(directory.path(), "next");
     let previous = transaction.join("previous");
-    fs::create_dir_all(&previous).unwrap();
-    fs::write(previous.join("old.xll"), b"old").unwrap();
+    create_test_previous(&previous);
     let previous_identity = directory_identity(&previous).unwrap();
     let prefix = ".win-x64.transaction-";
     let mut journal = TransactionJournal::new(
@@ -781,14 +754,8 @@ fn stale_journal_next_is_promoted_before_recovery() {
     .unwrap();
     drop(transaction_directory);
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
+    let guard = test_commit_guard(directory.path());
+    recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps).unwrap();
 
     assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
     assert!(!transaction.exists());
@@ -797,21 +764,14 @@ fn stale_journal_next_is_promoted_before_recovery() {
 #[test]
 fn journalless_transaction_with_payload_is_quarantined() {
     let directory = tempfile::tempdir().unwrap();
-    let transaction = directory.path().join(".win-x64.transaction-orphan");
-    let transaction_directory = crate::PrivateStagingDirectory::create(&transaction).unwrap();
+    let (transaction, transaction_directory) = stale_transaction(directory.path(), "orphan");
     let previous = transaction.join("previous");
-    fs::create_dir_all(&previous).unwrap();
-    fs::write(previous.join("old.xll"), b"old").unwrap();
+    create_test_previous(&previous);
     drop(transaction_directory);
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    let error = recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap_err();
+    let guard = test_commit_guard(directory.path());
+    let error = recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps)
+        .unwrap_err();
     let DistributionError::Quarantined(error) = error else {
         panic!("journalless payload must be quarantined");
     };
@@ -834,13 +794,10 @@ fn corrupt_or_old_schema_journal_preserves_destination_and_backup() {
         let destination = directory.path().join("win-x64");
         fs::create_dir(&destination).unwrap();
         fs::write(destination.join("current.xll"), b"current").unwrap();
-        let transaction = directory
-            .path()
-            .join(".win-x64.transaction-invalid-journal");
-        let transaction_directory = crate::PrivateStagingDirectory::create(&transaction).unwrap();
+        let (transaction, transaction_directory) =
+            stale_transaction(directory.path(), "invalid-journal");
         let previous = transaction.join("previous");
-        fs::create_dir(&previous).unwrap();
-        fs::write(previous.join("old.xll"), b"old").unwrap();
+        create_test_previous(&previous);
         write_stale_journal(
             directory.path(),
             &transaction,
@@ -862,10 +819,9 @@ fn corrupt_or_old_schema_journal_preserves_destination_and_backup() {
         fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
         drop(transaction_directory);
 
-        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        let guard = test_commit_guard(directory.path());
         let file_ops = InjectedFileOps::default();
-        let error =
-            recover_stale_transactions(directory.path(), "win-x64", &guard, &file_ops).unwrap_err();
+        let error = recover_test_distribution(directory.path(), &guard, &file_ops).unwrap_err();
         let DistributionError::Quarantined(error) = error else {
             panic!("invalid journal must be quarantined");
         };
@@ -893,7 +849,7 @@ fn corrupt_or_old_schema_journal_preserves_destination_and_backup() {
 fn distribution_lock_replacement_is_detected() {
     let directory = tempfile::tempdir().unwrap();
     let lock_path = directory.path().join(".win-x64.lock");
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+    let guard = test_commit_guard(directory.path());
     fs::remove_file(&lock_path).unwrap();
     fs::write(&lock_path, b"replacement").unwrap();
 
@@ -914,14 +870,8 @@ fn directory_sync_failure_leaves_a_recoverable_install() {
     );
     assert!(transaction_directories(directory.path()).len() == 1);
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
+    let guard = test_commit_guard(directory.path());
+    recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps).unwrap();
 
     assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
     assert!(!destination.join("new.xll").exists());
@@ -957,14 +907,8 @@ fn backup_sync_failure_reports_interrupted_destination_and_recovery_paths() {
     assert_eq!(fs::read(previous.join("old.xll")).unwrap(), b"old");
     assert!(transaction.join(TRANSACTION_JOURNAL).is_file());
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
+    let guard = test_commit_guard(directory.path());
+    recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps).unwrap();
     assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
     assert!(transaction_directories(directory.path()).is_empty());
 }
@@ -1002,14 +946,8 @@ fn source_rejection_after_backup_reports_interruption() {
     assert!(!destination.exists());
     assert_eq!(fs::read(previous.unwrap().join("old.xll")).unwrap(), b"old");
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
+    let guard = test_commit_guard(directory.path());
+    recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps).unwrap();
     assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
 }
 
@@ -1037,14 +975,8 @@ fn first_install_sync_failure_reports_interruption_without_previous_package() {
     assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
     assert!(transaction.join(TRANSACTION_JOURNAL).is_file());
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
+    let guard = test_commit_guard(directory.path());
+    recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps).unwrap();
     assert!(!destination.exists());
     assert!(transaction_directories(directory.path()).is_empty());
 }
@@ -1090,8 +1022,7 @@ fn commit_accepts_unicode_host_directories() {
     let host = directory.path().join("開発");
     fs::create_dir(&host).unwrap();
     let staging = host.join("staging");
-    fs::create_dir(&staging).unwrap();
-    fs::write(staging.join("new.xll"), b"new").unwrap();
+    create_test_staging(&staging, b"new");
     let destination = host.join("win-x64");
     crate::PreparedDistribution::new(prepared_test_directory(&staging))
         .commit(&destination)
@@ -1103,13 +1034,10 @@ fn commit_accepts_unicode_host_directories() {
 fn stale_rollback_transaction_preserves_already_restored_distribution() {
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("win-x64");
-    let transaction = directory.path().join(".win-x64.transaction-rollback");
-    let transaction_directory = crate::PrivateStagingDirectory::create(&transaction).unwrap();
+    let (transaction, transaction_directory) = stale_transaction(directory.path(), "rollback");
     let recovery_install = transaction.join("recovery-install");
-    fs::create_dir_all(&destination).unwrap();
-    fs::create_dir_all(&recovery_install).unwrap();
-    fs::write(destination.join("old.xll"), b"old").unwrap();
-    fs::write(recovery_install.join("new.xll"), b"new").unwrap();
+    create_test_previous(&destination);
+    create_test_staging(&recovery_install, b"new");
     let destination_identity = directory_identity(&destination).unwrap();
     let installed_identity = directory_identity(&recovery_install).unwrap();
     write_stale_journal(
@@ -1123,14 +1051,8 @@ fn stale_rollback_transaction_preserves_already_restored_distribution() {
     );
     drop(transaction_directory);
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
+    let guard = test_commit_guard(directory.path());
+    recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps).unwrap();
 
     assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
     assert!(!transaction.exists());
@@ -1201,14 +1123,8 @@ fn rollback_sync_failure_keeps_restored_destination_recoverable() {
         TransactionState::RollbackPending
     );
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
+    let guard = test_commit_guard(directory.path());
+    recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps).unwrap();
     assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
     assert!(transaction_directories(directory.path()).is_empty());
 }
@@ -1223,8 +1139,7 @@ fn output_destination_rejects_existing_files() {
     assert!(error.to_string().contains("must be a directory"));
 
     let staging = directory.path().join("staging");
-    fs::create_dir_all(&staging).unwrap();
-    fs::write(staging.join("new.xll"), b"new").unwrap();
+    create_test_staging(&staging, b"new");
     let file_ops = InjectedFileOps::default();
     let prepared = prepared_test_directory(&staging);
     assert!(commit_test_directory_with(&prepared, &destination, &file_ops).is_err());
@@ -1300,13 +1215,13 @@ fn stale_recovery_sync_failure_reports_interruption_and_can_be_retried() {
     };
     assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
 
-    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+    let guard = test_commit_guard(directory.path());
     let file_ops = InjectedFileOps {
         fail_sync_after_recovery_move: true,
         ..InjectedFileOps::default()
     };
     let recovery_error =
-        recover_stale_transactions(directory.path(), "win-x64", &guard, &file_ops).unwrap_err();
+        recover_test_distribution(directory.path(), &guard, &file_ops).unwrap_err();
     let DistributionError::Interrupted {
         destination: interrupted_destination,
         transaction: interrupted_transaction,
@@ -1327,13 +1242,7 @@ fn stale_recovery_sync_failure_reports_interruption_and_can_be_retried() {
         b"new"
     );
 
-    recover_stale_transactions(
-        directory.path(),
-        "win-x64",
-        &guard,
-        &SystemDistributionFileOps,
-    )
-    .unwrap();
+    recover_test_distribution(directory.path(), &guard, &SystemDistributionFileOps).unwrap();
     assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
     assert!(!destination.join("new.xll").exists());
     assert!(transaction_directories(directory.path()).is_empty());
@@ -1349,8 +1258,8 @@ fn stale_recovery_after_restoring_backup_can_be_retried() {
     ] {
         let (directory, destination, staging) = distribution_fixture();
         let original_identity = directory_identity(&destination).unwrap();
-        let transaction = directory.path().join(".win-x64.transaction-stale-restore");
-        let transaction_directory = PrivateStagingDirectory::create(&transaction).unwrap();
+        let (transaction, transaction_directory) =
+            stale_transaction(directory.path(), "stale-restore");
         let previous = transaction.join("previous");
         fs::rename(&destination, &previous).unwrap();
         let installed_identity = if matches!(
@@ -1374,13 +1283,12 @@ fn stale_recovery_after_restoring_backup_can_be_retried() {
         );
         drop(transaction_directory);
 
-        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        let guard = test_commit_guard(directory.path());
         let file_ops = InjectedFileOps {
             fail_sync_after_install: true,
             ..InjectedFileOps::default()
         };
-        let error =
-            recover_stale_transactions(directory.path(), "win-x64", &guard, &file_ops).unwrap_err();
+        let error = recover_test_distribution(directory.path(), &guard, &file_ops).unwrap_err();
         assert!(
             matches!(error, DistributionError::Interrupted { .. }),
             "{state:?}"

@@ -1,4 +1,6 @@
+use super::journal::{MAX_TRANSACTION_JOURNAL_BYTES, read_transaction_journal_contents};
 use super::*;
+use std::io::Read;
 
 fn journal_fixture(parent: &Path, transaction: &Path) -> TransactionJournal {
     TransactionJournal::new(
