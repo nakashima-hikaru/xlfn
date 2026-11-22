@@ -56,42 +56,55 @@ mod tests {
 
     static COMPOSITION_TRACE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn run_lean_checker(
+        checker: &std::ffi::OsStr,
+        label: &str,
+        trace: &str,
+    ) -> std::process::Output {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new(checker)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| panic!("failed to start Lean checker for {label}: {error}"));
+        child
+            .stdin
+            .take()
+            .expect("Lean checker stdin is piped")
+            .write_all(trace.as_bytes())
+            .unwrap_or_else(|error| panic!("failed to write {label} trace: {error}"));
+        child
+            .wait_with_output()
+            .unwrap_or_else(|error| panic!("failed to wait for {label} Lean checker: {error}"))
+    }
+
+    fn assert_lean_trace_accepted(checker: &std::ffi::OsStr, label: &str, trace: &str) {
+        let output = run_lean_checker(checker, label, trace);
+        assert!(
+            output.status.success(),
+            "Lean checker rejected {label} Rust trace:\n\
+             stdout:\n{}\n\
+             stderr:\n{}\n\
+             trace:\n{trace}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn check_composition_trace_with_lean(
         checker: &std::ffi::OsString,
         label: &str,
         trace: &str,
         artifact_name: &str,
     ) {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
         if let Some(directory) = std::env::var_os("XLFN_COMPOSITION_TRACE_DIR") {
             let path = std::path::Path::new(&directory).join(artifact_name);
             std::fs::write(path, trace).expect("write Rust composition trace");
         }
-        let mut child = Command::new(checker)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|error| {
-                panic!("failed to start composition checker for {label}: {error}")
-            });
-        child
-            .stdin
-            .take()
-            .expect("composition checker stdin is piped")
-            .write_all(trace.as_bytes())
-            .unwrap_or_else(|error| panic!("failed to write {label} composition trace: {error}"));
-        let output = child.wait_with_output().unwrap_or_else(|error| {
-            panic!("failed to wait for {label} composition checker: {error}")
-        });
-        assert!(
-            output.status.success(),
-            "Lean checker rejected {label} Rust composition trace: {}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert_lean_trace_accepted(checker.as_os_str(), label, trace);
     }
 
     fn assert_commit_open_precedes_lift_shutdown(trace: &str) {
@@ -834,8 +847,6 @@ mod tests {
     #[test]
     #[ignore = "requires XLFN_COMPOSITION_CHECKER and XLFN_SHUTDOWN_CHECKER"]
     fn rust_composition_initialization_quarantine_traces_are_accepted_by_lean_checker() {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
         let _runtime_guard = crate::runtime::tests::TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -845,20 +856,9 @@ mod tests {
         let composition_checker = std::env::var_os("XLFN_COMPOSITION_CHECKER").unwrap();
         let shutdown_checker = std::env::var_os("XLFN_SHUTDOWN_CHECKER").unwrap();
         let reject = |checker: &std::ffi::OsString, document: &serde_json::Value| {
-            let mut child = Command::new(checker)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(document.to_string().as_bytes())
-                .unwrap();
+            let output = run_lean_checker(checker.as_os_str(), "negative", &document.to_string());
             assert!(
-                !child.wait_with_output().unwrap().status.success(),
+                !output.status.success(),
                 "invalid trace accepted: {document}"
             );
         };
@@ -1007,37 +1007,11 @@ mod tests {
         #[test]
         #[ignore = "requires XLFN_SHUTDOWN_CHECKER to point to the Lean executable"]
         fn rust_shutdown_resource_traces_are_accepted_by_lean_checker() {
-            use std::io::Write;
-            use std::process::{Command, Stdio};
-
             let checker = std::env::var_os("XLFN_SHUTDOWN_CHECKER")
                 .expect("XLFN_SHUTDOWN_CHECKER must point to shutdown_trace_checker");
 
             let check = |label: &str, trace: String| {
-                let mut child = Command::new(&checker)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .unwrap_or_else(|error| {
-                        panic!("failed to start shutdown_trace_checker for {label}: {error}")
-                    });
-                child
-                    .stdin
-                    .take()
-                    .expect("checker stdin is piped")
-                    .write_all(trace.as_bytes())
-                    .unwrap_or_else(|error| {
-                        panic!("failed to write {label} shutdown trace: {error}")
-                    });
-                let output = child.wait_with_output().unwrap_or_else(|error| {
-                    panic!("failed to wait for {label} shutdown trace: {error}")
-                });
-                assert!(
-                    output.status.success(),
-                    "Lean checker rejected {label} Rust trace: {}\ntrace:\n{trace}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
+                assert_lean_trace_accepted(checker.as_os_str(), label, &trace);
             };
 
             let static_fixture = crate::runtime::StaticTestRuntime::<TraceCleanup>::new();
@@ -1227,9 +1201,6 @@ mod tests {
     #[test]
     #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
     fn rust_composition_traces_are_accepted_by_lean_checker() {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
         let _test_guard = COMPOSITION_TRACE_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -1248,27 +1219,7 @@ mod tests {
         if let Some(path) = std::env::var_os("XLFN_COMPOSITION_TRACE") {
             std::fs::write(path, &trace).expect("write Rust composition trace");
         }
-        let mut child = Command::new(&checker)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to start composition_trace_checker");
-        child
-            .stdin
-            .take()
-            .expect("composition checker stdin is piped")
-            .write_all(trace.as_bytes())
-            .expect("failed to write composition trace");
-        let output = child
-            .wait_with_output()
-            .expect("failed to wait for composition_trace_checker");
-        assert!(
-            output.status.success(),
-            "Lean checker rejected Rust composition trace: {}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert_lean_trace_accepted(checker.as_os_str(), "composition", &trace);
     }
 
     #[test]
@@ -1342,9 +1293,6 @@ mod tests {
     #[test]
     #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
     fn rust_composition_owner_takeover_trace_is_accepted_by_lean_checker() {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
         let _test_guard = COMPOSITION_TRACE_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -1368,30 +1316,7 @@ mod tests {
         if let Some(path) = std::env::var_os("XLFN_COMPOSITION_TAKEOVER_TRACE") {
             std::fs::write(path, &trace).expect("write Rust composition takeover trace");
         }
-        let mut child = Command::new(&checker)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to start composition_trace_checker");
-        child
-            .stdin
-            .take()
-            .expect("composition checker stdin is piped")
-            .write_all(trace.as_bytes())
-            .expect("failed to write composition takeover trace");
-        let output = child
-            .wait_with_output()
-            .expect("failed to wait for composition_trace_checker");
-        assert!(
-            output.status.success(),
-            "Lean checker rejected Rust composition takeover trace:\n\
-             stdout:\n{}\n\
-             stderr:\n{}\n\
-             trace:\n{trace}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert_lean_trace_accepted(checker.as_os_str(), "composition takeover", &trace);
     }
 
     fn uncommitted_final_close_trace() -> String {
@@ -1468,47 +1393,13 @@ mod tests {
     #[test]
     #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
     fn rust_composition_uncommitted_and_rollback_traces_are_accepted_by_lean_checker() {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
         let _test_guard = COMPOSITION_TRACE_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let checker = std::env::var_os("XLFN_COMPOSITION_CHECKER")
             .expect("XLFN_COMPOSITION_CHECKER must point to composition_trace_checker");
         let check = |label: &str, trace: String, path_name: &str| {
-            if let Some(directory) = std::env::var_os("XLFN_COMPOSITION_TRACE_DIR") {
-                let path = std::path::Path::new(&directory).join(path_name);
-                std::fs::write(path, &trace).expect("write Rust composition path trace");
-            }
-            let mut child = Command::new(&checker)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap_or_else(|error| {
-                    panic!("failed to start composition checker for {label}: {error}")
-                });
-            child
-                .stdin
-                .take()
-                .expect("composition checker stdin is piped")
-                .write_all(trace.as_bytes())
-                .unwrap_or_else(|error| {
-                    panic!("failed to write {label} composition trace: {error}")
-                });
-            let output = child.wait_with_output().unwrap_or_else(|error| {
-                panic!("failed to wait for {label} composition checker: {error}")
-            });
-            assert!(
-                output.status.success(),
-                "Lean checker rejected {label} Rust composition trace:\n\
-                 stdout:\n{}\n\
-                 stderr:\n{}\n\
-                 trace:\n{trace}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+            check_composition_trace_with_lean(&checker, label, &trace, path_name);
         };
 
         check(
