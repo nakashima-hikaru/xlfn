@@ -1956,7 +1956,7 @@ fn prepare_pinned_counted_record(
 ) -> (
     Arc<AtomicUsize>,
     String,
-    crate::handle::PendingHandleLease<CountedDataRecord>,
+    super::typed::PendingHandleLease<CountedDataRecord>,
 ) {
     let drops = Arc::new(AtomicUsize::new(0));
     let token = runtime
