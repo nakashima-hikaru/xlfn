@@ -474,7 +474,7 @@ where
         &'call crate::runtime::CallGuard<'call, A>,
     ) -> XllResult<P>,
 {
-    sync_boundary::<A, ValueReturnAbi<P>, F>(runtime, udf_id, excel_name, operation)
+    sync_boundary_once::<A, ValueReturnAbi<P>, F>(runtime, udf_id, excel_name, operation)
 }
 
 /// Runs a generated K% UDF; null is Excel's #NUM! pointer result.
@@ -492,7 +492,7 @@ where
         &'call crate::runtime::CallGuard<'call, A>,
     ) -> XllResult<numeric::NumericArrayOutput>,
 {
-    sync_boundary::<A, NumericReturnAbi, F>(runtime, udf_id, excel_name, operation)
+    sync_boundary_once::<A, NumericReturnAbi, F>(runtime, udf_id, excel_name, operation)
 }
 
 fn report_sync_panic<A: crate::Addin>(
@@ -528,7 +528,8 @@ fn report_sync_failure<A: crate::Addin, B: SyncReturnAbi>(
     );
 }
 
-fn sync_boundary<A, B, F>(
+#[inline]
+fn sync_boundary_once<A, B, F>(
     runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -542,6 +543,81 @@ where
         &'call crate::runtime::CallGuard<'call, A>,
     ) -> XllResult<B::Payload>,
 {
+    // Only the operation thunk depends on a generated UDF's closure type.
+    // Keep the boundary shared per add-in, unload policy and return ABI without
+    // allocating or changing the generated wrapper or the order of teardown.
+    sync_boundary::<A, B>(
+        runtime,
+        udf_id,
+        excel_name,
+        SyncOperation(Some(&mut Some(operation))),
+    )
+}
+
+trait SyncOperationSlot<A: crate::Addin, P> {
+    fn invoke<'call>(
+        &mut self,
+        state: &'call A::SharedState,
+        call: &'call crate::runtime::CallGuard<'call, A>,
+    ) -> XllResult<P>;
+    fn discard(&mut self);
+}
+
+impl<A: crate::Addin, P, F> SyncOperationSlot<A, P> for Option<F>
+where
+    F: for<'call> FnOnce(
+        &'call A::SharedState,
+        &'call crate::runtime::CallGuard<'call, A>,
+    ) -> XllResult<P>,
+{
+    fn invoke<'call>(
+        &mut self,
+        state: &'call A::SharedState,
+        call: &'call crate::runtime::CallGuard<'call, A>,
+    ) -> XllResult<P> {
+        let Some(operation) = self.take() else {
+            xlfn_kernel::invariant::fail_stop();
+        };
+        operation(state, call)
+    }
+
+    fn discard(&mut self) {
+        drop(self.take());
+    }
+}
+
+// Owns the right to run or destroy the stack-backed closure. In particular,
+// a rejection drops its captures at the same boundary stage as before.
+struct SyncOperation<'op, A: crate::Addin, P>(Option<&'op mut dyn SyncOperationSlot<A, P>>);
+
+impl<A: crate::Addin, P> SyncOperation<'_, A, P> {
+    fn run<'call>(
+        mut self,
+        state: &'call A::SharedState,
+        call: &'call crate::runtime::CallGuard<'call, A>,
+    ) -> XllResult<P> {
+        let Some(slot) = self.0.take() else {
+            xlfn_kernel::invariant::fail_stop();
+        };
+        slot.invoke(state, call)
+    }
+}
+
+impl<A: crate::Addin, P> Drop for SyncOperation<'_, A, P> {
+    fn drop(&mut self) {
+        if let Some(slot) = self.0.take() {
+            slot.discard();
+        }
+    }
+}
+
+#[inline(never)]
+fn sync_boundary<A: crate::Addin, B: SyncReturnAbi>(
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    udf_id: &'static str,
+    excel_name: &'static str,
+    operation: SyncOperation<'_, A, B::Payload>,
+) -> B::Pointer {
     // Retain nesting authority through admission, publication, and every guard's
     // teardown: teardown can itself reenter a UDF before Excel reads this result.
     let numeric = numeric::Fp12CallGuard::enter();
@@ -572,7 +648,7 @@ where
     // Allocate correlation even without a sink, layer, or tracing subscriber.
     let call_id = CallId::new(runtime.next_call_id());
     let result = match crate::panic_boundary::catch_udf_no_unwind(AssertUnwindSafe(|| {
-        sync_boundary_inner::<A, B, F>(
+        sync_boundary_inner::<A, B>(
             runtime,
             &call,
             &numeric,
@@ -603,7 +679,7 @@ where
     clippy::too_many_arguments,
     reason = "Shared UDF boundary carries ABI and invocation authority"
 )]
-fn sync_boundary_inner<A, B, F>(
+fn sync_boundary_inner<A: crate::Addin, B: SyncReturnAbi>(
     runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::CallGuard<'_, A>,
     numeric: &numeric::Fp12CallGuard,
@@ -611,20 +687,12 @@ fn sync_boundary_inner<A, B, F>(
     excel_name: &'static str,
     call_id: CallId,
     calculation_id: crate::execution::CalculationId,
-    operation: F,
-) -> B::Prepared
-where
-    A: crate::Addin,
-    B: SyncReturnAbi,
-    F: for<'call> FnOnce(
-        &'call A::SharedState,
-        &'call crate::runtime::CallGuard<'call, A>,
-    ) -> XllResult<B::Payload>,
-{
+    operation: SyncOperation<'_, A, B::Payload>,
+) -> B::Prepared {
     let instrumentation = crate::execution::InstrumentationPlan::for_call(guard);
     if !instrumentation.enabled() {
         let caught = crate::panic_boundary::catch_udf_no_unwind(AssertUnwindSafe(|| {
-            B::prepare(operation(guard.state(), guard)?, numeric)
+            B::prepare(operation.run(guard.state(), guard)?, numeric)
         }));
         let result = match caught {
             Ok(result) => result,
@@ -652,7 +720,7 @@ where
         }
     };
     let caught = crate::panic_boundary::catch_udf_no_unwind(AssertUnwindSafe(|| {
-        B::prepare(operation(guard.state(), guard)?, numeric)
+        B::prepare(operation.run(guard.state(), guard)?, numeric)
     }));
     let (result, panic_reported) = match caught {
         Ok(result) => (result, false),
