@@ -1434,12 +1434,12 @@ impl<A: crate::Addin> Drop for QuarantineWork<'_, A> {
         };
         let failure = Err((crate::XllError::Closing, owner.retain_without_draining()));
         if let Err((_, Some(rejected))) = self.issuer.complete_quarantine(self.stamp, failure) {
-            // A different issuer/epoch must not receive this authority.
-            #[allow(
-                clippy::mem_forget,
-                reason = "retain stale module owner without replaying cleanup"
-            )]
-            std::mem::forget(rejected);
+            // A different epoch must not receive this authority. Retain the
+            // old ticket's resources separately from the current state.
+            self.issuer
+                .retained_cleanup
+                .lock()
+                .push((self.stamp, std::mem::ManuallyDrop::new(rejected)));
         }
     }
 }
@@ -1766,6 +1766,7 @@ pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
     publication_readers: StripedDrainGate<DEFAULT_STRIPE_COUNT>,
     service_readers: DrainGate,
     core: Mutex<LifecycleCore<A>>,
+    retained_cleanup: Mutex<Vec<(CleanupStamp, std::mem::ManuallyDrop<ModuleAuthority>)>>,
     changed: Condvar,
     #[cfg(test)]
     pub(crate) test_module_lease: Mutex<Option<crate::ingress::TestModuleLease>>,
@@ -1831,6 +1832,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             publication_readers: StripedDrainGate::new_sealed(),
             service_readers: DrainGate::new_open(),
             core: Mutex::new(LifecycleCore::new()),
+            retained_cleanup: Mutex::new(Vec::new()),
             changed: Condvar::new(),
             #[cfg(test)]
             test_module_lease: Mutex::new(None),
