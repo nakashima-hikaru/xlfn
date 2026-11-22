@@ -63,6 +63,26 @@ fn rtd_publish_benchmarks(c: &mut Criterion) {
         },
     );
 
+    for (name, bench) in [
+        ("string_borrowed", RtdPublishStringBenchmark::new()),
+        ("string_8k_borrowed", bench_8k),
+    ] {
+        group.bench_with_input(
+            BenchmarkId::new(name, "changing"),
+            &ITERATIONS,
+            |b, &iterations| {
+                b.iter(|| bench.run_borrowed_changing(iterations));
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new(name, "same_value"),
+            &ITERATIONS,
+            |b, &iterations| {
+                b.iter(|| bench.run_borrowed_repeated_same(iterations));
+            },
+        );
+    }
+
     for producers in [1, 4, 16, 32] {
         for capacity in [64, 1024] {
             let mut pipeline =

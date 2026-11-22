@@ -69,11 +69,7 @@ impl RtdValue {
             Self::Number(value) if !value.is_finite() => Err(XllError::Domain {
                 code: crate::error::DomainErrorCode::InvalidInput,
             }),
-            Self::String(value) => crate::utf16::validate_utf16_limit(
-                value,
-                "RTD value",
-                crate::utf16::EXCEL_STRING_LIMIT,
-            ),
+            Self::String(value) => validate_rtd_string(value),
             _ => Ok(()),
         }
     }
@@ -89,6 +85,10 @@ impl RtdValue {
             Self::Empty => StoredRtdValue::Empty,
         })
     }
+}
+
+pub(super) fn validate_rtd_string(value: &str) -> XllResult<()> {
+    crate::utf16::validate_utf16_limit(value, "RTD value", crate::utf16::EXCEL_STRING_LIMIT)
 }
 
 impl TryFrom<crate::value::ExcelValue> for RtdValue {

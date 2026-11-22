@@ -607,6 +607,26 @@ impl RtdPublishStringBenchmark {
                 .expect("publish must succeed");
         }
     }
+    #[inline]
+    pub fn run_borrowed_repeated_same(&self, iterations: usize) {
+        for _ in 0..iterations {
+            self.sink
+                .publish_str(&self.first_value)
+                .expect("publish must succeed");
+        }
+    }
+
+    #[inline]
+    pub fn run_borrowed_changing(&self, iterations: usize) {
+        for index in 0..iterations {
+            let value = if index & 1 == 0 {
+                &self.first_value
+            } else {
+                &self.second_value
+            };
+            self.sink.publish_str(value).expect("publish must succeed");
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

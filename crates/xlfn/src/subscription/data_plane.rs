@@ -812,30 +812,78 @@ impl<H: SubscriptionHost> PublishCore<H> {
         value: StoredRtdValue,
     ) -> XllResult<()> {
         let _operation = self.enter_operation()?;
+        self.publish_admitted(topic_id, generation, value)
+    }
 
-        let shard_index = shard_index(topic_id);
+    #[cfg(feature = "rtd")]
+    pub(super) fn publish_str(
+        &self,
+        topic_id: TopicId,
+        generation: ConnectionGeneration,
+        value: &str,
+    ) -> XllResult<()> {
+        let _operation = self.enter_operation()?;
+        self.publish_str_admitted(topic_id, generation, value, Box::from)
+    }
 
-        let (epoch, committed) = loop {
-            self.ensure_open()?;
+    #[cfg(feature = "rtd")]
+    fn publish_str_admitted<'value>(
+        &self,
+        topic_id: TopicId,
+        generation: ConnectionGeneration,
+        value: &'value str,
+        own: impl FnOnce(&'value str) -> Box<str>,
+    ) -> XllResult<()> {
+        let (_, duplicate) = self.with_publish_shard(topic_id, |shard, _| {
+            let active = shard
+                .active_by_topic
+                .get(&topic_id)
+                .filter(|active| active.generation == generation)
+                .ok_or(XllError::Closing)?;
+            Ok(
+                matches!(active.latest_value(), Some(StoredRtdValue::String(latest))
+                if latest.as_ref() == value),
+            )
+        })?;
+        if duplicate {
+            return Ok(());
+        }
+        // Allocate after releasing the lock. State may have changed, so do
+        // not reuse the probe's epoch, active entry, or nonduplicate verdict.
+        self.publish_admitted(topic_id, generation, StoredRtdValue::String(own(value)))
+    }
 
-            let epoch = self.publish_epoch.load(Ordering::Acquire);
-            let buffer = BufferIndex::from_epoch(epoch);
-
-            let mut shard = self.shards[shard_index].lock();
-
-            if self.publish_epoch.load(Ordering::Acquire) != epoch {
-                drop(shard);
-                continue;
-            }
-
-            let committed = self.commit_value(&mut shard, buffer, topic_id, generation, value)?;
-            break (epoch, committed);
-        };
-
+    fn publish_admitted(
+        &self,
+        topic_id: TopicId,
+        generation: ConnectionGeneration,
+        value: StoredRtdValue,
+    ) -> XllResult<()> {
+        let (epoch, committed) = self.with_publish_shard(topic_id, |shard, buffer| {
+            self.commit_value(shard, buffer, topic_id, generation, value)
+        })?;
         if committed && let Some(attempt) = self.prepare_notification_for_known_update(epoch)? {
             attempt.drive();
         }
         Ok(())
+    }
+
+    #[inline]
+    fn with_publish_shard<R>(
+        &self,
+        topic_id: TopicId,
+        visit: impl FnOnce(&mut TopicShard, BufferIndex) -> XllResult<R>,
+    ) -> XllResult<(u64, R)> {
+        let shard = &self.shards[shard_index(topic_id)];
+        loop {
+            self.ensure_open()?;
+            let epoch = self.publish_epoch.load(Ordering::Acquire);
+            let mut shard = shard.lock();
+            if self.publish_epoch.load(Ordering::Acquire) == epoch {
+                let result = visit(&mut shard, BufferIndex::from_epoch(epoch))?;
+                return Ok((epoch, result));
+            }
+        }
     }
 
     // Shared single-value commit keeps dedup, quotas, and sequence accounting
@@ -1210,6 +1258,40 @@ mod tests {
     use crate::subscription::runtime::SubscriptionRuntime;
     use triomphe::Arc;
     use xlfn_kernel::operation_gate::OperationGate;
+
+    #[test]
+    fn borrowed_string_probe_does_not_allocate_and_rechecks_at_commit() {
+        use super::{TopicId, shard_index};
+        use crate::subscription::{RefreshOutcome, tests::connected_sink};
+
+        let (_runtime, server, sink) = connected_sink::<String>(None, "borrowed-dedup");
+        let publish = &server.test_server().publish;
+        let topic = TopicId(1);
+        let shard = &publish.shards[shard_index(topic)];
+        let generation = shard.lock().active_by_topic[&topic].generation;
+        sink.publish("first".to_owned()).unwrap();
+        let _operation = publish.enter_operation().unwrap();
+
+        publish
+            .publish_str_admitted(topic, generation, "first", |_| {
+                panic!("an exact resident duplicate must not be owned")
+            })
+            .unwrap();
+
+        // A second publisher may win after the probe but before allocation.
+        // The shared commit must then deduplicate against its newer value.
+        publish
+            .publish_str_admitted(topic, generation, "second", |text| {
+                assert!(shard.try_lock().is_some(), "allocation must be unlocked");
+                sink.publish("second".to_owned()).unwrap();
+                text.into()
+            })
+            .unwrap();
+        let refresh = server.begin_refresh().unwrap();
+        assert_eq!(refresh.updates().len(), 1);
+        assert_eq!(refresh.updates()[0].sequence, 1);
+        refresh.complete(RefreshOutcome::Delivered).unwrap();
+    }
 
     #[test]
     fn miri_termination_retains_pending_accounting_until_refresh_drains() {
