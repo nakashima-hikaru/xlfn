@@ -32,7 +32,7 @@ class PackageRoutingTests(unittest.TestCase):
                 relative = checker.MODULES[module]
                 source = overlay / relative
                 source.parent.mkdir(parents=True)
-                source.write_text("// original\n", encoding="utf-8")
+                source.write_bytes(b"// original\n")
                 fixture = checker.Fixture(Path("tools/typestate/pass/control.rs"), module, ())
                 events = [
                     {"reason": "compiler-artifact", "fresh": fresh, "manifest_path": str(path)}

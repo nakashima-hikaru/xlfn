@@ -31,12 +31,31 @@ pub(super) struct NotificationPump {
 }
 
 impl NotificationPump {
+    #[cfg(test)]
     pub(super) fn start(notify: impl FnMut() -> XllResult<()> + Send + 'static) -> XllResult<Self> {
         Self::start_with_interval(notify, RETRY_INTERVAL)
     }
 
+    #[cfg(test)]
     fn start_with_interval(
         mut notify: impl FnMut() -> XllResult<()> + Send + 'static,
+        interval: Duration,
+    ) -> XllResult<Self> {
+        Self::spawn(|| (), move |()| notify(), interval)
+    }
+
+    /// Construct and destroy the dispatch state on the worker, which also
+    /// allows thread-affine resources that cannot implement Send.
+    pub(super) fn start_with_state<S>(
+        init: impl FnOnce() -> S + Send + 'static,
+        notify: impl FnMut(&mut S) -> XllResult<()> + Send + 'static,
+    ) -> XllResult<Self> {
+        Self::spawn(init, notify, RETRY_INTERVAL)
+    }
+
+    fn spawn<S>(
+        init: impl FnOnce() -> S + Send + 'static,
+        mut notify: impl FnMut(&mut S) -> XllResult<()> + Send + 'static,
         interval: Duration,
     ) -> XllResult<Self> {
         let shared = Arc::new(Shared::default());
@@ -47,6 +66,9 @@ impl NotificationPump {
         let require_spawn_result =
             std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
         let spawn_result = builder.spawn(move || {
+            // The state lock is declared later and released first at exit, so
+            // worker resources also drop without the queue lock.
+            let mut dispatch = init();
             let mut reported_failure = false;
             let mut state = worker_shared.state.lock();
             loop {
@@ -68,8 +90,10 @@ impl NotificationPump {
                 drop(state);
                 // The host call can block or synchronously cause RefreshData.
                 // Never hold the queue lock while running foreign code.
-                let result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(&mut notify))
-                    .unwrap_or(Err(XllError::Panic));
+                let result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+                    notify(&mut dispatch)
+                }))
+                .unwrap_or(Err(XllError::Panic));
                 if let Err(error) = &result {
                     if !matches!(error, XllError::Closing) && !reported_failure {
                         crate::diagnostics::report_no_unwind(
@@ -146,10 +170,26 @@ impl NotificationPump {
             state.pending = None;
             self.shared.changed.notify_one();
         }
-        if let Some(worker) = self.worker.take()
-            && crate::panic_boundary::contain_panic(worker.join()).is_err()
-        {
-            xlfn_kernel::invariant::fail_stop();
+        if let Some(worker) = self.worker.take() {
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::AsHandle;
+                if worker.thread().id() == std::thread::current().id() {
+                    xlfn_kernel::invariant::fail_stop();
+                }
+                // Releasing the worker's GIT reference and leaving COM happen
+                // on its thread, after the last admitted UpdateNotify. An STA
+                // caller must keep dispatching until that thread has exited.
+                // No queue or callback lock is held while dispatching.
+                xlfn_host::com_wait::wait_with_com_pumping(
+                    worker.as_handle(),
+                    crate::win32::INFINITE,
+                )
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+            }
+            if crate::panic_boundary::contain_panic(worker.join()).is_err() {
+                xlfn_kernel::invariant::fail_stop();
+            }
         }
         std::mem::DropGuard::dismiss(require_join);
     }
@@ -285,6 +325,56 @@ mod tests {
         pump.stop();
         assert!(matches!(pump.request(), Err(XllError::Closing)));
         assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn worker_state_is_affine_and_reused_after_a_failed_attempt() {
+        use std::rc::Rc;
+        use std::thread;
+
+        struct WorkerState {
+            calls: Rc<usize>,
+            owner: thread::ThreadId,
+            exited: mpsc::Sender<thread::ThreadId>,
+        }
+
+        impl Drop for WorkerState {
+            fn drop(&mut self) {
+                assert_eq!(self.owner, thread::current().id());
+                self.exited.send(self.owner).unwrap();
+            }
+        }
+
+        let (sent, received) = mpsc::channel();
+        let (exited, joined) = mpsc::channel();
+        let initializes = thread::current().id();
+        let mut pump = NotificationPump::start_with_state(
+            move || WorkerState {
+                calls: Rc::new(0),
+                owner: thread::current().id(),
+                exited,
+            },
+            move |state| {
+                let calls = Rc::get_mut(&mut state.calls).unwrap();
+                *calls += 1;
+                sent.send((*calls, thread::current().id())).unwrap();
+                if *calls == 1 {
+                    Err(XllError::Overloaded)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap();
+
+        pump.request().unwrap();
+        let (first, worker) = received.recv_timeout(DEADLINE).unwrap();
+        assert_ne!(worker, initializes);
+        assert_eq!(first, 1);
+        assert_eq!(received.recv_timeout(DEADLINE).unwrap(), (2, worker));
+        pump.acknowledge(pump.pending());
+        pump.stop();
+        assert_eq!(joined.try_recv().unwrap(), worker);
     }
 
     #[test]

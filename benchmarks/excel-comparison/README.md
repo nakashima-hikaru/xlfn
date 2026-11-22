@@ -134,3 +134,16 @@ dotnet run --project benchmarks/excel-comparison/control-tests/ControlTests.cspr
 These checks maintain the runner, output validation, process cleanup, and fixture
 control protocols. Native Windows XLL loading and live Excel delivery require
 running the benchmarks on Windows with Excel installed.
+
+### Measure generated UDF size on Windows
+
+From PowerShell 7 on Windows x64 with the MSVC toolset, run
+`./benchmarks/excel-comparison/measure-udf-size.ps1 -Output ./target/udf-size`.
+Use `-Repository <checkout>` and a separate output directory to repeat the
+0/128/512/1,000 scalar UDF sweep on a baseline on the same machine and toolchain.
+Each case records PE virtual and file sizes (including `.text`, `.rdata`,
+`.pdata`, and `.xdata` where present), PDB size, public linker symbols, Cargo
+crate timings, and MSVC linker pass timings. Compare growth relative to the
+zero-UDF case. The first build includes dependencies; use the Cargo report for
+the fixture crate alone. The map identifies public symbol locations, not
+exact sizes of private functions; use PE section sizes for total bytes.

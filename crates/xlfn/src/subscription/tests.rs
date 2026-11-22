@@ -908,6 +908,69 @@ fn two_buffer_string_refresh_picks_newer_sequence_and_cleans_both() {
 }
 
 #[test]
+fn borrowed_string_validates_the_utf16_limit_before_admission() {
+    use crate::error::InputError;
+    use crate::utf16::EXCEL_STRING_LIMIT;
+
+    let (_runtime, server, sink) = connected_sink::<String>(None, "borrowed-string-limit");
+    // More UTF-8 bytes than the limit, but exactly the allowed UTF-16 length.
+    let exact = "💡".repeat(EXCEL_STRING_LIMIT / 2) + "日";
+    let oversized = exact.clone() + "a";
+    sink.publish_str(&exact).unwrap();
+    sink.publish_str(&exact).unwrap();
+
+    let assert_oversized = || {
+        assert!(matches!(
+            sink.publish_str(&oversized),
+            Err(XllError::Input {
+                argument: "RTD value",
+                reason: InputError::TooLarge { limit, actual },
+            }) if limit == EXCEL_STRING_LIMIT && actual == EXCEL_STRING_LIMIT + 1
+        ));
+    };
+    assert_oversized();
+    let refresh = server.begin_refresh().unwrap();
+    assert_eq!(refresh.updates().len(), 1);
+    assert_eq!(refresh.updates()[0].sequence, 0);
+    assert_eq!(
+        refresh.updates()[0].value,
+        StoredRtdValue::String(exact.into_boxed_str())
+    );
+    refresh.complete(RefreshOutcome::Delivered).unwrap();
+
+    server.test_server().publish.mark_closing_for_test();
+    assert_oversized();
+    assert!(matches!(sink.publish_str("valid"), Err(XllError::Closing)));
+}
+
+#[test]
+fn borrowed_string_publish_during_refresh_keeps_the_newer_sequence() {
+    let (_runtime, server, sink) = connected_sink::<String>(None, "borrowed-concurrent");
+    sink.publish_str("same").unwrap();
+    let older = server.begin_refresh().unwrap();
+    let older_sequence = older.updates()[0].sequence;
+
+    let worker = sink.clone();
+    std::thread::spawn(move || {
+        // In-flight is not resident even when the payload happens to match.
+        worker.publish_str("same").unwrap();
+        worker.publish_str("same").unwrap();
+    })
+    .join()
+    .unwrap();
+    older.complete(RefreshOutcome::Delivered).unwrap();
+
+    let newer = server.begin_refresh().unwrap();
+    assert_eq!(newer.updates().len(), 1);
+    assert_eq!(newer.updates()[0].sequence, older_sequence + 1);
+    assert_eq!(
+        newer.updates()[0].value,
+        StoredRtdValue::String("same".into())
+    );
+    newer.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
 fn newer_update_survives_completion_of_older_refresh() {
     let (arena, source, sink, _) = publishing_source::<f64>(None);
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));

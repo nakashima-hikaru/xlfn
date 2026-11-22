@@ -607,6 +607,60 @@ impl RtdPublishStringBenchmark {
                 .expect("publish must succeed");
         }
     }
+    #[inline]
+    pub fn run_borrowed_repeated_same(&self, iterations: usize) {
+        for _ in 0..iterations {
+            self.sink
+                .publish_str(&self.first_value)
+                .expect("publish must succeed");
+        }
+    }
+
+    #[inline]
+    pub fn run_borrowed_changing(&self, iterations: usize) {
+        for index in 0..iterations {
+            let value = if index & 1 == 0 {
+                &self.first_value
+            } else {
+                &self.second_value
+            };
+            self.sink.publish_str(value).expect("publish must succeed");
+        }
+    }
+    /// Builds an exact duplicate mix relative to the first payload.
+    ///
+    /// Seed with `run_borrowed_repeated_same(1)` before measuring each run.
+    pub fn mixed_payloads(&self, duplicate_percent: usize, iterations: usize) -> Vec<&str> {
+        assert!(iterations.is_multiple_of(100));
+        let change_every = match duplicate_percent {
+            0 => 1,
+            50 => 2,
+            99 => 100,
+            100 => return vec![self.first_value.as_str(); iterations],
+            _ => panic!("unsupported duplicate ratio"),
+        };
+        (0..iterations)
+            .map(|index| {
+                if (index / change_every).is_multiple_of(2) {
+                    self.second_value.as_str()
+                } else {
+                    self.first_value.as_str()
+                }
+            })
+            .collect()
+    }
+
+    pub fn run_owned_payloads(&self, values: impl IntoIterator<Item = String>) {
+        for value in values {
+            self.sink.publish(value).expect("publish must succeed");
+        }
+    }
+
+    pub fn run_borrowed_payloads(&self, values: &[&str]) {
+        for &value in values {
+            self.sink.publish_str(value).expect("publish must succeed");
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

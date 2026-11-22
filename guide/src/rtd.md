@@ -158,6 +158,11 @@ producer starts. Later publications update the topic and notify Excel.
 A custom converter returns an owned `RtdValue`. The sender checks finite
 numbers and Excel's string-length limit before queueing it.
 
+A direct source with `RtdSink<String>` can call `sink.publish_str(text)` with a
+borrowed `&str`. It applies the same UTF-16 limit as `publish` and avoids copying
+text identical to the latest resident value. Keep using `publish` when you
+already own the string, or when each update is expected to change.
+
 RTD does not transport arrays. Publish a handle or another scalar identity and expose a separate function when a stream logically updates a complex object.
 
 ## Define a topic

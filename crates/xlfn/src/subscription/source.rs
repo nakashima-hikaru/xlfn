@@ -453,6 +453,19 @@ where
     }
 }
 
+#[cfg(feature = "rtd")]
+impl RtdSink<String> {
+    /// Publishes borrowed text without allocating for an exact resident duplicate.
+    ///
+    /// The same Excel UTF-16 limit, notification behavior, and disconnection
+    /// barrier as [`Self::publish`] apply. Changed values are copied into runtime
+    /// storage; the runtime never retains the caller's borrow.
+    pub fn publish_str(&self, value: &str) -> XllResult<()> {
+        super::value::validate_rtd_string(value)?;
+        self.sink.publish_str(value)
+    }
+}
+
 /// One erased adapter per registered source; subscriptions move out by value.
 pub(crate) trait ErasedRtdSource<E: RtdSubscription = ()>: Send + Sync {
     fn subscribe(&self, topic: &RtdTopic, sink: PublishSink) -> XllResult<E>;

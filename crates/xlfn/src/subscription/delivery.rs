@@ -66,6 +66,13 @@ impl PublishSink {
     }
 
     #[cfg(feature = "rtd")]
+    #[inline]
+    pub(super) fn publish_str(&self, value: &str) -> XllResult<()> {
+        self.core()
+            .publish_str(self.topic_id, self.connection_generation, value)
+    }
+
+    #[cfg(feature = "rtd")]
     pub(crate) fn publish_batch(
         &self,
         values: PublishBatch,

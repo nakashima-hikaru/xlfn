@@ -182,6 +182,7 @@ fn resident_hits_do_not_own_borrowed_keys() {
 
 #[test]
 fn owned_and_borrowed_versioned_hashes_match() {
+    let index = ResidentIndex::<String, u8>::new(8);
     for epoch in [0, 1, u64::MAX] {
         for text in ["", "key", "日本語💡"] {
             let owned = VersionedKey {
@@ -189,9 +190,10 @@ fn owned_and_borrowed_versioned_hashes_match() {
                 key: text.to_owned(),
             };
             let borrowed = VersionedKeyRef { epoch, key: text };
-            let mut hasher = FxHasher::default();
-            borrowed.hash(&mut hasher);
-            assert_eq!(flight_hash(&owned), hasher.finish());
+            assert_eq!(
+                index.prepare(&owned.as_ref()).fingerprint(),
+                index.prepare(&borrowed).fingerprint(),
+            );
             assert!(quick_cache::Equivalent::equivalent(&borrowed, &owned));
         }
     }
@@ -309,7 +311,7 @@ fn borrowed_and_owned_misses_share_singleflight_even_without_residency() {
             epoch: 0,
             key: "key".to_owned(),
         };
-        let hash = flight_hash(&key);
+        let hash = cache.index.prepare(&key.as_ref()).fingerprint();
         std::thread::scope(|scope| {
             let (started_tx, started_rx) = mpsc::sync_channel(1);
             let (release_tx, release_rx) = mpsc::sync_channel(1);
@@ -353,13 +355,13 @@ fn borrowed_and_owned_misses_share_singleflight_even_without_residency() {
 }
 
 #[test]
-fn each_initialization_hashes_once_per_domain_and_hits_only_hash_the_resident_domain() {
+fn each_initialization_and_hit_hashes_the_key_only_once() {
     for borrowed in [false, true] {
         let control = StdArc::new(QueryControl::default());
         let query = Query::new(&"long-key".repeat(128), StdArc::clone(&control));
         let cache = CalculationCache::<OwnedKey, u8>::new(CacheBudget::weight_units(8));
         let compute = || {
-            assert_eq!(control.hashed.load(Ordering::Relaxed), 2);
+            assert_eq!(control.hashed.load(Ordering::Relaxed), 1);
             // Publication must not call user Hash after computation.
             control.fault.store(1, Ordering::Relaxed);
             Ok(9)
@@ -372,11 +374,11 @@ fn each_initialization_hashes_once_per_domain_and_hits_only_hash_the_resident_do
                 .unwrap()
         };
         assert_eq!(*lease, 9);
-        assert_eq!(control.hashed.load(Ordering::Relaxed), 2);
+        assert_eq!(control.hashed.load(Ordering::Relaxed), 1);
         assert_eq!(control.owned.load(Ordering::Relaxed), usize::from(borrowed));
         control.fault.store(0, Ordering::Relaxed);
         assert_eq!(*cache.get(&query).unwrap(), 9);
-        assert_eq!(control.hashed.load(Ordering::Relaxed), 3);
+        assert_eq!(control.hashed.load(Ordering::Relaxed), 2);
     }
 }
 
@@ -402,6 +404,9 @@ fn registered_borrowed_followers_do_not_acquire_owned_keys() {
         });
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let flight = observe_pending_flight(&cache, query.owned());
+        // The leader and this test-only observation each hash once. Each
+        // blocked follower then uses the same fingerprint for both tables.
+        assert_eq!(control.hashed.load(Ordering::Relaxed), 2);
         let followers = (0..4)
             .map(|_| {
                 scope.spawn(|| {
@@ -422,5 +427,6 @@ fn registered_borrowed_followers_do_not_acquire_owned_keys() {
         assert!(enrolled);
     });
     assert_eq!(control.owned.load(Ordering::Relaxed), 0);
+    assert_eq!(control.hashed.load(Ordering::Relaxed), 6);
     assert!(cache.flights.is_empty());
 }

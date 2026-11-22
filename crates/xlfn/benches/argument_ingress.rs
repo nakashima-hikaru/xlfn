@@ -5,6 +5,40 @@ use xlfn::benchmark_support::{
 };
 use xlfn::value::{ExcelCellValue, ExcelValue, Matrix};
 
+fn numeric_fingerprint_breakdown(c: &mut Criterion) {
+    let mut group = c.benchmark_group("numeric_fingerprint_breakdown");
+    group.measurement_time(benchmark_measurement_time());
+    for (rows, columns) in [(1, 1), (2, 8), (64, 64), (10, 10_000)] {
+        let mut fp12 = NumericMatrixIngressBenchmark::new(rows, columns);
+        let mut raw = RawArgumentIngressBenchmark::number_matrix(rows, columns);
+        let shape = format!("{rows}x{columns}");
+        let digest = fp12.run_identity();
+        assert_eq!(digest, fp12.run_fingerprint_only(), "FP12 {shape}");
+        assert_eq!(
+            digest,
+            raw.run_borrowed_numeric_matrix_prepared(false),
+            "strict numeric XLOPER12 {shape}",
+        );
+        group.throughput(criterion::Throughput::Elements((rows * columns) as u64));
+        group.bench_function(format!("{shape}/scope_setup"), |b| {
+            b.iter(|| fp12.run_setup_only());
+        });
+        group.bench_function(format!("{shape}/fp12_validate"), |b| {
+            b.iter(|| fp12.run_plain());
+        });
+        group.bench_function(format!("{shape}/fp12_fingerprint_only"), |b| {
+            b.iter(|| std::hint::black_box(fp12.run_fingerprint_only()));
+        });
+        group.bench_function(format!("{shape}/fp12_validate_fingerprint"), |b| {
+            b.iter(|| std::hint::black_box(fp12.run_identity()));
+        });
+        group.bench_function(format!("{shape}/xloper12_prepare_fingerprint"), |b| {
+            b.iter(|| std::hint::black_box(raw.run_borrowed_numeric_matrix_prepared(false)));
+        });
+    }
+    group.finish();
+}
+
 fn argument_ingress_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("argument_ingress");
     group.measurement_time(benchmark_measurement_time());
@@ -321,5 +355,9 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, argument_ingress_benchmarks);
+criterion_group!(
+    benches,
+    argument_ingress_benchmarks,
+    numeric_fingerprint_breakdown
+);
 criterion_main!(benches);

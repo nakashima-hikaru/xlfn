@@ -1,5 +1,5 @@
 use super::IID_IRTD_UPDATE_EVENT;
-use super::global_interface_table::get_git;
+use super::global_interface_table::{GlobalInterfaceTable, get_git};
 use super::module_lifetime;
 use super::server_gate::ServerOperationBarrier;
 use crate::excel_rtd::notification::NotificationPump;
@@ -130,9 +130,9 @@ impl RetainedUpdateCallback {
         operations: triomphe::Arc<ServerOperationBarrier>,
     ) -> XllResult<Self> {
         let raw_cookie = cookie.raw();
-        let pump = NotificationPump::start(move || {
+        let pump = NotificationPump::start_with_state(WorkerGit::default, move |worker| {
             let _operation = operations.enter_notification().ok_or(XllError::Closing)?;
-            notify_cookie(raw_cookie)
+            worker.notify(raw_cookie)
         })?;
         Ok(Self {
             resources: CallbackResources::Active(ActiveCallback {
@@ -190,27 +190,56 @@ impl RetainedUpdateCallback {
     }
 }
 
-fn notify_cookie(cookie: u32) -> XllResult<()> {
-    let _apartment = ComApartmentGuard::enter()
-        .map_err(|code| crate::error::construct::windows_api("CoInitializeEx", code))?;
+/// Apartment-local state, initialized lazily so idle callbacks do not enter
+/// COM and ServerStart still reports only notification-worker spawn errors.
+#[derive(Default)]
+struct WorkerGit {
+    // Fields drop in declaration order: release the system GIT reference
+    // before balancing the apartment initialization on the same thread.
+    git: Option<GlobalInterfaceTable>,
+    apartment: Option<ComApartmentGuard>,
+}
 
-    // SAFETY: this thread has entered a COM apartment. `get_git` returns
-    // one live IGlobalInterfaceTable wrapper on success, and the wrapper
-    // validates the GIT output before returning its owned reference.
-    unsafe {
-        let git = get_git().map_err(|_| {
-            crate::error::construct::internal(crate::diagnostics::catalog::GIT_NULL)
-        })?;
-        let proxy = git
-            .get_interface(cookie, &IID_IRTD_UPDATE_EVENT)
-            .map_err(|code| {
-                crate::error::construct::windows_api(
-                    "IGlobalInterfaceTable::GetInterfaceFromGlobal",
-                    code,
-                )
-            })?;
-        let event = OwnedRtdUpdateEvent::from_raw(proxy.cast());
-        let notify_status = event.notify();
+impl WorkerGit {
+    fn table(&mut self) -> XllResult<&GlobalInterfaceTable> {
+        match self.git {
+            Some(ref git) => Ok(git),
+            None => {
+                if self.apartment.is_none() {
+                    self.apartment = Some(ComApartmentGuard::enter().map_err(|code| {
+                        crate::error::construct::windows_api("CoInitializeEx", code)
+                    })?);
+                }
+                // SAFETY: the apartment guard is now live and outlives the
+                // cached GIT reference. Failed acquisition leaves the slot
+                // empty, so the next scheduled attempt can retry.
+                let git = unsafe { get_git() }.map_err(|_| {
+                    crate::error::construct::internal(crate::diagnostics::catalog::GIT_NULL)
+                })?;
+                Ok(self.git.insert(git))
+            }
+        }
+    }
+
+    fn notify(&mut self, cookie: u32) -> XllResult<()> {
+        let git = self.table()?;
+        // SAFETY: the worker holds its apartment and GIT reference. The IID
+        // is readable and names the interface originally registered under
+        // the callback's cookie. Keep each proxy local to its admitted call:
+        // Release may call back into COM, and must finish before admission
+        // is released; do not pin Excel's callback in the cache.
+        let notify_status = unsafe {
+            let proxy = git
+                .get_interface(cookie, &IID_IRTD_UPDATE_EVENT)
+                .map_err(|code| {
+                    crate::error::construct::windows_api(
+                        "IGlobalInterfaceTable::GetInterfaceFromGlobal",
+                        code,
+                    )
+                })?;
+            let event = OwnedRtdUpdateEvent::from_raw(proxy.cast());
+            event.notify()
+        };
 
         if notify_status != S_OK {
             return Err(crate::error::construct::windows_api(
@@ -218,9 +247,8 @@ fn notify_cookie(cookie: u32) -> XllResult<()> {
                 notify_status,
             ));
         }
+        Ok(())
     }
-
-    Ok(())
 }
 
 /// Retains the callback lock and storage for one installation. Abandonment

@@ -126,7 +126,8 @@ fn double_checked_hit_reclaims_after_singleflight_unlock() {
         epoch: cache.generation.snapshot(),
         key: Key::plain(1),
     };
-    let flights = cache.flights.shard(flight_hash(&blocked_key)).lock();
+    let hash = cache.index.prepare(&blocked_key.as_ref()).fingerprint();
+    let flights = cache.flights.shard(hash).lock();
     let (observed_tx, observed_rx) = mpsc::channel();
     let worker_cache = StdArc::clone(&cache);
     let computed = StdArc::new(AtomicBool::new(false));
@@ -226,7 +227,7 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
         epoch: cache.generation.snapshot(),
         key: Key::plain(1),
     };
-    let hash = flight_hash(&key);
+    let hash = cache.index.prepare(&key.as_ref()).fingerprint();
     let flight = Arc::new(Flight::new(key, hash));
     *flight.state.lock() = FlightState::Finished(Err(Box::new(XllError::Overloaded)));
     cache

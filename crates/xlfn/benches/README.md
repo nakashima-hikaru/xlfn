@@ -25,7 +25,7 @@ the repository does not keep results from individual machines.
 | `object_lease` | Shared-object pins and final pin release |
 | `cache_registry`, `cache_miss_concurrency`, `cache_reclamation` | Endpoint lookup, concurrent misses, eviction, and lease reclamation |
 | `async_spawn`, `async_task_drain`, `async_task_drain_allocations`, `async_pending_allocations` | Task spawning, rescheduling, cancellation, and drain allocation budgets |
-| `rtd_prepare`, `rtd_prepare_allocations`, `rtd_connection_allocations`, `rtd_publish`, `rtd_refresh` | Subscription admission, owner storage, publication, and refresh |
+| `rtd_prepare`, `rtd_prepare_allocations`, `rtd_connection_allocations`, `rtd_publish`, `rtd_publish_allocations`, `rtd_refresh` | Subscription admission, owner storage, publication, and refresh |
 
 Run one maintained target with its required features:
 
@@ -33,6 +33,7 @@ Run one maintained target with its required features:
 just bench-one argument_ingress
 just bench-one cache_registry "bench-internals cache"
 just bench-one rtd_publish "bench-internals rtd"
+just bench-one rtd_publish_allocations "bench-internals rtd"
 just bench-one async_spawn "bench-internals async-builtin"
 ```
 
@@ -45,6 +46,12 @@ Criterion targets normally measure for ten seconds per case.
 `XLFN_BENCH_MEASUREMENT_MS` provides a local override; Criterion warmup and sample
 count options are separate. Allocation targets use deterministic iteration
 counts and check their stated budgets independently of timing.
+
+The `rtd_publish_string_mix` Criterion group and `rtd_publish_allocations` probe
+compare moved, cloned, and borrowed short and 8 KiB text at 0%, 50%, 99%, and
+100% duplicates. Moved-string allocation is deliberately outside the measurement
+because the caller already owns the string; clone and borrowed-copy costs are
+included. The allocation probe warms the pending slot and asserts its budgets.
 
 Measurements execute Rust paths without Excel/COM. Requested bytes, allocation
 traffic, and process RSS describe different quantities. For performance

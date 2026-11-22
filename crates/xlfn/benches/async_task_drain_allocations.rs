@@ -48,10 +48,20 @@ fn main() {
         // Warm cancellation slot recycling before measuring batch storage.
         // Its free-list growth is independent of the collection under review.
         assert_eq!(AsyncTaskDrainBenchmark::new(count).run(), count);
-        let benchmark = AsyncTaskDrainBenchmark::new(count);
         ALLOCS.store(0, Ordering::Relaxed);
         REALLOCS.store(0, Ordering::Relaxed);
         BYTES.store(0, Ordering::Relaxed);
+        ENABLED.store(true, Ordering::Relaxed);
+        let benchmark = std::hint::black_box(AsyncTaskDrainBenchmark::new(count));
+        ENABLED.store(false, Ordering::Relaxed);
+        let construction_allocations = ALLOCS.swap(0, Ordering::Relaxed);
+        let construction_reallocations = REALLOCS.swap(0, Ordering::Relaxed);
+        let construction_requested_bytes = BYTES.swap(0, Ordering::Relaxed);
+        if count == 0 {
+            assert_eq!(construction_allocations, 0);
+            assert_eq!(construction_reallocations, 0);
+        }
+
         ENABLED.store(true, Ordering::Relaxed);
         let drained = benchmark.run();
         ENABLED.store(false, Ordering::Relaxed);
@@ -62,6 +72,9 @@ fn main() {
             "{}",
             serde_json::json!({
                 "tasks": count,
+                "construction_allocations": construction_allocations,
+                "construction_reallocations": construction_reallocations,
+                "construction_requested_bytes": construction_requested_bytes,
                 "allocations": ALLOCS.load(Ordering::Relaxed),
                 "reallocations": REALLOCS.load(Ordering::Relaxed),
                 "requested_bytes": BYTES.load(Ordering::Relaxed),

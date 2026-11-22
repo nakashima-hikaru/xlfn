@@ -14,6 +14,17 @@ fn drain(c: &mut Criterion) {
         });
     }
     group.finish();
+
+    // The drain-only benchmark intentionally excludes the cost of creating
+    // the calculation and publishing its first task.
+    let mut lifecycle = c.benchmark_group("async_task_calculation_lifecycle");
+    lifecycle.measurement_time(benchmark_measurement_time());
+    for count in [0, 1, 32, 128] {
+        lifecycle.bench_function(BenchmarkId::from_parameter(count), |b| {
+            b.iter(|| assert_eq!(AsyncTaskDrainBenchmark::new(count).run(), count));
+        });
+    }
+    lifecycle.finish();
 }
 
 criterion_group!(benches, drain);

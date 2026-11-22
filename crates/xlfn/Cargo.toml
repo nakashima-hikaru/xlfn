@@ -127,6 +127,11 @@ harness = false
 required-features = ["bench-internals", "rtd"]
 
 [[bench]]
+name = "rtd_publish_allocations"
+harness = false
+required-features = ["bench-internals", "rtd"]
+
+[[bench]]
 name = "rtd_refresh"
 harness = false
 required-features = ["bench-internals", "rtd"]

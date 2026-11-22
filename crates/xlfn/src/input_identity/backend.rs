@@ -155,6 +155,52 @@ impl InputIdentityEncoder {
         self.u64(value.to_bits());
     }
 
+    /// Appends the existing little-endian f64 encoding in bulk. This does
+    /// not validate values; FP12 ingress has already checked the whole slice.
+    #[inline]
+    pub(crate) fn f64_slice(&mut self, values: &[f64]) -> XllResult<()> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+
+        #[cfg(target_endian = "little")]
+        {
+            // f64 has no padding, so its initialized little-endian memory is
+            // exactly the existing to_bits().to_le_bytes() fingerprint encoding.
+            // This retains signed zero and subnormal bits without conversion.
+            #[allow(
+                unsafe_code,
+                reason = "reads initialized f64 bits as little-endian bytes"
+            )]
+            // SAFETY: the byte borrow spans the same immutable contiguous
+            // slice, with weaker alignment; size_of_val stays within isize.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    values.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(values),
+                )
+            };
+            self.write(bytes);
+        }
+
+        #[cfg(target_endian = "big")]
+        self.write_f64_slice_portable(values);
+        Ok(())
+    }
+
+    #[cfg(any(target_endian = "big", test))]
+    fn write_f64_slice_portable(&mut self, values: &[f64]) {
+        // Batch endian conversion without a heap allocation or a per-value
+        // trip through the sink state machine.
+        let mut bytes = [[0; 8]; 64];
+        for chunk in values.chunks(bytes.len()) {
+            for (&value, target) in chunk.iter().zip(&mut bytes) {
+                *target = value.to_bits().to_le_bytes();
+            }
+            self.write(bytes[..chunk.len()].as_flattened());
+        }
+    }
+
     /// Appends converted numeric cells with the same framing as repeated
     /// `f64` calls. Selects the hashed sink once for the remaining sequence;
     /// validation stays with the iterator and completes before lookup.
@@ -509,6 +555,57 @@ mod tests {
                 actual.finish_into(&mut a).unwrap();
                 expected.finish_into(&mut b).unwrap();
                 assert_eq!(a.finalize(), b.finalize(), "prefix={prefix}, count={count}");
+            }
+        }
+    }
+
+    #[test]
+    fn miri_bulk_f64_bits_match_scalar_and_portable_encodings() {
+        let prefixes: &[usize] = if cfg!(miri) {
+            &[16, 127]
+        } else {
+            &[0, 1, 16, 127, 128, 129]
+        };
+        let counts: &[usize] = if cfg!(miri) {
+            &[14, 15, 513]
+        } else {
+            &[0, 1, 14, 15, 16, 63, 64, 65, 510, 511, 512, 513, 1025]
+        };
+        let digest = |encoder: &mut InputIdentityEncoder| {
+            let mut root = blake3::Hasher::new();
+            encoder.finish_into(&mut root).unwrap();
+            root.finalize()
+        };
+        for &prefix in prefixes {
+            for &count in counts {
+                let header = vec![0xa5; prefix];
+                let values: Vec<_> = (0..count)
+                    .map(|index| match index % 7 {
+                        0 => -0.0,
+                        1 => 0.0,
+                        2 => f64::from_bits(1),
+                        3 => f64::from_bits(0x8000_0000_0000_0001),
+                        4 => f64::MAX,
+                        5 => f64::MIN_POSITIVE,
+                        _ => -(index as f64) / 7.0,
+                    })
+                    .collect();
+                let mut scalar = InputIdentityEncoder::new("values");
+                let mut portable = InputIdentityEncoder::new("values");
+                let mut bulk = InputIdentityEncoder::new("values");
+                for encoder in [&mut scalar, &mut portable, &mut bulk] {
+                    encoder.write(&header);
+                }
+                values.iter().copied().for_each(|value| scalar.f64(value));
+                portable.write_f64_slice_portable(&values);
+                bulk.f64_slice(&values).unwrap();
+                for encoder in [&mut scalar, &mut portable, &mut bulk] {
+                    // Verify ordinary writes after streaming too.
+                    encoder.tag(0x77);
+                }
+                let expected = digest(&mut scalar);
+                assert_eq!(digest(&mut portable), expected, "portable {prefix}/{count}");
+                assert_eq!(digest(&mut bulk), expected, "bulk {prefix}/{count}");
             }
         }
     }

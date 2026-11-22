@@ -2161,6 +2161,8 @@ impl<T, D> core::marker::UnsafeUnpin for xlfn::rtd::RtdSender<T, D> where triomp
 impl<T, D> !core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdSender<T, D>
 impl<T, D> !core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdSender<T, D>
 pub struct xlfn::rtd::RtdSink<T>
+impl xlfn::rtd::RtdSink<alloc::string::String>
+pub fn xlfn::rtd::RtdSink<alloc::string::String>::publish_str(&self, &str) -> xlfn_engine::error::XllResult<()>
 impl<T> xlfn::rtd::RtdSink<T> where T: xlfn::rtd::IntoRtdValue
 pub fn xlfn::rtd::RtdSink<T>::publish(&self, T) -> xlfn_engine::error::XllResult<()>
 impl<T> core::clone::Clone for xlfn::rtd::RtdSink<T>

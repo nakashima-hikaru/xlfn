@@ -8,6 +8,8 @@ pub struct NumericMatrixIngressBenchmark {
     // The first eight bytes hold the two i32 dimensions. Keeping Vec storage
     // lets the pointer be derived afresh after all owner moves have completed.
     storage: Vec<f64>,
+    rows: usize,
+    columns: usize,
 }
 
 impl NumericMatrixIngressBenchmark {
@@ -33,7 +35,38 @@ impl NumericMatrixIngressBenchmark {
         Self {
             runtime: get_benchmark_runtime(),
             storage,
+            rows,
+            columns,
         }
+    }
+
+    /// Measures the same runtime and call-scope setup without reading an argument.
+    pub fn run_setup_only(&self) {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope, token| {
+            let arguments = crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(
+                call, scope, token, 1,
+            );
+            std::hint::black_box(arguments.finish().unwrap());
+        });
+    }
+
+    /// Hashes the known-finite fixture without ABI validation or scope setup.
+    pub fn run_fingerprint_only(&self) -> [u8; 32] {
+        use crate::value::{FormulaInputMode, InputMode};
+        let mut fingerprint = crate::input_identity::InputFingerprintBuilder::new(1);
+        fingerprint
+            .with_argument(0, "arg", |identity| {
+                identity.u64(self.rows as u64);
+                identity.u64(self.columns as u64);
+                FormulaInputMode::f64_slice(identity, std::hint::black_box(&self.storage[1..]))
+            })
+            .unwrap();
+        *fingerprint.finish().unwrap().as_bytes()
     }
 
     /// Validates and borrows the numeric buffer through production call setup.

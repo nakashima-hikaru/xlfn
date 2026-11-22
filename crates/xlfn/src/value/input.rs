@@ -312,7 +312,7 @@ impl InputMode for FormulaInputMode {
     }
 
     fn f64_slice(identity: &mut Self::Identity, values: &[f64]) -> XllResult<()> {
-        identity.f64_sequence(values.iter().copied().map(Ok))
+        identity.f64_slice(values)
     }
 
     fn i64(identity: &mut Self::Identity, value: i64) {

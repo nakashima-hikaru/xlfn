@@ -4052,6 +4052,82 @@ mod sta_probe {
 
 #[test]
 #[cfg(all(feature = "rtd", feature = "handles"))]
+fn sta_notification_pump_dispatches_during_worker_state_drop() {
+    const CHILD: &str = "XLFN_TEST_STA_NOTIFICATION_WORKER_DROP";
+    if std::env::var_os(CHILD).is_none() {
+        // A blocking join would deadlock. Keep that failure bounded.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(CHILD, "1")
+            .args([
+                "--exact",
+                "excel_rtd::windows::tests::sta_notification_pump_dispatches_during_worker_state_drop",
+            ])
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(
+                    status.success(),
+                    "notification worker STA probe failed: {status}"
+                );
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                child.wait().unwrap();
+                panic!("STA stopped dispatching COM before notification worker exit");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    struct WorkerCleanup {
+        cookie: u32,
+        _apartment: TestComApartment,
+    }
+    impl Drop for WorkerCleanup {
+        fn drop(&mut self) {
+            let interface = sta_probe::interface(self.cookie);
+            sta_probe::call(&interface);
+        }
+    }
+
+    let _apartment = TestComApartment::enter_sta();
+    let sta = thread::current().id();
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&dispatched);
+    let probe = sta_probe::new(move || {
+        assert_eq!(thread::current().id(), sta);
+        observed.store(true, Ordering::Release);
+    });
+
+    // SAFETY: the STA retains its apartment and this IUnknown through revocation.
+    let git = unsafe { super::global_interface_table::get_git() }.unwrap();
+    let mut cookie = 0;
+    // SAFETY: the live interface, IID, and writable cookie are valid here.
+    let status = unsafe { git.register(probe.as_ptr(), &IID_IUNKNOWN, &mut cookie) };
+    assert_eq!(status, S_OK);
+
+    let pump = crate::excel_rtd::notification::NotificationPump::start_with_state(
+        move || WorkerCleanup {
+            cookie,
+            _apartment: TestComApartment::enter(),
+        },
+        |_| Ok(()),
+    )
+    .unwrap();
+    // Simulate COM reentry after the last admitted call, from teardown of the
+    // worker's apartment-affine state rather than from UpdateNotify.
+    drop(pump);
+    assert!(dispatched.load(Ordering::Acquire));
+    // SAFETY: dropping the pump joined the worker, and no proxy retains the cookie.
+    let status = unsafe { git.revoke(cookie) };
+    assert_eq!(status, S_OK);
+}
+
+#[test]
+#[cfg(all(feature = "rtd", feature = "handles"))]
 fn sta_registration_mutex_wait_dispatches_com_and_keeps_reentry_excluded() {
     const CHILD: &str = "XLFN_TEST_STA_REGISTRATION_MUTEX";
     if std::env::var_os(CHILD).is_none() {
