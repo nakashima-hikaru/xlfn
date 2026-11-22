@@ -1,7 +1,7 @@
 // module: runtime/shutdown/pipeline
-use super::{ModuleAuthorityRecovery, ServicesSealed, TeardownTxn};
+use super::{BindingPhase, ServicesSealed, TeardownTxn};
 
-fn typed_drop<A: crate::Addin, S: ModuleAuthorityRecovery>(
+fn typed_drop<A: crate::Addin, S: BindingPhase>(
     transaction: TeardownTxn<'_, A, (), S>,
 ) {
     drop(transaction);

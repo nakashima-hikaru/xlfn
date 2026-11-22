@@ -1,7 +1,7 @@
 // module: runtime/shutdown/pipeline
-use super::{ModuleAuthorityRecovery, TeardownTxn};
+use super::{BindingPhase, TeardownTxn};
 
-fn invalid<A: crate::Addin, S: ModuleAuthorityRecovery>(
+fn invalid<A: crate::Addin, S: BindingPhase>(
     teardown: TeardownTxn<'_, A, (), S>,
 ) {
     drop(teardown.split());

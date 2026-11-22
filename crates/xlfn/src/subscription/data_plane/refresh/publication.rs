@@ -1,114 +1,11 @@
 //! Exact-batch marshalling and local output handoff.
 //!
-//! The backend traits and constructors are private. Ordinary callers can only
-//! marshal their consumed batch with the concrete Windows Automation backend.
+//! Only this module can bind a prepared host array to a consumed batch.
+//! Ordinary callers can marshal that batch only with the Windows backend.
 use super::*;
 use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
-trait ArrayApi {
-    type Array: Copy;
-    type Data;
-    fn create(count: u32) -> Result<Self::Array, i32>;
-    fn access(array: Self::Array) -> Result<Self::Data, i32>;
-    fn fill(data: Self::Data, updates: &[RtdUpdate]) -> Result<(), i32>;
-    fn unaccess(array: Self::Array) -> Result<(), i32>;
-    fn destroy(array: Self::Array);
-    fn retained(array: Self::Array, status: i32);
-}
-
-enum MarshalFailure {
-    InvalidCount,
-    Backend(i32),
-}
-
-struct BuildingArray<A: ArrayApi> {
-    array: Option<A::Array>,
-    locked: bool,
-}
-
-impl<A: ArrayApi> BuildingArray<A> {
-    fn unlock(&mut self) -> Result<(), i32> {
-        if !self.locked {
-            return Ok(());
-        }
-        // Disarm before invoking the API: an indeterminate failure must never
-        // be retried by Drop, nor followed by destroying a still-locked array.
-        self.locked = false;
-        // Move the allocation out before the call too: if the backend unwinds,
-        // self's Drop cannot mistake an indeterminate lock for an unlocked one.
-        let array = self
-            .array
-            .take()
-            .expect("locked construction owns an array");
-        // A::Array is a raw, non-dropping handle. Until the call returns Ok,
-        // it is indeterminate ownership, not a ReadyArray; unwind retains it.
-        if let Err(status) = A::unaccess(array) {
-            A::retained(array, status);
-            return Err(status);
-        }
-        self.array = Some(array);
-        Ok(())
-    }
-}
-
-impl<A: ArrayApi> Drop for BuildingArray<A> {
-    fn drop(&mut self) {
-        let _ = self.unlock();
-        if let Some(array) = self.array.take() {
-            A::destroy(array);
-        }
-    }
-}
-
-struct ReadyArray<A: ArrayApi> {
-    array: Option<A::Array>,
-    count: i32,
-}
-
-impl<A: ArrayApi> ReadyArray<A> {
-    fn prepare(updates: &[RtdUpdate]) -> Result<Self, MarshalFailure> {
-        let count = i32::try_from(updates.len()).map_err(|_| MarshalFailure::InvalidCount)?;
-        if updates.is_empty() {
-            return Ok(Self { array: None, count });
-        }
-        updates
-            .len()
-            .checked_mul(2)
-            .ok_or(MarshalFailure::InvalidCount)?;
-        let array = A::create(count as u32).map_err(MarshalFailure::Backend)?;
-        let mut construction = BuildingArray::<A> {
-            array: Some(array),
-            locked: false,
-        };
-        // An unwind from an access with indeterminate side effects must retain
-        // the allocation too. Only a returned error confirms no lock acquired.
-        construction.array = None;
-        // The local raw handle has no Drop. An unwind retains/leaks it without
-        // pretending that access has completed or an unlocked array is ready.
-        let accessed = A::access(array);
-        construction.array = Some(array);
-        let data = accessed.map_err(MarshalFailure::Backend)?;
-        construction.locked = true;
-        A::fill(data, updates).map_err(MarshalFailure::Backend)?;
-        construction.unlock().map_err(MarshalFailure::Backend)?;
-        Ok(Self {
-            array: construction.array.take(),
-            count,
-        })
-    }
-
-    fn relinquish(mut self) {
-        self.array.take();
-    }
-}
-
-impl<A: ArrayApi> Drop for ReadyArray<A> {
-    fn drop(&mut self) {
-        if let Some(array) = self.array.take() {
-            A::destroy(array);
-        }
-    }
-}
+use xlfn_host::refresh_array::{ArrayApi, MarshalFailure, ReadyArray};
 
 trait OutputSlots<A: ArrayApi> {
     fn write_count(&mut self, count: i32) -> Result<(), i32>;
@@ -216,22 +113,14 @@ enum HandoffStage {
 }
 
 /// Its private fields bind this exact array to the batch used to build it.
-#[allow(
-    private_bounds,
-    reason = "only the private audited backend can construct publication authority"
-)]
 #[must_use = "dropping an unpublished response destroys its array and restores its batch"]
-pub(crate) struct RefreshPublication<'a, H: SubscriptionHost, A: ArrayApi> {
+pub(crate) struct RefreshPublication<'a, H: SubscriptionHost, A: ArrayApi<Update = RtdUpdate>> {
     // Field order also governs ordinary Drop before handoff.
     array: ReadyArray<A>,
     batch: RtdRefreshBatch<'a, H>,
 }
 
-#[allow(
-    private_bounds,
-    reason = "backend and construction remain private rather than mintable by callers"
-)]
-impl<'a, H: SubscriptionHost, A: ArrayApi> RefreshPublication<'a, H, A> {
+impl<'a, H: SubscriptionHost, A: ArrayApi<Update = RtdUpdate>> RefreshPublication<'a, H, A> {
     fn prepare(batch: RtdRefreshBatch<'a, H>) -> Result<Self, MarshalFailure> {
         let array = match ReadyArray::<A>::prepare(batch.updates()) {
             Ok(array) => array,
@@ -254,9 +143,9 @@ impl<'a, H: SubscriptionHost, A: ArrayApi> RefreshPublication<'a, H, A> {
         // Thus even a reentrant rollback notifier sees empty failed outputs.
         let Self { batch, array } = self;
         let mut staged = PendingOutputs::<A, O>::stage(output);
-        staged.get_mut().output.write_count(array.count)?;
+        staged.get_mut().output.write_count(array.count())?;
         after(HandoffStage::CountWritten);
-        staged.get_mut().output.write_array(array.array)?;
+        staged.get_mut().output.write_array(array.array())?;
         after(HandoffStage::PointerWritten);
         array.relinquish();
         let committed = CommittedRefresh { batch: Some(batch) };
@@ -329,36 +218,7 @@ mod windows {
     use crate::excel_rtd::WindowsRefreshArrayApi as WindowsApi;
     #[cfg(test)]
     use crate::win32::S_OK;
-    use crate::win32::{E_INVALIDARG, E_POINTER, SAFEARRAY, VARIANT};
-    use std::ptr::NonNull;
-
-    impl ArrayApi for WindowsApi {
-        type Array = NonNull<SAFEARRAY>;
-        type Data = *mut VARIANT;
-        fn create(count: u32) -> Result<Self::Array, i32> {
-            Self::create(count)
-        }
-        fn access(array: Self::Array) -> Result<Self::Data, i32> {
-            // SAFETY: only the private core supplies its fresh retained array.
-            unsafe { Self::access(array) }
-        }
-        fn fill(data: Self::Data, updates: &[RtdUpdate]) -> Result<(), i32> {
-            // SAFETY: the private construction owner retains the successful
-            // lock and the create-time VARIANT layout validation.
-            unsafe { Self::fill(data, updates) }
-        }
-        fn unaccess(array: Self::Array) -> Result<(), i32> {
-            // SAFETY: the construction owns the one successful data access.
-            unsafe { Self::unaccess(array) }
-        }
-        fn destroy(array: Self::Array) {
-            // SAFETY: only an unlocked, untransferred owner reaches destruction.
-            unsafe { Self::destroy(array) }
-        }
-        fn retained(_array: Self::Array, status: i32) {
-            Self::retained(status);
-        }
-    }
+    use crate::win32::{E_INVALIDARG, E_POINTER, SAFEARRAY};
 
     fn marshal_status(error: MarshalFailure) -> i32 {
         match error {
@@ -417,12 +277,12 @@ mod windows {
         let mut staged = PendingOutputs::<WindowsApi, _>::stage(output);
         if let Err(status) = <RefreshOutputSlots<'_> as OutputSlots<WindowsApi>>::write_count(
             &mut staged.get_mut().output,
-            ready.count,
+            ready.count(),
         )
         .and_then(|()| {
             <RefreshOutputSlots<'_> as OutputSlots<WindowsApi>>::write_array(
                 &mut staged.get_mut().output,
-                ready.array,
+                ready.array(),
             )
         }) {
             return status;

@@ -1,3 +1,4 @@
+use crate::refresh_array::ArrayApi;
 use crate::win32::{
     E_FAIL, E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, S_OK, SAFEARRAY, SAFEARRAYBOUND,
     SafeArrayAccessData, SafeArrayCreate, SafeArrayDestroy, SafeArrayUnaccessData,
@@ -130,11 +131,25 @@ pub unsafe fn write_variant(result: *mut VARIANT, value: VariantValue<'_>) -> i3
     S_OK
 }
 
-/// Raw Automation primitives used only by the private refresh ownership core.
-/// These functions do not issue batch delivery authority.
-pub enum VariantArray {}
-impl VariantArray {
-    pub fn create(count: u32) -> Result<NonNull<SAFEARRAY>, i32> {
+/// Maps borrowed application updates without constructing an intermediate row
+/// buffer. The caller owns the meaning of its values and the diagnostic sink.
+pub trait VariantArraySource {
+    type Update;
+    fn row(update: &Self::Update) -> (i32, VariantValue<'_>);
+    fn retained(status: i32);
+}
+
+/// Native 2 × N array backend. Does not issue batch delivery authority.
+pub struct VariantArray<S>(std::marker::PhantomData<fn() -> S>);
+
+// SAFETY: OLE creates unique, unlocked arrays and reports exactly one lock
+// on successful access. SAFEARRAY owns all initialized element resources.
+unsafe impl<S: VariantArraySource> ArrayApi for VariantArray<S> {
+    type Update = S::Update;
+    type Array = NonNull<SAFEARRAY>;
+    type Data = *mut VARIANT;
+
+    fn create(count: u32) -> Result<NonNull<SAFEARRAY>, i32> {
         let Some(cells) = (count as usize).checked_mul(2) else {
             return Err(E_INVALIDARG);
         };
@@ -156,10 +171,7 @@ impl VariantArray {
             .ok_or(E_OUTOFMEMORY)
     }
 
-    /// # Safety
-    /// `array` must be live, unlocked and uniquely controlled by the caller.
-    /// On success the caller owns exactly one access that must be released.
-    pub unsafe fn access(array: NonNull<SAFEARRAY>) -> Result<*mut VARIANT, i32> {
+    unsafe fn access(array: NonNull<SAFEARRAY>) -> Result<*mut VARIANT, i32> {
         let mut data = ptr::null_mut();
         // SAFETY: the ownership core retains this fresh, unlocked array.
         let status = unsafe { SafeArrayAccessData(array.as_ptr(), &mut data) };
@@ -170,22 +182,42 @@ impl VariantArray {
         }
     }
 
-    /// # Safety
-    /// The caller must own one successful access of this live array and stop
-    /// using its data before the release attempt.
-    pub unsafe fn unaccess(array: NonNull<SAFEARRAY>) -> Result<(), i32> {
+    unsafe fn fill(data: *mut VARIANT, updates: &[S::Update]) -> Result<(), i32> {
+        if data.is_null() {
+            return Err(E_FAIL);
+        }
+        // SAFETY: the owner locked the array allocated for this exact slice.
+        let cells = unsafe { std::slice::from_raw_parts_mut(data, updates.len() * 2) };
+        for (column, update) in cells.as_chunks_mut::<2>().0.iter_mut().zip(updates) {
+            let (topic, value) = S::row(update);
+            let mut topic_variant = VARIANT::default();
+            topic_variant.Anonymous.Anonymous.vt = VT_I4;
+            topic_variant.Anonymous.Anonymous.Anonymous.lVal = topic;
+            column[0] = topic_variant;
+            // SAFETY: the second slot is initialized and empty. The array
+            // takes any BSTR directly.
+            let status = unsafe { write_variant(&mut column[1], value) };
+            if status != S_OK {
+                return Err(status);
+            }
+        }
+        Ok(())
+    }
+
+    unsafe fn unaccess(array: NonNull<SAFEARRAY>) -> Result<(), i32> {
         // SAFETY: this is the one data access retained by the ownership core.
         let status = unsafe { SafeArrayUnaccessData(array.as_ptr()) };
         if status < 0 { Err(status) } else { Ok(()) }
     }
 
-    /// # Safety
-    /// The caller must own this live, unlocked array; ownership does not remain
-    /// with the caller and the array must not be used again.
-    pub unsafe fn destroy(array: NonNull<SAFEARRAY>) {
+    unsafe fn destroy(array: NonNull<SAFEARRAY>) {
         // SAFETY: the ownership core destroys only its untransferred unlocked array.
         if unsafe { SafeArrayDestroy(array.as_ptr()) } < 0 {
             xlfn_kernel::invariant::fail_stop();
         }
+    }
+
+    fn retained(_array: Self::Array, status: i32) {
+        S::retained(status);
     }
 }

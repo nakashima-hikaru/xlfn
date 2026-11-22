@@ -54,9 +54,10 @@ Fixtures reject empty take, occupied release, double install, and foreign claims
 Quota borrowed permits retain the quota lifetime. Detached acquisition requires
 an unsafe owner-lifetime contract; observing capacity zero is not a drain proof.
 
-Open transactions carry mandatory service inputs after initialization. Fixtures
-reject missing or repeated initialization inputs, commit before initialization
-or lifecycle installation, and committing twice. Async response delivery consumes
+Open transactions carry raw service inputs after initialization and must consume
+preparation before host registration, lifecycle installation, or commit. Fixtures
+reject missing or repeated inputs, skipping or repeating preparation, early commit,
+and committing twice. Async response delivery consumes
 the pending handle authority; its fixtures reject a second delivery attempt.
 Executor close retains the runtime and executor through publication-reader and
 task drain. Only the drained stage exposes executor shutdown; abandoning any
@@ -75,8 +76,12 @@ sealing generation services. The seal transition first detaches
 handle topics while the handle slot is still published, preserving separate
 topic-stop and handle-seal failures. Fixtures reject skipping these stages,
 reusing the initial owner, and reassembling an unrelated owner and drained stage.
-Interrupted teardown still returns its module authority before releasing the
-cleanup claim.
+Once exports drain, the private stopping owner holds the exact claim and
+drained module authority together. Later stages add resource proofs, not
+authority. Interrupted teardown returns the drained module to its original
+issuer before releasing the cleanup claim, including after a stage has split
+from its owner. The STA binding remains installed until add-in cleanup yields
+an empty binding for finalization.
 A lifecycle match retains `AvailableClose` or `ClaimedClose` rather than rebuilding
 the broad resource enum. Only available resources can claim a removal owner;
 already drained or retained authority cannot start a new close. Cleanup-ready

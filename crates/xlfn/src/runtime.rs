@@ -387,6 +387,13 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
                 panic!("test runtime must stage its opening generation");
             }
         };
+        let transaction = match transaction.prepare_services() {
+            Ok(transaction) => transaction,
+            Err(failure) => {
+                let error = failure.recover(&access);
+                panic!("test runtime must prepare its generation services: {error}");
+            }
+        };
         match transaction.install_lifecycle(&access) {
             Ok(transaction) => transaction,
             Err((reason, transaction)) => {
@@ -435,6 +442,13 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
                 panic!("test runtime must stage its opening generation");
             }
         };
+        let transaction = match transaction.prepare_services() {
+            Ok(transaction) => transaction,
+            Err(failure) => {
+                let error = failure.recover(&access);
+                panic!("test runtime must prepare its generation services: {error}");
+            }
+        };
         match transaction.install_lifecycle(&access) {
             Ok(transaction) => transaction,
             Err((reason, transaction)) => {
@@ -475,6 +489,13 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
             Err((_error, transaction, _opening)) => {
                 drop(transaction);
                 panic!("test runtime must stage its opening generation");
+            }
+        };
+        let transaction = match transaction.prepare_services() {
+            Ok(transaction) => transaction,
+            Err(failure) => {
+                let error = failure.recover(&access);
+                panic!("test runtime must prepare its generation services: {error}");
             }
         };
         match transaction.install_lifecycle(&access) {
@@ -2072,7 +2093,7 @@ pub(crate) mod tests {
                     assert!(fail_start);
                     failure
                 }
-                Ok((transaction, _)) => {
+                Ok(transaction) => {
                     assert!(!fail_start);
                     assert_eq!(COUNTS.stops.load(Ordering::Relaxed), 0);
                     // Registration failures enter this same owning rollback path.

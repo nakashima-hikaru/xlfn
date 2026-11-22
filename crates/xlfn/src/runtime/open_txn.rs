@@ -29,45 +29,46 @@ type RawServiceInputs<A> = crate::runtime_components::GenerationServiceInputs<
     crate::addin_impl::AddinSubscription<A>,
     crate::addin_impl::AddinSources<A>,
 >;
-enum ServiceInputs<A: crate::Addin> {
-    Unprepared(Option<RawServiceInputs<A>>),
+// Only recovery erases which payload the opening owner currently holds.
+pub(crate) enum RollbackInputs<A: crate::Addin> {
+    Empty,
+    Raw(RawServiceInputs<A>),
     Prepared(PreparedServices<A>),
 }
 
-impl<A: crate::Addin> ServiceInputs<A> {
-    fn arm(
-        &mut self,
-        attempt: OpenAttemptId,
-        config: crate::addin_impl::RuntimeConfig,
-    ) -> XllResult<()> {
-        let Self::Unprepared(inputs) = self else {
-            return Err(open_state_error());
-        };
-        let inputs = inputs.take().ok_or_else(open_state_error)?;
-        #[cfg(feature = "handles")]
-        let inputs = {
-            let mut inputs = inputs;
-            inputs.prepare_handles(config.handle_config())?;
-            inputs
-        };
-        let services = GenerationServices::arm_generation(
-            attempt.into_runtime_generation(),
-            config,
-            #[cfg(feature = "rtd")]
-            crate::excel_rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
-            inputs,
-        )?
-        .commit();
-        *self = Self::Prepared(services);
-        Ok(())
+impl<A: crate::Addin> From<()> for RollbackInputs<A> {
+    fn from((): ()) -> Self {
+        Self::Empty
     }
 }
 
-type InitializedOpenCore<A> = OpenCore<A, ServiceInputs<A>>;
-type RollbackOpenCore<A> = OpenCore<A, Option<ServiceInputs<A>>>;
+impl<A: crate::Addin> From<RawServiceInputs<A>> for RollbackInputs<A> {
+    fn from(inputs: RawServiceInputs<A>) -> Self {
+        Self::Raw(inputs)
+    }
+}
 
-/// Service inputs are absent before initialization and mandatory afterwards.
-/// Only the rollback projection erases that distinction into an `Option`.
+impl<A: crate::Addin> From<PreparedServices<A>> for RollbackInputs<A> {
+    fn from(services: PreparedServices<A>) -> Self {
+        Self::Prepared(services)
+    }
+}
+
+impl<A: crate::Addin> RollbackInputs<A> {
+    fn dispose(self) -> bool {
+        match self {
+            Self::Empty => true,
+            Self::Raw(inputs) => discard_open_inputs(inputs),
+            Self::Prepared(services) => discard_open_inputs(services),
+        }
+    }
+}
+
+type InitializedOpenCore<A> = OpenCore<A, RawServiceInputs<A>>;
+type RollbackOpenCore<A> = OpenCore<A, RollbackInputs<A>>;
+type PreparedOpenCore<A> = OpenCore<A, PreparedServices<A>>;
+
+/// Service ownership follows initialization and preparation as distinct types.
 pub(crate) struct OpenCore<A: crate::Addin, I = ()> {
     attempt_id: OpenAttemptId,
     module_opening: crate::module_runtime::ModuleOpening,
@@ -89,17 +90,13 @@ impl<A: crate::Addin> OpenCore<A> {
     }
 
     fn initialized(self, inputs: RawServiceInputs<A>) -> InitializedOpenCore<A> {
-        self.map_inputs(|()| ServiceInputs::Unprepared(Some(inputs)))
-    }
-
-    fn into_rollback(self) -> RollbackOpenCore<A> {
-        self.map_inputs(|()| None)
+        self.map_inputs(|()| inputs)
     }
 }
 
-impl<A: crate::Addin> InitializedOpenCore<A> {
+impl<A: crate::Addin, I: Into<RollbackInputs<A>>> OpenCore<A, I> {
     fn into_rollback(self) -> RollbackOpenCore<A> {
-        self.map_inputs(Some)
+        self.map_inputs(Into::into)
     }
 }
 
@@ -151,22 +148,26 @@ pub(crate) struct Initialized<A: crate::Addin> {
 
 /// The generation is staged in canonical lifecycle state, while the
 /// thread-affine lifecycle payload remains owned by the transaction.
-pub(crate) struct GenerationStaged<A: crate::Addin> {
-    core: InitializedOpenCore<A>,
+pub(crate) struct GenerationStaged<A: crate::Addin, I = RawServiceInputs<A>> {
+    core: OpenCore<A, I>,
+    config: crate::addin_impl::RuntimeConfig,
     host: HostOpeningState,
     lifecycle: A::LifecycleState,
 }
 
+/// All private services are armed, but still owned by the opening attempt.
+pub(crate) type PreparedGeneration<A> = GenerationStaged<A, PreparedServices<A>>;
+
 /// The lifecycle payload has been transferred to the runtime's thread-affine
 /// slot. The transaction still owns the module and host capabilities.
 pub(crate) struct LifecycleInstalled<A: crate::Addin> {
-    core: InitializedOpenCore<A>,
+    core: PreparedOpenCore<A>,
     host: HostOpeningState,
 }
 
 /// All mandatory open steps are complete and the transaction may commit.
 pub(crate) struct HostMutated<A: crate::Addin> {
-    core: InitializedOpenCore<A>,
+    core: PreparedOpenCore<A>,
     host: HostOpeningState,
 }
 
@@ -337,7 +338,7 @@ impl<A: crate::Addin> OpeningState<A> for Initialized<A> {
     }
 }
 
-impl<A: crate::Addin> OpeningState<A> for GenerationStaged<A> {
+impl<A: crate::Addin, I> OpeningState<A> for GenerationStaged<A, I> {
     type Binding<'runtime> = ();
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
@@ -348,6 +349,7 @@ impl<A: crate::Addin> OpeningState<A> for GenerationStaged<A> {
             core,
             host,
             lifecycle,
+            ..
         } = self;
         let (_, journal) = host.into_parts();
         deps.merge_host(journal);
@@ -415,7 +417,7 @@ impl<A: crate::Addin> RollbackState<A> for Initialized<A> {
     }
 }
 
-impl<A: crate::Addin> RollbackState<A> for GenerationStaged<A> {
+impl<A: crate::Addin, I: Into<RollbackInputs<A>>> RollbackState<A> for GenerationStaged<A, I> {
     fn into_rollback_parts<'runtime>(
         self,
         _binding: Self::Binding<'runtime>,
@@ -424,6 +426,7 @@ impl<A: crate::Addin> RollbackState<A> for GenerationStaged<A> {
             core,
             host,
             lifecycle,
+            ..
         } = self;
         RollbackParts {
             core: core.into_rollback(),
@@ -471,13 +474,7 @@ impl<A: crate::Addin> HasHost for HostAttached<A> {
     }
 }
 
-impl<A: crate::Addin> HasHost for Initialized<A> {
-    fn host_mut(&mut self) -> &mut HostOpeningState {
-        &mut self.host
-    }
-}
-
-impl<A: crate::Addin> HasHost for GenerationStaged<A> {
+impl<A: crate::Addin> HasHost for PreparedGeneration<A> {
     fn host_mut(&mut self) -> &mut HostOpeningState {
         &mut self.host
     }
@@ -691,8 +688,11 @@ impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
         // A final-removal waiter can claim the module as soon as it is
         // returned. No application-owned service input may outlive that
         // handoff, including a source destructor that reenters lifecycle code.
-        let service_inputs = return_module.get_mut().core.service_inputs.take();
-        if !discard_open_inputs(service_inputs) {
+        let service_inputs = std::mem::replace(
+            &mut return_module.get_mut().core.service_inputs,
+            RollbackInputs::Empty,
+        );
+        if !service_inputs.dispose() {
             drop(request);
             drop(return_module);
             recovery.quarantine(None);
@@ -731,10 +731,20 @@ impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
 
 #[cfg(test)]
 std::thread_local! {
+    static FAIL_PREPARE_SERVICES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_OPEN_ACQUIRE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     static FAIL_OPEN_COMMIT: std::cell::Cell<(u8, bool)> = const { std::cell::Cell::new((0, false)) };
     static PANIC_ROLLBACK_TRANSFER: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
+#[cfg(test)]
+fn check_prepare_services_fault() -> XllResult<()> {
+    if FAIL_PREPARE_SERVICES.with(|fault| fault.replace(false)) {
+        Err(open_state_error())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 fn check_open_acquire_fault(point: u8) -> XllResult<()> {
     FAIL_OPEN_ACQUIRE.with(|fault| {
@@ -793,7 +803,7 @@ type OpeningStageFailure<'runtime, A> = (
 
 type LifecycleInstallFailure<'runtime, A> = (
     ThreadAffineError,
-    Box<OpeningTxn<'runtime, A, GenerationStaged<A>>>,
+    Box<OpeningTxn<'runtime, A, PreparedGeneration<A>>>,
 );
 
 impl<'runtime, A: crate::Addin, S: OpeningState<A>> OpeningTxn<'runtime, A, S> {
@@ -945,6 +955,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initialized<A>> {
         opening: OpeningGeneration<A>,
     ) -> Result<OpeningTxn<'runtime, A, GenerationStaged<A>>, OpeningStageFailure<'runtime, A>>
     {
+        let config = opening.init_config;
         let result = self
             .deps()
             .lifecycle_control()
@@ -964,6 +975,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initialized<A>> {
                     deps,
                     GenerationStaged {
                         core,
+                        config,
                         host,
                         lifecycle,
                     },
@@ -977,11 +989,85 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initialized<A>> {
 
 impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
     pub(crate) fn prepare_services(
-        &mut self,
-        config: crate::addin_impl::RuntimeConfig,
-    ) -> XllResult<()> {
-        let core = &mut self.pending.get_mut().state.core;
-        core.service_inputs.arm(core.attempt_id, config)
+        self,
+    ) -> Result<OpeningTxn<'runtime, A, PreparedGeneration<A>>, super::open::OpenFailure<'runtime, A>>
+    {
+        let (
+            deps,
+            GenerationStaged {
+                core,
+                config,
+                host,
+                lifecycle,
+            },
+            (),
+        ) = self.into_parts();
+        let (attempt, module, inputs) = core.into_parts();
+        // The arm step may consume or discard raw inputs, including running
+        // application destructors. Keep recovery armed before entering it.
+        let recovery = OpeningTxn::new_state(
+            deps,
+            GenerationStaged {
+                core: OpenCore::<A>::new(attempt, module),
+                config,
+                host,
+                lifecycle,
+            },
+            (),
+        );
+        let services = match arm_services::<A>(attempt, config, inputs) {
+            Ok(services) => services,
+            Err(error) => return Err(super::open::OpenFailure::rollback(recovery, error)),
+        };
+        let (
+            deps,
+            GenerationStaged {
+                core,
+                config,
+                host,
+                lifecycle,
+            },
+            (),
+        ) = recovery.into_parts();
+        Ok(OpeningTxn::new_state(
+            deps,
+            GenerationStaged {
+                core: core.map_inputs(|()| services),
+                config,
+                host,
+                lifecycle,
+            },
+            (),
+        ))
+    }
+}
+
+fn arm_services<A: crate::Addin>(
+    attempt: OpenAttemptId,
+    config: crate::addin_impl::RuntimeConfig,
+    inputs: RawServiceInputs<A>,
+) -> XllResult<PreparedServices<A>> {
+    #[cfg(test)]
+    check_prepare_services_fault()?;
+    #[cfg(feature = "handles")]
+    let inputs = {
+        let mut inputs = inputs;
+        inputs.prepare_handles(config.handle_config())?;
+        inputs
+    };
+    Ok(GenerationServices::arm_generation(
+        attempt.into_runtime_generation(),
+        config,
+        #[cfg(feature = "rtd")]
+        crate::excel_rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
+        inputs,
+    )?
+    .commit())
+}
+
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, PreparedGeneration<A>> {
+    pub(crate) fn runtime_config(&self) -> crate::addin_impl::RuntimeConfig {
+        self.pending.get().state.config
     }
 
     pub(crate) fn install_lifecycle(
@@ -993,6 +1079,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
             deps,
             GenerationStaged {
                 core,
+                config,
                 host,
                 lifecycle,
             },
@@ -1009,6 +1096,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
                     deps,
                     GenerationStaged {
                         core,
+                        config,
                         host,
                         lifecycle: error.value,
                     },
@@ -1134,13 +1222,13 @@ impl<A: crate::Addin> Rollback for UncommittedModule<'_, A> {
     }
 }
 
-struct PreparingServices<'runtime, A: crate::Addin>(RollbackGuard<UncommittedModule<'runtime, A>>);
+struct CommitHandoff<'runtime, A: crate::Addin>(RollbackGuard<UncommittedModule<'runtime, A>>);
 
-impl<'runtime, A: crate::Addin> PreparingServices<'runtime, A> {
+impl<'runtime, A: crate::Addin> CommitHandoff<'runtime, A> {
     fn prepare(
         self,
         host: HostOpeningState,
-        service_inputs: ServiceInputs<A>,
+        services: PreparedServices<A>,
     ) -> XllResult<ServicesPrepared<'runtime, A>> {
         let deps = self.0.get().context.deps;
         let (_callbacks, journal) = host.into_parts();
@@ -1151,37 +1239,16 @@ impl<'runtime, A: crate::Addin> PreparingServices<'runtime, A> {
             drop(control);
             // Keep this opening attempt responsible until destruction has
             // completed. The close waiter cannot advance to module teardown.
-            if !discard_open_inputs(service_inputs) {
+            if !discard_open_inputs(services) {
                 return Err(XllError::Panic);
             }
             let UncommittedModule { context, module } = self.0.complete();
             context.reject(|| module.rollback(|| {}));
             return Err(XllError::Closing);
         }
-        // Production arms all private services while rollback and the
-        // original host callback session are still available. Synthetic
-        // test/benchmark opens intentionally skip that host preparation.
-        #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
-        let config = control.opening_config().ok_or_else(open_state_error)?;
         drop(control);
         #[cfg(test)]
         check_open_commit_fault(1)?;
-        let services = match service_inputs {
-            ServiceInputs::Prepared(services) => services,
-            #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
-            mut raw @ ServiceInputs::Unprepared(_) => {
-                raw.arm(self.0.get().context.attempt, config)?;
-                let ServiceInputs::Prepared(services) = raw else {
-                    return Err(open_state_error());
-                };
-                services
-            }
-            #[cfg(not(any(test, feature = "bench-internals", feature = "refinement")))]
-            raw @ ServiceInputs::Unprepared(_) => {
-                discard_open_inputs(raw);
-                return Err(open_state_error());
-            }
-        };
         Ok(ServicesPrepared {
             services,
             module: self.0,
@@ -1387,7 +1454,7 @@ impl<A: crate::Addin> GenerationPublished<'_, A> {
 
 fn commit_inner<'runtime, A: crate::Addin>(
     deps: OpenDeps<'runtime, A>,
-    core: InitializedOpenCore<A>,
+    core: PreparedOpenCore<A>,
     host: HostOpeningState,
     binding: InstalledLifecycle<'runtime, A>,
 ) -> XllResult<()> {
@@ -1406,12 +1473,12 @@ fn commit_inner<'runtime, A: crate::Addin>(
 
 fn prepare_commit<'runtime, A: crate::Addin>(
     deps: OpenDeps<'runtime, A>,
-    core: InitializedOpenCore<A>,
+    core: PreparedOpenCore<A>,
     host: HostOpeningState,
     binding: InstalledLifecycle<'runtime, A>,
 ) -> XllResult<ServicesPrepared<'runtime, A>> {
     let (attempt, module, service_inputs) = core.into_parts();
-    let preparing = PreparingServices(RollbackGuard::new(UncommittedModule {
+    let preparing = CommitHandoff(RollbackGuard::new(UncommittedModule {
         context: OpenCommitContext {
             deps,
             attempt,
@@ -1466,6 +1533,75 @@ mod owner_tests {
         fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
             unreachable!("test initializes state directly")
         }
+    }
+
+    #[test]
+    fn failed_service_preparation_makes_no_registration_host_calls() {
+        use crate::registration::host::test_support::{CallbackScript, Reply};
+        use crate::registration::{RegistrationDescriptor, RegistrationSignature};
+        use xlfn_common::{ExecutionKind, FunctionVisibility, ReturnAbi};
+        use xlfn_sys::{XL_GET_NAME, XLOPER12, XLOPER12Value, XLTYPE_STR};
+
+        let runtime = Runtime::<()>::new();
+        let path = if cfg!(windows) {
+            "C:\\test.xll"
+        } else {
+            "/test.xll"
+        };
+        let mut module_name: Vec<u16> = path.encode_utf16().collect();
+        module_name.insert(0, u16::try_from(module_name.len()).unwrap());
+        // xlGetName and its result release are needed to build Addin::open's
+        // context. Any callback after that bootstrap, including an event or
+        // UDF registration, is unexpected.
+        let script = CallbackScript::install([Reply::success(
+            XL_GET_NAME,
+            XLOPER12 {
+                value: XLOPER12Value {
+                    string: module_name.as_mut_ptr(),
+                },
+                xltype: XLTYPE_STR,
+            },
+        )]);
+        let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+        let transaction = runtime
+            .begin_open()
+            .unwrap()
+            .attach_host(HostCallbackSession::new());
+        let descriptor = RegistrationDescriptor {
+            export_name: "test_prepare_failure",
+            excel_name: "TEST.PREPARE.FAILURE",
+            signature: RegistrationSignature {
+                execution: ExecutionKind::MainThread,
+                return_abi: ReturnAbi::Value12,
+                arguments: &[],
+                volatile: false,
+            },
+            category: "Test",
+            description: "",
+            help_topic: "",
+            visibility: FunctionVisibility::Public,
+            arguments: &[],
+        };
+        FAIL_PREPARE_SERVICES.with(|fault| fault.set(true));
+        let result = crate::runtime::transactions::open_addin_inner(
+            crate::BuildInfo::new(
+                crate::diagnostics::AddinId::parse("prepare-failure").unwrap(),
+                "0",
+                "test",
+            ),
+            &[descriptor],
+            transaction,
+        );
+        let Err(failure @ super::super::open::OpenFailure::Rollback { .. }) = result else {
+            panic!("preparation failure must carry the opening rollback owner");
+        };
+        FAIL_PREPARE_SERVICES.with(|fault| assert!(!fault.get()));
+        assert!(runtime.has_opening_generation());
+        let _error = failure.recover(&lifecycle);
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+        assert!(!runtime.has_current_generation());
+        assert_eq!(runtime.resident_event_count(), 0);
+        script.assert_calls(&[XL_GET_NAME]);
     }
 
     #[test]

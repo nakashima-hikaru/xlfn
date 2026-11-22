@@ -231,14 +231,13 @@ mod tests {
             .unwrap()
             .attach_host(crate::host_callback::HostCallbackSession::new());
         let lifecycle = lifecycle_access(&runtime);
-        let (transaction, _) =
-            match initialize_addin::<LayersPanic>(test_open_context(), transaction) {
-                Ok(result) => result,
-                Err(failure) => {
-                    let error = failure.recover(&lifecycle);
-                    panic!("unexpected add-in initialization failure: {error}");
-                }
-            };
+        let transaction = match initialize_addin::<LayersPanic>(test_open_context(), transaction) {
+            Ok(result) => result,
+            Err(failure) => {
+                let error = failure.recover(&lifecycle);
+                panic!("unexpected add-in initialization failure: {error}");
+            }
+        };
         assert!(runtime.has_opening_generation());
         assert!(!runtime.has_current_generation());
         rollback_active_open(&lifecycle, Some(transaction));

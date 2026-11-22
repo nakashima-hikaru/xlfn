@@ -8,6 +8,7 @@ use super::{AddinLifecycleAccess, Runtime};
 use crate::addin_impl::Addin;
 use crate::lifecycle::{LifecycleAccess, LifecycleControl, LifecycleCoordinator};
 use crate::runtime::observer::RuntimeObserver;
+use crate::runtime::open_txn::{OpeningTxn, PreparedGeneration};
 use crate::runtime_components::{
     GenerationServices, HostLedger, ModuleResidency, QuarantineVault, ReturnProtocol,
 };
@@ -15,6 +16,18 @@ use xlfn_kernel::thread_affine::{
     BindingEmpty, BindingOccupied, BindingState, BindingTxn, ThreadAffineError,
     ThreadAffineInstallError, ThreadAffineSlot,
 };
+
+impl<A: Addin> OpeningTxn<'_, A, PreparedGeneration<A>> {
+    pub(in crate::runtime) fn ensure_calculation_events(
+        &mut self,
+        has_async_functions: bool,
+    ) -> crate::XllResult<()> {
+        let deps = self.deps();
+        let host = crate::registration::RegistrationHost::new(self.callbacks_mut());
+        deps.residency
+            .ensure_calculation_events(&host, has_async_functions)
+    }
+}
 
 /// Occupancy authority retained from installation through commit or rollback.
 #[must_use = "retain lifecycle installation authority through commit or rollback"]
@@ -384,15 +397,6 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         self.lifecycle.access().host_intent()
     }
 
-    pub(in crate::runtime) fn ensure_calculation_events(
-        &self,
-        host: &crate::registration::RegistrationHost<'_>,
-        has_async_functions: bool,
-    ) -> crate::XllResult<()> {
-        self.residency
-            .ensure_calculation_events(host, has_async_functions)
-    }
-
     pub(in crate::runtime) fn merge_host(&self, journal: crate::registration::HostMutationJournal) {
         self.host.merge(journal);
     }
@@ -678,7 +682,6 @@ mod tests {
     use super::*;
     use crate::host_callback::HostCallbackSession;
     use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
-    use crate::registration::RegistrationHost;
     use crate::registration::host::test_support::{CallbackScript, Reply};
 
     #[test]
@@ -818,7 +821,7 @@ mod tests {
         let other = Runtime::<()>::new();
         let transaction = issuer.begin_open().unwrap();
         let generation = transaction.attempt_id().into_runtime_generation();
-        let mut transaction = transaction.attach_host(HostCallbackSession::new());
+        let transaction = transaction.attach_host(HostCallbackSession::new());
         let deps = transaction.deps();
         let other_control = other.lifecycle_control();
         other_control.request_explicit_removal();
@@ -835,9 +838,22 @@ mod tests {
             xlfn_sys::XL_EVENT_REGISTER,
             xlfn_sys::XLOPER12::integer(7),
         )]);
-        let host = RegistrationHost::new(transaction.callbacks_mut());
-        deps.ensure_calculation_events(&host, false).unwrap();
-        deps.ensure_calculation_events(&host, false).unwrap();
+        let context = crate::OpenContext::new(
+            std::path::PathBuf::from("test.xll"),
+            crate::BuildInfo::new(
+                crate::diagnostics::AddinId::parse("test").unwrap(),
+                "0",
+                "test",
+            ),
+            generation,
+        );
+        let Ok(mut transaction) =
+            super::super::transactions::initialize_addin(context, transaction)
+        else {
+            panic!("fixture must prepare generation services");
+        };
+        transaction.ensure_calculation_events(false).unwrap();
+        transaction.ensure_calculation_events(false).unwrap();
         script.assert_calls(&[xlfn_sys::XL_EVENT_REGISTER]);
         assert_eq!(issuer.resident_event_count(), 1);
         assert_eq!(other.resident_event_count(), 0);
