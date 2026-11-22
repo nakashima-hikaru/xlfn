@@ -145,7 +145,7 @@ theorem resident_events_prevent_lease_release
 
 theorem safe_with_resident_events_retains_lease
     {s : ResidencyState}
-    (_hSafe : s.Safe)
+    (hSafe : s.Safe)
     (hEvents : s.residentEventRegistrations > 0) :
     s.leaseHeld = true := by
   rcases hSafe with hHeld | hClosed
@@ -171,7 +171,7 @@ theorem late_com_release_keeps_closed_module_resident
 
 theorem safe_with_retained_com_roots_retains_lease
     {s : ResidencyState}
-    (_hSafe : s.Safe)
+    (hSafe : s.Safe)
     (hRoots : s.rtdComRoots > 0) :
     s.leaseHeld = true := by
   rcases hSafe with hHeld | hClosed
