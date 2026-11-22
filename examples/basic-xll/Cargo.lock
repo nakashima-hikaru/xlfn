@@ -451,6 +451,7 @@ version = "0.1.0"
 dependencies = [
  "windows-link 0.100.0",
  "xlfn-engine",
+ "xlfn-kernel",
  "xlfn-sys",
 ]
 

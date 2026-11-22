@@ -8,8 +8,13 @@ license.workspace = true
 repository.workspace = true
 description = "Excel and Windows host adapter primitives for xlfn"
 
+[features]
+# Native facade tests inject startup refusals across the adapter boundary.
+dispatch-test-hooks = []
+
 [dependencies]
 xlfn-engine.workspace = true
+xlfn-kernel.workspace = true
 xlfn-sys.workspace = true
 
 [target.'cfg(windows)'.dependencies]

@@ -1,183 +1,55 @@
+//! Excel-facing error mapping for the host adapter's native drain.
 use crate::XllError;
-use crate::drain_wait::{DrainWork, UnstartedDrain, WorkerJoined};
-#[cfg(test)]
-use crate::win32::E_UNEXPECTED;
-use crate::win32::{DuplicateHandle, GetCurrentProcess, GetCurrentThread, INFINITE, SYNCHRONIZE};
-use std::os::windows::io::{AsHandle, FromRawHandle, OwnedHandle};
-use std::ptr;
-use std::sync::OnceLock;
+use crate::drain_wait::{DrainWork, UnstartedDrain};
+#[cfg(any(feature = "async", feature = "rtd", feature = "handles"))]
+pub(crate) use xlfn_host::com_wait::ComApartmentGuard;
+#[cfg(any(test, feature = "rtd", feature = "handles"))]
+pub(crate) use xlfn_host::com_wait::ManualResetEvent;
 #[cfg(any(feature = "rtd", feature = "handles"))]
 pub(crate) use xlfn_host::com_wait::Win32EventError;
-use xlfn_host::com_wait::wait_with_com_pumping;
-pub(crate) use xlfn_host::com_wait::{ComApartmentGuard, ManualResetEvent};
-
+use xlfn_host::drain::WorkerJoined;
+use xlfn_host::drain::windows::{self, DrainPreparationError};
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DrainPreparationStage {
-    Apartment,
-    Event,
-}
+pub(crate) use xlfn_host::drain::windows::{DrainPreparationStage, fail_next_drain_preparation};
 
-#[cfg(test)]
-std::thread_local! {
-    static DRAIN_PREPARATION_FAULT: std::cell::Cell<Option<DrainPreparationStage>> = const { std::cell::Cell::new(None) };
-}
+pub(crate) struct DispatchPrepared<W>(windows::DispatchPrepared<W>);
 
-#[cfg(test)]
-pub(crate) fn fail_next_drain_preparation(stage: DrainPreparationStage) {
-    DRAIN_PREPARATION_FAULT.with(|fault| assert!(fault.replace(Some(stage)).is_none()));
-}
-
-#[cfg(test)]
-fn preparation_fails(stage: DrainPreparationStage) -> bool {
-    DRAIN_PREPARATION_FAULT.with(|fault| {
-        if fault.get() == Some(stage) {
-            fault.set(None);
-            true
-        } else {
-            false
-        }
-    })
-}
-
-#[cfg(test)]
-fn injected_preparation_error(stage: DrainPreparationStage) -> crate::XllError {
-    crate::XllError::Native {
-        code: E_UNEXPECTED,
-        message: format!("injected COM drain preparation failure: {stage:?}"),
-    }
-}
-
-struct DispatchApartment(ComApartmentGuard);
-
-impl DispatchApartment {
-    fn enter() -> Result<Self, XllError> {
-        #[cfg(test)]
-        if preparation_fails(DrainPreparationStage::Apartment) {
-            return Err(injected_preparation_error(DrainPreparationStage::Apartment));
-        }
-        // Preserve an existing STA. A thread without COM initialization enters
-        // an MTA, so other Windows callers retain ordinary blocking behavior.
-        ComApartmentGuard::enter()
-            .map(Self)
-            .map_err(|code| XllError::Native {
-                code,
-                message: "failed to initialize COM drain apartment".into(),
-            })
-    }
-
-    fn prepare<W>(
-        self,
-        drain: UnstartedDrain<W>,
-    ) -> Result<DispatchPrepared<W>, (XllError, UnstartedDrain<W>)> {
-        #[cfg(test)]
-        if preparation_fails(DrainPreparationStage::Event) {
-            return Err((
-                injected_preparation_error(DrainPreparationStage::Event),
-                drain,
-            ));
-        }
-        let completion = match ManualResetEvent::new(false) {
-            Ok(event) => event,
-            Err(error) => {
-                return Err((
-                    XllError::Native {
-                        code: error.code as i32,
-                        message: "failed to create COM drain completion event".into(),
-                    },
-                    drain,
-                ));
-            }
-        };
-        Ok(DispatchPrepared {
-            drain,
-            completion,
-            _apartment: self.0,
-        })
-    }
-}
-
-/// Owns the untransferred work and both resources needed to pump its caller's
-/// STA. The event is closed before the caller's apartment guard is released.
-pub(crate) struct DispatchPrepared<W> {
-    drain: UnstartedDrain<W>,
-    completion: ManualResetEvent,
-    _apartment: ComApartmentGuard,
-}
-
-/// Prepares an STA-dispatchable drain without transferring the work. Both
-/// apartment and event preparation errors return the original owner.
 pub(crate) fn drain_with_com_dispatch<W: DrainWork>(
     drain: UnstartedDrain<W>,
 ) -> Result<DispatchPrepared<W>, (XllError, UnstartedDrain<W>)> {
-    match DispatchApartment::enter() {
-        Ok(apartment) => apartment.prepare(drain),
-        Err(error) => Err((error, drain)),
-    }
+    windows::prepare_com_dispatch(drain)
+        .map(DispatchPrepared)
+        .map_err(|(error, owner)| {
+            let error = match error {
+                DrainPreparationError::Apartment(code) => XllError::Native {
+                    code,
+                    message: "failed to initialize COM drain apartment".into(),
+                },
+                DrainPreparationError::Event(error) => XllError::Native {
+                    code: error.code as i32,
+                    message: "failed to create COM drain completion event".into(),
+                },
+                DrainPreparationError::Injected(stage) => XllError::Native {
+                    code: crate::win32::E_UNEXPECTED,
+                    message: format!("injected COM drain preparation failure: {stage:?}"),
+                },
+            };
+            (error, owner)
+        })
 }
 
 impl<W: DrainWork> DispatchPrepared<W> {
-    /// Starts the scoped worker and pumps COM until it is safe to join. A
-    /// startup refusal returns the untransferred owner. Once startup succeeds,
-    /// the caller keeps both COM resources alive through the worker's join.
     pub(crate) fn run(self) -> Result<WorkerJoined<W::Output>, (XllError, UnstartedDrain<W>)> {
-        let completion = &self.completion;
-        let terminated = OnceLock::new();
-        std::thread::scope(|scope| {
-            let publish_termination = &terminated;
-            let transferred = self
-                .drain
-                .spawn(
-                    scope,
-                    std::thread::Builder::new().name("xlfn-sta-drain".into()),
-                    move || {
-                        publish_termination
-                            .set(duplicate_current_thread())
-                            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-                        completion
-                            .set()
-                            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-                    },
-                )
-                .map_err(|(error, drain)| {
-                    (
-                        XllError::Native {
-                            code: error.raw_os_error().unwrap_or(0),
-                            message: format!("failed to start COM drain worker: {error}"),
-                        },
-                        drain,
-                    )
-                })?;
-            completion
-                .wait_with_com_pumping()
-                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-            // The completion callback runs before the helper's TLS and OS
-            // exit hooks. Keep dispatching through their synchronous COM calls.
-            let helper = terminated
-                .get()
-                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-            wait_with_com_pumping(helper.as_handle(), INFINITE)
-                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-            Ok(transferred.join())
+        self.0.run().map_err(|(error, owner)| {
+            (
+                XllError::Native {
+                    code: error.raw_os_error().unwrap_or(0),
+                    message: format!("failed to start COM drain worker: {error}"),
+                },
+                owner,
+            )
         })
     }
-}
-
-fn duplicate_current_thread() -> OwnedHandle {
-    let mut raw = ptr::null_mut();
-    // SAFETY: these pseudo-handle getters have no caller preconditions.
-    let process = unsafe { GetCurrentProcess() };
-    // SAFETY: this returns the helper's current-thread pseudo-handle.
-    let thread = unsafe { GetCurrentThread() };
-    // SAFETY: both process pseudo-handles designate this process; the thread
-    // pseudo-handle designates this helper. The output points to live storage.
-    let success =
-        unsafe { DuplicateHandle(process, thread, process, &mut raw, SYNCHRONIZE as u32, 0, 0) };
-    if success == 0 || raw.is_null() {
-        xlfn_kernel::invariant::fail_stop();
-    }
-    // SAFETY: successful duplication issued a real handle uniquely owned here.
-    unsafe { OwnedHandle::from_raw_handle(raw) }
 }
 
 #[cfg(test)]
@@ -230,7 +102,6 @@ mod tests {
             assert_eq!(drops.load(Ordering::Acquire), 0);
             drop(unused_wait);
             assert_eq!(drops.load(Ordering::Acquire), 1);
-            DRAIN_PREPARATION_FAULT.with(|fault| assert!(fault.get().is_none()));
         }
     }
 

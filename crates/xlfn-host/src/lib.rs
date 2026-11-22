@@ -1,5 +1,9 @@
 //! Native host adapter for xlfn. No dependency on the facade or its add-ins.
 
+/// Affine startup, dispatch, and scoped drain ownership.
+#[doc(hidden)]
+pub mod drain;
+
 /// COM-aware waiting and owned Win32 event handles.
 #[doc(hidden)]
 #[cfg(windows)]

@@ -277,6 +277,7 @@ impl ObjectArena {
         self.destroy(retired);
     }
 
+    #[cfg(any(feature = "async", test))]
     fn release_pin(&self, id: ObjectId) {
         self.release_pin_observed::<{ cfg!(any(test, feature = "refinement")) }>(id);
     }
@@ -285,6 +286,7 @@ impl ObjectArena {
     /// the removal can block after the capability-transition lock is dropped.
     /// Unobserved production releases finish under that lock unless they
     /// retire the payload. Tests explicitly exercise both instantiations.
+    #[cfg(any(feature = "async", test))]
     fn release_pin_observed<const OBSERVED: bool>(&self, id: ObjectId) {
         let _release;
         let retired = {
@@ -745,11 +747,13 @@ unsafe impl Sync for ObjectBinding {}
 ///
 /// Generated tasks retain their execution lease through this pin's final
 /// release; task drain precedes service teardown and arena quiescence checks.
+#[cfg(any(feature = "async", test))]
 #[repr(transparent)]
 pub(crate) struct RawObjectLeaseGuard {
     cell: NonNull<ObjectCell>,
 }
 
+#[cfg(any(feature = "async", test))]
 impl Drop for RawObjectLeaseGuard {
     fn drop(&mut self) {
         // SAFETY: every guard owns one pin until Drop. Async execution and the
@@ -766,8 +770,10 @@ impl Drop for RawObjectLeaseGuard {
 }
 
 // SAFETY: RawObjectLeaseGuard holds a pin count in a thread-safe arena and can be transferred.
+#[cfg(any(feature = "async", test))]
 unsafe impl Send for RawObjectLeaseGuard {}
 // SAFETY: RawObjectLeaseGuard immutable borrows can be shared across threads.
+#[cfg(any(feature = "async", test))]
 unsafe impl Sync for RawObjectLeaseGuard {}
 
 #[cfg(all(feature = "bench-internals", feature = "async"))]

@@ -1,11 +1,11 @@
 use super::{DrainWork, UnstartedDrain, WorkerJoined};
-use crate::panic_boundary::{CaughtPanic, catch_no_unwind, contain_panic};
 use std::mem::DropGuard;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::{Builder, Scope, ScopedJoinHandle};
+use xlfn_engine::panic_boundary::{CaughtPanic, catch_no_unwind, contain_panic};
 use xlfn_kernel::invariant::fail_stop;
 use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
@@ -69,16 +69,16 @@ impl<W: DrainWork> UnstartedDrain<W> {
         // Unwinding from spawn says nothing about whether a helper started.
         // Abort before the scope could auto-join while the STA is blocked.
         let require_startup = DropGuard::new((), |()| fail_stop());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "dispatch-test-hooks"))]
         let fault = SPAWN_FAULT.with(|fault| fault.replace(None));
-        #[cfg(test)]
+        #[cfg(any(test, feature = "dispatch-test-hooks"))]
         let started = if fault == Some(SpawnFault::Refused) {
             drop(run);
             Err(std::io::Error::other("injected drain worker spawn failure"))
         } else {
             builder.spawn_scoped(scope, run)
         };
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "dispatch-test-hooks")))]
         let started = builder.spawn_scoped(scope, run);
         let worker = match started {
             Ok(worker) => worker,
@@ -114,21 +114,26 @@ fn run_helper<W: DrainWork, C>(
     catch_no_unwind(AssertUnwindSafe(|| work.run()))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "dispatch-test-hooks"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SpawnFault {
     Refused,
+    #[cfg(test)]
     Unwind,
+}
+
+#[cfg(any(test, feature = "dispatch-test-hooks"))]
+std::thread_local! {
+    static SPAWN_FAULT: std::cell::Cell<Option<SpawnFault>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
 std::thread_local! {
-    static SPAWN_FAULT: std::cell::Cell<Option<SpawnFault>> = const { std::cell::Cell::new(None) };
     static FAIL_JOIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
-pub(crate) fn fail_next_drain_spawn() {
+#[cfg(any(test, feature = "dispatch-test-hooks"))]
+pub fn fail_next_drain_spawn() {
     SPAWN_FAULT.with(|fault| assert!(fault.replace(Some(SpawnFault::Refused)).is_none()));
 }
 
@@ -164,6 +169,39 @@ mod tests {
         assert_eq!(signals.load(Ordering::Relaxed), 0);
         drop(restored);
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn miri_refused_drain_can_retry_the_same_owner_once() {
+        let calls = AtomicUsize::new(0);
+        let signals = AtomicUsize::new(0);
+        let work = UnstartedDrain::new(|| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            17
+        });
+        let unstarted = std::thread::scope(|scope| {
+            fail_next_drain_spawn();
+            match work.spawn(scope, Builder::new(), || {
+                signals.fetch_add(1, Ordering::Relaxed);
+            }) {
+                Err((_, unstarted)) => unstarted,
+                Ok(_) => panic!("a refused start cannot own the work"),
+            }
+        });
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(signals.load(Ordering::Relaxed), 0);
+
+        let joined = std::thread::scope(|scope| {
+            unstarted
+                .spawn(scope, Builder::new(), || {
+                    signals.fetch_add(1, Ordering::Relaxed);
+                })
+                .unwrap_or_else(|_| panic!("retry starts the worker"))
+                .join()
+        });
+        assert_eq!(joined.into_output(), 17);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(signals.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -222,7 +260,10 @@ mod tests {
         }
         for path in ["spawn", "join", "abandon", "work"] {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "drain_wait::threaded::tests::unknown_drain_startup_or_completion_cannot_return"])
+                .args([
+                    "--exact",
+                    "drain::threaded::tests::unknown_drain_startup_or_completion_cannot_return",
+                ])
                 .env(CHILD, path)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())

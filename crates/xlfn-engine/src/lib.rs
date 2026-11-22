@@ -4,6 +4,7 @@
 //! coordinator that owns the corresponding resource.
 
 pub mod generation;
+pub mod panic_boundary;
 
 /// Distinguishes a known host mutation from rejection or uncertainty.
 pub enum HostMutation<T, Status, Error> {
