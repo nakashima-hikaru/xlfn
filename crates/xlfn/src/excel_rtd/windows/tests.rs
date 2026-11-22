@@ -2475,10 +2475,8 @@ fn empty_refresh_overwrites_stale_outputs_without_a_safearray() {
     let mut array = ptr::dangling_mut();
     // SAFETY: both output slots are writable and disjoint. The sentinel is
     // not an owned array and must be overwritten without dereferencing it.
-    assert_eq!(
-        unsafe { write_refresh_data(&mut count, &mut array, &[]) },
-        S_OK
-    );
+    let result = unsafe { write_refresh_data(&mut count, &mut array, &[]) };
+    assert_eq!(result, S_OK);
     assert_eq!(count, 0);
     assert!(array.is_null());
 }

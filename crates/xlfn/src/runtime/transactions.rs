@@ -534,19 +534,9 @@ where
     let teardown = match teardown.seal_services() {
         Ok(stage) => stage,
         Err(failure) => {
-            let hazard = failure.hazard();
-            let boundary = match &failure {
-                super::shutdown::ServiceSealFailure::HandleTopics(_) => "xlAutoRemove RTD shutdown",
-                super::shutdown::ServiceSealFailure::Handles(_) => {
-                    "xlAutoRemove handle table shutdown"
-                }
-            };
-            return Err(handle_unload_hazard(
-                runtime,
-                hazard,
-                boundary,
-                &failure.into_error(),
-            ));
+            let (hazard, boundary, error) =
+                failure.into_diagnostic(super::shutdown::ShutdownDiagnosticContext::Removal);
+            return Err(handle_unload_hazard(runtime, hazard, boundary, &error));
         }
     };
 
@@ -591,19 +581,9 @@ where
     let teardown = match teardown.reclaim(report_cleanup_issue) {
         Ok(teardown) => teardown,
         Err(failure) => {
-            let hazard = failure.hazard();
-            let boundary = match &failure {
-                super::shutdown::ReclaimFailure::Diagnostics(_) => {
-                    "xlAutoRemove diagnostic refinement"
-                }
-                super::shutdown::ReclaimFailure::Rtd(_) => "xlAutoRemove RTD logical quiescence",
-            };
-            return Err(handle_unload_hazard(
-                runtime,
-                hazard,
-                boundary,
-                &failure.into_error(),
-            ));
+            let (hazard, boundary, error) =
+                failure.into_diagnostic(super::shutdown::ShutdownDiagnosticContext::Removal);
+            return Err(handle_unload_hazard(runtime, hazard, boundary, &error));
         }
     };
     let certificate = match teardown.certify() {

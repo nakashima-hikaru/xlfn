@@ -132,6 +132,8 @@ pub mod value;
 
 pub(crate) use xlfn_kernel::sync;
 
+#[cfg(all(feature = "async", test))]
+pub(crate) use addin_impl::AsyncContext;
 #[cfg(any(
     all(feature = "async", test),
     all(feature = "async-builtin", feature = "bench-internals")
@@ -142,8 +144,6 @@ pub(crate) use addin_impl::AsyncTaskLimit;
     any(test, all(feature = "bench-internals", not(feature = "async-builtin")))
 ))]
 pub(crate) use addin_impl::NoAsyncExecutor;
-#[cfg(all(feature = "async", test))]
-pub(crate) use addin_impl::{AsyncContext, BuildInfo};
 #[cfg(all(feature = "handles", test))]
 pub(crate) use addin_impl::{HandleBindingLimit, HandleConfig, RuntimeConfig};
 #[cfg(test)]

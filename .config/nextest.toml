@@ -7,6 +7,10 @@ inherits = "default"
 fail-fast = false
 global-timeout = "20m"
 
+[profile.ci.junit]
+path = "junit.xml"
+report-skipped = "ignored"
+
 [test-groups]
 # This serialization applies to nextest runs only. Windows artifact CI
 # deliberately retains same-process libtest semantics; RTD tests also acquire
@@ -34,5 +38,11 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 [[profile.ci.overrides]]
 filter = 'package(xlfn) and test(=trait_driven_function_signatures_compile)'
 platform = 'cfg(windows)'
+test-group = 'compile-ui'
+slow-timeout = { period = "60s", terminate-after = 8 }
+
+# The isolated no-async UI test uses the same cold trybuild dependency graph.
+[[profile.default.overrides]]
+filter = 'package(xlfn) and test(=async_udf_requires_async_feature)'
 test-group = 'compile-ui'
 slow-timeout = { period = "60s", terminate-after = 8 }

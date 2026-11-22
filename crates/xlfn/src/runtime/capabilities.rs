@@ -840,7 +840,7 @@ mod tests {
         )]);
         let context = crate::OpenContext::new(
             std::path::PathBuf::from("test.xll"),
-            crate::BuildInfo::new(
+            crate::addin::BuildInfo::new(
                 crate::diagnostics::AddinId::parse("test").unwrap(),
                 "0",
                 "test",

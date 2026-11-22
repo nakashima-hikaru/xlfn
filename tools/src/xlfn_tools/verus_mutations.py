@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 
 from ._repository import ROOT
@@ -60,7 +61,7 @@ class Snapshot:
             files[path] = (ROOT / path).read_bytes()
         return cls(proof, tuple(sorted(files.items())))
 
-    @property
+    @cached_property
     def digest(self) -> str:
         digest = hashlib.sha256()
         for path, data in self.files:
@@ -120,7 +121,7 @@ class MutationPlan:
     def __init__(self) -> None:
         self.snapshots: dict[tuple[Path, str], Snapshot] = {}
         self.mutations: list[Mutation] = []
-        self.groups = 0
+        self.groups: dict[tuple[Path, str], int] = {}
 
     def add_baseline(self, snapshot: Snapshot) -> Snapshot:
         return self.snapshots.setdefault(snapshot.key, snapshot)
@@ -143,16 +144,29 @@ class MutationPlan:
             )
             mutation.changed_source()  # Validate every anchor before launching any verifier.
             self.mutations.append(mutation)
-        self.groups += 1
+        self.groups[snapshot.key] = self.groups.get(snapshot.key, 0) + 1
 
     def shard(self, index: int, count: int) -> MutationPlan:
         if count < 1 or not 0 <= index < count:
             raise ValueError("shard index must be in [0, shard count)")
         plan = MutationPlan()
-        # Each runner proves its own exact inputs; no proof results cross machines.
-        plan.snapshots = self.snapshots.copy()
-        plan.groups = self.groups
-        plan.mutations = self.mutations[index::count]
+        # Keep each exact baseline and all its mutants together. Greedily place
+        # the heaviest proof bundle first, using verifier invocation count as a
+        # deterministic proxy for cost. Ties preserve plan order.
+        weights = dict.fromkeys(self.snapshots, 1)
+        for mutation in self.mutations:
+            weights[mutation.snapshot.key] += 1
+        loads = [0] * count
+        owners = {}
+        for key in sorted(weights, key=lambda key: -weights[key]):
+            owner = min(range(count), key=lambda i: loads[i])
+            owners[key] = owner
+            loads[owner] += weights[key]
+        plan.snapshots = {
+            key: snapshot for key, snapshot in self.snapshots.items() if owners[key] == index
+        }
+        plan.groups = {key: groups for key, groups in self.groups.items() if key in plan.snapshots}
+        plan.mutations = [m for m in self.mutations if m.snapshot.key in plan.snapshots]
         return plan
 
 
@@ -285,7 +299,7 @@ class MutationRunner:
             "jobs": self.jobs,
             "threads": self.threads,
             "seconds": elapsed,
-            "groups": plan.groups,
+            "groups": sum(plan.groups.values()),
             "baselines": baselines,
             "mutations": [results[mutation] for mutation in plan.mutations],
         }

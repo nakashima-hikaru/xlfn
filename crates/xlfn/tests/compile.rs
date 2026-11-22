@@ -91,7 +91,10 @@ fn trait_driven_function_signatures_compile() {
             tests.compile_fail("tests/ui/fail_async/handle_lease_*.rs");
         }
     }
+}
 
-    #[cfg(not(feature = "async"))]
-    tests.compile_fail("tests/ui/fail_no_async/*.rs");
+#[cfg(not(feature = "async"))]
+#[test]
+fn async_udf_requires_async_feature() {
+    trybuild::TestCases::new().compile_fail("tests/ui/fail_no_async/*.rs");
 }

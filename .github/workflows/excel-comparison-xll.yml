@@ -2,6 +2,8 @@ name: Excel comparison XLLs (x86_64)
 
 "on":
   push:
+    # PRs run on the merge ref; do not rebuild their topic-branch push.
+    branches: [main, 'maintenance/**', 'release/**']
   pull_request:
   workflow_dispatch:
 
@@ -38,6 +40,14 @@ jobs:
       - name: Install x86_64 MSVC target
         shell: pwsh
         run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: excel-comparison-x86_64
+          workspaces: benchmarks/excel-comparison/xlfn
+          cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check benchmark Python package and tests
         shell: pwsh

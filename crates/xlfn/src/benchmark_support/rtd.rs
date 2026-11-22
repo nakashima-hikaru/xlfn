@@ -757,7 +757,6 @@ impl RtdRefreshScalingBenchmark {
             let planned = self
                 .server
                 .server()
-                .expect("benchmark server remains registered")
                 .publish
                 .plan_refresh()
                 .expect("refresh planning must succeed");

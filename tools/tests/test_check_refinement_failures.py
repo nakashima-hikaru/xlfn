@@ -4,54 +4,25 @@ from xlfn_tools.verus_mutations import is_idle_callback_ownership_rejection, is_
 
 
 class VerificationFailureTests(unittest.TestCase):
-    def test_atomic_invariant_failure_is_a_proof_failure(self):
-        self.assertTrue(
-            is_verification_failure(
-                1,
-                "verification results:: 417 verified, 1 errors\n"
-                "error: Cannot show invariant holds at end of block",
-            )
-        )
-
-    def test_state_machine_assertion_safety_is_a_proof_failure(self):
-        diagnostic = "error: unable to prove assertion safety condition"
-        self.assertTrue(
-            is_verification_failure(
-                1, "verification results:: 512 verified, 1 errors\n" + diagnostic
-            )
-        )
-        self.assertFalse(is_verification_failure(1, diagnostic))
-
-    def test_contract_failure_remains_recognized(self):
-        self.assertTrue(
-            is_verification_failure(
-                1, "error: precondition not satisfied\nverification results:: 2 verified, 1 errors"
-            )
-        )
-
-    def test_compiler_failure_does_not_count(self):
-        self.assertFalse(
-            is_verification_failure(
-                1, "error[E0308]: mismatched types\nerror: aborting due to 1 previous error"
-            )
-        )
-
-    def test_diagnostic_without_failed_verification_summary_does_not_count(self):
-        self.assertFalse(
-            is_verification_failure(1, "error: Cannot show invariant holds at end of block")
-        )
-
-    def test_success_does_not_count(self):
-        self.assertFalse(
-            is_verification_failure(
-                0, "verification results:: 417 verified, 1 errors\nerror: assertion failed"
-            )
-        )
-        self.assertFalse(
-            is_verification_failure(
-                1, "verification results:: 417 verified, 0 errors\nerror: assertion failed"
-            )
-        )
+    def test_proof_failure_requires_failure_exit_summary_and_recognized_diagnostic(self):
+        failed = "verification results:: 512 verified, 1 errors"
+        passed = "verification results:: 512 verified, 0 errors"
+        invariant = "error: cannot show invariant holds at end of block"
+        assertion = "error: unable to prove assertion safety condition"
+        for status, output, expected in (
+            (1, f"{failed}\n{invariant}", True),
+            (1, f"{failed}\n{invariant.replace('cannot', 'Cannot')}", True),
+            (1, f"{failed}\n{assertion}", True),
+            (1, f"error: precondition not satisfied\n{failed}", True),
+            (1, "error[E0308]: mismatched types", False),
+            (1, f"{failed}\nerror[E0308]: mismatched types", False),
+            (1, assertion, False),
+            (1, invariant, False),
+            (0, f"{failed}\n{invariant}", False),
+            (1, f"{passed}\n{invariant}", False),
+        ):
+            with self.subTest(status=status, output=output):
+                self.assertEqual(is_verification_failure(status, output), expected)
 
     def test_idle_callback_ownership_failure_is_narrow(self):
         diagnostic = "error[E0382]: borrow of moved value: `detached`"

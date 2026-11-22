@@ -58,3 +58,38 @@ The virtual environment, caches, and generated verification results are local
 artifacts and must stay out of version control. Scripts continue to launch
 Python subprocesses through `sys.executable` so child checks use the same
 managed interpreter.
+
+## Feature and Verus shard plans
+
+The Windows library feature checker and production tests use the same
+manifest-derived inventory as the former cargo-hack powersets: 288 distinct
+check cases and 96 test cases, including the empty selection. The runner
+deduplicates transitive local feature selections (for example,
+`async-builtin` already enables `async`), and excludes `default` in both modes
+and `bench-internals`/`refinement` in test mode. Each test case still runs the
+library suite with one test thread.
+
+To inspect a plan without building:
+
+```sh
+uv run --project tools --locked python -B -m xlfn_tools.feature_matrix check --shard 1/8 --list
+uv run --project tools --locked python -B -m xlfn_tools.feature_matrix test --shard 1/8 --list
+```
+
+With no shard option, the command runs the complete inventory. CI runs eight
+shards for each mode: 36 check or 12 test cases per job. The deterministic
+cost proxy starts at 10 per case, adds 3 for the RTD transport shared by
+`rtd` and `handles`, adds 2 each for `handles`, `cache`, and `async`, and
+adds 1 for each other enabled feature. The heaviest cases go to the lightest
+non-full shard first. Total proxy weights are 659–661 for check jobs and
+202–204 for test jobs. These are not measured Windows runtimes. Each case
+prints its elapsed time so Windows CI can be used to validate or tune the proxy.
+
+Verus shards assign each exact input snapshot and all of its mutations to one
+runner. A runner proves the unmodified snapshot before starting any local
+mutation. Shard assignment uses the number of verifier calls (one baseline plus
+its mutations) as a proxy, so indivisible large suites can still dominate the
+largest job. Across four jobs the current plan executes eight baselines rather
+than thirty-two, and retains all 423 mutations. The required Verus check
+reconstructs the current plan and requires every expected baseline and mutation
+in its designated report, with matching source digests and Verus versions.

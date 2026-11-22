@@ -19,6 +19,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -170,13 +172,16 @@ def error_spans(message: dict) -> list[dict]:
     return [span for span in message.get("spans", []) if span.get("is_primary")]
 
 
-def check_fixture(
-    fixture: Fixture,
-    overlay: Path,
-    target: Path,
-    compile_target: str | None = None,
-    extra_features: tuple[str, ...] = (),
-) -> dict:
+@dataclass(frozen=True)
+class CompileConfig:
+    package: str
+    features: tuple[str, ...]
+    target: str | None
+
+
+def compile_config(
+    fixture: Fixture, compile_target: str | None, extra_features: tuple[str, ...]
+) -> CompileConfig:
     package = (
         "xlfn-kernel"
         if fixture.module.startswith("kernel/")
@@ -196,6 +201,13 @@ def check_fixture(
         features = ()
     if fixture.module == "async_udf/builtin" and "async-builtin" not in features:
         features = (*features, "async-builtin")
+    return CompileConfig(package, features, compile_target)
+
+
+def compile_fixtures(
+    cases: list[Fixture], overlay: Path, target: Path, config: CompileConfig
+) -> tuple[dict, list[dict]]:
+    package, features, compile_target = config.package, config.features, config.target
     command = [
         "cargo",
         "check",
@@ -213,15 +225,23 @@ def check_fixture(
         command.extend(["--target", compile_target])
     # Rust accepts literal Unicode; JSON's ASCII-only \uXXXX escapes are not
     # Rust string escapes and would reject non-ASCII checkout/fixture paths.
-    injected = overlay / MODULES[fixture.module]
-    path_literal = json.dumps(str(overlay / fixture.path), ensure_ascii=False)
-    fixture_declaration = (
-        f"\n#[allow(dead_code)]\n#[path = {path_literal}]\nmod typestate_compile_fixture;\n"
-    ).encode()
-    original = injected.read_bytes()
-    try:
-        with injected.open("ab") as source:
-            source.write(fixture_declaration)
+    declarations: dict[Path, list[bytes]] = {}
+    for index, fixture in enumerate(cases):
+        injected = overlay / MODULES[fixture.module]
+        path_literal = json.dumps(str(overlay / fixture.path), ensure_ascii=False)
+        # Multiple scopes can map to the same source file; namespace by index
+        # so the fixture's own item names, imports, and inner attrs stay isolated.
+        suffix = f"_{index}" if len(cases) > 1 else ""
+        declarations.setdefault(injected, []).append(
+            f"\n#[allow(dead_code)]\n#[path = {path_literal}]\n"
+            f"mod typestate_compile_fixture{suffix};\n".encode()
+        )
+    with ExitStack() as restore:
+        for source, items in declarations.items():
+            # Restore only touched sources, byte-for-byte including CRLF.
+            restore.callback(source.write_bytes, source.read_bytes())
+            with source.open("ab") as stream:
+                stream.writelines(items)
         completed = subprocess.run(
             command,
             cwd=overlay,
@@ -230,10 +250,6 @@ def check_fixture(
             capture_output=True,
             env={**os.environ, "CARGO_TERM_COLOR": "never"},
         )
-    finally:
-        # Keep all other input files and their timestamps untouched. Restore
-        # bytes, not text, including any original CRLF and non-ASCII content.
-        injected.write_bytes(original)
     errors = []
     workspace_artifacts_rebuilt = 0
     for line in completed.stdout.splitlines():
@@ -252,6 +268,28 @@ def check_fixture(
             message = event["message"]
             if message.get("level") == "error":
                 errors.append(message)
+    return {
+        "target": compile_target or "host",
+        "package": package,
+        "features": list(features),
+        "command": command,
+        "exit_code": completed.returncode,
+        "workspace_artifacts_rebuilt": workspace_artifacts_rebuilt,
+        "diagnostics": [error.get("rendered", error["message"]) for error in errors],
+        "stderr": completed.stderr,
+    }, errors
+
+
+def check_fixture(
+    fixture: Fixture,
+    overlay: Path,
+    target: Path,
+    compile_target: str | None = None,
+    extra_features: tuple[str, ...] = (),
+) -> dict:
+    build, errors = compile_fixtures(
+        [fixture], overlay, target, compile_config(fixture, compile_target, extra_features)
+    )
     expected = set(fixture.errors)
     observed = set()
     unexpected = []
@@ -267,25 +305,116 @@ def check_fixture(
         if not matching:
             unexpected.append(message.get("rendered", message["message"]))
     passed = (
-        completed.returncode == 0 and not errors
+        build["exit_code"] == 0 and not errors
         if not expected
-        else completed.returncode != 0 and observed == expected and not unexpected
+        else build["exit_code"] != 0 and observed == expected and not unexpected
     )
     return {
+        **build,
         "fixture": str(fixture.path),
-        "target": compile_target or "host",
         "passed": passed,
-        "package": package,
-        "features": list(features),
-        "command": command,
-        "exit_code": completed.returncode,
-        "workspace_artifacts_rebuilt": workspace_artifacts_rebuilt,
         "expected": sorted(expected),
         "observed": sorted(observed),
         "unexpected_errors": unexpected,
-        "diagnostics": [error.get("rendered", error["message"]) for error in errors],
-        "stderr": completed.stderr if not passed else "",
+        "stderr": build["stderr"] if not passed else "",
     }
+
+
+def check_cases(
+    cases: list[Fixture],
+    overlay: Path,
+    target: Path,
+    compile_target: str | None,
+    extra_features: tuple[str, ...],
+    jobs: int,
+) -> tuple[list[dict], list[dict]]:
+    positive = [fixture for fixture in cases if not fixture.errors]
+    negative = [fixture for fixture in cases if fixture.errors]
+    groups: dict[CompileConfig, list[Fixture]] = {}
+    for fixture in positive:
+        config = compile_config(fixture, compile_target, extra_features)
+        groups.setdefault(config, []).append(fixture)
+
+    results: dict[Path, dict] = {}
+    attempts: list[dict] = []
+
+    def record_attempt(group: list[Fixture], build: dict, kind: str, passed: bool) -> None:
+        attempts.append(
+            {
+                **build,
+                "fixtures": [str(fixture.path) for fixture in group],
+                "kind": kind,
+                "passed": passed,
+                "source_restores": len({MODULES[fixture.module] for fixture in group}),
+            }
+        )
+
+    for config, group in groups.items():
+        if len(group) > 1:
+            build, errors = compile_fixtures(group, overlay, target, config)
+            passed = build["exit_code"] == 0 and not errors
+            record_attempt(group, build, "positive-batch", passed)
+            if passed:
+                for fixture in group:
+                    results[fixture.path] = {
+                        **build,
+                        "fixture": str(fixture.path),
+                        "passed": True,
+                        "expected": [],
+                        "observed": [],
+                        "unexpected_errors": [],
+                        "stderr": "",
+                        # The batch's cost belongs to its single invocation.
+                        "workspace_artifacts_rebuilt": 0,
+                    }
+                continue
+
+        # If the batch fails, attribute each failing control in an isolated
+        # build. Do not accept negative evidence if the batch itself is broken,
+        # even if every fixture passes in isolation.
+        for fixture in group:
+            result = check_fixture(fixture, overlay, target, compile_target, extra_features)
+            record_attempt([fixture], result, "positive-single", result["passed"])
+            results[fixture.path] = result
+
+    if all(attempt["passed"] for attempt in attempts) and negative:
+        workers = min(jobs, len(negative))
+
+        def check_shard(
+            shard: list[Fixture], worker_overlay: Path, worker_target: Path
+        ) -> list[dict]:
+            return [
+                check_fixture(
+                    fixture, worker_overlay, worker_target, compile_target, extra_features
+                )
+                for fixture in shard
+            ]
+
+        if workers == 1:
+            negative_results = check_shard(negative, overlay, target)
+        else:
+            with tempfile.TemporaryDirectory(prefix="xlfn-typestate-worker-") as directory:
+                # Clone the already hashed snapshot after complete restoration.
+                # Each worker owns both a mutable overlay and a Cargo target
+                # directory; otherwise either source injection or Cargo locks race.
+                second_overlay = Path(directory)
+                shutil.copytree(overlay, second_overlay, dirs_exist_ok=True)
+                shards = [(overlay, target), (second_overlay, target / "worker-2")]
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = [
+                        executor.submit(check_shard, negative[index::workers], *shards[index])
+                        for index in range(workers)
+                    ]
+                    negative_results = [result for future in futures for result in future.result()]
+
+        negative_by_path = {result["fixture"]: result for result in negative_results}
+        for fixture in negative:
+            result = negative_by_path[str(fixture.path)]
+            record_attempt([fixture], result, "negative", result["passed"])
+            results[fixture.path] = result
+
+    # Worker completion and package batching never reorder fixture evidence.
+    return [results[fixture.path] for fixture in cases if fixture.path in results], attempts
 
 
 def main() -> int:
@@ -297,6 +426,13 @@ def main() -> int:
             reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dir", type=Path, default=ROOT / "target/typestate-check")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="Independent negative-check workers (default: 1)",
+    )
     parser.add_argument("--report", type=Path)
     parser.add_argument("--target", help="Cargo compile target; defaults to the rustc host")
     parser.add_argument(
@@ -352,29 +488,34 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="xlfn-typestate-") as directory:
         overlay = Path(directory)
         report["source_sha256"] = copy_sources(ROOT, overlay)
-        for fixture in cases:
-            result = check_fixture(fixture, overlay, target, args.target, extra_features)
-            report["fixtures"].append(result)
-            print(f"{'PASS' if result['passed'] else 'FAIL'} {fixture.path}", flush=True)
+        results, attempts = check_cases(
+            cases, overlay, target, args.target, extra_features, args.jobs
+        )
+        report["fixtures"] = results
+        report["attempts"] = attempts
+        for attempt in attempts:
+            if attempt["kind"] == "positive-batch" and not attempt["passed"]:
+                print(
+                    f"FAIL positive batch for {attempt['package']}; isolated results follow",
+                    flush=True,
+                )
+                print("\n".join(attempt["diagnostics"]), file=sys.stderr)
+                print(attempt["stderr"], file=sys.stderr)
+        for result in results:
+            print(f"{'PASS' if result['passed'] else 'FAIL'} {result['fixture']}", flush=True)
             if not result["passed"]:
                 print("\n".join(result["diagnostics"]), file=sys.stderr)
                 print(result["stderr"], file=sys.stderr)
-                # A broken positive control invalidates all negative evidence.
-                if not fixture.errors:
-                    break
-    executed = len(report["fixtures"])
     report["runner_cost"] = {
-        "cargo_invocations": executed,
-        "fixture_injections": executed,
-        "fixture_restores": executed,
+        "cargo_invocations": len(attempts),
+        "fixture_injections": sum(len(attempt["fixtures"]) for attempt in attempts),
+        "fixture_restores": sum(attempt["source_restores"] for attempt in attempts),
         "workspace_artifacts_rebuilt": sum(
-            fixture["workspace_artifacts_rebuilt"] for fixture in report["fixtures"]
+            attempt["workspace_artifacts_rebuilt"] for attempt in attempts
         ),
         "elapsed_seconds": time.perf_counter() - started,
     }
-    report["passed"] = len(report["fixtures"]) == len(cases) and all(
-        result["passed"] for result in report["fixtures"]
-    )
+    report["passed"] = len(results) == len(cases) and all(attempt["passed"] for attempt in attempts)
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(
