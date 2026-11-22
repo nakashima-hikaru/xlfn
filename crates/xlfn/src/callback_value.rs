@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use xlfn_host::{excel_free, excel12_with_invocation};
+use xlfn_host::{RawCallback, dispatch, excel_free};
 use xlfn_sys::XLOPER12;
 
 const CALLBACK_CLEANUP_AUDIT_CAPACITY: usize = 64;
@@ -212,14 +212,17 @@ impl<'session> ExcelCallbackValue<'session> {
     ) -> Result<(i32, CallbackResult<'session>), crate::callback_gate::CallbackAdmissionSuppressed>
     {
         let callback_admission = crate::callback_gate::enter_callback()?;
-        // SAFETY: The caller supplies live callback arguments.
-        let (status, raw, callback_invoked) =
-            unsafe { excel12_with_invocation(function, arguments) };
+        // SAFETY: the caller supplies live operands and the call holds
+        // callback admission until result ownership is transferred below.
+        let invocation = unsafe { dispatch(function, arguments) };
+        let (status, raw) = match invocation {
+            RawCallback::NotInvoked(status) => {
+                drop(callback_admission);
+                return Ok((status, CallbackResult::Empty));
+            }
+            RawCallback::Invoked { status, value } => (status, value),
+        };
         let callback_status = crate::error::callback_status_from_raw(status);
-        if !callback_invoked {
-            drop(callback_admission);
-            return Ok((status, CallbackResult::Empty));
-        }
         // Classification constructs the fresh owner itself. A value whose
         // cleanup already started cannot be supplied to this issuing path.
         let make_owner = |state| CallbackOwner {

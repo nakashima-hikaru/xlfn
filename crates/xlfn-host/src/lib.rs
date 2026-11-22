@@ -13,6 +13,10 @@ pub mod com_wait;
 #[doc(hidden)]
 pub mod process_quota;
 
+/// Native Excel registration arguments and scratch preparation.
+#[doc(hidden)]
+pub mod registration;
+
 /// Generated Windows ABI used by the platform adapter.
 #[doc(hidden)]
 #[cfg(windows)]
@@ -100,7 +104,43 @@ impl NativeModuleReference {
 
 /// The callback ABI consumed by the facade's admission and result owner.
 #[doc(hidden)]
-pub use xlfn_sys::{excel_free, excel12_with_invocation};
+pub use xlfn_sys::excel_free;
+
+/// Distinguishes an invoked Excel callback from an unavailable backend.
+#[doc(hidden)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the invoked raw value is ABI scratch and must not allocate"
+)]
+pub enum RawCallback {
+    NotInvoked(i32),
+    Invoked {
+        status: i32,
+        value: xlfn_sys::XLOPER12,
+    },
+}
+
+/// Native Excel dispatch after the facade has acquired callback admission.
+///
+/// # Safety
+/// The caller retains a live Excel callback session, proves this invocation
+/// is currently permitted, supplies live operands, and takes responsibility
+/// for releasing any invoked result before the admission permit is dropped.
+#[doc(hidden)]
+#[inline]
+pub unsafe fn dispatch(
+    function: i32,
+    arguments: &[std::ptr::NonNull<xlfn_sys::XLOPER12>],
+) -> RawCallback {
+    // SAFETY: the caller owns host admission and the synchronous arguments.
+    let (status, value, invoked) =
+        unsafe { xlfn_sys::excel12_with_invocation(function, arguments) };
+    if invoked {
+        RawCallback::Invoked { status, value }
+    } else {
+        RawCallback::NotInvoked(status)
+    }
+}
 
 /// Result of a host action whose outcome is checked by the engine.
 #[doc(hidden)]

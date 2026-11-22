@@ -568,6 +568,7 @@ dependencies = [
 name = "xlfn-engine"
 version = "0.1.0"
 dependencies = [
+ "parking_lot",
  "thiserror",
 ]
 
@@ -575,7 +576,9 @@ dependencies = [
 name = "xlfn-host"
 version = "0.1.0"
 dependencies = [
+ "smallvec",
  "windows-link 0.100.0",
+ "xlfn-common",
  "xlfn-engine",
  "xlfn-kernel",
  "xlfn-sys",

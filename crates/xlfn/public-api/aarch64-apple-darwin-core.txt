@@ -1,8 +1,16 @@
 # nightly-2026-09-28; cargo-public-api 0.52.0; features=(none)
 pub mod xlfn
+pub use xlfn::ExcelApiFailure
+pub use xlfn::ExcelApiFunction
+pub use xlfn::ExcelCallbackStatus
 pub use xlfn::ExcelEnum
+pub use xlfn::ExcelError
 pub use xlfn::ExcelInputIdentity
 pub use xlfn::ExcelPrepare
+pub use xlfn::UdfError
+pub use xlfn::UdfResult
+pub use xlfn::XllError
+pub use xlfn::XllResult
 pub use xlfn::excel_addin
 pub use xlfn::excel_function
 pub mod xlfn::addin
@@ -47,7 +55,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::BuildInfo
 impl core::panic::unwind_safe::UnwindSafe for xlfn::addin::BuildInfo
 pub struct xlfn::addin::CleanupReporter<'a>
 impl<'a> xlfn::addin::CleanupReporter<'a>
-pub fn xlfn::addin::CleanupReporter<'a>::warn(&mut self, &'static str, xlfn::addin::CleanupIssueKind, impl xlfn::error::IntoXllError)
+pub fn xlfn::addin::CleanupReporter<'a>::warn(&mut self, &'static str, xlfn::addin::CleanupIssueKind, impl xlfn_engine::error::IntoXllError)
 impl<'a> core::marker::Freeze for xlfn::addin::CleanupReporter<'a>
 impl<'a> core::marker::Send for xlfn::addin::CleanupReporter<'a>
 impl<'a> core::marker::Sync for xlfn::addin::CleanupReporter<'a>
@@ -57,10 +65,10 @@ impl<'a> core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::CleanupReporte
 impl<'a> !core::panic::unwind_safe::UnwindSafe for xlfn::addin::CleanupReporter<'a>
 pub struct xlfn::addin::DiagnosticsSetup<'a, A: xlfn::Addin>
 impl<A: xlfn::Addin> xlfn::addin::DiagnosticsSetup<'_, A>
-pub fn xlfn::addin::DiagnosticsSetup<'_, A>::install_file_sink(&self) -> core::result::Result<std::path::PathBuf, xlfn::diagnostics::DiagnosticInitError>
-pub fn xlfn::addin::DiagnosticsSetup<'_, A>::install_file_sink_with(&self, xlfn::diagnostics::DiagnosticFileConfig) -> core::result::Result<std::path::PathBuf, xlfn::diagnostics::DiagnosticInitError>
-pub fn xlfn::addin::DiagnosticsSetup<'_, A>::install_sink<S>(&self, S) -> core::result::Result<(), xlfn::diagnostics::DiagnosticInitError> where S: xlfn::diagnostics::DiagnosticSink
-pub fn xlfn::addin::DiagnosticsSetup<'_, A>::replace_sink<S>(&self, S) -> core::result::Result<(), xlfn::diagnostics::DiagnosticInitError> where S: xlfn::diagnostics::DiagnosticSink
+pub fn xlfn::addin::DiagnosticsSetup<'_, A>::install_file_sink(&self) -> core::result::Result<std::path::PathBuf, xlfn_engine::error::DiagnosticInitError>
+pub fn xlfn::addin::DiagnosticsSetup<'_, A>::install_file_sink_with(&self, xlfn::diagnostics::DiagnosticFileConfig) -> core::result::Result<std::path::PathBuf, xlfn_engine::error::DiagnosticInitError>
+pub fn xlfn::addin::DiagnosticsSetup<'_, A>::install_sink<S>(&self, S) -> core::result::Result<(), xlfn_engine::error::DiagnosticInitError> where S: xlfn::diagnostics::DiagnosticSink
+pub fn xlfn::addin::DiagnosticsSetup<'_, A>::replace_sink<S>(&self, S) -> core::result::Result<(), xlfn_engine::error::DiagnosticInitError> where S: xlfn::diagnostics::DiagnosticSink
 impl<A: xlfn::Addin> core::clone::Clone for xlfn::addin::DiagnosticsSetup<'_, A>
 pub fn xlfn::addin::DiagnosticsSetup<'_, A>::clone(&self) -> Self
 impl<A: xlfn::Addin> core::fmt::Debug for xlfn::addin::DiagnosticsSetup<'_, A>
@@ -75,13 +83,13 @@ impl<'a, A> core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::Diagnostics
 impl<'a, A> core::panic::unwind_safe::UnwindSafe for xlfn::addin::DiagnosticsSetup<'a, A> where &'a xlfn::addin::OpenContext<A>: core::panic::unwind_safe::UnwindSafe
 pub struct xlfn::addin::MacroSheetContext<'call, A: xlfn::Addin>
 impl<'call, A: xlfn::Addin> xlfn::addin::MacroSheetContext<'call, A>
-pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<xlfn::value::ExcelValue>
-pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce_matrix<T>(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<xlfn::value::Matrix<T>> where T: for<'value> xlfn::value::FromExcel<'value>
-pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce_with<R>(&self, &xlfn::reference::ExcelReference<'_>, impl for<'value> core::ops::function::FnOnce(xlfn::value::raw::XlValueRef<'value>) -> xlfn::error::XllResult<R>) -> xlfn::error::XllResult<R>
+pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn_engine::error::XllResult<xlfn::value::ExcelValue>
+pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce_matrix<T>(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn_engine::error::XllResult<xlfn::value::Matrix<T>> where T: for<'value> xlfn::value::FromExcel<'value>
+pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce_with<R>(&self, &xlfn::reference::ExcelReference<'_>, impl for<'value> core::ops::function::FnOnce(xlfn::value::raw::XlValueRef<'value>) -> xlfn_engine::error::XllResult<R>) -> xlfn_engine::error::XllResult<R>
 pub const fn xlfn::addin::MacroSheetContext<'call, A>::diagnostics(&self) -> &'call xlfn::diagnostics::DiagnosticHistory
-pub fn xlfn::addin::MacroSheetContext<'call, A>::sheet_name(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<alloc::string::String>
+pub fn xlfn::addin::MacroSheetContext<'call, A>::sheet_name(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn_engine::error::XllResult<alloc::string::String>
 pub const fn xlfn::addin::MacroSheetContext<'call, A>::state(&self) -> &'call <A as xlfn::Addin>::SharedState
-pub fn xlfn::addin::MacroSheetContext<'call, A>::workbook_date_system(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<xlfn::value::ExcelDateSystem>
+pub fn xlfn::addin::MacroSheetContext<'call, A>::workbook_date_system(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn_engine::error::XllResult<xlfn::value::ExcelDateSystem>
 impl<A: xlfn::Addin> core::clone::Clone for xlfn::addin::MacroSheetContext<'_, A>
 pub fn xlfn::addin::MacroSheetContext<'_, A>::clone(&self) -> Self
 impl<A: xlfn::Addin> core::convert::AsRef<<A as xlfn::Addin>::SharedState> for xlfn::addin::MacroSheetContext<'_, A>
@@ -178,7 +186,7 @@ impl<'call, A> core::marker::UnsafeUnpin for xlfn::addin::ThreadSafeContext<'cal
 impl<'call, A> !core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::ThreadSafeContext<'call, A>
 impl<'call, A> !core::panic::unwind_safe::UnwindSafe for xlfn::addin::ThreadSafeContext<'call, A>
 pub trait xlfn::addin::Addin: core::marker::Sized + core::marker::Send + core::marker::Sync + 'static
-pub type xlfn::addin::Addin::Error: xlfn::error::IntoXllError
+pub type xlfn::addin::Addin::Error: xlfn_engine::error::IntoXllError
 pub type xlfn::addin::Addin::Layers: xlfn::execution::UdfLayers
 pub type xlfn::addin::Addin::LifecycleState: 'static
 pub type xlfn::addin::Addin::SharedState: core::marker::Send + core::marker::Sync + 'static
@@ -189,6 +197,8 @@ pub unsafe trait xlfn::addin::PhysicallyUnloadableAddin: xlfn::Addin
 pub fn xlfn::addin::PhysicallyUnloadableAddin::quiesce_for_physical_unload(&mut Self::SharedState, &mut Self::LifecycleState) -> core::result::Result<(), Self::Error>
 pub type xlfn::addin::OpenResult<A> = core::result::Result<xlfn::addin::Opened<<A as xlfn::Addin>::SharedState, <A as xlfn::Addin>::LifecycleState, <A as xlfn::Addin>::Layers>, <A as xlfn::Addin>::Error>
 pub mod xlfn::diagnostics
+pub use xlfn::diagnostics::DiagnosticId
+pub use xlfn::diagnostics::DiagnosticInitError
 #[non_exhaustive] pub enum xlfn::diagnostics::DiagnosticErrorKind
 pub xlfn::diagnostics::DiagnosticErrorKind::Closing
 pub xlfn::diagnostics::DiagnosticErrorKind::Domain
@@ -215,31 +225,6 @@ impl core::marker::Unpin for xlfn::execution::UdfErrorKind
 impl core::marker::UnsafeUnpin for xlfn::execution::UdfErrorKind
 impl core::panic::unwind_safe::RefUnwindSafe for xlfn::execution::UdfErrorKind
 impl core::panic::unwind_safe::UnwindSafe for xlfn::execution::UdfErrorKind
-#[non_exhaustive] pub enum xlfn::diagnostics::DiagnosticInitError
-pub xlfn::diagnostics::DiagnosticInitError::AlreadyInstalled
-pub xlfn::diagnostics::DiagnosticInitError::Io(core::io::error::Error)
-pub xlfn::diagnostics::DiagnosticInitError::ReentrantMutation
-pub xlfn::diagnostics::DiagnosticInitError::RouterClosed
-pub xlfn::diagnostics::DiagnosticInitError::WorkerSpawn(core::io::error::Error)
-impl core::convert::From<core::io::error::Error> for xlfn::diagnostics::DiagnosticInitError
-pub fn xlfn::diagnostics::DiagnosticInitError::from(core::io::error::Error) -> Self
-impl core::convert::From<xlfn::diagnostics::DiagnosticInitError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::diagnostics::DiagnosticInitError) -> Self
-impl core::error::Error for xlfn::diagnostics::DiagnosticInitError
-pub fn xlfn::diagnostics::DiagnosticInitError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
-impl core::fmt::Debug for xlfn::diagnostics::DiagnosticInitError
-pub fn xlfn::diagnostics::DiagnosticInitError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::diagnostics::DiagnosticInitError
-pub fn xlfn::diagnostics::DiagnosticInitError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl xlfn::error::IntoXllError for xlfn::diagnostics::DiagnosticInitError
-pub fn xlfn::diagnostics::DiagnosticInitError::into_xll_error(self) -> xlfn::error::XllError
-impl core::marker::Freeze for xlfn::diagnostics::DiagnosticInitError
-impl core::marker::Send for xlfn::diagnostics::DiagnosticInitError
-impl core::marker::Sync for xlfn::diagnostics::DiagnosticInitError
-impl core::marker::Unpin for xlfn::diagnostics::DiagnosticInitError
-impl core::marker::UnsafeUnpin for xlfn::diagnostics::DiagnosticInitError
-impl !core::panic::unwind_safe::RefUnwindSafe for xlfn::diagnostics::DiagnosticInitError
-impl !core::panic::unwind_safe::UnwindSafe for xlfn::diagnostics::DiagnosticInitError
 pub struct xlfn::diagnostics::AddinId(_)
 impl xlfn::diagnostics::AddinId
 pub fn xlfn::diagnostics::AddinId::as_str(&self) -> &str
@@ -287,8 +272,8 @@ impl core::panic::unwind_safe::UnwindSafe for xlfn::diagnostics::DiagnosticCurso
 #[non_exhaustive] pub struct xlfn::diagnostics::DiagnosticEvent<'a>
 impl xlfn::diagnostics::DiagnosticEvent<'_>
 pub const fn xlfn::diagnostics::DiagnosticEvent<'_>::argument(&self) -> core::option::Option<&'static str>
-pub const fn xlfn::diagnostics::DiagnosticEvent<'_>::diagnostic_id(&self) -> xlfn::diagnostics::DiagnosticId
-pub const fn xlfn::diagnostics::DiagnosticEvent<'_>::error(&self) -> &xlfn::error::XllError
+pub const fn xlfn::diagnostics::DiagnosticEvent<'_>::diagnostic_id(&self) -> xlfn_engine::diagnostic_id::DiagnosticId
+pub const fn xlfn::diagnostics::DiagnosticEvent<'_>::error(&self) -> &xlfn_engine::error::XllError
 pub const fn xlfn::diagnostics::DiagnosticEvent<'_>::timestamp(&self) -> std::time::SystemTime
 pub const fn xlfn::diagnostics::DiagnosticEvent<'_>::udf_id(&self) -> &'static str
 impl<'a> core::marker::Freeze for xlfn::diagnostics::DiagnosticEvent<'a>
@@ -391,29 +376,6 @@ impl core::marker::Unpin for xlfn::diagnostics::DiagnosticHistoryStats
 impl core::marker::UnsafeUnpin for xlfn::diagnostics::DiagnosticHistoryStats
 impl core::panic::unwind_safe::RefUnwindSafe for xlfn::diagnostics::DiagnosticHistoryStats
 impl core::panic::unwind_safe::UnwindSafe for xlfn::diagnostics::DiagnosticHistoryStats
-#[repr(transparent)] pub struct xlfn::diagnostics::DiagnosticId(_)
-impl xlfn::diagnostics::DiagnosticId
-pub const fn xlfn::diagnostics::DiagnosticId::as_u64(self) -> u64
-impl core::clone::Clone for xlfn::diagnostics::DiagnosticId
-pub fn xlfn::diagnostics::DiagnosticId::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::diagnostics::DiagnosticId
-impl core::cmp::PartialEq for xlfn::diagnostics::DiagnosticId
-pub fn xlfn::diagnostics::DiagnosticId::eq(&self, &Self) -> bool
-impl core::fmt::Debug for xlfn::diagnostics::DiagnosticId
-pub fn xlfn::diagnostics::DiagnosticId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::LowerHex for xlfn::diagnostics::DiagnosticId
-pub fn xlfn::diagnostics::DiagnosticId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for xlfn::diagnostics::DiagnosticId
-pub fn xlfn::diagnostics::DiagnosticId::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for xlfn::diagnostics::DiagnosticId
-impl core::marker::StructuralPartialEq for xlfn::diagnostics::DiagnosticId
-impl core::marker::Freeze for xlfn::diagnostics::DiagnosticId
-impl core::marker::Send for xlfn::diagnostics::DiagnosticId
-impl core::marker::Sync for xlfn::diagnostics::DiagnosticId
-impl core::marker::Unpin for xlfn::diagnostics::DiagnosticId
-impl core::marker::UnsafeUnpin for xlfn::diagnostics::DiagnosticId
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::diagnostics::DiagnosticId
-impl core::panic::unwind_safe::UnwindSafe for xlfn::diagnostics::DiagnosticId
 #[non_exhaustive] pub struct xlfn::diagnostics::DiagnosticPage
 pub xlfn::diagnostics::DiagnosticPage::allocation_failed: bool
 pub xlfn::diagnostics::DiagnosticPage::errors: alloc::vec::Vec<xlfn::diagnostics::DiagnosticRecord>
@@ -432,9 +394,9 @@ impl core::panic::unwind_safe::UnwindSafe for xlfn::diagnostics::DiagnosticPage
 pub xlfn::diagnostics::DiagnosticRecord::argument: core::option::Option<alloc::string::String>
 pub xlfn::diagnostics::DiagnosticRecord::calculation_id: core::option::Option<xlfn::execution::CalculationId>
 pub xlfn::diagnostics::DiagnosticRecord::call_id: core::option::Option<xlfn::execution::CallId>
-pub xlfn::diagnostics::DiagnosticRecord::diagnostic_id: xlfn::diagnostics::DiagnosticId
+pub xlfn::diagnostics::DiagnosticRecord::diagnostic_id: xlfn_engine::diagnostic_id::DiagnosticId
 pub xlfn::diagnostics::DiagnosticRecord::error_kind: xlfn::execution::UdfErrorKind
-pub xlfn::diagnostics::DiagnosticRecord::excel_error: xlfn::error::ExcelError
+pub xlfn::diagnostics::DiagnosticRecord::excel_error: xlfn_engine::error::ExcelError
 pub xlfn::diagnostics::DiagnosticRecord::message: alloc::string::String
 pub xlfn::diagnostics::DiagnosticRecord::timestamp: std::time::SystemTime
 pub xlfn::diagnostics::DiagnosticRecord::udf_id: alloc::string::String
@@ -493,382 +455,24 @@ pub trait xlfn::diagnostics::DiagnosticSink: core::marker::Send + 'static
 pub fn xlfn::diagnostics::DiagnosticSink::report(&self, &xlfn::diagnostics::DiagnosticEvent<'_>)
 pub fn xlfn::diagnostics::diagnostic_stats() -> xlfn::diagnostics::DiagnosticStats
 pub mod xlfn::error
-#[non_exhaustive] pub enum xlfn::error::DomainErrorCode
-pub xlfn::error::DomainErrorCode::InvalidInput
-pub xlfn::error::DomainErrorCode::NativeFailure
-pub xlfn::error::DomainErrorCode::Overflow
-impl core::clone::Clone for xlfn::error::DomainErrorCode
-pub fn xlfn::error::DomainErrorCode::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::error::DomainErrorCode
-impl core::cmp::PartialEq for xlfn::error::DomainErrorCode
-pub fn xlfn::error::DomainErrorCode::eq(&self, &Self) -> bool
-impl core::fmt::Debug for xlfn::error::DomainErrorCode
-pub fn xlfn::error::DomainErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for xlfn::error::DomainErrorCode
-impl core::marker::StructuralPartialEq for xlfn::error::DomainErrorCode
-impl core::marker::Freeze for xlfn::error::DomainErrorCode
-impl core::marker::Send for xlfn::error::DomainErrorCode
-impl core::marker::Sync for xlfn::error::DomainErrorCode
-impl core::marker::Unpin for xlfn::error::DomainErrorCode
-impl core::marker::UnsafeUnpin for xlfn::error::DomainErrorCode
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::DomainErrorCode
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::DomainErrorCode
-#[non_exhaustive] pub enum xlfn::error::ExcelApiFailure
-pub xlfn::error::ExcelApiFailure::Indeterminate(xlfn::error::ExcelCallbackStatus)
-pub xlfn::error::ExcelApiFailure::InvalidRegistrationId(i32)
-pub xlfn::error::ExcelApiFailure::Status(xlfn::error::ExcelCallbackStatus)
-pub xlfn::error::ExcelApiFailure::Suppressed(xlfn::error::ExcelCallbackStatus)
-pub xlfn::error::ExcelApiFailure::UnexpectedResult
-impl core::clone::Clone for xlfn::error::ExcelApiFailure
-pub fn xlfn::error::ExcelApiFailure::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::error::ExcelApiFailure
-impl core::cmp::PartialEq for xlfn::error::ExcelApiFailure
-pub fn xlfn::error::ExcelApiFailure::eq(&self, &Self) -> bool
-impl core::fmt::Debug for xlfn::error::ExcelApiFailure
-pub fn xlfn::error::ExcelApiFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::ExcelApiFailure
-pub fn xlfn::error::ExcelApiFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for xlfn::error::ExcelApiFailure
-pub fn xlfn::error::ExcelApiFailure::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for xlfn::error::ExcelApiFailure
-impl core::marker::StructuralPartialEq for xlfn::error::ExcelApiFailure
-impl core::marker::Freeze for xlfn::error::ExcelApiFailure
-impl core::marker::Send for xlfn::error::ExcelApiFailure
-impl core::marker::Sync for xlfn::error::ExcelApiFailure
-impl core::marker::Unpin for xlfn::error::ExcelApiFailure
-impl core::marker::UnsafeUnpin for xlfn::error::ExcelApiFailure
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::ExcelApiFailure
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::ExcelApiFailure
-#[non_exhaustive] pub enum xlfn::error::ExcelApiFunction
-pub xlfn::error::ExcelApiFunction::AsyncReturn
-pub xlfn::error::ExcelApiFunction::Caller
-pub xlfn::error::ExcelApiFunction::Coerce
-pub xlfn::error::ExcelApiFunction::Evaluate
-pub xlfn::error::ExcelApiFunction::EventRegister
-pub xlfn::error::ExcelApiFunction::Free
-pub xlfn::error::ExcelApiFunction::GetDocument
-pub xlfn::error::ExcelApiFunction::GetName
-pub xlfn::error::ExcelApiFunction::Register
-pub xlfn::error::ExcelApiFunction::Rtd
-pub xlfn::error::ExcelApiFunction::SetName
-pub xlfn::error::ExcelApiFunction::SheetId
-pub xlfn::error::ExcelApiFunction::SheetName
-pub xlfn::error::ExcelApiFunction::Unregister
-impl core::clone::Clone for xlfn::error::ExcelApiFunction
-pub fn xlfn::error::ExcelApiFunction::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::error::ExcelApiFunction
-impl core::cmp::PartialEq for xlfn::error::ExcelApiFunction
-pub fn xlfn::error::ExcelApiFunction::eq(&self, &Self) -> bool
-impl core::fmt::Debug for xlfn::error::ExcelApiFunction
-pub fn xlfn::error::ExcelApiFunction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::ExcelApiFunction
-pub fn xlfn::error::ExcelApiFunction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for xlfn::error::ExcelApiFunction
-pub fn xlfn::error::ExcelApiFunction::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for xlfn::error::ExcelApiFunction
-impl core::marker::StructuralPartialEq for xlfn::error::ExcelApiFunction
-impl core::marker::Freeze for xlfn::error::ExcelApiFunction
-impl core::marker::Send for xlfn::error::ExcelApiFunction
-impl core::marker::Sync for xlfn::error::ExcelApiFunction
-impl core::marker::Unpin for xlfn::error::ExcelApiFunction
-impl core::marker::UnsafeUnpin for xlfn::error::ExcelApiFunction
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::ExcelApiFunction
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::ExcelApiFunction
-pub enum xlfn::error::ExcelCallbackStatus
-pub xlfn::error::ExcelCallbackStatus::Abort
-pub xlfn::error::ExcelCallbackStatus::Failed(i32)
-pub xlfn::error::ExcelCallbackStatus::Success
-pub xlfn::error::ExcelCallbackStatus::Uncalced
-impl core::clone::Clone for xlfn::error::ExcelCallbackStatus
-pub fn xlfn::error::ExcelCallbackStatus::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::error::ExcelCallbackStatus
-impl core::cmp::PartialEq for xlfn::error::ExcelCallbackStatus
-pub fn xlfn::error::ExcelCallbackStatus::eq(&self, &Self) -> bool
-impl core::fmt::Debug for xlfn::error::ExcelCallbackStatus
-pub fn xlfn::error::ExcelCallbackStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::ExcelCallbackStatus
-pub fn xlfn::error::ExcelCallbackStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for xlfn::error::ExcelCallbackStatus
-pub fn xlfn::error::ExcelCallbackStatus::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for xlfn::error::ExcelCallbackStatus
-impl core::marker::StructuralPartialEq for xlfn::error::ExcelCallbackStatus
-impl core::marker::Freeze for xlfn::error::ExcelCallbackStatus
-impl core::marker::Send for xlfn::error::ExcelCallbackStatus
-impl core::marker::Sync for xlfn::error::ExcelCallbackStatus
-impl core::marker::Unpin for xlfn::error::ExcelCallbackStatus
-impl core::marker::UnsafeUnpin for xlfn::error::ExcelCallbackStatus
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::ExcelCallbackStatus
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::ExcelCallbackStatus
-#[non_exhaustive] #[repr(i32)] pub enum xlfn::error::ExcelError
-pub xlfn::error::ExcelError::DivisionByZero = 7
-pub xlfn::error::ExcelError::GettingData = 43
-pub xlfn::error::ExcelError::Name = 29
-pub xlfn::error::ExcelError::NotAvailable = 42
-pub xlfn::error::ExcelError::Null = 0
-pub xlfn::error::ExcelError::Number = 36
-pub xlfn::error::ExcelError::Reference = 23
-pub xlfn::error::ExcelError::Value = 15
-impl xlfn::error::ExcelError
-pub const fn xlfn::error::ExcelError::code(self) -> i32
-pub const fn xlfn::error::ExcelError::from_code(i32) -> core::option::Option<Self>
-impl core::clone::Clone for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::error::ExcelError
-impl core::cmp::PartialEq for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::eq(&self, &Self) -> bool
-impl core::convert::From<xlfn::error::ExcelError> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::ExcelError) -> Self
-impl core::convert::From<xlfn::error::ExcelError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::ExcelError) -> Self
-impl core::error::Error for xlfn::error::ExcelError
-impl core::fmt::Debug for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for xlfn::error::ExcelError
-impl core::marker::StructuralPartialEq for xlfn::error::ExcelError
-impl xlfn::error::IntoXllError for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::into_xll_error(self) -> xlfn::error::XllError
-impl xlfn::value::ExcelInputIdentity for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
-impl xlfn::value::IntoExcel for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
-impl<'call> xlfn::value::FromExcel<'call> for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::error::ExcelError::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
-impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::error::ExcelError
-pub type xlfn::error::ExcelError::Prepared = xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn xlfn::error::ExcelError::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
-impl core::marker::Freeze for xlfn::error::ExcelError
-impl core::marker::Send for xlfn::error::ExcelError
-impl core::marker::Sync for xlfn::error::ExcelError
-impl core::marker::Unpin for xlfn::error::ExcelError
-impl core::marker::UnsafeUnpin for xlfn::error::ExcelError
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::ExcelError
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::ExcelError
-#[non_exhaustive] pub enum xlfn::error::InputError
-pub xlfn::error::InputError::InvalidUtf16
-pub xlfn::error::InputError::Malformed(&'static str)
-pub xlfn::error::InputError::NonFinite
-pub xlfn::error::InputError::NotInteger
-pub xlfn::error::InputError::NullPointer
-pub xlfn::error::InputError::NumericOverflow
-pub xlfn::error::InputError::OutOfRange
-pub xlfn::error::InputError::TooLarge
-pub xlfn::error::InputError::TooLarge::actual: usize
-pub xlfn::error::InputError::TooLarge::limit: usize
-pub xlfn::error::InputError::UnknownEnum
-pub xlfn::error::InputError::UnknownEnum::actual: alloc::string::String
-pub xlfn::error::InputError::UnknownEnum::expected: &'static str
-pub xlfn::error::InputError::WrongType
-pub xlfn::error::InputError::WrongType::actual: xlfn::value::raw::XlValueType
-pub xlfn::error::InputError::WrongType::expected: &'static str
-impl core::clone::Clone for xlfn::error::InputError
-pub fn xlfn::error::InputError::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::error::InputError
-impl core::cmp::PartialEq for xlfn::error::InputError
-pub fn xlfn::error::InputError::eq(&self, &Self) -> bool
-impl core::error::Error for xlfn::error::InputError
-impl core::fmt::Debug for xlfn::error::InputError
-pub fn xlfn::error::InputError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::InputError
-pub fn xlfn::error::InputError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for xlfn::error::InputError
-impl core::marker::Freeze for xlfn::error::InputError
-impl core::marker::Send for xlfn::error::InputError
-impl core::marker::Sync for xlfn::error::InputError
-impl core::marker::Unpin for xlfn::error::InputError
-impl core::marker::UnsafeUnpin for xlfn::error::InputError
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::InputError
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::InputError
-#[non_exhaustive] pub enum xlfn::error::XllError
-#[non_exhaustive] pub xlfn::error::XllError::AbiMismatch
-pub xlfn::error::XllError::AbiMismatch::actual: u32
-pub xlfn::error::XllError::AbiMismatch::expected: u32
-#[non_exhaustive] pub xlfn::error::XllError::Application
-pub xlfn::error::XllError::Application::excel: xlfn::error::ExcelError
-pub xlfn::error::XllError::Application::message: alloc::string::String
-pub xlfn::error::XllError::Application::source: core::option::Option<alloc::boxed::Box<xlfn::error::ErrorCause>>
-pub xlfn::error::XllError::Closing
-pub xlfn::error::XllError::Custom
-pub xlfn::error::XllError::Custom::excel: xlfn::error::ExcelError
-pub xlfn::error::XllError::Custom::message: alloc::borrow::Cow<'static, str>
-pub xlfn::error::XllError::Domain
-pub xlfn::error::XllError::Domain::code: xlfn::error::DomainErrorCode
-pub xlfn::error::XllError::ElementCountMismatch
-pub xlfn::error::XllError::ElementCountMismatch::actual: usize
-pub xlfn::error::XllError::ElementCountMismatch::columns: usize
-pub xlfn::error::XllError::ElementCountMismatch::expected: usize
-pub xlfn::error::XllError::ElementCountMismatch::rows: usize
-#[non_exhaustive] pub xlfn::error::XllError::ExcelApi
-pub xlfn::error::XllError::ExcelApi::failure: xlfn::error::ExcelApiFailure
-pub xlfn::error::XllError::ExcelApi::function: xlfn::error::ExcelApiFunction
-pub xlfn::error::XllError::ExcelValue(xlfn::error::ExcelError)
-pub xlfn::error::XllError::Input
-pub xlfn::error::XllError::Input::argument: &'static str
-pub xlfn::error::XllError::Input::reason: xlfn::error::InputError
-#[non_exhaustive] pub xlfn::error::XllError::Internal
-pub xlfn::error::XllError::Internal::diagnostic_id: xlfn::diagnostics::DiagnosticId
-pub xlfn::error::XllError::InvalidHandle
-#[non_exhaustive] pub xlfn::error::XllError::LibraryLoad
-pub xlfn::error::XllError::LibraryLoad::os_error: u32
-pub xlfn::error::XllError::LibraryLoad::path: std::path::PathBuf
-#[non_exhaustive] pub xlfn::error::XllError::MetadataDebtBindingChanged
-pub xlfn::error::XllError::MetadataDebtBindingChanged::name: &'static str
-#[non_exhaustive] pub xlfn::error::XllError::MissingSymbol
-pub xlfn::error::XllError::MissingSymbol::symbol: &'static str
-pub xlfn::error::XllError::Native
-pub xlfn::error::XllError::Native::code: i32
-pub xlfn::error::XllError::Native::message: alloc::string::String
-pub xlfn::error::XllError::Overloaded
-pub xlfn::error::XllError::Panic
-pub xlfn::error::XllError::ReentrantCall
-#[non_exhaustive] pub xlfn::error::XllError::RegistrationConflict
-pub xlfn::error::XllError::RegistrationConflict::name: &'static str
-#[non_exhaustive] pub xlfn::error::XllError::RtdProducerFailure
-pub xlfn::error::XllError::RtdProducerFailure::source: alloc::boxed::Box<xlfn::error::XllError>
-pub xlfn::error::XllError::RtdProducerFailure::topic: alloc::string::String
-#[non_exhaustive] pub xlfn::error::XllError::RtdSubscriptionShutdown
-pub xlfn::error::XllError::RtdSubscriptionShutdown::key: alloc::string::String
-pub xlfn::error::XllError::RtdSubscriptionShutdown::server_generation: u64
-pub xlfn::error::XllError::RtdSubscriptionShutdown::source: alloc::boxed::Box<xlfn::error::XllError>
-pub xlfn::error::XllError::RtdSubscriptionShutdown::topic_id: i32
-pub xlfn::error::XllError::Shape
-pub xlfn::error::XllError::Shape::actual: xlfn::value::Shape
-pub xlfn::error::XllError::Shape::expected: xlfn::value::Shape
-pub xlfn::error::XllError::StaleHandle
-#[non_exhaustive] pub xlfn::error::XllError::WindowsApi
-pub xlfn::error::XllError::WindowsApi::code: i32
-pub xlfn::error::XllError::WindowsApi::function: &'static str
-impl xlfn::error::XllError
-pub fn xlfn::error::XllError::custom(xlfn::error::ExcelError, impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
-pub const fn xlfn::error::XllError::domain(xlfn::error::DomainErrorCode) -> Self
-pub const fn xlfn::error::XllError::input(&'static str, xlfn::error::InputError) -> Self
-pub const fn xlfn::error::XllError::to_excel_error(&self) -> xlfn::error::ExcelError
-pub fn xlfn::error::XllError::validation(&'static str, xlfn::error::InputError) -> Self
-pub fn xlfn::error::XllError::with_argument(self, &'static str) -> Self
-impl core::clone::Clone for xlfn::error::XllError
-pub fn xlfn::error::XllError::clone(&self) -> Self
-impl core::convert::From<core::io::error::Error> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(core::io::error::Error) -> Self
-impl core::convert::From<xlfn::diagnostics::DiagnosticInitError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::diagnostics::DiagnosticInitError) -> Self
-impl core::convert::From<xlfn::error::ExcelError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::ExcelError) -> Self
-impl core::convert::From<xlfn::error::InvalidLimit> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::InvalidLimit) -> Self
-impl core::convert::From<xlfn::error::UdfError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::UdfError) -> Self
-impl core::convert::From<xlfn::error::XllError> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::XllError) -> Self
-impl core::error::Error for xlfn::error::XllError
-pub fn xlfn::error::XllError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
-impl core::fmt::Debug for xlfn::error::XllError
-pub fn xlfn::error::XllError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::XllError
-pub fn xlfn::error::XllError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl xlfn::error::IntoXllError for xlfn::error::XllError
-pub fn xlfn::error::XllError::into_xll_error(self) -> xlfn::error::XllError
-impl core::marker::Freeze for xlfn::error::XllError
-impl core::marker::Send for xlfn::error::XllError
-impl core::marker::Sync for xlfn::error::XllError
-impl core::marker::Unpin for xlfn::error::XllError
-impl core::marker::UnsafeUnpin for xlfn::error::XllError
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::XllError
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::XllError
-pub struct xlfn::error::ErrorCause
-impl core::clone::Clone for xlfn::error::ErrorCause
-pub fn xlfn::error::ErrorCause::clone(&self) -> Self
-impl core::error::Error for xlfn::error::ErrorCause
-pub fn xlfn::error::ErrorCause::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
-impl core::fmt::Debug for xlfn::error::ErrorCause
-pub fn xlfn::error::ErrorCause::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::ErrorCause
-pub fn xlfn::error::ErrorCause::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for xlfn::error::ErrorCause
-impl core::marker::Send for xlfn::error::ErrorCause
-impl core::marker::Sync for xlfn::error::ErrorCause
-impl core::marker::Unpin for xlfn::error::ErrorCause
-impl core::marker::UnsafeUnpin for xlfn::error::ErrorCause
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::ErrorCause
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::ErrorCause
-pub struct xlfn::error::InvalidLimit
-impl core::clone::Clone for xlfn::error::InvalidLimit
-pub fn xlfn::error::InvalidLimit::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::error::InvalidLimit
-impl core::cmp::PartialEq for xlfn::error::InvalidLimit
-pub fn xlfn::error::InvalidLimit::eq(&self, &Self) -> bool
-impl core::convert::From<xlfn::error::InvalidLimit> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::InvalidLimit) -> Self
-impl core::convert::From<xlfn::error::InvalidLimit> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::InvalidLimit) -> Self
-impl core::error::Error for xlfn::error::InvalidLimit
-impl core::fmt::Debug for xlfn::error::InvalidLimit
-pub fn xlfn::error::InvalidLimit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::InvalidLimit
-pub fn xlfn::error::InvalidLimit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for xlfn::error::InvalidLimit
-impl core::marker::StructuralPartialEq for xlfn::error::InvalidLimit
-impl core::marker::Freeze for xlfn::error::InvalidLimit
-impl core::marker::Send for xlfn::error::InvalidLimit
-impl core::marker::Sync for xlfn::error::InvalidLimit
-impl core::marker::Unpin for xlfn::error::InvalidLimit
-impl core::marker::UnsafeUnpin for xlfn::error::InvalidLimit
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::InvalidLimit
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::InvalidLimit
-pub struct xlfn::error::UdfError
-impl xlfn::error::UdfError
-pub fn xlfn::error::UdfError::message(&self) -> &str
-pub fn xlfn::error::UdfError::new(xlfn::error::ExcelError, impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
-pub const fn xlfn::error::UdfError::to_excel_error(&self) -> xlfn::error::ExcelError
-pub fn xlfn::error::UdfError::with_source(self, impl core::error::Error + core::marker::Send + core::marker::Sync + 'static) -> Self
-impl core::convert::From<core::io::error::Error> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(core::io::error::Error) -> Self
-impl core::convert::From<xlfn::error::ExcelError> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::ExcelError) -> Self
-impl core::convert::From<xlfn::error::InvalidLimit> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::InvalidLimit) -> Self
-impl core::convert::From<xlfn::error::UdfError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::UdfError) -> Self
-impl core::convert::From<xlfn::error::XllError> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::XllError) -> Self
-impl core::error::Error for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
-impl core::fmt::Debug for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl xlfn::error::IntoXllError for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::into_xll_error(self) -> xlfn::error::XllError
-impl core::marker::Freeze for xlfn::error::UdfError
-impl core::marker::Send for xlfn::error::UdfError
-impl core::marker::Sync for xlfn::error::UdfError
-impl core::marker::Unpin for xlfn::error::UdfError
-impl core::marker::UnsafeUnpin for xlfn::error::UdfError
-impl !core::panic::unwind_safe::RefUnwindSafe for xlfn::error::UdfError
-impl !core::panic::unwind_safe::UnwindSafe for xlfn::error::UdfError
-pub trait xlfn::error::IntoXllError
-pub fn xlfn::error::IntoXllError::into_xll_error(self) -> xlfn::error::XllError
-impl xlfn::error::IntoXllError for core::io::error::Error
-pub fn core::io::error::Error::into_xll_error(self) -> xlfn::error::XllError
-impl xlfn::error::IntoXllError for xlfn::diagnostics::DiagnosticInitError
-pub fn xlfn::diagnostics::DiagnosticInitError::into_xll_error(self) -> xlfn::error::XllError
-impl xlfn::error::IntoXllError for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::into_xll_error(self) -> xlfn::error::XllError
-impl xlfn::error::IntoXllError for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::into_xll_error(self) -> xlfn::error::XllError
-impl xlfn::error::IntoXllError for xlfn::error::XllError
-pub fn xlfn::error::XllError::into_xll_error(self) -> xlfn::error::XllError
-pub type xlfn::error::UdfResult<T> = core::result::Result<T, xlfn::error::UdfError>
-pub type xlfn::error::XllResult<T> = core::result::Result<T, xlfn::error::XllError>
+pub use xlfn::error::DomainErrorCode
+pub use xlfn::error::ErrorCause
+pub use xlfn::error::ExcelApiFailure
+pub use xlfn::error::ExcelApiFunction
+pub use xlfn::error::ExcelCallbackStatus
+pub use xlfn::error::ExcelError
+pub use xlfn::error::InputError
+pub use xlfn::error::IntoXllError
+pub use xlfn::error::InvalidLimit
+pub use xlfn::error::UdfError
+pub use xlfn::error::UdfResult
+pub use xlfn::error::XllError
+pub use xlfn::error::XllResult
 pub mod xlfn::execution
 #[non_exhaustive] pub enum xlfn::execution::UdfCompletionOutcome<'call>
 pub xlfn::execution::UdfCompletionOutcome::Cancelled
 pub xlfn::execution::UdfCompletionOutcome::Error
-pub xlfn::execution::UdfCompletionOutcome::Error::error: &'call xlfn::error::XllError
+pub xlfn::execution::UdfCompletionOutcome::Error::error: &'call xlfn_engine::error::XllError
 pub xlfn::execution::UdfCompletionOutcome::Error::kind: xlfn::execution::UdfErrorKind
 pub xlfn::execution::UdfCompletionOutcome::Error::vendor_code: core::option::Option<i32>
 pub xlfn::execution::UdfCompletionOutcome::Success
@@ -889,7 +493,7 @@ impl<'call> core::panic::unwind_safe::UnwindSafe for xlfn::execution::UdfComplet
 #[non_exhaustive] pub enum xlfn::execution::UdfDeliveryOutcome<'call>
 pub xlfn::execution::UdfDeliveryOutcome::Delivered
 pub xlfn::execution::UdfDeliveryOutcome::Failed
-pub xlfn::execution::UdfDeliveryOutcome::Failed::error: &'call xlfn::error::XllError
+pub xlfn::execution::UdfDeliveryOutcome::Failed::error: &'call xlfn_engine::error::XllError
 pub xlfn::execution::UdfDeliveryOutcome::NotApplicable
 pub xlfn::execution::UdfDeliveryOutcome::Unobserved
 impl<'call> core::clone::Clone for xlfn::execution::UdfDeliveryOutcome<'call>
@@ -1009,7 +613,7 @@ impl<'call> core::panic::unwind_safe::RefUnwindSafe for xlfn::execution::CallOut
 impl<'call> core::panic::unwind_safe::UnwindSafe for xlfn::execution::CallOutcome<'call>
 pub trait xlfn::execution::UdfLayer: core::marker::Send + core::marker::Sync + 'static
 pub type xlfn::execution::UdfLayer::Guard: xlfn::execution::UdfLayerGuard
-pub fn xlfn::execution::UdfLayer::enter(&self, &xlfn::execution::CallMetadata) -> xlfn::error::XllResult<Self::Guard>
+pub fn xlfn::execution::UdfLayer::enter(&self, &xlfn::execution::CallMetadata) -> xlfn_engine::error::XllResult<Self::Guard>
 pub trait xlfn::execution::UdfLayerGuard: core::marker::Send + 'static
 pub fn xlfn::execution::UdfLayerGuard::exit(self, &xlfn::execution::CallOutcome<'_>)
 impl xlfn::execution::UdfLayerGuard for ()
@@ -1051,10 +655,10 @@ impl<T> xlfn::execution::UdfLayers for T where T: xlfn::execution::private::UdfL
 pub mod xlfn::output
 pub struct xlfn::output::ExcelArrayBuilder
 impl xlfn::output::ExcelArrayBuilder
-pub fn xlfn::output::ExcelArrayBuilder::finish(self) -> xlfn::error::XllResult<xlfn::output::ExcelArrayOutput>
-pub fn xlfn::output::ExcelArrayBuilder::new(usize, usize) -> xlfn::error::XllResult<Self>
-pub fn xlfn::output::ExcelArrayBuilder::push<T: xlfn::value::IntoExcel>(&mut self, T) -> xlfn::error::XllResult<()>
-pub fn xlfn::output::ExcelArrayBuilder::push_f64(&mut self, f64) -> xlfn::error::XllResult<()>
+pub fn xlfn::output::ExcelArrayBuilder::finish(self) -> xlfn_engine::error::XllResult<xlfn::output::ExcelArrayOutput>
+pub fn xlfn::output::ExcelArrayBuilder::new(usize, usize) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::output::ExcelArrayBuilder::push<T: xlfn::value::IntoExcel>(&mut self, T) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::output::ExcelArrayBuilder::push_f64(&mut self, f64) -> xlfn_engine::error::XllResult<()>
 impl !core::marker::Freeze for xlfn::output::ExcelArrayBuilder
 impl !core::marker::Send for xlfn::output::ExcelArrayBuilder
 impl !core::marker::Sync for xlfn::output::ExcelArrayBuilder
@@ -1064,9 +668,9 @@ impl core::panic::unwind_safe::RefUnwindSafe for xlfn::output::ExcelArrayBuilder
 impl core::panic::unwind_safe::UnwindSafe for xlfn::output::ExcelArrayBuilder
 pub struct xlfn::output::ExcelArrayOutput
 impl xlfn::output::ExcelArrayOutput
-pub fn xlfn::output::ExcelArrayOutput::from_f64(usize, usize, &[f64]) -> xlfn::error::XllResult<Self>
-pub fn xlfn::output::ExcelArrayOutput::from_iter<T: xlfn::value::IntoExcel>(usize, usize, impl core::iter::traits::collect::IntoIterator<Item = T>) -> xlfn::error::XllResult<Self>
-pub const fn xlfn::output::ExcelArrayOutput::shape(&self) -> xlfn::value::Shape
+pub fn xlfn::output::ExcelArrayOutput::from_f64(usize, usize, &[f64]) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::output::ExcelArrayOutput::from_iter<T: xlfn::value::IntoExcel>(usize, usize, impl core::iter::traits::collect::IntoIterator<Item = T>) -> xlfn_engine::error::XllResult<Self>
+pub const fn xlfn::output::ExcelArrayOutput::shape(&self) -> xlfn_engine::value_types::Shape
 impl core::fmt::Debug for xlfn::output::ExcelArrayOutput
 pub fn xlfn::output::ExcelArrayOutput::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl !core::marker::Freeze for xlfn::output::ExcelArrayOutput
@@ -1078,9 +682,9 @@ impl core::panic::unwind_safe::RefUnwindSafe for xlfn::output::ExcelArrayOutput
 impl core::panic::unwind_safe::UnwindSafe for xlfn::output::ExcelArrayOutput
 pub struct xlfn::output::NumericArrayBuilder
 impl xlfn::output::NumericArrayBuilder
-pub fn xlfn::output::NumericArrayBuilder::finish(self) -> xlfn::error::XllResult<xlfn::output::NumericArrayOutput>
-pub fn xlfn::output::NumericArrayBuilder::new(usize, usize) -> xlfn::error::XllResult<Self>
-pub fn xlfn::output::NumericArrayBuilder::push_f64(&mut self, f64) -> xlfn::error::XllResult<()>
+pub fn xlfn::output::NumericArrayBuilder::finish(self) -> xlfn_engine::error::XllResult<xlfn::output::NumericArrayOutput>
+pub fn xlfn::output::NumericArrayBuilder::new(usize, usize) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::output::NumericArrayBuilder::push_f64(&mut self, f64) -> xlfn_engine::error::XllResult<()>
 impl core::marker::Freeze for xlfn::output::NumericArrayBuilder
 impl core::marker::Send for xlfn::output::NumericArrayBuilder
 impl core::marker::Sync for xlfn::output::NumericArrayBuilder
@@ -1092,10 +696,10 @@ pub struct xlfn::output::NumericArrayOutput
 impl xlfn::output::NumericArrayOutput
 pub fn xlfn::output::NumericArrayOutput::as_slice(&self) -> &[f64]
 pub const fn xlfn::output::NumericArrayOutput::columns(&self) -> usize
-pub fn xlfn::output::NumericArrayOutput::from_f64(usize, usize, &[f64]) -> xlfn::error::XllResult<Self>
-pub fn xlfn::output::NumericArrayOutput::from_iter(usize, usize, impl core::iter::traits::collect::IntoIterator<Item = f64>) -> xlfn::error::XllResult<Self>
+pub fn xlfn::output::NumericArrayOutput::from_f64(usize, usize, &[f64]) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::output::NumericArrayOutput::from_iter(usize, usize, impl core::iter::traits::collect::IntoIterator<Item = f64>) -> xlfn_engine::error::XllResult<Self>
 pub const fn xlfn::output::NumericArrayOutput::rows(&self) -> usize
-pub const fn xlfn::output::NumericArrayOutput::shape(&self) -> xlfn::value::Shape
+pub const fn xlfn::output::NumericArrayOutput::shape(&self) -> xlfn_engine::value_types::Shape
 impl core::fmt::Debug for xlfn::output::NumericArrayOutput
 pub fn xlfn::output::NumericArrayOutput::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Freeze for xlfn::output::NumericArrayOutput
@@ -1140,17 +744,22 @@ pub const xlfn::output::MAX_MODULE_NUMERIC_RETURN_BYTES: usize
 pub const xlfn::output::MAX_NUMERIC_RETURN_BYTES: usize
 pub const xlfn::output::MAX_PROCESS_NUMERIC_RETURN_BYTES: usize
 pub const xlfn::output::MAX_THREAD_NUMERIC_RETURN_BYTES: usize
-pub fn xlfn::output::numeric_return_memory_metrics() -> xlfn::error::XllResult<xlfn::output::NumericReturnMemoryMetrics>
+pub fn xlfn::output::numeric_return_memory_metrics() -> xlfn_engine::error::XllResult<xlfn::output::NumericReturnMemoryMetrics>
 pub mod xlfn::prelude
 pub use xlfn::prelude::ExcelEnum
+pub use xlfn::prelude::ExcelError
 pub use xlfn::prelude::ExcelInputIdentity
 pub use xlfn::prelude::ExcelPrepare
+pub use xlfn::prelude::UdfError
+pub use xlfn::prelude::UdfResult
+pub use xlfn::prelude::XllError
+pub use xlfn::prelude::XllResult
 pub use xlfn::prelude::excel_addin
 pub use xlfn::prelude::excel_function
 pub enum xlfn::prelude::ExcelCellRef<'call>
 pub xlfn::prelude::ExcelCellRef::Blank
 pub xlfn::prelude::ExcelCellRef::Boolean(bool)
-pub xlfn::prelude::ExcelCellRef::Error(xlfn::error::ExcelError)
+pub xlfn::prelude::ExcelCellRef::Error(xlfn_engine::error::ExcelError)
 pub xlfn::prelude::ExcelCellRef::Number(f64)
 pub xlfn::prelude::ExcelCellRef::String(&'call str)
 impl<'call> core::clone::Clone for xlfn::value::ExcelCellRef<'call>
@@ -1170,56 +779,6 @@ impl<'call> core::marker::Unpin for xlfn::value::ExcelCellRef<'call>
 impl<'call> core::marker::UnsafeUnpin for xlfn::value::ExcelCellRef<'call>
 impl<'call> core::panic::unwind_safe::RefUnwindSafe for xlfn::value::ExcelCellRef<'call>
 impl<'call> core::panic::unwind_safe::UnwindSafe for xlfn::value::ExcelCellRef<'call>
-#[non_exhaustive] #[repr(i32)] pub enum xlfn::prelude::ExcelError
-pub xlfn::prelude::ExcelError::DivisionByZero = 7
-pub xlfn::prelude::ExcelError::GettingData = 43
-pub xlfn::prelude::ExcelError::Name = 29
-pub xlfn::prelude::ExcelError::NotAvailable = 42
-pub xlfn::prelude::ExcelError::Null = 0
-pub xlfn::prelude::ExcelError::Number = 36
-pub xlfn::prelude::ExcelError::Reference = 23
-pub xlfn::prelude::ExcelError::Value = 15
-impl xlfn::error::ExcelError
-pub const fn xlfn::error::ExcelError::code(self) -> i32
-pub const fn xlfn::error::ExcelError::from_code(i32) -> core::option::Option<Self>
-impl core::clone::Clone for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::error::ExcelError
-impl core::cmp::PartialEq for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::eq(&self, &Self) -> bool
-impl core::convert::From<xlfn::error::ExcelError> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::ExcelError) -> Self
-impl core::convert::From<xlfn::error::ExcelError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::ExcelError) -> Self
-impl core::error::Error for xlfn::error::ExcelError
-impl core::fmt::Debug for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for xlfn::error::ExcelError
-impl core::marker::StructuralPartialEq for xlfn::error::ExcelError
-impl xlfn::error::IntoXllError for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::into_xll_error(self) -> xlfn::error::XllError
-impl xlfn::value::ExcelInputIdentity for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
-impl xlfn::value::IntoExcel for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
-impl<'call> xlfn::value::FromExcel<'call> for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::error::ExcelError::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
-impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::error::ExcelError
-pub type xlfn::error::ExcelError::Prepared = xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn xlfn::error::ExcelError::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
-impl core::marker::Freeze for xlfn::error::ExcelError
-impl core::marker::Send for xlfn::error::ExcelError
-impl core::marker::Sync for xlfn::error::ExcelError
-impl core::marker::Unpin for xlfn::error::ExcelError
-impl core::marker::UnsafeUnpin for xlfn::error::ExcelError
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::ExcelError
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::ExcelError
 pub enum xlfn::prelude::ExcelValueRef<'call>
 pub xlfn::prelude::ExcelValueRef::Array(xlfn::value::ExcelArrayRef<'call>)
 pub xlfn::prelude::ExcelValueRef::Missing
@@ -1256,106 +815,11 @@ impl<T> core::marker::Unpin for xlfn::value::OptionalExcelValue<T> where T: core
 impl<T> core::marker::UnsafeUnpin for xlfn::value::OptionalExcelValue<T> where T: core::marker::UnsafeUnpin
 impl<T> core::panic::unwind_safe::RefUnwindSafe for xlfn::value::OptionalExcelValue<T> where T: core::panic::unwind_safe::RefUnwindSafe
 impl<T> core::panic::unwind_safe::UnwindSafe for xlfn::value::OptionalExcelValue<T> where T: core::panic::unwind_safe::UnwindSafe
-#[non_exhaustive] pub enum xlfn::prelude::XllError
-#[non_exhaustive] pub xlfn::prelude::XllError::AbiMismatch
-pub xlfn::prelude::XllError::AbiMismatch::actual: u32
-pub xlfn::prelude::XllError::AbiMismatch::expected: u32
-#[non_exhaustive] pub xlfn::prelude::XllError::Application
-pub xlfn::prelude::XllError::Application::excel: xlfn::error::ExcelError
-pub xlfn::prelude::XllError::Application::message: alloc::string::String
-pub xlfn::prelude::XllError::Application::source: core::option::Option<alloc::boxed::Box<xlfn::error::ErrorCause>>
-pub xlfn::prelude::XllError::Closing
-pub xlfn::prelude::XllError::Custom
-pub xlfn::prelude::XllError::Custom::excel: xlfn::error::ExcelError
-pub xlfn::prelude::XllError::Custom::message: alloc::borrow::Cow<'static, str>
-pub xlfn::prelude::XllError::Domain
-pub xlfn::prelude::XllError::Domain::code: xlfn::error::DomainErrorCode
-pub xlfn::prelude::XllError::ElementCountMismatch
-pub xlfn::prelude::XllError::ElementCountMismatch::actual: usize
-pub xlfn::prelude::XllError::ElementCountMismatch::columns: usize
-pub xlfn::prelude::XllError::ElementCountMismatch::expected: usize
-pub xlfn::prelude::XllError::ElementCountMismatch::rows: usize
-#[non_exhaustive] pub xlfn::prelude::XllError::ExcelApi
-pub xlfn::prelude::XllError::ExcelApi::failure: xlfn::error::ExcelApiFailure
-pub xlfn::prelude::XllError::ExcelApi::function: xlfn::error::ExcelApiFunction
-pub xlfn::prelude::XllError::ExcelValue(xlfn::error::ExcelError)
-pub xlfn::prelude::XllError::Input
-pub xlfn::prelude::XllError::Input::argument: &'static str
-pub xlfn::prelude::XllError::Input::reason: xlfn::error::InputError
-#[non_exhaustive] pub xlfn::prelude::XllError::Internal
-pub xlfn::prelude::XllError::Internal::diagnostic_id: xlfn::diagnostics::DiagnosticId
-pub xlfn::prelude::XllError::InvalidHandle
-#[non_exhaustive] pub xlfn::prelude::XllError::LibraryLoad
-pub xlfn::prelude::XllError::LibraryLoad::os_error: u32
-pub xlfn::prelude::XllError::LibraryLoad::path: std::path::PathBuf
-#[non_exhaustive] pub xlfn::prelude::XllError::MetadataDebtBindingChanged
-pub xlfn::prelude::XllError::MetadataDebtBindingChanged::name: &'static str
-#[non_exhaustive] pub xlfn::prelude::XllError::MissingSymbol
-pub xlfn::prelude::XllError::MissingSymbol::symbol: &'static str
-pub xlfn::prelude::XllError::Native
-pub xlfn::prelude::XllError::Native::code: i32
-pub xlfn::prelude::XllError::Native::message: alloc::string::String
-pub xlfn::prelude::XllError::Overloaded
-pub xlfn::prelude::XllError::Panic
-pub xlfn::prelude::XllError::ReentrantCall
-#[non_exhaustive] pub xlfn::prelude::XllError::RegistrationConflict
-pub xlfn::prelude::XllError::RegistrationConflict::name: &'static str
-#[non_exhaustive] pub xlfn::prelude::XllError::RtdProducerFailure
-pub xlfn::prelude::XllError::RtdProducerFailure::source: alloc::boxed::Box<xlfn::error::XllError>
-pub xlfn::prelude::XllError::RtdProducerFailure::topic: alloc::string::String
-#[non_exhaustive] pub xlfn::prelude::XllError::RtdSubscriptionShutdown
-pub xlfn::prelude::XllError::RtdSubscriptionShutdown::key: alloc::string::String
-pub xlfn::prelude::XllError::RtdSubscriptionShutdown::server_generation: u64
-pub xlfn::prelude::XllError::RtdSubscriptionShutdown::source: alloc::boxed::Box<xlfn::error::XllError>
-pub xlfn::prelude::XllError::RtdSubscriptionShutdown::topic_id: i32
-pub xlfn::prelude::XllError::Shape
-pub xlfn::prelude::XllError::Shape::actual: xlfn::value::Shape
-pub xlfn::prelude::XllError::Shape::expected: xlfn::value::Shape
-pub xlfn::prelude::XllError::StaleHandle
-#[non_exhaustive] pub xlfn::prelude::XllError::WindowsApi
-pub xlfn::prelude::XllError::WindowsApi::code: i32
-pub xlfn::prelude::XllError::WindowsApi::function: &'static str
-impl xlfn::error::XllError
-pub fn xlfn::error::XllError::custom(xlfn::error::ExcelError, impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
-pub const fn xlfn::error::XllError::domain(xlfn::error::DomainErrorCode) -> Self
-pub const fn xlfn::error::XllError::input(&'static str, xlfn::error::InputError) -> Self
-pub const fn xlfn::error::XllError::to_excel_error(&self) -> xlfn::error::ExcelError
-pub fn xlfn::error::XllError::validation(&'static str, xlfn::error::InputError) -> Self
-pub fn xlfn::error::XllError::with_argument(self, &'static str) -> Self
-impl core::clone::Clone for xlfn::error::XllError
-pub fn xlfn::error::XllError::clone(&self) -> Self
-impl core::convert::From<core::io::error::Error> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(core::io::error::Error) -> Self
-impl core::convert::From<xlfn::diagnostics::DiagnosticInitError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::diagnostics::DiagnosticInitError) -> Self
-impl core::convert::From<xlfn::error::ExcelError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::ExcelError) -> Self
-impl core::convert::From<xlfn::error::InvalidLimit> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::InvalidLimit) -> Self
-impl core::convert::From<xlfn::error::UdfError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::UdfError) -> Self
-impl core::convert::From<xlfn::error::XllError> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::XllError) -> Self
-impl core::error::Error for xlfn::error::XllError
-pub fn xlfn::error::XllError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
-impl core::fmt::Debug for xlfn::error::XllError
-pub fn xlfn::error::XllError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::XllError
-pub fn xlfn::error::XllError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl xlfn::error::IntoXllError for xlfn::error::XllError
-pub fn xlfn::error::XllError::into_xll_error(self) -> xlfn::error::XllError
-impl core::marker::Freeze for xlfn::error::XllError
-impl core::marker::Send for xlfn::error::XllError
-impl core::marker::Sync for xlfn::error::XllError
-impl core::marker::Unpin for xlfn::error::XllError
-impl core::marker::UnsafeUnpin for xlfn::error::XllError
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::XllError
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::XllError
 pub struct xlfn::prelude::Column<T>(_)
 impl<T> xlfn::value::Column<T>
 pub fn xlfn::value::Column<T>::as_slice(&self) -> &[T]
 pub fn xlfn::value::Column<T>::into_vec(self) -> alloc::vec::Vec<T>
-pub fn xlfn::value::Column<T>::new(alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::Column<T>::new(alloc::vec::Vec<T>) -> xlfn_engine::error::XllResult<Self>
 impl<'a, T> core::iter::traits::collect::IntoIterator for &'a mut xlfn::value::Column<T>
 pub type &'a mut xlfn::value::Column<T>::IntoIter = core::slice::iter::IterMut<'a, T>
 pub type &'a mut xlfn::value::Column<T>::Item = &'a mut T
@@ -1385,8 +849,8 @@ pub fn xlfn::value::Column<T>::as_ref(&self) -> &[T]
 impl<T> core::convert::From<xlfn::value::Column<T>> for alloc::vec::Vec<T>
 pub fn alloc::vec::Vec<T>::from(xlfn::value::Column<T>) -> Self
 impl<T> core::convert::TryFrom<alloc::vec::Vec<T>> for xlfn::value::Column<T>
-pub type xlfn::value::Column<T>::Error = xlfn::error::XllError
-pub fn xlfn::value::Column<T>::try_from(alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
+pub type xlfn::value::Column<T>::Error = xlfn_engine::error::XllError
+pub fn xlfn::value::Column<T>::try_from(alloc::vec::Vec<T>) -> xlfn_engine::error::XllResult<Self>
 impl<T> core::iter::traits::collect::IntoIterator for xlfn::value::Column<T>
 pub type xlfn::value::Column<T>::IntoIter = alloc::vec::into_iter::IntoIter<T>
 pub type xlfn::value::Column<T>::Item = T
@@ -1406,11 +870,11 @@ impl<T> core::panic::unwind_safe::UnwindSafe for xlfn::value::Column<T> where al
 pub struct xlfn::prelude::ExcelArrayRef<'call>
 impl<'call> xlfn::value::ExcelArrayRef<'call>
 pub const fn xlfn::value::ExcelArrayRef<'call>::columns(&self) -> usize
-pub fn xlfn::value::ExcelArrayRef<'call>::get(&self, usize, usize) -> xlfn::error::XllResult<core::option::Option<xlfn::value::ExcelCellRef<'call>>>
+pub fn xlfn::value::ExcelArrayRef<'call>::get(&self, usize, usize) -> xlfn_engine::error::XllResult<core::option::Option<xlfn::value::ExcelCellRef<'call>>>
 pub const fn xlfn::value::ExcelArrayRef<'call>::is_empty(&self) -> bool
 pub const fn xlfn::value::ExcelArrayRef<'call>::len(&self) -> usize
 pub const fn xlfn::value::ExcelArrayRef<'call>::rows(&self) -> usize
-pub const fn xlfn::value::ExcelArrayRef<'call>::shape(&self) -> xlfn::value::Shape
+pub const fn xlfn::value::ExcelArrayRef<'call>::shape(&self) -> xlfn_engine::value_types::Shape
 impl core::fmt::Debug for xlfn::value::ExcelArrayRef<'_>
 pub fn xlfn::value::ExcelArrayRef<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'call> core::clone::Clone for xlfn::value::ExcelArrayRef<'call>
@@ -1427,11 +891,11 @@ pub struct xlfn::prelude::ExcelSerialDate
 impl xlfn::value::ExcelSerialDate
 pub const fn xlfn::value::ExcelSerialDate::date_system(self) -> xlfn::value::ExcelDateSystem
 pub fn xlfn::value::ExcelSerialDate::fractional_day(self) -> f64
-pub fn xlfn::value::ExcelSerialDate::from_ymd(i16, i8, i8, xlfn::value::ExcelDateSystem) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::ExcelSerialDate::from_ymd(i16, i8, i8, xlfn::value::ExcelDateSystem) -> xlfn_engine::error::XllResult<Self>
 pub fn xlfn::value::ExcelSerialDate::is_fictitious_1900_leap_day(self) -> bool
-pub fn xlfn::value::ExcelSerialDate::new(f64, xlfn::value::ExcelDateSystem) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::ExcelSerialDate::new(f64, xlfn::value::ExcelDateSystem) -> xlfn_engine::error::XllResult<Self>
 pub const fn xlfn::value::ExcelSerialDate::serial(self) -> f64
-pub fn xlfn::value::ExcelSerialDate::to_ymd(self) -> xlfn::error::XllResult<xlfn::value::CalendarDate>
+pub fn xlfn::value::ExcelSerialDate::to_ymd(self) -> xlfn_engine::error::XllResult<xlfn::value::CalendarDate>
 pub const fn xlfn::value::ExcelSerialDate::with_date_system(self, xlfn::value::ExcelDateSystem) -> Self
 impl core::clone::Clone for xlfn::value::ExcelSerialDate
 pub fn xlfn::value::ExcelSerialDate::clone(&self) -> Self
@@ -1444,14 +908,14 @@ impl core::marker::StructuralPartialEq for xlfn::value::ExcelSerialDate
 impl xlfn::value::ExcelInputIdentity for xlfn::value::ExcelSerialDate
 pub fn xlfn::value::ExcelSerialDate::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl xlfn::value::IntoExcel for xlfn::value::ExcelSerialDate
-pub fn xlfn::value::ExcelSerialDate::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn xlfn::value::ExcelSerialDate::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl<'call> xlfn::value::FromExcel<'call> for xlfn::value::ExcelSerialDate
-pub fn xlfn::value::ExcelSerialDate::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelSerialDate::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+pub fn xlfn::value::ExcelSerialDate::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelSerialDate::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
 impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::value::ExcelSerialDate
 pub type xlfn::value::ExcelSerialDate::Prepared = xlfn::value::ExcelSerialDate
-pub fn xlfn::value::ExcelSerialDate::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelSerialDate::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::ExcelSerialDate::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelSerialDate::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl core::marker::Freeze for xlfn::value::ExcelSerialDate
 impl core::marker::Send for xlfn::value::ExcelSerialDate
 impl core::marker::Sync for xlfn::value::ExcelSerialDate
@@ -1461,13 +925,13 @@ impl core::panic::unwind_safe::RefUnwindSafe for xlfn::value::ExcelSerialDate
 impl core::panic::unwind_safe::UnwindSafe for xlfn::value::ExcelSerialDate
 pub struct xlfn::prelude::MacroSheetContext<'call, A: xlfn::Addin>
 impl<'call, A: xlfn::Addin> xlfn::addin::MacroSheetContext<'call, A>
-pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<xlfn::value::ExcelValue>
-pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce_matrix<T>(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<xlfn::value::Matrix<T>> where T: for<'value> xlfn::value::FromExcel<'value>
-pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce_with<R>(&self, &xlfn::reference::ExcelReference<'_>, impl for<'value> core::ops::function::FnOnce(xlfn::value::raw::XlValueRef<'value>) -> xlfn::error::XllResult<R>) -> xlfn::error::XllResult<R>
+pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn_engine::error::XllResult<xlfn::value::ExcelValue>
+pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce_matrix<T>(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn_engine::error::XllResult<xlfn::value::Matrix<T>> where T: for<'value> xlfn::value::FromExcel<'value>
+pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce_with<R>(&self, &xlfn::reference::ExcelReference<'_>, impl for<'value> core::ops::function::FnOnce(xlfn::value::raw::XlValueRef<'value>) -> xlfn_engine::error::XllResult<R>) -> xlfn_engine::error::XllResult<R>
 pub const fn xlfn::addin::MacroSheetContext<'call, A>::diagnostics(&self) -> &'call xlfn::diagnostics::DiagnosticHistory
-pub fn xlfn::addin::MacroSheetContext<'call, A>::sheet_name(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<alloc::string::String>
+pub fn xlfn::addin::MacroSheetContext<'call, A>::sheet_name(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn_engine::error::XllResult<alloc::string::String>
 pub const fn xlfn::addin::MacroSheetContext<'call, A>::state(&self) -> &'call <A as xlfn::Addin>::SharedState
-pub fn xlfn::addin::MacroSheetContext<'call, A>::workbook_date_system(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn::error::XllResult<xlfn::value::ExcelDateSystem>
+pub fn xlfn::addin::MacroSheetContext<'call, A>::workbook_date_system(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn_engine::error::XllResult<xlfn::value::ExcelDateSystem>
 impl<A: xlfn::Addin> core::clone::Clone for xlfn::addin::MacroSheetContext<'_, A>
 pub fn xlfn::addin::MacroSheetContext<'_, A>::clone(&self) -> Self
 impl<A: xlfn::Addin> core::convert::AsRef<<A as xlfn::Addin>::SharedState> for xlfn::addin::MacroSheetContext<'_, A>
@@ -1500,8 +964,8 @@ pub fn xlfn::value::Matrix<T>::as_mut_slice(&mut self) -> &mut [T]
 pub fn xlfn::value::Matrix<T>::as_slice(&self) -> &[T]
 pub fn xlfn::value::Matrix<T>::column(&self, usize) -> core::option::Option<impl core::iter::traits::iterator::Iterator<Item = &T>>
 pub const fn xlfn::value::Matrix<T>::columns(&self) -> usize
-pub fn xlfn::value::Matrix<T>::fill(usize, usize, T) -> xlfn::error::XllResult<Self> where T: core::clone::Clone
-pub fn xlfn::value::Matrix<T>::from_fn(usize, usize, impl core::ops::function::FnMut(usize, usize) -> T) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::Matrix<T>::fill(usize, usize, T) -> xlfn_engine::error::XllResult<Self> where T: core::clone::Clone
+pub fn xlfn::value::Matrix<T>::from_fn(usize, usize, impl core::ops::function::FnMut(usize, usize) -> T) -> xlfn_engine::error::XllResult<Self>
 pub fn xlfn::value::Matrix<T>::get(&self, usize, usize) -> core::option::Option<&T>
 pub fn xlfn::value::Matrix<T>::get_mut(&mut self, usize, usize) -> core::option::Option<&mut T>
 pub fn xlfn::value::Matrix<T>::into_vec(self) -> alloc::vec::Vec<T>
@@ -1509,12 +973,12 @@ pub const fn xlfn::value::Matrix<T>::is_empty(&self) -> bool
 pub fn xlfn::value::Matrix<T>::iter(&self) -> core::slice::iter::Iter<'_, T>
 pub fn xlfn::value::Matrix<T>::iter_mut(&mut self) -> core::slice::iter::IterMut<'_, T>
 pub const fn xlfn::value::Matrix<T>::len(&self) -> usize
-pub fn xlfn::value::Matrix<T>::new(usize, usize, alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::Matrix<T>::new(usize, usize, alloc::vec::Vec<T>) -> xlfn_engine::error::XllResult<Self>
 pub fn xlfn::value::Matrix<T>::row(&self, usize) -> core::option::Option<&[T]>
 pub fn xlfn::value::Matrix<T>::row_mut(&mut self, usize) -> core::option::Option<&mut [T]>
 pub const fn xlfn::value::Matrix<T>::rows(&self) -> usize
 pub fn xlfn::value::Matrix<T>::rows_mut(&mut self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = &mut [T]> + '_
-pub const fn xlfn::value::Matrix<T>::shape(&self) -> xlfn::value::Shape
+pub const fn xlfn::value::Matrix<T>::shape(&self) -> xlfn_engine::value_types::Shape
 pub fn xlfn::value::Matrix<T>::try_map<U, E>(self, impl core::ops::function::FnMut(T) -> core::result::Result<U, E>) -> core::result::Result<xlfn::value::Matrix<U>, E>
 impl<'a, T> core::iter::traits::collect::IntoIterator for &'a mut xlfn::value::Matrix<T>
 pub type &'a mut xlfn::value::Matrix<T>::IntoIter = core::slice::iter::IterMut<'a, T>
@@ -1536,8 +1000,8 @@ pub fn xlfn::value::Matrix<T>::encode_input_identity(&self, &mut xlfn::value::In
 impl<T> core::convert::AsRef<[T]> for xlfn::value::Matrix<T>
 pub fn xlfn::value::Matrix<T>::as_ref(&self) -> &[T]
 impl<T> core::convert::TryFrom<alloc::vec::Vec<alloc::vec::Vec<T>>> for xlfn::value::Matrix<T>
-pub type xlfn::value::Matrix<T>::Error = xlfn::error::XllError
-pub fn xlfn::value::Matrix<T>::try_from(alloc::vec::Vec<alloc::vec::Vec<T>>) -> xlfn::error::XllResult<Self>
+pub type xlfn::value::Matrix<T>::Error = xlfn_engine::error::XllError
+pub fn xlfn::value::Matrix<T>::try_from(alloc::vec::Vec<alloc::vec::Vec<T>>) -> xlfn_engine::error::XllResult<Self>
 impl<T> core::iter::traits::collect::IntoIterator for xlfn::value::Matrix<T>
 pub type xlfn::value::Matrix<T>::IntoIter = alloc::vec::into_iter::IntoIter<T>
 pub type xlfn::value::Matrix<T>::Item = T
@@ -1565,8 +1029,8 @@ pub fn xlfn::value::MatrixRef<'call, T>::iter(&self) -> core::slice::iter::Iter<
 pub const fn xlfn::value::MatrixRef<'call, T>::len(&self) -> usize
 pub fn xlfn::value::MatrixRef<'call, T>::row(&self, usize) -> core::option::Option<&'call [T]>
 pub const fn xlfn::value::MatrixRef<'call, T>::rows(&self) -> usize
-pub const fn xlfn::value::MatrixRef<'call, T>::shape(&self) -> xlfn::value::Shape
-pub fn xlfn::value::MatrixRef<'call, T>::to_owned(&self) -> xlfn::error::XllResult<xlfn::value::Matrix<T>> where T: core::clone::Clone
+pub const fn xlfn::value::MatrixRef<'call, T>::shape(&self) -> xlfn_engine::value_types::Shape
+pub fn xlfn::value::MatrixRef<'call, T>::to_owned(&self) -> xlfn_engine::error::XllResult<xlfn::value::Matrix<T>> where T: core::clone::Clone
 impl<'call, T: core::clone::Clone> core::clone::Clone for xlfn::value::MatrixRef<'call, T>
 pub fn xlfn::value::MatrixRef<'call, T>::clone(&self) -> Self
 impl<'call, T: core::cmp::PartialEq> core::cmp::PartialEq for xlfn::value::MatrixRef<'call, T>
@@ -1626,7 +1090,7 @@ pub fn xlfn::value::NumericMatrixRef<'call>::iter(self) -> core::slice::iter::It
 pub const fn xlfn::value::NumericMatrixRef<'call>::len(self) -> usize
 pub fn xlfn::value::NumericMatrixRef<'call>::row(self, usize) -> core::option::Option<&'call [f64]>
 pub const fn xlfn::value::NumericMatrixRef<'call>::rows(self) -> usize
-pub const fn xlfn::value::NumericMatrixRef<'call>::shape(self) -> xlfn::value::Shape
+pub const fn xlfn::value::NumericMatrixRef<'call>::shape(self) -> xlfn_engine::value_types::Shape
 impl core::convert::AsRef<[f64]> for xlfn::value::NumericMatrixRef<'_>
 pub fn xlfn::value::NumericMatrixRef<'_>::as_ref(&self) -> &[f64]
 impl core::ops::index::Index<(usize, usize)> for xlfn::value::NumericMatrixRef<'_>
@@ -1686,7 +1150,7 @@ pub struct xlfn::prelude::Row<T>(_)
 impl<T> xlfn::value::Row<T>
 pub fn xlfn::value::Row<T>::as_slice(&self) -> &[T]
 pub fn xlfn::value::Row<T>::into_vec(self) -> alloc::vec::Vec<T>
-pub fn xlfn::value::Row<T>::new(alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::Row<T>::new(alloc::vec::Vec<T>) -> xlfn_engine::error::XllResult<Self>
 impl<'a, T> core::iter::traits::collect::IntoIterator for &'a mut xlfn::value::Row<T>
 pub type &'a mut xlfn::value::Row<T>::IntoIter = core::slice::iter::IterMut<'a, T>
 pub type &'a mut xlfn::value::Row<T>::Item = &'a mut T
@@ -1716,8 +1180,8 @@ pub fn xlfn::value::Row<T>::as_ref(&self) -> &[T]
 impl<T> core::convert::From<xlfn::value::Row<T>> for alloc::vec::Vec<T>
 pub fn alloc::vec::Vec<T>::from(xlfn::value::Row<T>) -> Self
 impl<T> core::convert::TryFrom<alloc::vec::Vec<T>> for xlfn::value::Row<T>
-pub type xlfn::value::Row<T>::Error = xlfn::error::XllError
-pub fn xlfn::value::Row<T>::try_from(alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
+pub type xlfn::value::Row<T>::Error = xlfn_engine::error::XllError
+pub fn xlfn::value::Row<T>::try_from(alloc::vec::Vec<T>) -> xlfn_engine::error::XllResult<Self>
 impl<T> core::iter::traits::collect::IntoIterator for xlfn::value::Row<T>
 pub type xlfn::value::Row<T>::IntoIter = alloc::vec::into_iter::IntoIter<T>
 pub type xlfn::value::Row<T>::Item = T
@@ -1750,39 +1214,8 @@ impl<'call, A> core::marker::Unpin for xlfn::addin::ThreadSafeContext<'call, A> 
 impl<'call, A> core::marker::UnsafeUnpin for xlfn::addin::ThreadSafeContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::UnsafeUnpin
 impl<'call, A> !core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::ThreadSafeContext<'call, A>
 impl<'call, A> !core::panic::unwind_safe::UnwindSafe for xlfn::addin::ThreadSafeContext<'call, A>
-pub struct xlfn::prelude::UdfError
-impl xlfn::error::UdfError
-pub fn xlfn::error::UdfError::message(&self) -> &str
-pub fn xlfn::error::UdfError::new(xlfn::error::ExcelError, impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
-pub const fn xlfn::error::UdfError::to_excel_error(&self) -> xlfn::error::ExcelError
-pub fn xlfn::error::UdfError::with_source(self, impl core::error::Error + core::marker::Send + core::marker::Sync + 'static) -> Self
-impl core::convert::From<core::io::error::Error> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(core::io::error::Error) -> Self
-impl core::convert::From<xlfn::error::ExcelError> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::ExcelError) -> Self
-impl core::convert::From<xlfn::error::InvalidLimit> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::InvalidLimit) -> Self
-impl core::convert::From<xlfn::error::UdfError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::UdfError) -> Self
-impl core::convert::From<xlfn::error::XllError> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::XllError) -> Self
-impl core::error::Error for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
-impl core::fmt::Debug for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl xlfn::error::IntoXllError for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::into_xll_error(self) -> xlfn::error::XllError
-impl core::marker::Freeze for xlfn::error::UdfError
-impl core::marker::Send for xlfn::error::UdfError
-impl core::marker::Sync for xlfn::error::UdfError
-impl core::marker::Unpin for xlfn::error::UdfError
-impl core::marker::UnsafeUnpin for xlfn::error::UdfError
-impl !core::panic::unwind_safe::RefUnwindSafe for xlfn::error::UdfError
-impl !core::panic::unwind_safe::UnwindSafe for xlfn::error::UdfError
 pub trait xlfn::prelude::Addin: core::marker::Sized + core::marker::Send + core::marker::Sync + 'static
-pub type xlfn::prelude::Addin::Error: xlfn::error::IntoXllError
+pub type xlfn::prelude::Addin::Error: xlfn_engine::error::IntoXllError
 pub type xlfn::prelude::Addin::Layers: xlfn::execution::UdfLayers
 pub type xlfn::prelude::Addin::LifecycleState: 'static
 pub type xlfn::prelude::Addin::SharedState: core::marker::Send + core::marker::Sync + 'static
@@ -1790,8 +1223,6 @@ pub fn xlfn::prelude::Addin::cleanup(&mut Self::LifecycleState, &mut xlfn::addin
 pub fn xlfn::prelude::Addin::open(&xlfn::addin::OpenContext<Self>) -> xlfn::addin::OpenResult<Self>
 pub fn xlfn::prelude::Addin::quiesce(&mut Self::SharedState, &mut Self::LifecycleState) -> core::result::Result<(), Self::Error>
 pub type xlfn::prelude::OpenResult<A> = core::result::Result<xlfn::addin::Opened<<A as xlfn::Addin>::SharedState, <A as xlfn::Addin>::LifecycleState, <A as xlfn::Addin>::Layers>, <A as xlfn::Addin>::Error>
-pub type xlfn::prelude::UdfResult<T> = core::result::Result<T, xlfn::error::UdfError>
-pub type xlfn::prelude::XllResult<T> = core::result::Result<T, xlfn::error::XllError>
 pub mod xlfn::reference
 pub struct xlfn::reference::ExcelReference<'call>
 impl xlfn::reference::ExcelReference<'_>
@@ -1799,7 +1230,7 @@ pub fn xlfn::reference::ExcelReference<'_>::areas(&self) -> xlfn::reference::Ref
 pub fn xlfn::reference::ExcelReference<'_>::is_multi_area(&self) -> bool
 pub fn xlfn::reference::ExcelReference<'_>::sheet_id(&self) -> core::option::Option<xlfn::reference::SheetId>
 impl<'call> xlfn::reference::FromExcelReference<'call> for xlfn::reference::ExcelReference<'call>
-pub fn xlfn::reference::ExcelReference<'call>::from_excel_reference(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
+pub fn xlfn::reference::ExcelReference<'call>::from_excel_reference(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
 impl<'call> core::marker::Freeze for xlfn::reference::ExcelReference<'call>
 impl<'call> !core::marker::Send for xlfn::reference::ExcelReference<'call>
 impl<'call> !core::marker::Sync for xlfn::reference::ExcelReference<'call>
@@ -1872,9 +1303,9 @@ impl core::marker::UnsafeUnpin for xlfn::reference::SheetId
 impl core::panic::unwind_safe::RefUnwindSafe for xlfn::reference::SheetId
 impl core::panic::unwind_safe::UnwindSafe for xlfn::reference::SheetId
 pub trait xlfn::reference::FromExcelReference<'call>: core::marker::Sized
-pub fn xlfn::reference::FromExcelReference::from_excel_reference(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
+pub fn xlfn::reference::FromExcelReference::from_excel_reference(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
 impl<'call> xlfn::reference::FromExcelReference<'call> for xlfn::reference::ExcelReference<'call>
-pub fn xlfn::reference::ExcelReference<'call>::from_excel_reference(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
+pub fn xlfn::reference::ExcelReference<'call>::from_excel_reference(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
 pub mod xlfn::task
 pub struct xlfn::task::NoAsyncExecutor
 impl core::clone::Clone for xlfn::task::NoAsyncExecutor
@@ -1896,55 +1327,24 @@ impl core::marker::UnsafeUnpin for xlfn::task::NoAsyncExecutor
 impl core::panic::unwind_safe::RefUnwindSafe for xlfn::task::NoAsyncExecutor
 impl core::panic::unwind_safe::UnwindSafe for xlfn::task::NoAsyncExecutor
 pub mod xlfn::value
+pub use xlfn::value::Shape
 pub mod xlfn::value::convert
-pub fn xlfn::value::convert::bounded_var_args<'call, T, const MAX: usize>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnMut(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<T>) -> xlfn::error::XllResult<xlfn::value::BoundedVarArgs<T, MAX>>
-pub fn xlfn::value::convert::column<'call, T>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnMut(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<T>) -> xlfn::error::XllResult<xlfn::value::Column<T>>
-pub fn xlfn::value::convert::matrix<'call, T>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnMut(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<T>) -> xlfn::error::XllResult<xlfn::value::Matrix<T>>
-pub fn xlfn::value::convert::optional<'call, T>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnOnce(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<T>) -> xlfn::error::XllResult<core::option::Option<T>>
-pub fn xlfn::value::convert::optional_value<'call, T>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnOnce(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<T>) -> xlfn::error::XllResult<xlfn::value::OptionalExcelValue<T>>
-pub fn xlfn::value::convert::row<'call, T>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnMut(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<T>) -> xlfn::error::XllResult<xlfn::value::Row<T>>
-pub fn xlfn::value::convert::vector<'call, T>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnMut(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<T>) -> xlfn::error::XllResult<alloc::vec::Vec<T>>
+pub fn xlfn::value::convert::bounded_var_args<'call, T, const MAX: usize>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnMut(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<T>) -> xlfn_engine::error::XllResult<xlfn::value::BoundedVarArgs<T, MAX>>
+pub fn xlfn::value::convert::column<'call, T>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnMut(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<T>) -> xlfn_engine::error::XllResult<xlfn::value::Column<T>>
+pub fn xlfn::value::convert::matrix<'call, T>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnMut(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<T>) -> xlfn_engine::error::XllResult<xlfn::value::Matrix<T>>
+pub fn xlfn::value::convert::optional<'call, T>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnOnce(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<T>) -> xlfn_engine::error::XllResult<core::option::Option<T>>
+pub fn xlfn::value::convert::optional_value<'call, T>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnOnce(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<T>) -> xlfn_engine::error::XllResult<xlfn::value::OptionalExcelValue<T>>
+pub fn xlfn::value::convert::row<'call, T>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnMut(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<T>) -> xlfn_engine::error::XllResult<xlfn::value::Row<T>>
+pub fn xlfn::value::convert::vector<'call, T>(xlfn::value::raw::XlValueRef<'call>, &'static str, impl core::ops::function::FnMut(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<T>) -> xlfn_engine::error::XllResult<alloc::vec::Vec<T>>
 pub mod xlfn::value::raw
-#[non_exhaustive] pub enum xlfn::value::raw::XlValueType
-pub xlfn::value::raw::XlValueType::BigData
-pub xlfn::value::raw::XlValueType::Boolean
-pub xlfn::value::raw::XlValueType::Error
-pub xlfn::value::raw::XlValueType::Flow
-pub xlfn::value::raw::XlValueType::Integer
-pub xlfn::value::raw::XlValueType::Missing
-pub xlfn::value::raw::XlValueType::Multi
-pub xlfn::value::raw::XlValueType::Nil
-pub xlfn::value::raw::XlValueType::Number
-pub xlfn::value::raw::XlValueType::Reference
-pub xlfn::value::raw::XlValueType::SimpleReference
-pub xlfn::value::raw::XlValueType::String
-impl core::clone::Clone for xlfn::value::raw::XlValueType
-pub fn xlfn::value::raw::XlValueType::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::value::raw::XlValueType
-impl core::cmp::PartialEq for xlfn::value::raw::XlValueType
-pub fn xlfn::value::raw::XlValueType::eq(&self, &Self) -> bool
-impl core::fmt::Debug for xlfn::value::raw::XlValueType
-pub fn xlfn::value::raw::XlValueType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::value::raw::XlValueType
-pub fn xlfn::value::raw::XlValueType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for xlfn::value::raw::XlValueType
-pub fn xlfn::value::raw::XlValueType::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for xlfn::value::raw::XlValueType
-impl core::marker::StructuralPartialEq for xlfn::value::raw::XlValueType
-impl core::marker::Freeze for xlfn::value::raw::XlValueType
-impl core::marker::Send for xlfn::value::raw::XlValueType
-impl core::marker::Sync for xlfn::value::raw::XlValueType
-impl core::marker::Unpin for xlfn::value::raw::XlValueType
-impl core::marker::UnsafeUnpin for xlfn::value::raw::XlValueType
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::value::raw::XlValueType
-impl core::panic::unwind_safe::UnwindSafe for xlfn::value::raw::XlValueType
+pub use xlfn::value::raw::XlValueType
 pub struct xlfn::value::raw::CoercedGridRef<'call>(_)
 impl<'call> xlfn::value::raw::CoercedGridRef<'call>
 pub fn xlfn::value::raw::CoercedGridRef<'call>::is_empty(self) -> bool
 pub fn xlfn::value::raw::CoercedGridRef<'call>::len(self) -> usize
-pub fn xlfn::value::raw::CoercedGridRef<'call>::new(xlfn::value::raw::XlValueRef<'call>) -> xlfn::error::XllResult<Self>
-pub const fn xlfn::value::raw::CoercedGridRef<'call>::shape(self) -> xlfn::value::Shape
-pub fn xlfn::value::raw::CoercedGridRef<'call>::try_cells(self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = xlfn::error::XllResult<xlfn::value::raw::XlValueRef<'call>>> + 'call
+pub fn xlfn::value::raw::CoercedGridRef<'call>::new(xlfn::value::raw::XlValueRef<'call>) -> xlfn_engine::error::XllResult<Self>
+pub const fn xlfn::value::raw::CoercedGridRef<'call>::shape(self) -> xlfn_engine::value_types::Shape
+pub fn xlfn::value::raw::CoercedGridRef<'call>::try_cells(self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = xlfn_engine::error::XllResult<xlfn::value::raw::XlValueRef<'call>>> + 'call
 impl core::fmt::Debug for xlfn::value::raw::CoercedGridRef<'_>
 pub fn xlfn::value::raw::CoercedGridRef<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'call> core::clone::Clone for xlfn::value::raw::CoercedGridRef<'call>
@@ -1965,7 +1365,7 @@ pub fn xlfn::value::raw::XlArrayRef<'call>::get(self, usize, usize) -> core::opt
 pub const fn xlfn::value::raw::XlArrayRef<'call>::is_empty(self) -> bool
 pub const fn xlfn::value::raw::XlArrayRef<'call>::len(self) -> usize
 pub const fn xlfn::value::raw::XlArrayRef<'call>::rows(self) -> usize
-pub const fn xlfn::value::raw::XlArrayRef<'call>::shape(self) -> xlfn::value::Shape
+pub const fn xlfn::value::raw::XlArrayRef<'call>::shape(self) -> xlfn_engine::value_types::Shape
 impl core::fmt::Debug for xlfn::value::raw::XlArrayRef<'_>
 pub fn xlfn::value::raw::XlArrayRef<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'call> core::clone::Clone for xlfn::value::raw::XlArrayRef<'call>
@@ -1974,12 +1374,12 @@ impl<'call> core::marker::Copy for xlfn::value::raw::XlArrayRef<'call>
 impl<'call> xlfn::value::ExcelInputIdentity for xlfn::value::raw::XlArrayRef<'call>
 pub fn xlfn::value::raw::XlArrayRef<'call>::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl<'call> xlfn::value::FromExcel<'call> for xlfn::value::raw::XlArrayRef<'call>
-pub fn xlfn::value::raw::XlArrayRef<'call>::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::raw::XlArrayRef<'call>::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+pub fn xlfn::value::raw::XlArrayRef<'call>::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::raw::XlArrayRef<'call>::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
 impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::value::raw::XlArrayRef<'call>
 pub type xlfn::value::raw::XlArrayRef<'call>::Prepared = xlfn::value::raw::XlArrayRef<'call>
-pub fn xlfn::value::raw::XlArrayRef<'call>::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::raw::XlArrayRef<'call>::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::raw::XlArrayRef<'call>::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::raw::XlArrayRef<'call>::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl<'call> core::marker::Freeze for xlfn::value::raw::XlArrayRef<'call>
 impl<'call> !core::marker::Send for xlfn::value::raw::XlArrayRef<'call>
 impl<'call> !core::marker::Sync for xlfn::value::raw::XlArrayRef<'call>
@@ -1991,7 +1391,7 @@ pub struct xlfn::value::raw::XlStrRef<'call>
 impl<'call> xlfn::value::raw::XlStrRef<'call>
 pub const fn xlfn::value::raw::XlStrRef<'call>::as_utf16(self) -> &'call [u16]
 pub fn xlfn::value::raw::XlStrRef<'call>::chars(self) -> impl core::iter::traits::iterator::Iterator<Item = core::result::Result<char, core::char::decode::DecodeUtf16Error>> + 'call
-pub fn xlfn::value::raw::XlStrRef<'call>::try_to_string(self) -> xlfn::error::XllResult<alloc::string::String>
+pub fn xlfn::value::raw::XlStrRef<'call>::try_to_string(self) -> xlfn_engine::error::XllResult<alloc::string::String>
 pub const fn xlfn::value::raw::XlStrRef<'call>::with_argument(self, &'static str) -> Self
 impl core::cmp::Eq for xlfn::value::raw::XlStrRef<'_>
 impl core::cmp::PartialEq for xlfn::value::raw::XlStrRef<'_>
@@ -2010,11 +1410,11 @@ impl<'call> core::panic::unwind_safe::RefUnwindSafe for xlfn::value::raw::XlStrR
 impl<'call> core::panic::unwind_safe::UnwindSafe for xlfn::value::raw::XlStrRef<'call>
 pub struct xlfn::value::raw::XlValueRef<'call>
 impl<'call> xlfn::value::raw::XlValueRef<'call>
-pub fn xlfn::value::raw::XlValueRef<'call>::as_bool(self) -> xlfn::error::XllResult<bool>
-pub fn xlfn::value::raw::XlValueRef<'call>::as_f64(self) -> xlfn::error::XllResult<f64>
-pub fn xlfn::value::raw::XlValueRef<'call>::as_str(self) -> xlfn::error::XllResult<xlfn::value::raw::XlStrRef<'call>>
+pub fn xlfn::value::raw::XlValueRef<'call>::as_bool(self) -> xlfn_engine::error::XllResult<bool>
+pub fn xlfn::value::raw::XlValueRef<'call>::as_f64(self) -> xlfn_engine::error::XllResult<f64>
+pub fn xlfn::value::raw::XlValueRef<'call>::as_str(self) -> xlfn_engine::error::XllResult<xlfn::value::raw::XlStrRef<'call>>
 pub const fn xlfn::value::raw::XlValueRef<'call>::is_blank(self) -> bool
-pub const fn xlfn::value::raw::XlValueRef<'call>::value_type(self) -> xlfn::value::raw::XlValueType
+pub const fn xlfn::value::raw::XlValueRef<'call>::value_type(self) -> xlfn_engine::value_types::XlValueType
 impl core::fmt::Debug for xlfn::value::raw::XlValueRef<'_>
 pub fn xlfn::value::raw::XlValueRef<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'call> core::clone::Clone for xlfn::value::raw::XlValueRef<'call>
@@ -2029,7 +1429,7 @@ impl<'call> core::panic::unwind_safe::RefUnwindSafe for xlfn::value::raw::XlValu
 impl<'call> core::panic::unwind_safe::UnwindSafe for xlfn::value::raw::XlValueRef<'call>
 pub enum xlfn::value::ExcelCellOutput
 pub xlfn::value::ExcelCellOutput::Boolean(bool)
-pub xlfn::value::ExcelCellOutput::Error(xlfn::error::ExcelError)
+pub xlfn::value::ExcelCellOutput::Error(xlfn_engine::error::ExcelError)
 pub xlfn::value::ExcelCellOutput::Number(f64)
 pub xlfn::value::ExcelCellOutput::String(alloc::string::String)
 impl core::clone::Clone for xlfn::value::ExcelCellOutput
@@ -2040,7 +1440,7 @@ impl core::fmt::Debug for xlfn::value::ExcelCellOutput
 pub fn xlfn::value::ExcelCellOutput::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for xlfn::value::ExcelCellOutput
 impl xlfn::value::IntoExcel for xlfn::value::ExcelCellOutput
-pub fn xlfn::value::ExcelCellOutput::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn xlfn::value::ExcelCellOutput::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl core::marker::Freeze for xlfn::value::ExcelCellOutput
 impl core::marker::Send for xlfn::value::ExcelCellOutput
 impl core::marker::Sync for xlfn::value::ExcelCellOutput
@@ -2051,7 +1451,7 @@ impl core::panic::unwind_safe::UnwindSafe for xlfn::value::ExcelCellOutput
 pub enum xlfn::value::ExcelCellRef<'call>
 pub xlfn::value::ExcelCellRef::Blank
 pub xlfn::value::ExcelCellRef::Boolean(bool)
-pub xlfn::value::ExcelCellRef::Error(xlfn::error::ExcelError)
+pub xlfn::value::ExcelCellRef::Error(xlfn_engine::error::ExcelError)
 pub xlfn::value::ExcelCellRef::Number(f64)
 pub xlfn::value::ExcelCellRef::String(&'call str)
 impl<'call> core::clone::Clone for xlfn::value::ExcelCellRef<'call>
@@ -2074,7 +1474,7 @@ impl<'call> core::panic::unwind_safe::UnwindSafe for xlfn::value::ExcelCellRef<'
 pub enum xlfn::value::ExcelCellValue
 pub xlfn::value::ExcelCellValue::Blank
 pub xlfn::value::ExcelCellValue::Boolean(bool)
-pub xlfn::value::ExcelCellValue::Error(xlfn::error::ExcelError)
+pub xlfn::value::ExcelCellValue::Error(xlfn_engine::error::ExcelError)
 pub xlfn::value::ExcelCellValue::Number(f64)
 pub xlfn::value::ExcelCellValue::String(alloc::string::String)
 impl core::clone::Clone for xlfn::value::ExcelCellValue
@@ -2087,12 +1487,12 @@ impl core::marker::StructuralPartialEq for xlfn::value::ExcelCellValue
 impl xlfn::value::ExcelInputIdentity for xlfn::value::ExcelCellValue
 pub fn xlfn::value::ExcelCellValue::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl<'call> xlfn::value::FromExcel<'call> for xlfn::value::ExcelCellValue
-pub fn xlfn::value::ExcelCellValue::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelCellValue::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+pub fn xlfn::value::ExcelCellValue::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelCellValue::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
 impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::value::ExcelCellValue
 pub type xlfn::value::ExcelCellValue::Prepared = xlfn::value::ExcelCellValue
-pub fn xlfn::value::ExcelCellValue::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelCellValue::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::ExcelCellValue::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelCellValue::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl core::marker::Freeze for xlfn::value::ExcelCellValue
 impl core::marker::Send for xlfn::value::ExcelCellValue
 impl core::marker::Sync for xlfn::value::ExcelCellValue
@@ -2136,12 +1536,12 @@ impl core::marker::StructuralPartialEq for xlfn::value::ExcelValue
 impl xlfn::value::ExcelInputIdentity for xlfn::value::ExcelValue
 pub fn xlfn::value::ExcelValue::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl<'call> xlfn::value::FromExcel<'call> for xlfn::value::ExcelValue
-pub fn xlfn::value::ExcelValue::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelValue::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::ExcelValue::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelValue::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::value::ExcelValue
 pub type xlfn::value::ExcelValue::Prepared = xlfn::value::ExcelValue
-pub fn xlfn::value::ExcelValue::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelValue::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::ExcelValue::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelValue::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl core::marker::Freeze for xlfn::value::ExcelValue
 impl core::marker::Send for xlfn::value::ExcelValue
 impl core::marker::Sync for xlfn::value::ExcelValue
@@ -2189,7 +1589,7 @@ pub struct xlfn::value::BoundedVarArgs<T, const MAX: usize>(_)
 impl<T, const MAX: usize> xlfn::value::BoundedVarArgs<T, MAX>
 pub fn xlfn::value::BoundedVarArgs<T, MAX>::as_slice(&self) -> &[T]
 pub fn xlfn::value::BoundedVarArgs<T, MAX>::into_vec(self) -> alloc::vec::Vec<T>
-pub fn xlfn::value::BoundedVarArgs<T, MAX>::new(alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::BoundedVarArgs<T, MAX>::new(alloc::vec::Vec<T>) -> xlfn_engine::error::XllResult<Self>
 impl<'a, T, const MAX: usize> core::iter::traits::collect::IntoIterator for &'a mut xlfn::value::BoundedVarArgs<T, MAX>
 pub type &'a mut xlfn::value::BoundedVarArgs<T, MAX>::IntoIter = core::slice::iter::IterMut<'a, T>
 pub type &'a mut xlfn::value::BoundedVarArgs<T, MAX>::Item = &'a mut T
@@ -2252,7 +1652,7 @@ pub struct xlfn::value::Column<T>(_)
 impl<T> xlfn::value::Column<T>
 pub fn xlfn::value::Column<T>::as_slice(&self) -> &[T]
 pub fn xlfn::value::Column<T>::into_vec(self) -> alloc::vec::Vec<T>
-pub fn xlfn::value::Column<T>::new(alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::Column<T>::new(alloc::vec::Vec<T>) -> xlfn_engine::error::XllResult<Self>
 impl<'a, T> core::iter::traits::collect::IntoIterator for &'a mut xlfn::value::Column<T>
 pub type &'a mut xlfn::value::Column<T>::IntoIter = core::slice::iter::IterMut<'a, T>
 pub type &'a mut xlfn::value::Column<T>::Item = &'a mut T
@@ -2282,8 +1682,8 @@ pub fn xlfn::value::Column<T>::as_ref(&self) -> &[T]
 impl<T> core::convert::From<xlfn::value::Column<T>> for alloc::vec::Vec<T>
 pub fn alloc::vec::Vec<T>::from(xlfn::value::Column<T>) -> Self
 impl<T> core::convert::TryFrom<alloc::vec::Vec<T>> for xlfn::value::Column<T>
-pub type xlfn::value::Column<T>::Error = xlfn::error::XllError
-pub fn xlfn::value::Column<T>::try_from(alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
+pub type xlfn::value::Column<T>::Error = xlfn_engine::error::XllError
+pub fn xlfn::value::Column<T>::try_from(alloc::vec::Vec<T>) -> xlfn_engine::error::XllResult<Self>
 impl<T> core::iter::traits::collect::IntoIterator for xlfn::value::Column<T>
 pub type xlfn::value::Column<T>::IntoIter = alloc::vec::into_iter::IntoIter<T>
 pub type xlfn::value::Column<T>::Item = T
@@ -2303,11 +1703,11 @@ impl<T> core::panic::unwind_safe::UnwindSafe for xlfn::value::Column<T> where al
 pub struct xlfn::value::ExcelArrayRef<'call>
 impl<'call> xlfn::value::ExcelArrayRef<'call>
 pub const fn xlfn::value::ExcelArrayRef<'call>::columns(&self) -> usize
-pub fn xlfn::value::ExcelArrayRef<'call>::get(&self, usize, usize) -> xlfn::error::XllResult<core::option::Option<xlfn::value::ExcelCellRef<'call>>>
+pub fn xlfn::value::ExcelArrayRef<'call>::get(&self, usize, usize) -> xlfn_engine::error::XllResult<core::option::Option<xlfn::value::ExcelCellRef<'call>>>
 pub const fn xlfn::value::ExcelArrayRef<'call>::is_empty(&self) -> bool
 pub const fn xlfn::value::ExcelArrayRef<'call>::len(&self) -> usize
 pub const fn xlfn::value::ExcelArrayRef<'call>::rows(&self) -> usize
-pub const fn xlfn::value::ExcelArrayRef<'call>::shape(&self) -> xlfn::value::Shape
+pub const fn xlfn::value::ExcelArrayRef<'call>::shape(&self) -> xlfn_engine::value_types::Shape
 impl core::fmt::Debug for xlfn::value::ExcelArrayRef<'_>
 pub fn xlfn::value::ExcelArrayRef<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'call> core::clone::Clone for xlfn::value::ExcelArrayRef<'call>
@@ -2324,11 +1724,11 @@ pub struct xlfn::value::ExcelSerialDate
 impl xlfn::value::ExcelSerialDate
 pub const fn xlfn::value::ExcelSerialDate::date_system(self) -> xlfn::value::ExcelDateSystem
 pub fn xlfn::value::ExcelSerialDate::fractional_day(self) -> f64
-pub fn xlfn::value::ExcelSerialDate::from_ymd(i16, i8, i8, xlfn::value::ExcelDateSystem) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::ExcelSerialDate::from_ymd(i16, i8, i8, xlfn::value::ExcelDateSystem) -> xlfn_engine::error::XllResult<Self>
 pub fn xlfn::value::ExcelSerialDate::is_fictitious_1900_leap_day(self) -> bool
-pub fn xlfn::value::ExcelSerialDate::new(f64, xlfn::value::ExcelDateSystem) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::ExcelSerialDate::new(f64, xlfn::value::ExcelDateSystem) -> xlfn_engine::error::XllResult<Self>
 pub const fn xlfn::value::ExcelSerialDate::serial(self) -> f64
-pub fn xlfn::value::ExcelSerialDate::to_ymd(self) -> xlfn::error::XllResult<xlfn::value::CalendarDate>
+pub fn xlfn::value::ExcelSerialDate::to_ymd(self) -> xlfn_engine::error::XllResult<xlfn::value::CalendarDate>
 pub const fn xlfn::value::ExcelSerialDate::with_date_system(self, xlfn::value::ExcelDateSystem) -> Self
 impl core::clone::Clone for xlfn::value::ExcelSerialDate
 pub fn xlfn::value::ExcelSerialDate::clone(&self) -> Self
@@ -2341,14 +1741,14 @@ impl core::marker::StructuralPartialEq for xlfn::value::ExcelSerialDate
 impl xlfn::value::ExcelInputIdentity for xlfn::value::ExcelSerialDate
 pub fn xlfn::value::ExcelSerialDate::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl xlfn::value::IntoExcel for xlfn::value::ExcelSerialDate
-pub fn xlfn::value::ExcelSerialDate::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn xlfn::value::ExcelSerialDate::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl<'call> xlfn::value::FromExcel<'call> for xlfn::value::ExcelSerialDate
-pub fn xlfn::value::ExcelSerialDate::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelSerialDate::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+pub fn xlfn::value::ExcelSerialDate::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelSerialDate::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
 impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::value::ExcelSerialDate
 pub type xlfn::value::ExcelSerialDate::Prepared = xlfn::value::ExcelSerialDate
-pub fn xlfn::value::ExcelSerialDate::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelSerialDate::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::ExcelSerialDate::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelSerialDate::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl core::marker::Freeze for xlfn::value::ExcelSerialDate
 impl core::marker::Send for xlfn::value::ExcelSerialDate
 impl core::marker::Sync for xlfn::value::ExcelSerialDate
@@ -2379,8 +1779,8 @@ pub fn xlfn::value::Matrix<T>::as_mut_slice(&mut self) -> &mut [T]
 pub fn xlfn::value::Matrix<T>::as_slice(&self) -> &[T]
 pub fn xlfn::value::Matrix<T>::column(&self, usize) -> core::option::Option<impl core::iter::traits::iterator::Iterator<Item = &T>>
 pub const fn xlfn::value::Matrix<T>::columns(&self) -> usize
-pub fn xlfn::value::Matrix<T>::fill(usize, usize, T) -> xlfn::error::XllResult<Self> where T: core::clone::Clone
-pub fn xlfn::value::Matrix<T>::from_fn(usize, usize, impl core::ops::function::FnMut(usize, usize) -> T) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::Matrix<T>::fill(usize, usize, T) -> xlfn_engine::error::XllResult<Self> where T: core::clone::Clone
+pub fn xlfn::value::Matrix<T>::from_fn(usize, usize, impl core::ops::function::FnMut(usize, usize) -> T) -> xlfn_engine::error::XllResult<Self>
 pub fn xlfn::value::Matrix<T>::get(&self, usize, usize) -> core::option::Option<&T>
 pub fn xlfn::value::Matrix<T>::get_mut(&mut self, usize, usize) -> core::option::Option<&mut T>
 pub fn xlfn::value::Matrix<T>::into_vec(self) -> alloc::vec::Vec<T>
@@ -2388,12 +1788,12 @@ pub const fn xlfn::value::Matrix<T>::is_empty(&self) -> bool
 pub fn xlfn::value::Matrix<T>::iter(&self) -> core::slice::iter::Iter<'_, T>
 pub fn xlfn::value::Matrix<T>::iter_mut(&mut self) -> core::slice::iter::IterMut<'_, T>
 pub const fn xlfn::value::Matrix<T>::len(&self) -> usize
-pub fn xlfn::value::Matrix<T>::new(usize, usize, alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::Matrix<T>::new(usize, usize, alloc::vec::Vec<T>) -> xlfn_engine::error::XllResult<Self>
 pub fn xlfn::value::Matrix<T>::row(&self, usize) -> core::option::Option<&[T]>
 pub fn xlfn::value::Matrix<T>::row_mut(&mut self, usize) -> core::option::Option<&mut [T]>
 pub const fn xlfn::value::Matrix<T>::rows(&self) -> usize
 pub fn xlfn::value::Matrix<T>::rows_mut(&mut self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = &mut [T]> + '_
-pub const fn xlfn::value::Matrix<T>::shape(&self) -> xlfn::value::Shape
+pub const fn xlfn::value::Matrix<T>::shape(&self) -> xlfn_engine::value_types::Shape
 pub fn xlfn::value::Matrix<T>::try_map<U, E>(self, impl core::ops::function::FnMut(T) -> core::result::Result<U, E>) -> core::result::Result<xlfn::value::Matrix<U>, E>
 impl<'a, T> core::iter::traits::collect::IntoIterator for &'a mut xlfn::value::Matrix<T>
 pub type &'a mut xlfn::value::Matrix<T>::IntoIter = core::slice::iter::IterMut<'a, T>
@@ -2415,8 +1815,8 @@ pub fn xlfn::value::Matrix<T>::encode_input_identity(&self, &mut xlfn::value::In
 impl<T> core::convert::AsRef<[T]> for xlfn::value::Matrix<T>
 pub fn xlfn::value::Matrix<T>::as_ref(&self) -> &[T]
 impl<T> core::convert::TryFrom<alloc::vec::Vec<alloc::vec::Vec<T>>> for xlfn::value::Matrix<T>
-pub type xlfn::value::Matrix<T>::Error = xlfn::error::XllError
-pub fn xlfn::value::Matrix<T>::try_from(alloc::vec::Vec<alloc::vec::Vec<T>>) -> xlfn::error::XllResult<Self>
+pub type xlfn::value::Matrix<T>::Error = xlfn_engine::error::XllError
+pub fn xlfn::value::Matrix<T>::try_from(alloc::vec::Vec<alloc::vec::Vec<T>>) -> xlfn_engine::error::XllResult<Self>
 impl<T> core::iter::traits::collect::IntoIterator for xlfn::value::Matrix<T>
 pub type xlfn::value::Matrix<T>::IntoIter = alloc::vec::into_iter::IntoIter<T>
 pub type xlfn::value::Matrix<T>::Item = T
@@ -2444,8 +1844,8 @@ pub fn xlfn::value::MatrixRef<'call, T>::iter(&self) -> core::slice::iter::Iter<
 pub const fn xlfn::value::MatrixRef<'call, T>::len(&self) -> usize
 pub fn xlfn::value::MatrixRef<'call, T>::row(&self, usize) -> core::option::Option<&'call [T]>
 pub const fn xlfn::value::MatrixRef<'call, T>::rows(&self) -> usize
-pub const fn xlfn::value::MatrixRef<'call, T>::shape(&self) -> xlfn::value::Shape
-pub fn xlfn::value::MatrixRef<'call, T>::to_owned(&self) -> xlfn::error::XllResult<xlfn::value::Matrix<T>> where T: core::clone::Clone
+pub const fn xlfn::value::MatrixRef<'call, T>::shape(&self) -> xlfn_engine::value_types::Shape
+pub fn xlfn::value::MatrixRef<'call, T>::to_owned(&self) -> xlfn_engine::error::XllResult<xlfn::value::Matrix<T>> where T: core::clone::Clone
 impl<'call, T: core::clone::Clone> core::clone::Clone for xlfn::value::MatrixRef<'call, T>
 pub fn xlfn::value::MatrixRef<'call, T>::clone(&self) -> Self
 impl<'call, T: core::cmp::PartialEq> core::cmp::PartialEq for xlfn::value::MatrixRef<'call, T>
@@ -2486,7 +1886,7 @@ pub fn xlfn::value::NumericMatrixRef<'call>::iter(self) -> core::slice::iter::It
 pub const fn xlfn::value::NumericMatrixRef<'call>::len(self) -> usize
 pub fn xlfn::value::NumericMatrixRef<'call>::row(self, usize) -> core::option::Option<&'call [f64]>
 pub const fn xlfn::value::NumericMatrixRef<'call>::rows(self) -> usize
-pub const fn xlfn::value::NumericMatrixRef<'call>::shape(self) -> xlfn::value::Shape
+pub const fn xlfn::value::NumericMatrixRef<'call>::shape(self) -> xlfn_engine::value_types::Shape
 impl core::convert::AsRef<[f64]> for xlfn::value::NumericMatrixRef<'_>
 pub fn xlfn::value::NumericMatrixRef<'_>::as_ref(&self) -> &[f64]
 impl core::ops::index::Index<(usize, usize)> for xlfn::value::NumericMatrixRef<'_>
@@ -2515,7 +1915,7 @@ pub struct xlfn::value::Row<T>(_)
 impl<T> xlfn::value::Row<T>
 pub fn xlfn::value::Row<T>::as_slice(&self) -> &[T]
 pub fn xlfn::value::Row<T>::into_vec(self) -> alloc::vec::Vec<T>
-pub fn xlfn::value::Row<T>::new(alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::Row<T>::new(alloc::vec::Vec<T>) -> xlfn_engine::error::XllResult<Self>
 impl<'a, T> core::iter::traits::collect::IntoIterator for &'a mut xlfn::value::Row<T>
 pub type &'a mut xlfn::value::Row<T>::IntoIter = core::slice::iter::IterMut<'a, T>
 pub type &'a mut xlfn::value::Row<T>::Item = &'a mut T
@@ -2545,8 +1945,8 @@ pub fn xlfn::value::Row<T>::as_ref(&self) -> &[T]
 impl<T> core::convert::From<xlfn::value::Row<T>> for alloc::vec::Vec<T>
 pub fn alloc::vec::Vec<T>::from(xlfn::value::Row<T>) -> Self
 impl<T> core::convert::TryFrom<alloc::vec::Vec<T>> for xlfn::value::Row<T>
-pub type xlfn::value::Row<T>::Error = xlfn::error::XllError
-pub fn xlfn::value::Row<T>::try_from(alloc::vec::Vec<T>) -> xlfn::error::XllResult<Self>
+pub type xlfn::value::Row<T>::Error = xlfn_engine::error::XllError
+pub fn xlfn::value::Row<T>::try_from(alloc::vec::Vec<T>) -> xlfn_engine::error::XllResult<Self>
 impl<T> core::iter::traits::collect::IntoIterator for xlfn::value::Row<T>
 pub type xlfn::value::Row<T>::IntoIter = alloc::vec::into_iter::IntoIter<T>
 pub type xlfn::value::Row<T>::Item = T
@@ -2563,27 +1963,6 @@ impl<T> core::marker::Unpin for xlfn::value::Row<T> where alloc::vec::Vec<T>: co
 impl<T> core::marker::UnsafeUnpin for xlfn::value::Row<T> where alloc::vec::Vec<T>: core::marker::UnsafeUnpin
 impl<T> core::panic::unwind_safe::RefUnwindSafe for xlfn::value::Row<T> where alloc::vec::Vec<T>: core::panic::unwind_safe::RefUnwindSafe
 impl<T> core::panic::unwind_safe::UnwindSafe for xlfn::value::Row<T> where alloc::vec::Vec<T>: core::panic::unwind_safe::UnwindSafe
-pub struct xlfn::value::Shape
-pub xlfn::value::Shape::columns: usize
-pub xlfn::value::Shape::rows: usize
-impl core::clone::Clone for xlfn::value::Shape
-pub fn xlfn::value::Shape::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::value::Shape
-impl core::cmp::PartialEq for xlfn::value::Shape
-pub fn xlfn::value::Shape::eq(&self, &Self) -> bool
-impl core::fmt::Debug for xlfn::value::Shape
-pub fn xlfn::value::Shape::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for xlfn::value::Shape
-pub fn xlfn::value::Shape::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for xlfn::value::Shape
-impl core::marker::StructuralPartialEq for xlfn::value::Shape
-impl core::marker::Freeze for xlfn::value::Shape
-impl core::marker::Send for xlfn::value::Shape
-impl core::marker::Sync for xlfn::value::Shape
-impl core::marker::Unpin for xlfn::value::Shape
-impl core::marker::UnsafeUnpin for xlfn::value::Shape
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::value::Shape
-impl core::panic::unwind_safe::UnwindSafe for xlfn::value::Shape
 pub trait xlfn::value::ExcelInputIdentity
 pub fn xlfn::value::ExcelInputIdentity::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl xlfn::value::ExcelInputIdentity for alloc::string::String
@@ -2596,14 +1975,14 @@ impl xlfn::value::ExcelInputIdentity for i32
 pub fn i32::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl xlfn::value::ExcelInputIdentity for i64
 pub fn i64::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
-impl xlfn::value::ExcelInputIdentity for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl xlfn::value::ExcelInputIdentity for xlfn::value::ExcelCellValue
 pub fn xlfn::value::ExcelCellValue::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl xlfn::value::ExcelInputIdentity for xlfn::value::ExcelSerialDate
 pub fn xlfn::value::ExcelSerialDate::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl xlfn::value::ExcelInputIdentity for xlfn::value::ExcelValue
 pub fn xlfn::value::ExcelValue::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
+impl xlfn::value::ExcelInputIdentity for xlfn_engine::error::ExcelError
+pub fn xlfn_engine::error::ExcelError::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl<'call> xlfn::value::ExcelInputIdentity for xlfn::value::ExcelCellRef<'call>
 pub fn xlfn::value::ExcelCellRef<'call>::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl<'call> xlfn::value::ExcelInputIdentity for xlfn::value::raw::XlArrayRef<'call>
@@ -2623,391 +2002,127 @@ pub fn xlfn::value::OptionalExcelValue<T>::encode_input_identity(&self, &mut xlf
 impl<T: xlfn::value::ExcelInputIdentity> xlfn::value::ExcelInputIdentity for xlfn::value::Row<T>
 pub fn xlfn::value::Row<T>::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 pub trait xlfn::value::FromExcel<'call>: core::marker::Sized
-pub fn xlfn::value::FromExcel::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::FromExcel::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+pub fn xlfn::value::FromExcel::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::FromExcel::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
 impl<'call> xlfn::value::FromExcel<'call> for alloc::string::String
-pub fn alloc::string::String::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn alloc::string::String::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+pub fn alloc::string::String::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn alloc::string::String::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
 impl<'call> xlfn::value::FromExcel<'call> for bool
-pub fn bool::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn bool::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+pub fn bool::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn bool::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
 impl<'call> xlfn::value::FromExcel<'call> for f64
-pub fn f64::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn f64::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+pub fn f64::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn f64::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
 impl<'call> xlfn::value::FromExcel<'call> for i32
-pub fn i32::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn i32::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+pub fn i32::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn i32::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
 impl<'call> xlfn::value::FromExcel<'call> for i64
-pub fn i64::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn i64::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
-impl<'call> xlfn::value::FromExcel<'call> for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::error::ExcelError::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+pub fn i64::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn i64::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
 impl<'call> xlfn::value::FromExcel<'call> for xlfn::value::ExcelCellValue
-pub fn xlfn::value::ExcelCellValue::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelCellValue::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+pub fn xlfn::value::ExcelCellValue::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelCellValue::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
 impl<'call> xlfn::value::FromExcel<'call> for xlfn::value::ExcelSerialDate
-pub fn xlfn::value::ExcelSerialDate::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelSerialDate::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+pub fn xlfn::value::ExcelSerialDate::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelSerialDate::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
 impl<'call> xlfn::value::FromExcel<'call> for xlfn::value::ExcelValue
-pub fn xlfn::value::ExcelValue::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelValue::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::ExcelValue::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelValue::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl<'call> xlfn::value::FromExcel<'call> for xlfn::value::raw::XlArrayRef<'call>
-pub fn xlfn::value::raw::XlArrayRef<'call>::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::raw::XlArrayRef<'call>::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+pub fn xlfn::value::raw::XlArrayRef<'call>::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::raw::XlArrayRef<'call>::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
+impl<'call> xlfn::value::FromExcel<'call> for xlfn_engine::error::ExcelError
+pub fn xlfn_engine::error::ExcelError::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn_engine::error::ExcelError::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
 pub trait xlfn::value::IntoExcel
-pub fn xlfn::value::IntoExcel::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn xlfn::value::IntoExcel::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for &str
-pub fn &str::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn &str::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for alloc::borrow::Cow<'_, str>
-pub fn alloc::borrow::Cow<'_, str>::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn alloc::borrow::Cow<'_, str>::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for alloc::string::String
-pub fn alloc::string::String::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn alloc::string::String::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for bool
-pub fn bool::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn bool::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for f32
-pub fn f32::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn f32::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for f64
-pub fn f64::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn f64::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for i16
-pub fn i16::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn i16::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for i32
-pub fn i32::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn i32::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for i64
-pub fn i64::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn i64::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for i8
-pub fn i8::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn i8::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for isize
-pub fn isize::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn isize::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for u16
-pub fn u16::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn u16::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for u32
-pub fn u32::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn u32::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for u64
-pub fn u64::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn u64::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for u8
-pub fn u8::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn u8::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for usize
-pub fn usize::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
-impl xlfn::value::IntoExcel for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn usize::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for xlfn::value::ExcelCellOutput
-pub fn xlfn::value::ExcelCellOutput::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn xlfn::value::ExcelCellOutput::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 impl xlfn::value::IntoExcel for xlfn::value::ExcelSerialDate
-pub fn xlfn::value::ExcelSerialDate::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
+pub fn xlfn::value::ExcelSerialDate::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
+impl xlfn::value::IntoExcel for xlfn_engine::error::ExcelError
+pub fn xlfn_engine::error::ExcelError::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
 pub trait xlfn::value::PrepareExcel<'call>: xlfn::value::FromExcel<'call> + xlfn::value::ExcelInputIdentity
 pub type xlfn::value::PrepareExcel::Prepared
-pub fn xlfn::value::PrepareExcel::materialize(Self::Prepared) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::PrepareExcel::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self::Prepared>
+pub fn xlfn::value::PrepareExcel::materialize(Self::Prepared) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::PrepareExcel::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self::Prepared>
 impl<'call> xlfn::value::PrepareExcel<'call> for alloc::string::String
 pub type alloc::string::String::Prepared = PreparedString<'call>
-pub fn alloc::string::String::materialize(Self::Prepared) -> xlfn::error::XllResult<Self>
-pub fn alloc::string::String::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self::Prepared>
+pub fn alloc::string::String::materialize(Self::Prepared) -> xlfn_engine::error::XllResult<Self>
+pub fn alloc::string::String::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self::Prepared>
 impl<'call> xlfn::value::PrepareExcel<'call> for bool
 pub type bool::Prepared = bool
-pub fn bool::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn bool::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn bool::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn bool::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl<'call> xlfn::value::PrepareExcel<'call> for f64
 pub type f64::Prepared = f64
-pub fn f64::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn f64::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn f64::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn f64::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl<'call> xlfn::value::PrepareExcel<'call> for i32
 pub type i32::Prepared = i32
-pub fn i32::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn i32::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn i32::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn i32::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl<'call> xlfn::value::PrepareExcel<'call> for i64
 pub type i64::Prepared = i64
-pub fn i64::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn i64::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
-impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::error::ExcelError
-pub type xlfn::error::ExcelError::Prepared = xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn xlfn::error::ExcelError::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn i64::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn i64::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::value::ExcelCellValue
 pub type xlfn::value::ExcelCellValue::Prepared = xlfn::value::ExcelCellValue
-pub fn xlfn::value::ExcelCellValue::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelCellValue::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::ExcelCellValue::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelCellValue::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::value::ExcelSerialDate
 pub type xlfn::value::ExcelSerialDate::Prepared = xlfn::value::ExcelSerialDate
-pub fn xlfn::value::ExcelSerialDate::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelSerialDate::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::ExcelSerialDate::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelSerialDate::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::value::ExcelValue
 pub type xlfn::value::ExcelValue::Prepared = xlfn::value::ExcelValue
-pub fn xlfn::value::ExcelValue::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::ExcelValue::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
+pub fn xlfn::value::ExcelValue::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::ExcelValue::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::value::raw::XlArrayRef<'call>
 pub type xlfn::value::raw::XlArrayRef<'call>::Prepared = xlfn::value::raw::XlArrayRef<'call>
-pub fn xlfn::value::raw::XlArrayRef<'call>::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn xlfn::value::raw::XlArrayRef<'call>::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
-#[non_exhaustive] pub enum xlfn::ExcelApiFailure
-pub xlfn::ExcelApiFailure::Indeterminate(xlfn::error::ExcelCallbackStatus)
-pub xlfn::ExcelApiFailure::InvalidRegistrationId(i32)
-pub xlfn::ExcelApiFailure::Status(xlfn::error::ExcelCallbackStatus)
-pub xlfn::ExcelApiFailure::Suppressed(xlfn::error::ExcelCallbackStatus)
-pub xlfn::ExcelApiFailure::UnexpectedResult
-impl core::clone::Clone for xlfn::error::ExcelApiFailure
-pub fn xlfn::error::ExcelApiFailure::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::error::ExcelApiFailure
-impl core::cmp::PartialEq for xlfn::error::ExcelApiFailure
-pub fn xlfn::error::ExcelApiFailure::eq(&self, &Self) -> bool
-impl core::fmt::Debug for xlfn::error::ExcelApiFailure
-pub fn xlfn::error::ExcelApiFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::ExcelApiFailure
-pub fn xlfn::error::ExcelApiFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for xlfn::error::ExcelApiFailure
-pub fn xlfn::error::ExcelApiFailure::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for xlfn::error::ExcelApiFailure
-impl core::marker::StructuralPartialEq for xlfn::error::ExcelApiFailure
-impl core::marker::Freeze for xlfn::error::ExcelApiFailure
-impl core::marker::Send for xlfn::error::ExcelApiFailure
-impl core::marker::Sync for xlfn::error::ExcelApiFailure
-impl core::marker::Unpin for xlfn::error::ExcelApiFailure
-impl core::marker::UnsafeUnpin for xlfn::error::ExcelApiFailure
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::ExcelApiFailure
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::ExcelApiFailure
-#[non_exhaustive] pub enum xlfn::ExcelApiFunction
-pub xlfn::ExcelApiFunction::AsyncReturn
-pub xlfn::ExcelApiFunction::Caller
-pub xlfn::ExcelApiFunction::Coerce
-pub xlfn::ExcelApiFunction::Evaluate
-pub xlfn::ExcelApiFunction::EventRegister
-pub xlfn::ExcelApiFunction::Free
-pub xlfn::ExcelApiFunction::GetDocument
-pub xlfn::ExcelApiFunction::GetName
-pub xlfn::ExcelApiFunction::Register
-pub xlfn::ExcelApiFunction::Rtd
-pub xlfn::ExcelApiFunction::SetName
-pub xlfn::ExcelApiFunction::SheetId
-pub xlfn::ExcelApiFunction::SheetName
-pub xlfn::ExcelApiFunction::Unregister
-impl core::clone::Clone for xlfn::error::ExcelApiFunction
-pub fn xlfn::error::ExcelApiFunction::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::error::ExcelApiFunction
-impl core::cmp::PartialEq for xlfn::error::ExcelApiFunction
-pub fn xlfn::error::ExcelApiFunction::eq(&self, &Self) -> bool
-impl core::fmt::Debug for xlfn::error::ExcelApiFunction
-pub fn xlfn::error::ExcelApiFunction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::ExcelApiFunction
-pub fn xlfn::error::ExcelApiFunction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for xlfn::error::ExcelApiFunction
-pub fn xlfn::error::ExcelApiFunction::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for xlfn::error::ExcelApiFunction
-impl core::marker::StructuralPartialEq for xlfn::error::ExcelApiFunction
-impl core::marker::Freeze for xlfn::error::ExcelApiFunction
-impl core::marker::Send for xlfn::error::ExcelApiFunction
-impl core::marker::Sync for xlfn::error::ExcelApiFunction
-impl core::marker::Unpin for xlfn::error::ExcelApiFunction
-impl core::marker::UnsafeUnpin for xlfn::error::ExcelApiFunction
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::ExcelApiFunction
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::ExcelApiFunction
-pub enum xlfn::ExcelCallbackStatus
-pub xlfn::ExcelCallbackStatus::Abort
-pub xlfn::ExcelCallbackStatus::Failed(i32)
-pub xlfn::ExcelCallbackStatus::Success
-pub xlfn::ExcelCallbackStatus::Uncalced
-impl core::clone::Clone for xlfn::error::ExcelCallbackStatus
-pub fn xlfn::error::ExcelCallbackStatus::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::error::ExcelCallbackStatus
-impl core::cmp::PartialEq for xlfn::error::ExcelCallbackStatus
-pub fn xlfn::error::ExcelCallbackStatus::eq(&self, &Self) -> bool
-impl core::fmt::Debug for xlfn::error::ExcelCallbackStatus
-pub fn xlfn::error::ExcelCallbackStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::ExcelCallbackStatus
-pub fn xlfn::error::ExcelCallbackStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for xlfn::error::ExcelCallbackStatus
-pub fn xlfn::error::ExcelCallbackStatus::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for xlfn::error::ExcelCallbackStatus
-impl core::marker::StructuralPartialEq for xlfn::error::ExcelCallbackStatus
-impl core::marker::Freeze for xlfn::error::ExcelCallbackStatus
-impl core::marker::Send for xlfn::error::ExcelCallbackStatus
-impl core::marker::Sync for xlfn::error::ExcelCallbackStatus
-impl core::marker::Unpin for xlfn::error::ExcelCallbackStatus
-impl core::marker::UnsafeUnpin for xlfn::error::ExcelCallbackStatus
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::ExcelCallbackStatus
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::ExcelCallbackStatus
-#[non_exhaustive] #[repr(i32)] pub enum xlfn::ExcelError
-pub xlfn::ExcelError::DivisionByZero = 7
-pub xlfn::ExcelError::GettingData = 43
-pub xlfn::ExcelError::Name = 29
-pub xlfn::ExcelError::NotAvailable = 42
-pub xlfn::ExcelError::Null = 0
-pub xlfn::ExcelError::Number = 36
-pub xlfn::ExcelError::Reference = 23
-pub xlfn::ExcelError::Value = 15
-impl xlfn::error::ExcelError
-pub const fn xlfn::error::ExcelError::code(self) -> i32
-pub const fn xlfn::error::ExcelError::from_code(i32) -> core::option::Option<Self>
-impl core::clone::Clone for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::clone(&self) -> Self
-impl core::cmp::Eq for xlfn::error::ExcelError
-impl core::cmp::PartialEq for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::eq(&self, &Self) -> bool
-impl core::convert::From<xlfn::error::ExcelError> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::ExcelError) -> Self
-impl core::convert::From<xlfn::error::ExcelError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::ExcelError) -> Self
-impl core::error::Error for xlfn::error::ExcelError
-impl core::fmt::Debug for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for xlfn::error::ExcelError
-impl core::marker::StructuralPartialEq for xlfn::error::ExcelError
-impl xlfn::error::IntoXllError for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::into_xll_error(self) -> xlfn::error::XllError
-impl xlfn::value::ExcelInputIdentity for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
-impl xlfn::value::IntoExcel for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::into_excel(self) -> xlfn::error::XllResult<xlfn::value::ExcelCellOutput>
-impl<'call> xlfn::value::FromExcel<'call> for xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::from_excel(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn::error::XllResult<Self>
-pub fn xlfn::error::ExcelError::from_excel_with_identity(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self> where Self: xlfn::value::ExcelInputIdentity
-impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::error::ExcelError
-pub type xlfn::error::ExcelError::Prepared = xlfn::error::ExcelError
-pub fn xlfn::error::ExcelError::materialize(Self) -> xlfn::error::XllResult<Self>
-pub fn xlfn::error::ExcelError::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn::error::XllResult<Self>
-impl core::marker::Freeze for xlfn::error::ExcelError
-impl core::marker::Send for xlfn::error::ExcelError
-impl core::marker::Sync for xlfn::error::ExcelError
-impl core::marker::Unpin for xlfn::error::ExcelError
-impl core::marker::UnsafeUnpin for xlfn::error::ExcelError
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::ExcelError
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::ExcelError
-#[non_exhaustive] pub enum xlfn::XllError
-#[non_exhaustive] pub xlfn::XllError::AbiMismatch
-pub xlfn::XllError::AbiMismatch::actual: u32
-pub xlfn::XllError::AbiMismatch::expected: u32
-#[non_exhaustive] pub xlfn::XllError::Application
-pub xlfn::XllError::Application::excel: xlfn::error::ExcelError
-pub xlfn::XllError::Application::message: alloc::string::String
-pub xlfn::XllError::Application::source: core::option::Option<alloc::boxed::Box<xlfn::error::ErrorCause>>
-pub xlfn::XllError::Closing
-pub xlfn::XllError::Custom
-pub xlfn::XllError::Custom::excel: xlfn::error::ExcelError
-pub xlfn::XllError::Custom::message: alloc::borrow::Cow<'static, str>
-pub xlfn::XllError::Domain
-pub xlfn::XllError::Domain::code: xlfn::error::DomainErrorCode
-pub xlfn::XllError::ElementCountMismatch
-pub xlfn::XllError::ElementCountMismatch::actual: usize
-pub xlfn::XllError::ElementCountMismatch::columns: usize
-pub xlfn::XllError::ElementCountMismatch::expected: usize
-pub xlfn::XllError::ElementCountMismatch::rows: usize
-#[non_exhaustive] pub xlfn::XllError::ExcelApi
-pub xlfn::XllError::ExcelApi::failure: xlfn::error::ExcelApiFailure
-pub xlfn::XllError::ExcelApi::function: xlfn::error::ExcelApiFunction
-pub xlfn::XllError::ExcelValue(xlfn::error::ExcelError)
-pub xlfn::XllError::Input
-pub xlfn::XllError::Input::argument: &'static str
-pub xlfn::XllError::Input::reason: xlfn::error::InputError
-#[non_exhaustive] pub xlfn::XllError::Internal
-pub xlfn::XllError::Internal::diagnostic_id: xlfn::diagnostics::DiagnosticId
-pub xlfn::XllError::InvalidHandle
-#[non_exhaustive] pub xlfn::XllError::LibraryLoad
-pub xlfn::XllError::LibraryLoad::os_error: u32
-pub xlfn::XllError::LibraryLoad::path: std::path::PathBuf
-#[non_exhaustive] pub xlfn::XllError::MetadataDebtBindingChanged
-pub xlfn::XllError::MetadataDebtBindingChanged::name: &'static str
-#[non_exhaustive] pub xlfn::XllError::MissingSymbol
-pub xlfn::XllError::MissingSymbol::symbol: &'static str
-pub xlfn::XllError::Native
-pub xlfn::XllError::Native::code: i32
-pub xlfn::XllError::Native::message: alloc::string::String
-pub xlfn::XllError::Overloaded
-pub xlfn::XllError::Panic
-pub xlfn::XllError::ReentrantCall
-#[non_exhaustive] pub xlfn::XllError::RegistrationConflict
-pub xlfn::XllError::RegistrationConflict::name: &'static str
-#[non_exhaustive] pub xlfn::XllError::RtdProducerFailure
-pub xlfn::XllError::RtdProducerFailure::source: alloc::boxed::Box<xlfn::error::XllError>
-pub xlfn::XllError::RtdProducerFailure::topic: alloc::string::String
-#[non_exhaustive] pub xlfn::XllError::RtdSubscriptionShutdown
-pub xlfn::XllError::RtdSubscriptionShutdown::key: alloc::string::String
-pub xlfn::XllError::RtdSubscriptionShutdown::server_generation: u64
-pub xlfn::XllError::RtdSubscriptionShutdown::source: alloc::boxed::Box<xlfn::error::XllError>
-pub xlfn::XllError::RtdSubscriptionShutdown::topic_id: i32
-pub xlfn::XllError::Shape
-pub xlfn::XllError::Shape::actual: xlfn::value::Shape
-pub xlfn::XllError::Shape::expected: xlfn::value::Shape
-pub xlfn::XllError::StaleHandle
-#[non_exhaustive] pub xlfn::XllError::WindowsApi
-pub xlfn::XllError::WindowsApi::code: i32
-pub xlfn::XllError::WindowsApi::function: &'static str
-impl xlfn::error::XllError
-pub fn xlfn::error::XllError::custom(xlfn::error::ExcelError, impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
-pub const fn xlfn::error::XllError::domain(xlfn::error::DomainErrorCode) -> Self
-pub const fn xlfn::error::XllError::input(&'static str, xlfn::error::InputError) -> Self
-pub const fn xlfn::error::XllError::to_excel_error(&self) -> xlfn::error::ExcelError
-pub fn xlfn::error::XllError::validation(&'static str, xlfn::error::InputError) -> Self
-pub fn xlfn::error::XllError::with_argument(self, &'static str) -> Self
-impl core::clone::Clone for xlfn::error::XllError
-pub fn xlfn::error::XllError::clone(&self) -> Self
-impl core::convert::From<core::io::error::Error> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(core::io::error::Error) -> Self
-impl core::convert::From<xlfn::diagnostics::DiagnosticInitError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::diagnostics::DiagnosticInitError) -> Self
-impl core::convert::From<xlfn::error::ExcelError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::ExcelError) -> Self
-impl core::convert::From<xlfn::error::InvalidLimit> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::InvalidLimit) -> Self
-impl core::convert::From<xlfn::error::UdfError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::UdfError) -> Self
-impl core::convert::From<xlfn::error::XllError> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::XllError) -> Self
-impl core::error::Error for xlfn::error::XllError
-pub fn xlfn::error::XllError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
-impl core::fmt::Debug for xlfn::error::XllError
-pub fn xlfn::error::XllError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::XllError
-pub fn xlfn::error::XllError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl xlfn::error::IntoXllError for xlfn::error::XllError
-pub fn xlfn::error::XllError::into_xll_error(self) -> xlfn::error::XllError
-impl core::marker::Freeze for xlfn::error::XllError
-impl core::marker::Send for xlfn::error::XllError
-impl core::marker::Sync for xlfn::error::XllError
-impl core::marker::Unpin for xlfn::error::XllError
-impl core::marker::UnsafeUnpin for xlfn::error::XllError
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn::error::XllError
-impl core::panic::unwind_safe::UnwindSafe for xlfn::error::XllError
-pub struct xlfn::UdfError
-impl xlfn::error::UdfError
-pub fn xlfn::error::UdfError::message(&self) -> &str
-pub fn xlfn::error::UdfError::new(xlfn::error::ExcelError, impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
-pub const fn xlfn::error::UdfError::to_excel_error(&self) -> xlfn::error::ExcelError
-pub fn xlfn::error::UdfError::with_source(self, impl core::error::Error + core::marker::Send + core::marker::Sync + 'static) -> Self
-impl core::convert::From<core::io::error::Error> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(core::io::error::Error) -> Self
-impl core::convert::From<xlfn::error::ExcelError> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::ExcelError) -> Self
-impl core::convert::From<xlfn::error::InvalidLimit> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::InvalidLimit) -> Self
-impl core::convert::From<xlfn::error::UdfError> for xlfn::error::XllError
-pub fn xlfn::error::XllError::from(xlfn::error::UdfError) -> Self
-impl core::convert::From<xlfn::error::XllError> for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::from(xlfn::error::XllError) -> Self
-impl core::error::Error for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
-impl core::fmt::Debug for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl xlfn::error::IntoXllError for xlfn::error::UdfError
-pub fn xlfn::error::UdfError::into_xll_error(self) -> xlfn::error::XllError
-impl core::marker::Freeze for xlfn::error::UdfError
-impl core::marker::Send for xlfn::error::UdfError
-impl core::marker::Sync for xlfn::error::UdfError
-impl core::marker::Unpin for xlfn::error::UdfError
-impl core::marker::UnsafeUnpin for xlfn::error::UdfError
-impl !core::panic::unwind_safe::RefUnwindSafe for xlfn::error::UdfError
-impl !core::panic::unwind_safe::UnwindSafe for xlfn::error::UdfError
+pub fn xlfn::value::raw::XlArrayRef<'call>::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::value::raw::XlArrayRef<'call>::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
+impl<'call> xlfn::value::PrepareExcel<'call> for xlfn_engine::error::ExcelError
+pub type xlfn_engine::error::ExcelError::Prepared = xlfn_engine::error::ExcelError
+pub fn xlfn_engine::error::ExcelError::materialize(Self) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn_engine::error::ExcelError::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
 pub trait xlfn::Addin: core::marker::Sized + core::marker::Send + core::marker::Sync + 'static
-pub type xlfn::Addin::Error: xlfn::error::IntoXllError
+pub type xlfn::Addin::Error: xlfn_engine::error::IntoXllError
 pub type xlfn::Addin::Layers: xlfn::execution::UdfLayers
 pub type xlfn::Addin::LifecycleState: 'static
 pub type xlfn::Addin::SharedState: core::marker::Send + core::marker::Sync + 'static
 pub fn xlfn::Addin::cleanup(&mut Self::LifecycleState, &mut xlfn::addin::CleanupReporter<'_>)
 pub fn xlfn::Addin::open(&xlfn::addin::OpenContext<Self>) -> xlfn::addin::OpenResult<Self>
 pub fn xlfn::Addin::quiesce(&mut Self::SharedState, &mut Self::LifecycleState) -> core::result::Result<(), Self::Error>
-pub type xlfn::UdfResult<T> = core::result::Result<T, xlfn::error::UdfError>
-pub type xlfn::XllResult<T> = core::result::Result<T, xlfn::error::XllError>

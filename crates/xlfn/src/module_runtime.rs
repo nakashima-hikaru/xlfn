@@ -566,6 +566,18 @@ pub(crate) fn ingress() -> &'static ExportIngress {
     global().ingress()
 }
 
+/// A completed export drain for the synthetic logical-finalization fixture.
+/// Its module storage is separate from both the global runtime and the
+/// deliberately retained, non-Miri ownership fixtures below.
+#[cfg(test)]
+pub(crate) fn finalizing_epoch_for_test() -> ModuleEpochId {
+    static MODULE: LazyLock<ModuleRuntime> = LazyLock::new(ModuleRuntime::new);
+    let closing = MODULE.begin_open_internal().unwrap().rollback(|| {});
+    let epoch = closing.id();
+    let _drained = closing.seal_and_drain().unwrap();
+    epoch
+}
+
 #[cfg(test)]
 pub(crate) fn isolated_closing_for_test() -> ModuleClosing {
     Box::leak(Box::new(ModuleRuntime::new()))

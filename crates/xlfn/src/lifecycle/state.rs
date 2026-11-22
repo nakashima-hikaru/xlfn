@@ -5,10 +5,11 @@
     reason = "the publication pointer is protected by the lifecycle-owned drain gate"
 )]
 
-use crate::sync::{Condvar, Mutex, MutexGuard};
+use crate::sync::Mutex;
 use std::mem;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use xlfn_engine::canonical::{Access as CanonicalAccess, Canonical};
 use xlfn_engine::lifecycle_sequence::{LifecycleSequence, OpenClaimError};
 use xlfn_engine::quarantine::{CleanupClaim, CleanupObservation, CleanupOutcome, CleanupProtocol};
 use xlfn_kernel::drain_gate::{
@@ -1183,32 +1184,48 @@ impl RemovalClaim {
     }
 }
 
-/// Canonical lifecycle state and its owned generation payload.
-///
-/// `LifecycleCoordinator::phase` is only a read-side projection of this
-/// enum. The state machine below is deliberately non-`Copy`: moving between
-/// phases also moves the staged generation, open bundle, or retirement lease.
-pub(crate) enum LifecycleState<A: crate::Addin> {
-    Closed,
-    Opening {
-        attempt: OpenAttemptId,
-        payload: OpeningPayload<A>,
-    },
-    Open {
-        bundle: OpenGeneration<A>,
-    },
-    Stopping(StoppingState<A>),
-    Quarantined(CloseResources<A>),
+// The engine owns the canonical enum; this facade defines its opaque
+// payloads and native observations/extractions only.
+pub(crate) type LifecycleState<A> = xlfn_engine::canonical::LifecycleState<
+    OpeningPayload<A>,
+    OpenGeneration<A>,
+    StoppingState<A>,
+    CloseResources<A>,
+>;
+pub(crate) type StoppingState<A> =
+    xlfn_engine::canonical::StoppingState<ClosingState<A>, CloseResources<A>, StopRecord>;
+
+trait NativeState<A: crate::Addin> {
+    fn phase(&self) -> LifecyclePhase;
+    fn open_attempt(&self) -> Option<OpenAttemptId>;
+    fn protocol_generation(
+        &self,
+        last_committed: Option<RuntimeGeneration>,
+    ) -> Option<RuntimeGeneration>;
+    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
+    fn opening(&self) -> Option<&OpeningGeneration<A>>;
+    #[cfg(any(test, feature = "refinement"))]
+    fn has_current_generation(&self) -> bool;
+    #[cfg(any(test, feature = "refinement"))]
+    fn has_opening_generation(&self) -> bool;
+    fn generation_services(
+        &self,
+    ) -> Option<
+        &GenerationServices<
+            crate::addin_impl::AddinSubscription<A>,
+            crate::addin_impl::AddinSources<A>,
+        >,
+    >;
+    fn module_epoch_id(&self) -> Option<ModuleEpochId>;
+    fn removal_attempt(&self) -> Option<RemovalAttemptId>;
+    fn take_opening(&mut self) -> Option<OpeningGeneration<A>>;
+    fn take_retirement(&mut self) -> Option<OpenRetirement<A>>;
+    #[cfg(test)]
+    fn take_available_module_closing(&mut self) -> Option<crate::module_runtime::ModuleClosing>;
 }
 
-pub(crate) enum StoppingState<A: crate::Addin> {
-    Remove(ClosingState<A>),
-    RollbackOpen(CloseResources<A>),
-    Finalizing(StopRecord),
-}
-
-impl<A: crate::Addin> LifecycleState<A> {
-    pub(crate) const fn phase(&self) -> LifecyclePhase {
+impl<A: crate::Addin> NativeState<A> for LifecycleState<A> {
+    fn phase(&self) -> LifecyclePhase {
         match self {
             Self::Closed | Self::Stopping(StoppingState::Finalizing(_)) => LifecyclePhase::Closed,
             Self::Opening { .. } => LifecyclePhase::Opening,
@@ -1219,7 +1236,7 @@ impl<A: crate::Addin> LifecycleState<A> {
         }
     }
 
-    pub(crate) const fn open_attempt(&self) -> Option<OpenAttemptId> {
+    fn open_attempt(&self) -> Option<OpenAttemptId> {
         match self {
             Self::Opening { attempt, .. } => Some(*attempt),
             Self::Stopping(StoppingState::Remove(closing)) => closing.open_attempt(),
@@ -1267,7 +1284,9 @@ impl<A: crate::Addin> LifecycleState<A> {
     fn has_current_generation(&self) -> bool {
         match self {
             Self::Open { .. } => true,
-            Self::Opening { payload, .. } => matches!(payload, OpeningPayload::Published(_)),
+            Self::Opening { payload, .. } => {
+                matches!(payload, OpeningPayload::Published(_))
+            }
             Self::Stopping(StoppingState::Remove(closing)) => closing.has_current_generation(),
             Self::Stopping(StoppingState::RollbackOpen(resources))
             | Self::Quarantined(resources) => resources.is_published(),
@@ -1554,7 +1573,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
 /// mutate an arbitrary core state.
 pub(crate) struct LifecycleAccess<'a, A: crate::Addin> {
     coordinator: &'a LifecycleCoordinator<A>,
-    core: MutexGuard<'a, LifecycleCore<A>>,
+    core: CanonicalAccess<'a, LifecycleCore<A>>,
 }
 
 /// One closed, completed removal intent held under its original lifecycle
@@ -1616,9 +1635,9 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
         &mut self,
         mutation: impl FnOnce(&mut LifecycleCore<A>) -> (R, TransitionEffect<A>),
     ) -> R {
-        let (result, effect) = mutation(&mut self.core);
-        self.coordinator.commit_transition(self, effect);
-        result
+        self.core.transition(mutation, |core, effect| {
+            self.coordinator.commit_transition(core, effect);
+        })
     }
 
     fn canonical_state(&self) -> &LifecycleState<A> {
@@ -1744,7 +1763,10 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
 
     #[cfg(test)]
     pub(crate) fn set_next_lifecycle_attempt_for_test(&mut self, value: u64) {
-        self.core.set_next_lifecycle_attempt_for_test(value);
+        self.transition(|core| {
+            core.set_next_lifecycle_attempt_for_test(value);
+            ((), TransitionEffect::Keep)
+        });
     }
 }
 
@@ -1758,9 +1780,8 @@ pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
     publication: AtomicPtr<PublishedGeneration<A>>,
     publication_readers: StripedDrainGate<DEFAULT_STRIPE_COUNT>,
     service_readers: DrainGate,
-    core: Mutex<LifecycleCore<A>>,
+    core: Canonical<LifecycleCore<A>>,
     retained_cleanup: Mutex<Vec<(ModuleEpochId, std::mem::ManuallyDrop<ModuleAuthority>)>>,
-    changed: Condvar,
     #[cfg(test)]
     pub(crate) test_module_lease: Mutex<Option<crate::ingress::TestModuleLease>>,
 }
@@ -1824,9 +1845,8 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             publication: AtomicPtr::new(std::ptr::null_mut()),
             publication_readers: StripedDrainGate::new_sealed(),
             service_readers: DrainGate::new_open(),
-            core: Mutex::new(LifecycleCore::new()),
+            core: Canonical::new(LifecycleCore::new()),
             retained_cleanup: Mutex::new(Vec::new()),
-            changed: Condvar::new(),
             #[cfg(test)]
             test_module_lease: Mutex::new(None),
         }
@@ -1835,7 +1855,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(crate) fn access(&self) -> LifecycleAccess<'_, A> {
         LifecycleAccess {
             coordinator: self,
-            core: self.core.lock(),
+            core: self.core.access(),
         }
     }
 
@@ -1843,7 +1863,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     /// wait for the canonical lock in that order: a close driver may own it
     /// while requesting the ingress lock.
     pub(crate) fn try_access(&self) -> Option<LifecycleAccess<'_, A>> {
-        self.core.try_lock().map(|core| LifecycleAccess {
+        self.core.try_access().map(|core| LifecycleAccess {
             coordinator: self,
             core,
         })
@@ -1966,12 +1986,16 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             Ok(()) => CleanupOutcome::Drained,
             Err(_) => CleanupOutcome::Retained,
         };
-        if !access.core.quarantine.complete(
-            std::ptr::from_ref(self).addr(),
-            stamp,
-            ModuleEpochId::is_current,
-            outcome,
-        ) {
+        let completed = access.transition(|core| {
+            let completed = core.quarantine.complete(
+                std::ptr::from_ref(self).addr(),
+                stamp,
+                ModuleEpochId::is_current,
+                outcome,
+            );
+            (completed, TransitionEffect::Keep)
+        });
+        if !completed {
             let retained = result.err().map(|(_, owner)| owner.into_authority());
             return Err((crate::XllError::Closing, retained));
         }
@@ -2071,11 +2095,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     }
 
     fn wait<'a>(&self, access: &mut LifecycleAccess<'a, A>) {
-        self.changed.wait(&mut access.core);
+        access.core.wait();
     }
 
     pub(crate) fn notify_all(&self) {
-        self.changed.notify_all();
+        self.core.notify_all();
     }
 
     /// Returns the read-side phase projection.
@@ -2136,7 +2160,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     /// particular, closing clears admission before `Closing` becomes visible,
     /// while opening publishes the coherent root/services pair before
     /// `Open` becomes visible.
-    fn commit_transition(&self, access: &LifecycleAccess<'_, A>, effect: TransitionEffect<A>) {
+    fn commit_transition(&self, core: &LifecycleCore<A>, effect: TransitionEffect<A>) {
         match effect {
             TransitionEffect::Keep => {}
             TransitionEffect::ClearPublication => {
@@ -2168,8 +2192,8 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 drop(drained.reopen());
             }
         }
-        self.phase.store(access.phase() as u8, Ordering::Release);
-        self.changed.notify_all();
+        self.phase
+            .store(core.canonical_state().phase() as u8, Ordering::Release);
     }
 
     fn publish_effect(bundle: &OpenGeneration<A>) -> TransitionEffect<A> {
@@ -2184,9 +2208,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         expected_removal_epoch: crate::generation::RemovalEpoch,
     ) -> crate::XllResult<OpenAttemptId> {
         access.transition(|core| {
-            let attempt = match core.sequence.claim_open(
-                matches!(core.state, LifecycleState::Closed),
+            let attempt = match core.state.begin_open(
+                &mut core.sequence,
                 expected_removal_epoch,
+                OpeningPayload::Empty,
             ) {
                 Ok(attempt) => attempt,
                 Err(rejection) => {
@@ -2204,10 +2229,6 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 }
             };
             core.host_intent = HostLifecycleIntent::None;
-            core.state = LifecycleState::Opening {
-                attempt,
-                payload: OpeningPayload::Empty,
-            };
             (Ok(attempt), TransitionEffect::Keep)
         })
     }
@@ -2223,43 +2244,29 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             return Err(crate::XllError::Closing);
         }
         let generation = published.attempt.into_runtime_generation();
-        let attempt = core.transition(|core| {
-            let state = mem::replace(&mut core.state, LifecycleState::Closed);
-            match state {
-                LifecycleState::Opening {
-                    attempt,
-                    payload: OpeningPayload::Published(bundle),
-                } => {
-                    if attempt != published.attempt || bundle.generation.id() != generation {
-                        core.state = LifecycleState::Opening {
-                            attempt,
-                            payload: OpeningPayload::Published(bundle),
-                        };
-                        return (
-                            Err(crate::error::construct::internal(
-                                crate::diagnostics::catalog::OPEN_STATE,
-                            )),
-                            TransitionEffect::Keep,
-                        );
+        core.transition(|core| {
+            let effect = core
+                .state
+                .commit_open(published.attempt, |payload| match payload {
+                    OpeningPayload::Published(bundle) if bundle.generation.id() == generation => {
+                        let effect = Self::publish_effect(&bundle);
+                        Ok((bundle, effect))
                     }
-                    let effect = Self::publish_effect(&bundle);
-                    core.state = LifecycleState::Open { bundle };
-                    (Ok(attempt), effect)
-                }
-                other => {
-                    core.state = other;
-                    (
-                        Err(crate::error::construct::internal(
-                            crate::diagnostics::catalog::OPEN_STATE,
-                        )),
-                        TransitionEffect::Keep,
-                    )
-                }
+                    other => Err(other),
+                });
+            match effect {
+                Some(effect) => (Ok(()), effect),
+                None => (
+                    Err(crate::error::construct::internal(
+                        crate::diagnostics::catalog::OPEN_STATE,
+                    )),
+                    TransitionEffect::Keep,
+                ),
             }
         })?;
         Ok(CommittedOpen {
             _access: core,
-            attempt,
+            attempt: published.attempt,
         })
     }
 
@@ -2693,14 +2700,21 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         if !std::ptr::eq(access.coordinator, self) {
             return Err(crate::XllError::Closing);
         }
-        let LifecycleState::Stopping(StoppingState::Finalizing(record)) = &mut access.core.state
-        else {
-            return Err(crate::XllError::Closing);
-        };
-        if !record.epoch().is_current() || !advance(record) {
-            return Err(crate::XllError::Closing);
-        }
-        Ok(())
+        access.transition(|core| {
+            let result = match &mut core.state {
+                LifecycleState::Stopping(StoppingState::Finalizing(record))
+                    if record.epoch().is_current() =>
+                {
+                    if advance(record) {
+                        Ok(())
+                    } else {
+                        Err(crate::XllError::Closing)
+                    }
+                }
+                _ => Err(crate::XllError::Closing),
+            };
+            (result, TransitionEffect::Keep)
+        })
     }
 
     #[allow(

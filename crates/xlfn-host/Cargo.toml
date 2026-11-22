@@ -13,6 +13,8 @@ description = "Excel and Windows host adapter primitives for xlfn"
 dispatch-test-hooks = []
 
 [dependencies]
+smallvec.workspace = true
+xlfn-common.workspace = true
 xlfn-engine.workspace = true
 xlfn-kernel.workspace = true
 xlfn-sys.workspace = true
@@ -22,3 +24,7 @@ windows-link.workspace = true
 
 [lints]
 workspace = true
+
+[[example]]
+name = "fp12_quota_image"
+crate-type = ["cdylib"]

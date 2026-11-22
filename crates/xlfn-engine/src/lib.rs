@@ -3,6 +3,7 @@
 //! to publish, retire, or reclaim a generation. Such tickets are issued by the
 //! coordinator that owns the corresponding resource.
 
+pub mod canonical;
 pub mod diagnostic_id;
 pub mod error;
 pub mod generation;

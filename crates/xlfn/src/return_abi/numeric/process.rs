@@ -1,7 +1,9 @@
 //! Bridges the FP12 allocation epoch to process-owned host accounting.
 use crate::XllResult;
 use std::ptr::NonNull;
-pub use xlfn_host::process_quota::MAX_PROCESS_NUMERIC_RETURN_BYTES;
+/// Provisional limit for all participating xlfn FP12 allocations in a process.
+pub const MAX_PROCESS_NUMERIC_RETURN_BYTES: usize =
+    xlfn_host::process_quota::MAX_PROCESS_NUMERIC_RETURN_BYTES;
 pub(super) use xlfn_host::process_quota::{PublishedCharge, Reservation};
 
 /// Recovers the accounting from the actual detached allocation and releases it

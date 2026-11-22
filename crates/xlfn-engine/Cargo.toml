@@ -12,6 +12,7 @@ description = "Lifecycle identities and host mutation contracts for xlfn"
 serde = ["dep:serde"]
 
 [dependencies]
+parking_lot.workspace = true
 serde = { workspace = true, features = ["derive"], optional = true }
 thiserror.workspace = true
 

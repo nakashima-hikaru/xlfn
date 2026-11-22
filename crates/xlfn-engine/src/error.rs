@@ -3,7 +3,7 @@
 //! [`XllError`] keeps diagnostic detail separate from the [`ExcelError`] returned
 //! to a worksheet. Applications can return `Result<T, ExcelError>` directly, use
 //! [`UdfError`] for application messages and original causes, or implement
-//! [`IntoXllError`](crate::error::IntoXllError) for an application-specific error type.
+//! [`IntoXllError`] for an application-specific error type.
 
 use std::borrow::Cow;
 use std::fmt;

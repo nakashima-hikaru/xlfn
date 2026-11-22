@@ -1551,6 +1551,7 @@ version = "0.2.0"
 name = "xlfn-engine"
 version = "0.1.0"
 dependencies = [
+ "parking_lot 0.13.0",
  "serde",
  "thiserror",
 ]
@@ -1559,7 +1560,9 @@ dependencies = [
 name = "xlfn-host"
 version = "0.1.0"
 dependencies = [
+ "smallvec",
  "windows-link 0.100.0",
+ "xlfn-common",
  "xlfn-engine",
  "xlfn-kernel",
  "xlfn-sys",
