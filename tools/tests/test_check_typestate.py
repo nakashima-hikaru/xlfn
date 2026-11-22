@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
+from threading import Barrier, Lock
 from unittest.mock import patch
 
 from xlfn_tools import check_typestate as checker
@@ -105,6 +106,141 @@ class OverlayCleanupTests(unittest.TestCase):
             self.assertEqual(untouched.stat().st_mtime_ns, before)
 
 
+class BatchAndWorkerTests(unittest.TestCase):
+    def setUp(self):
+        self.overlay = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.target = self.overlay.parent / f"{self.overlay.name}-target"
+        self.facade = "runtime"
+        self.builtin = "async_udf/builtin"
+        self.source = self.overlay / checker.MODULES[self.facade]
+        self.original = b"// untouched\r\n"
+        for module in (self.facade, self.builtin):
+            source = self.overlay / checker.MODULES[module]
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(self.original)
+
+    def fixture(self, name, *, module=None, negative=False):
+        kind = "fail" if negative else "pass"
+        return checker.Fixture(
+            Path(f"tools/typestate/{kind}/{name}.rs"),
+            module or self.facade,
+            ((3, "E0308"),) if negative else (),
+        )
+
+    def run_cases(self, *cases, jobs=1):
+        return checker.check_cases(list(cases), self.overlay, self.target, None, (), jobs)
+
+    def test_failed_batch_only_retries_members_and_still_blocks_negatives(self):
+        one, two = self.fixture("a"), self.fixture("c")
+        other = self.fixture("b", module=self.builtin)
+        negative = self.fixture("d", negative=True)
+        payloads = []
+
+        def cargo(_command, **_kwargs):
+            payload = self.source.read_bytes()
+            payloads.append(payload)
+            if b"a.rs" in payload and b"c.rs" in payload:
+                self.assertIn(b"mod typestate_compile_fixture_0;", payload)
+                self.assertIn(b"mod typestate_compile_fixture_1;", payload)
+                return subprocess.CompletedProcess([], 1, "", "failed batch")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with patch.object(checker.subprocess, "run", side_effect=cargo):
+            results, attempts = self.run_cases(one, other, two, negative, jobs=2)
+        self.assertEqual(
+            [result["fixture"] for result in results],
+            [
+                str(one.path),
+                str(other.path),
+                str(two.path),
+            ],
+        )
+        self.assertTrue(all(result["passed"] for result in results))
+        self.assertFalse(attempts[0]["passed"])
+        self.assertEqual(attempts[0]["stderr"], "failed batch")
+        self.assertEqual(
+            [attempt["kind"] for attempt in attempts],
+            [
+                "positive-batch",
+                "positive-single",
+                "positive-single",
+                "positive-single",
+            ],
+        )
+        self.assertEqual(
+            [attempt["fixtures"] for attempt in attempts],
+            [
+                [str(one.path), str(two.path)],
+                [str(one.path)],
+                [str(two.path)],
+                [str(other.path)],
+            ],
+        )
+        self.assertNotIn(b"c.rs", payloads[1])
+        self.assertNotIn(b"a.rs", payloads[2])
+        self.assertEqual(payloads[3], self.original)
+        self.assertEqual(self.source.read_bytes(), self.original)
+
+    def test_two_negative_workers_compile_concurrently_with_isolated_files_and_targets(self):
+        positive = self.fixture("control")
+        negatives = [self.fixture(f"case_{index}", negative=True) for index in range(4)]
+        barrier = Barrier(2, timeout=10)
+        lock = Lock()
+        seen: dict[Path, set[Path]] = {}
+
+        def cargo(command, *, cwd, **_kwargs):
+            overlay = Path(cwd)
+            target = Path(command[command.index("--target-dir") + 1])
+            source = overlay / checker.MODULES[self.facade]
+            contents = source.read_bytes().decode()
+            if "control.rs" in contents:
+                return subprocess.CompletedProcess([], 0, "", "")
+            found = [fixture for fixture in negatives if fixture.path.name in contents]
+            self.assertEqual(len(found), 1)
+            fixture = found[0]
+            with lock:
+                seen.setdefault(overlay, set()).add(target)
+            barrier.wait()
+            self.assertEqual(source.read_bytes().decode(), contents)
+            event = {
+                "reason": "compiler-message",
+                "message": {
+                    "level": "error",
+                    "message": "expected compiler error",
+                    "code": {"code": "E0308"},
+                    "spans": [
+                        {
+                            "is_primary": True,
+                            "file_name": str(overlay / fixture.path),
+                            "line_start": 3,
+                        }
+                    ],
+                },
+            }
+            return subprocess.CompletedProcess([], 1, json.dumps(event), "")
+
+        with patch.object(checker.subprocess, "run", side_effect=cargo):
+            results, attempts = self.run_cases(positive, *negatives, jobs=2)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(
+            {target for targets in seen.values() for target in targets},
+            {
+                self.target,
+                self.target / "worker-2",
+            },
+        )
+        self.assertEqual({len(targets) for targets in seen.values()}, {1})
+        self.assertTrue(all(result["passed"] for result in results))
+        self.assertEqual(
+            [result["fixture"] for result in results],
+            [str(fixture.path) for fixture in (positive, *negatives)],
+        )
+        self.assertEqual(
+            [attempt["kind"] for attempt in attempts], ["positive-single"] + ["negative"] * 4
+        )
+        self.assertEqual(self.source.read_bytes(), self.original)
+
+
 class Utf8TypestateTests(unittest.TestCase):
     def run_checker(self, *, target=None, wrong_error=False):
         with tempfile.TemporaryDirectory(prefix="xlfn-typestate-test-") as directory:
@@ -173,16 +309,20 @@ class Utf8TypestateTests(unittest.TestCase):
                     injections.extend(
                         line for line in text.splitlines() if line.startswith("#[path = ")
                     )
-                # Restoring each original must leave exactly one current fixture.
-                self.assertEqual(len(injections), 1)
-                literal = injections[0][len("#[path = ") : -1]
-                self.assertIn(
-                    "あ", literal, "Rust path literals must retain Unicode instead of JSON escapes"
-                )
-                fixture = Path(json.loads(literal)).relative_to(overlay)
-                compiled.append(fixture)
+                batch = []
+                for injection in injections:
+                    literal = injection[len("#[path = ") : -1]
+                    self.assertIn(
+                        "あ",
+                        literal,
+                        "Rust path literals must retain Unicode instead of JSON escapes",
+                    )
+                    batch.append(Path(json.loads(literal)).relative_to(overlay))
+                self.assertTrue(batch)
+                compiled.append(batch)
                 events = []
-                if fixture == negative:
+                if negative in batch:
+                    self.assertEqual(batch, [negative])
                     events.append(
                         {
                             "reason": "compiler-message",
@@ -194,7 +334,7 @@ class Utf8TypestateTests(unittest.TestCase):
                                 "spans": [
                                     {
                                         "is_primary": True,
-                                        "file_name": str(overlay / fixture),
+                                        "file_name": str(overlay / negative),
                                         "line_start": 3,
                                     }
                                 ],
@@ -277,7 +417,9 @@ class Utf8TypestateTests(unittest.TestCase):
         status, report, compiled, _, _ = self.run_checker(target="x86_64-pc-windows-msvc")
         self.assertEqual(status, 0)
         self.assertTrue(report["passed"])
-        self.assertEqual(len(compiled), 3)
+        self.assertEqual(list(map(len, compiled)), [2, 1])
+        self.assertEqual(report["runner_cost"]["cargo_invocations"], 2)
+        self.assertEqual(report["runner_cost"]["fixture_injections"], 3)
         self.assertEqual(report["skipped_fixtures"], [])
 
     def test_non_ascii_failure_keeps_exact_error_code_and_utf8_report(self):

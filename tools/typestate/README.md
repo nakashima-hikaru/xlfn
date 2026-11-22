@@ -4,8 +4,8 @@ From the repository root, run
 `uv run --project tools --locked python -B -m xlfn_tools.check_typestate`.
 The checker copies the
 current tracked and nonignored working files into a temporary workspace, injects
-each fixture as an internal module, and runs an offline, locked `cargo check`
-against its owning package. Facade fixtures check `xlfn` with
+fixtures as private internal modules, and runs offline, locked `cargo check`
+against each owning package. Facade fixtures check `xlfn` with
 `async,rtd,handles,cache`; `kernel/*` fixtures check `xlfn-kernel`
 without facade features. The default target is the rustc host. Windows COM
 fixtures run on Windows and are explicitly reported as skipped on other hosts.
@@ -15,12 +15,18 @@ additional dependency features such as `blake3/pure` for compile-only checks.
 CI runs the suite on both Linux and Windows. These are compile checks, not live
 Excel execution tests. The original source tree is never edited. An optional
 `--report PATH` retains toolchain, input hash, targets, commands, build settings,
-skipped fixtures, and diagnostics.
+skipped fixtures, and diagnostics. The report also lists actual Cargo invocations
+(including any fallback checks) and their aggregate cost.
 Each result records its package and actual features; `--extra-features` applies
 only to the facade fixtures.
 
-Positive callers run first. Negative callers must produce the exact error code
-at each line marked `// error: E....`; unrelated errors fail the check. Internal
+Positive callers run first, batched by package, features and compile target. A
+failed batch is checked again fixture by fixture to localize the failure; any
+failed positive check withholds all negative evidence. Negative callers are
+always compiled one at a time. Use `--jobs 2` to run two negative workers with
+separate temporary workspaces and Cargo target directories (the default is one
+worker to limit local disk use). Reports and logs remain in fixture order.
+Negative callers must produce the exact error code at each line marked `// error: E....`; unrelated errors fail the check. Internal
 injection verifies the actual method and field restrictions without publishing
 test APIs or accepting an ancestor-module privacy error as typestate evidence.
 
