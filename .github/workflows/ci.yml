@@ -102,6 +102,7 @@ jobs:
                   key: portable-quality
                   cache-bin: false
                   save-if: ${{ github.ref == 'refs/heads/main' }}
+                  cache-targets: false
 
             - name: Check Python tooling
               run: just python-check
@@ -182,6 +183,7 @@ jobs:
                   key: windows-quality-${{ matrix.check }}
                   cache-bin: false
                   save-if: ${{ github.ref == 'refs/heads/main' }}
+                  cache-targets: false
 
             - name: Install Just
               if: matrix.check != 'lifecycle typestate contracts'
@@ -243,6 +245,7 @@ jobs:
                   key: windows-nextest
                   cache-bin: false
                   save-if: ${{ github.ref == 'refs/heads/main' }}
+                  cache-targets: false
 
             - name: Run all-feature tests and UI fixtures
               shell: pwsh
@@ -288,12 +291,24 @@ jobs:
               run: test "$TEST_RESULT" = success
 
     feature-matrix:
-        name: Rust production feature tests shard ${{ matrix.shard }}/8 (windows-latest)
+        name: Rust ${{ matrix.label }} shard ${{ matrix.shard }}/${{ matrix.count }} (windows-latest)
         runs-on: windows-latest
         strategy:
             fail-fast: false
             matrix:
-                shard: [1, 2, 3, 4, 5, 6, 7, 8]
+                include:
+                    - { mode: check, label: feature checks, shard: 1, count: 4 }
+                    - { mode: check, label: feature checks, shard: 2, count: 4 }
+                    - { mode: check, label: feature checks, shard: 3, count: 4 }
+                    - { mode: check, label: feature checks, shard: 4, count: 4 }
+                    - { mode: test, label: production feature tests, shard: 1, count: 8 }
+                    - { mode: test, label: production feature tests, shard: 2, count: 8 }
+                    - { mode: test, label: production feature tests, shard: 3, count: 8 }
+                    - { mode: test, label: production feature tests, shard: 4, count: 8 }
+                    - { mode: test, label: production feature tests, shard: 5, count: 8 }
+                    - { mode: test, label: production feature tests, shard: 6, count: 8 }
+                    - { mode: test, label: production feature tests, shard: 7, count: 8 }
+                    - { mode: test, label: production feature tests, shard: 8, count: 8 }
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -311,19 +326,15 @@ jobs:
             - name: Restore Cargo cache
               uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
               with:
-                  key: windows-features-${{ matrix.shard }}
+                  key: windows-features-${{ matrix.mode }}-${{ matrix.shard }}
+                  cache-targets: false
                   cache-bin: false
                   save-if: ${{ github.ref == 'refs/heads/main' }}
 
-            - name: Check the assigned canonical feature combinations
+            - name: Run assigned canonical feature combinations
               run: >-
                   uv run --project tools --locked python -B -m xlfn_tools.feature_matrix
-                  check --shard ${{ matrix.shard }}/8
-
-            - name: Test the assigned canonical production feature combinations
-              run: >-
-                  uv run --project tools --locked python -B -m xlfn_tools.feature_matrix
-                  test --shard ${{ matrix.shard }}/8
+                  ${{ matrix.mode }} --shard ${{ matrix.shard }}/${{ matrix.count }}
 
     features-required:
         name: Rust features (windows-latest)
@@ -385,7 +396,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                lane: [core, async, cache]
+                lane: [core, async, rtd]
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -444,6 +455,7 @@ jobs:
                   key: windows-artifact-${{ matrix.target }}
                   cache-bin: false
                   save-if: ${{ github.ref == 'refs/heads/main' }}
+                  cache-targets: false
 
             - name: Reject direct windows-sys dependencies
               shell: pwsh
@@ -710,6 +722,7 @@ jobs:
                   key: verus-support
                   cache-bin: false
                   save-if: ${{ github.ref == 'refs/heads/main' }}
+                  cache-targets: false
 
             - name: Check Verus and native borrow rejection
               run: |
@@ -985,6 +998,7 @@ jobs:
                   key: lean-rust-replay
                   cache-bin: false
                   save-if: ${{ github.ref == 'refs/heads/main' }}
+                  cache-targets: false
 
             - name: Validate a Rust-generated shutdown trace
               env:

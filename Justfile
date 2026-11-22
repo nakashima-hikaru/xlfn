@@ -78,7 +78,7 @@ test-all: test-libtest
 miri-setup:
     rustup toolchain install {{miri-toolchain}} --profile minimal --component miri,rust-src
 
-miri: miri-core-lane miri-async-lane miri-cache-lane
+miri: miri-core-lane miri-async-lane miri-rtd-lane
 
 miri-core-lane:
     CARGO_BUILD_WARNINGS=allow cargo +{{miri-toolchain}} miri test --manifest-path probes/ghostcell-call-model/Cargo.toml --locked
@@ -87,21 +87,21 @@ miri-core-lane:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --lib --locked -- scalar_publication_survives --test-threads=1
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-kernel --lib --locked -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-host --lib --locked -- drain::threaded::tests::miri_
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features handles --lib --locked -- miri_
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-host --lib --locked -- process_quota::tests::miri_
-
-miri-async-lane:
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async-builtin --lib --locked -- miri_ --test-threads=1
-    just miri-async
-    just miri-async-handles
-
-miri-cache-lane:
     just miri-cache-ownership
     just miri-cache-endpoints
     just miri-cache-resident-entry
     just miri-cache-residency
+
+miri-async-lane:
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features handles --lib --locked -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async-builtin --lib --locked -- miri_ --test-threads=1
+    just miri-async
+    just miri-async-handles
+
+miri-rtd-lane:
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
 
 # Executor-independent registry accounting under both aliasing models.
 # Strict provenance is limited to calculation pins: parking_lot's blocking

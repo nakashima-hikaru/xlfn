@@ -62,7 +62,27 @@ def inventory(features: dict[str, list[str]], mode: str) -> list[Case]:
     return list(by_enabled.values())
 
 
-def shards(cases: list[Case], count: int) -> list[list[Case]]:
+def historical_test_seconds() -> dict[tuple[str, ...], int]:
+    """Load the normalized per-configuration Windows test costs."""
+    table = json.loads((ROOT / "tools/feature-test-costs.json").read_text(encoding="utf-8"))
+    return {
+        tuple(key.split(",")) if key else (): seconds for key, seconds in table["seconds"].items()
+    }
+
+
+def scheduling_weight(case: Case, historical: dict[tuple[str, ...], int]) -> int:
+    if not historical:
+        return case.weight
+    # New configurations not present in the historical run use a proxy on the
+    # same approximate scale (baseline cost 10; most test cases cost 40–100 s).
+    return historical.get(case.enabled, 4 * case.weight)
+
+
+def shards(
+    cases: list[Case],
+    count: int,
+    historical: dict[tuple[str, ...], int] | None = None,
+) -> list[list[Case]]:
     """Longest predicted cases first, with equal shard cardinality to within one."""
     if not 1 <= count <= len(cases):
         raise ValueError("shard count must be in [1, number of cases]")
@@ -70,13 +90,34 @@ def shards(cases: list[Case], count: int) -> list[list[Case]]:
     loads = [0] * count
     quotient, remainder = divmod(len(cases), count)
     capacities = [quotient + (index < remainder) for index in range(count)]
-    for case in sorted(cases, key=lambda case: (-case.weight, case.enabled)):
+    weights = historical or {}
+    for case in sorted(cases, key=lambda c: (-scheduling_weight(c, weights), c.enabled)):
         index = min(
             (i for i in range(count) if len(groups[i]) < capacities[i]),
             key=lambda i: (loads[i], len(groups[i]), i),
         )
         groups[index].append(case)
-        loads[index] += case.weight
+        loads[index] += scheduling_weight(case, weights)
+    if historical:
+        # Greedy placement respects the case count; exchanges can correct the
+        # final imbalance without changing that count or duplicating any case.
+        while True:
+            best_gain = 0
+            swap = None
+            for left, right in itertools.combinations(range(count), 2):
+                for i, a in enumerate(groups[left]):
+                    for j, b in enumerate(groups[right]):
+                        delta = scheduling_weight(a, weights) - scheduling_weight(b, weights)
+                        gain = delta * (loads[left] - loads[right] - delta)
+                        if gain > best_gain:
+                            best_gain = gain
+                            swap = (left, right, i, j, delta)
+            if swap is None:
+                break
+            left, right, i, j, delta = swap
+            groups[left][i], groups[right][j] = groups[right][j], groups[left][i]
+            loads[left] -= delta
+            loads[right] += delta
     return groups
 
 
@@ -118,8 +159,9 @@ def main() -> None:
     index, count = args.shard
     with (ROOT / "crates/xlfn/Cargo.toml").open("rb") as manifest:
         features = tomllib.load(manifest)["features"]
+    historical = historical_test_seconds() if args.mode == "test" else {}
     try:
-        selected = shards(inventory(features, args.mode), count)[index - 1]
+        selected = shards(inventory(features, args.mode), count, historical)[index - 1]
     except ValueError as error:
         parser.error(str(error))
     if args.list:
@@ -128,7 +170,7 @@ def main() -> None:
                 [
                     {
                         "enabled": case.enabled,
-                        "weight": case.weight,
+                        "weight": scheduling_weight(case, historical),
                         "command": case.command(args.mode),
                     }
                     for case in selected

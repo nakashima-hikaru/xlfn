@@ -129,7 +129,12 @@ compile-fail test with default features disabled. Both Windows artifact
 targets still run same-process runtime tests, the FP12 DLL reload checks,
 and XLL validation; the Excel SDK ABI probe runs on both targets separately.
 
-The Miri core, async, and cache lanes together run the same set as `just miri`.
+The Miri RTD, handles/async, and kernel/host/cache lanes together run the same
+set as `just miri`.
+The feature matrix keeps all 288 library checks in four shards and all 96
+production library tests in eight shards. Test schedules use normalized Windows
+per-configuration timings from CI run 45007040232; new configurations fall
+back to a feature-cost estimate. Shard weights guide scheduling, not pass/fail.
 Linux and Windows lifecycle-typestate jobs upload their fixture timing
 reports. Lean checks the proofs and checked-in fixtures without waiting for
 Windows, then reuses those exact checkers for Rust and Windows trace replays.

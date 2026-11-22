@@ -46,6 +46,18 @@ class FeatureMatrixTests(unittest.TestCase):
                 self.assertLessEqual(max(weights) - min(weights), expected_weight_range)
                 self.assertIn(matrix.Case(("async-builtin",), ("async", "async-builtin")), cases)
 
+    def test_historical_test_costs_balance_all_observed_configurations(self):
+        observed = matrix.historical_test_seconds()
+        cases = matrix.inventory(self.features, "test")
+        self.assertEqual(set(observed), {case.enabled for case in cases})
+        self.assertTrue(all(seconds > 0 for seconds in observed.values()))
+        groups = matrix.shards(cases, 8, observed)
+        self.assertEqual([len(group) for group in groups], [12] * 8)
+        self.assertCountEqual(itertools.chain.from_iterable(groups), cases)
+        self.assertEqual(groups, matrix.shards(cases[::-1], 8, observed))
+        weights = [sum(matrix.scheduling_weight(c, observed) for c in group) for group in groups]
+        self.assertLessEqual(max(weights) - min(weights), 10)
+
     def test_command_preserves_locked_library_and_serial_tests(self):
         case = matrix.Case(("async-builtin", "handles"), ("async", "async-builtin", "handles"))
         self.assertEqual(
