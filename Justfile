@@ -78,7 +78,9 @@ test-all: test-libtest
 miri-setup:
     rustup toolchain install {{miri-toolchain}} --profile minimal --component miri,rust-src
 
-miri:
+miri: miri-core-lane miri-async-lane miri-cache-lane
+
+miri-core-lane:
     CARGO_BUILD_WARNINGS=allow cargo +{{miri-toolchain}} miri test --manifest-path probes/ghostcell-call-model/Cargo.toml --locked
     CARGO_BUILD_WARNINGS=allow MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test --manifest-path probes/ghostcell-call-model/Cargo.toml --locked
     # Layer metadata reads wall-clock time, so run these reentry cases without isolation.
@@ -86,16 +88,20 @@ miri:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-kernel --lib --locked -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-host --lib --locked -- drain::threaded::tests::miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features handles --lib --locked -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-host --lib --locked -- process_quota::tests::miri_
+
+miri-async-lane:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async-builtin --lib --locked -- miri_ --test-threads=1
     just miri-async
     just miri-async-handles
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
+
+miri-cache-lane:
     just miri-cache-ownership
     just miri-cache-endpoints
     just miri-cache-resident-entry
     just miri-cache-residency
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-host --lib --locked -- process_quota::tests::miri_
 
 # Executor-independent registry accounting under both aliasing models.
 # Strict provenance is limited to calculation pins: parking_lot's blocking
@@ -193,25 +199,11 @@ test-async-builtin:
 
 # Exercise production feature selections without benchmark/refinement helpers.
 test-features partition="1/1":
-    cargo hack test \
-        --package xlfn \
-        --feature-powerset \
-        --keep-going \
-        --exclude-features default,bench-internals,refinement \
-        --partition {{partition}} \
-        --lib \
-        --locked \
-        -- \
-        --test-threads=1
+    uv run --project tools --locked python -B -m xlfn_tools.feature_matrix test --shard {{partition}}
 
-# Check every combination, including internal instrumentation interactions.
-features:
-    cargo hack check \
-        --package xlfn \
-        --feature-powerset \
-        --exclude-features default \
-        --lib \
-        --locked
+# Check every distinct resolved combination, including internal interactions.
+features partition="1/1":
+    uv run --project tools --locked python -B -m xlfn_tools.feature_matrix check --shard {{partition}}
 
 deny:
     cargo deny --locked check

@@ -7,6 +7,10 @@ inherits = "default"
 fail-fast = false
 global-timeout = "20m"
 
+[profile.ci.junit]
+path = "junit.xml"
+report-skipped = "ignored"
+
 [test-groups]
 # This serialization applies to nextest runs only. Windows artifact CI
 # deliberately retains same-process libtest semantics; RTD tests also acquire

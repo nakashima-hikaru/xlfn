@@ -2,6 +2,8 @@ name: CI
 
 "on":
     push:
+        # Topic branches are checked at refs/pull/<n>/merge instead.
+        branches: [main, 'maintenance/**', 'release/**']
     pull_request:
     workflow_dispatch:
 
@@ -49,8 +51,24 @@ jobs:
                 persist-credentials: false
             - name: Install pinned extraction toolchain and targets
               run: rustup toolchain install nightly-2026-09-28 --profile minimal --target aarch64-apple-darwin,x86_64-pc-windows-msvc
+            - name: Cache Cargo dependencies for API extraction
+              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              with:
+                  key: nightly-2026-09-28-api
+                  cache-targets: false
+                  cache-bin: false
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
+            - name: Cache the pinned API extractor
+              id: api-extractor-cache
+              uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+              with:
+                  path: ~/.cache/xlfn-api-extractor/bin/cargo-public-api
+                  key: cargo-public-api-0.52.0-${{ runner.os }}-${{ runner.arch }}
             - name: Install API extractor
-              run: cargo install --locked cargo-public-api --version 0.52.0
+              if: steps.api-extractor-cache.outputs.cache-hit != 'true'
+              run: cargo install --locked --root "$HOME/.cache/xlfn-api-extractor" cargo-public-api --version 0.52.0
+            - name: Add API extractor to PATH
+              run: echo "$HOME/.cache/xlfn-api-extractor/bin" >> "$GITHUB_PATH"
             - name: Verify reviewed API surfaces
               run: PYTHONPATH=tools/src python3 -m xlfn_tools.check_public_api
 
@@ -77,6 +95,13 @@ jobs:
               with:
                   tool: just@1.58.0,cargo-semver-checks@0.50.0,cargo-deny@0.20.2,mdbook@0.5.4
                   fallback: none
+
+            - name: Restore Cargo cache
+              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              with:
+                  key: portable-quality
+                  cache-bin: false
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
 
             - name: Check Python tooling
               run: just python-check
@@ -109,7 +134,16 @@ jobs:
               run: just ghostcell-model
 
             - name: Check private lifecycle typestate contracts
-              run: just typestate
+              id: typestate
+              run: uv run --project tools --locked python -B -m xlfn_tools.check_typestate --jobs 2 --report target/typestate-report.json
+
+            - name: Upload Linux typestate timings
+              if: ${{ !cancelled() && steps.typestate.outcome != 'skipped' }}
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+              with:
+                  name: typestate-timings-linux
+                  path: target/typestate-report.json
+                  if-no-files-found: error
 
             - name: Check RTD consumer feature boundaries
               run: uv run --project tools --locked python -B tests/rtd-api-fixture/check.py
@@ -121,27 +155,12 @@ jobs:
               run: just guide-check
 
     rust-quality-windows:
-        name: Rust ${{ matrix.check.name }} (windows-latest)
+        name: Rust ${{ matrix.check }} (windows-latest)
         runs-on: windows-latest
         strategy:
             fail-fast: false
             matrix:
-                check:
-                    - name: lint
-                      command: just clippy
-                    - name: features
-                      command: just features
-                    - name: tests
-                      command: just test-ci
-                    - name: lifecycle typestate contracts
-                      command: just typestate
-                    - name: handle publication interleavings
-                      command: >-
-                          cargo test
-                          --package xlfn
-                          --all-features
-                          insert_racing_close_at_publication_boundaries_never_leaves_a_live_handle
-                          --locked
+                check: [lint, lifecycle typestate contracts]
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -149,7 +168,7 @@ jobs:
                 persist-credentials: false
 
             - name: Set up uv and Python
-              if: matrix.check.name == 'lifecycle typestate contracts'
+              if: matrix.check == 'lifecycle typestate contracts'
               uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
               with:
                   version: "0.13.6"
@@ -157,22 +176,118 @@ jobs:
                   enable-cache: true
                   cache-dependency-glob: tools/uv.lock
 
-            - name: Install development tools
+            - name: Restore Cargo cache
+              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              with:
+                  key: windows-quality-${{ matrix.check }}
+                  cache-bin: false
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
+
+            - name: Install Just
+              if: matrix.check != 'lifecycle typestate contracts'
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
-                  tool: just@1.58.0,cargo-nextest@0.9.143,cargo-hack@0.6.45
+                  tool: just@1.58.0
                   fallback: none
 
-            # The typestate runner deliberately checks temporary workspaces
-            # offline; a fresh Windows job must first populate Cargo's cache.
+            - name: Clippy
+              if: matrix.check == 'lint'
+              run: just clippy
+
+            # The typestate runner checks temporary workspaces offline.
             - name: Fetch dependencies for offline lifecycle checks
-              if: matrix.check.name == 'lifecycle typestate contracts'
+              if: matrix.check == 'lifecycle typestate contracts'
               run: cargo fetch --locked
 
-            - name: Run ${{ matrix.check.name }}
-              run: ${{ matrix.check.command }}
+            - name: Test the typestate fixture runner
+              if: matrix.check == 'lifecycle typestate contracts'
+              run: uv run --project tools --locked python -B -m unittest discover -s tools/tests -p test_check_typestate.py
 
-    production-feature-tests:
+            - name: Check private lifecycle typestate contracts
+              id: typestate
+              if: matrix.check == 'lifecycle typestate contracts'
+              run: uv run --project tools --locked python -B -m xlfn_tools.check_typestate --jobs 2 --report target/typestate-report.json
+
+            - name: Upload Windows typestate timings
+              if: ${{ matrix.check == 'lifecycle typestate contracts' && !cancelled() && steps.typestate.outcome != 'skipped' }}
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+              with:
+                  name: typestate-timings-windows
+                  path: target/typestate-report.json
+                  if-no-files-found: error
+
+    windows-tests:
+        name: Rust tests (windows-latest)
+        runs-on: windows-latest
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
+
+            - name: Install Just
+              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
+              with:
+                  tool: just@1.58.0
+                  fallback: none
+
+            - name: Install nextest
+              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
+              with:
+                  tool: cargo-nextest@0.9.143
+                  fallback: none
+
+            - name: Restore Cargo cache
+              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              with:
+                  key: windows-nextest
+                  cache-bin: false
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
+
+            - name: Run all-feature tests and UI fixtures
+              shell: pwsh
+              run: |
+                  Remove-Item -LiteralPath target/nextest/ci/junit.xml -Force -ErrorAction SilentlyContinue
+                  just test-ci
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+            - name: Require the handle publication interleaving regression to have passed
+              shell: pwsh
+              run: |
+                  [xml]$report = Get-Content -Raw -LiteralPath target/nextest/ci/junit.xml
+                  $name = 'handle::tests::insert_racing_close_at_publication_boundaries_never_leaves_a_live_handle'
+                  $cases = $report.SelectNodes("//testsuite[@name='xlfn']/testcase[@classname='xlfn' and @name='$name']")
+                  if ($cases.Count -ne 1 -or $cases[0].SelectSingleNode('failure|error|skipped|flakyFailure|flakyError|rerunFailure|rerunError')) {
+                    throw "Expected exactly one passing xlfn test: $name"
+                  }
+
+            - name: Upload nextest JUnit report
+              if: ${{ !cancelled() }}
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+              with:
+                  name: windows-nextest-junit
+                  path: target/nextest/ci/junit.xml
+                  if-no-files-found: warn
+
+            - name: Run the compile-fail regression without the async feature
+              run: >-
+                  cargo nextest run --package xlfn --no-default-features --test compile
+                  --locked --no-tests=fail
+                  -E "test(=async_udf_requires_async_feature)"
+
+    handle-regression-required:
+        # Keep the legacy status context without building and running Rust twice.
+        name: Rust handle publication interleavings (windows-latest)
+        runs-on: ubuntu-latest
+        needs: windows-tests
+        if: always()
+        steps:
+            - name: Require the Windows test job and JUnit assertion to pass
+              env:
+                  TEST_RESULT: ${{ needs.windows-tests.result }}
+              run: test "$TEST_RESULT" = success
+
+    feature-matrix:
         name: Rust production feature tests shard ${{ matrix.shard }}/8 (windows-latest)
         runs-on: windows-latest
         strategy:
@@ -185,25 +300,52 @@ jobs:
               with:
                 persist-credentials: false
 
-            - name: Install development tools
-              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
+            - name: Set up uv and Python
+              uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
               with:
-                  tool: just@1.58.0,cargo-hack@0.6.45
-                  fallback: none
+                  version: "0.13.6"
+                  python-version: "3.15"
+                  enable-cache: true
+                  cache-dependency-glob: tools/uv.lock
 
-            - name: Run production feature tests
-              run: just test-features ${{ matrix.shard }}/8
+            - name: Restore Cargo cache
+              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              with:
+                  key: windows-features-${{ matrix.shard }}
+                  cache-bin: false
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
 
-    production-feature-tests-required:
-        # Preserve the existing required check while requiring every shard.
-        name: Rust production feature tests (windows-latest)
+            - name: Check the assigned canonical feature combinations
+              run: >-
+                  uv run --project tools --locked python -B -m xlfn_tools.feature_matrix
+                  check --shard ${{ matrix.shard }}/8
+
+            - name: Test the assigned canonical production feature combinations
+              run: >-
+                  uv run --project tools --locked python -B -m xlfn_tools.feature_matrix
+                  test --shard ${{ matrix.shard }}/8
+
+    features-required:
+        name: Rust features (windows-latest)
         runs-on: ubuntu-latest
-        needs: production-feature-tests
+        needs: feature-matrix
         if: always()
         steps:
-            - name: Require every production feature shard to pass
+            - name: Require every feature matrix shard to pass
               env:
-                  SHARD_RESULT: ${{ needs.production-feature-tests.result }}
+                  SHARD_RESULT: ${{ needs.feature-matrix.result }}
+              run: test "$SHARD_RESULT" = success
+
+    production-feature-tests-required:
+        # Preserve the prior required status context.
+        name: Rust production feature tests (windows-latest)
+        runs-on: ubuntu-latest
+        needs: feature-matrix
+        if: always()
+        steps:
+            - name: Require every feature matrix shard to pass
+              env:
+                  SHARD_RESULT: ${{ needs.feature-matrix.result }}
               run: test "$SHARD_RESULT" = success
 
     standalone-consumers:
@@ -214,6 +356,14 @@ jobs:
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                 persist-credentials: false
+
+            - name: Restore Cargo cache
+              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              with:
+                  key: standalone-windows
+                  cache-targets: false
+                  cache-bin: false
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
 
             - name: Check and lint standalone consumers
               shell: pwsh
@@ -229,9 +379,13 @@ jobs:
                     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                   }
 
-    miri:
-        name: Miri regression tests
+    miri-lane:
+        name: Miri ${{ matrix.lane }}
         runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                lane: [core, async, cache]
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -247,8 +401,27 @@ jobs:
             - name: Install Miri
               run: just miri-setup
 
+            - name: Restore Cargo cache
+              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              with:
+                  key: miri-${{ matrix.lane }}
+                  cache-targets: false
+                  cache-bin: false
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
+
             - name: Run Miri regression tests
-              run: just miri
+              run: just miri-${{ matrix.lane }}-lane
+
+    miri:
+        name: Miri regression tests
+        runs-on: ubuntu-latest
+        needs: miri-lane
+        if: always()
+        steps:
+            - name: Require all three Miri lanes
+              env:
+                  LANE_RESULT: ${{ needs.miri-lane.result }}
+              run: test "$LANE_RESULT" = success
 
     windows-artifact:
         name: Windows artifact (${{ matrix.target }})
@@ -265,6 +438,13 @@ jobs:
               with:
                 persist-credentials: false
 
+            - name: Restore Cargo cache
+              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              with:
+                  key: windows-artifact-${{ matrix.target }}
+                  cache-bin: false
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
+
             - name: Reject direct windows-sys dependencies
               shell: pwsh
               run: |
@@ -279,6 +459,8 @@ jobs:
               shell: pwsh
               run: ./tests/fp12-multi-image/qualify.ps1 -Target ${{ matrix.target }}
 
+            # Keep both architectures and same-process runtime coverage.
+            # The Windows nextest job owns full compile-UI coverage.
             - name: Run Windows-targeted tests
               shell: pwsh
               env:
@@ -292,7 +474,10 @@ jobs:
                     --target ${{ matrix.target }} `
                     --locked `
                     -- `
-                    --test-threads=1
+                    --test-threads=1 `
+                    --skip trait_driven_function_signatures_compile `
+                    --skip invalid_macro_options_fail_to_compile `
+                    --skip distribution_commit_requires_prepared_verification
 
             - name: Upload Windows RTD shutdown trace
               uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -397,6 +582,14 @@ jobs:
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                 persist-credentials: false
+
+            - name: Restore Cargo cache
+              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              with:
+                  key: excel-sdk-probe-${{ matrix.target }}
+                  cache-targets: false
+                  cache-bin: false
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
 
             - name: Download and extract the pinned Excel SDK
               shell: pwsh
@@ -511,6 +704,13 @@ jobs:
             - name: Audit Verus TCB compliance (assumes and unapproved external_body)
               run: just verus-audit
 
+            - name: Restore Cargo cache
+              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              with:
+                  key: verus-support
+                  cache-bin: false
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
+
             - name: Check Verus and native borrow rejection
               run: |
                   uv run --project tools --locked python -B -m xlfn_tools.check_transition_borrows
@@ -556,34 +756,14 @@ jobs:
             - name: Require every mutation case exactly once
               run: uv run --project tools --locked python -B -m xlfn_tools.check_verus_reports verus-timings --shard-count 4
 
-    lean:
-        name: Lean formal models
+    lean-static:
+        name: Lean proofs and checked-in fixtures
         runs-on: ubuntu-latest
-        needs: windows-artifact
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                 persist-credentials: false
-
-            - name: Download Windows RTD shutdown traces
-              uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-              with:
-                  pattern: windows-rtd-shutdown-trace-*
-                  path: windows-rtd-shutdown-traces
-                  merge-multiple: true
-
-            - name: Download Windows retained RTD close and reopen traces
-              uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-              with:
-                  pattern: windows-rtd-retained-traces-*
-                  path: windows-rtd-retained-traces
-
-            - name: Download Windows H4 handle refinement traces
-              uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-              with:
-                  pattern: windows-handle-refinement-traces-*
-                  path: windows-handle-refinement-traces
 
             - name: Reject unfinished proof placeholders
               shell: bash
@@ -658,15 +838,73 @@ jobs:
                     fi
                   done
 
+            - name: Reject invalid H4 handle refinement fixtures
+              shell: bash
+              run: |
+                  for trace in formal/fixtures/handle-refinement/negative-*.json; do
+                    if formal/.lake/build/bin/published_trace_checker < "$trace"; then
+                      echo "Negative H4 fixture was accepted: $trace" >&2
+                      exit 1
+                    fi
+                  done
+
+            - name: Archive checker executables with their permissions
+              working-directory: formal/.lake/build/bin
+              run: tar -cf "${RUNNER_TEMP}/lean-checkers.tar" shutdown_trace_checker composition_trace_checker published_trace_checker
+
+            - name: Upload Lean trace checkers
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+              with:
+                  name: lean-trace-checkers
+                  path: ${{ runner.temp }}/lean-checkers.tar
+                  if-no-files-found: error
+
+    lean-windows-replay:
+        name: Lean Windows trace replay
+        runs-on: ubuntu-latest
+        needs: [lean-static, windows-artifact]
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
+
+            - name: Download Lean trace checkers
+              uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+              with:
+                  name: lean-trace-checkers
+                  path: ${{ runner.temp }}/lean-checkers
+
+            - name: Extract Lean trace checkers
+              run: |
+                  mkdir -p formal/.lake/build/bin
+                  tar -xf "${RUNNER_TEMP}/lean-checkers/lean-checkers.tar" -C formal/.lake/build/bin
+
+            - name: Download Windows RTD shutdown traces
+              uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+              with:
+                  pattern: windows-rtd-shutdown-trace-*
+                  path: windows-rtd-shutdown-traces
+                  merge-multiple: true
+
+            - name: Download Windows retained RTD close and reopen traces
+              uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+              with:
+                  pattern: windows-rtd-retained-traces-*
+                  path: windows-rtd-retained-traces
+
+            - name: Download Windows H4 handle refinement traces
+              uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+              with:
+                  pattern: windows-handle-refinement-traces-*
+                  path: windows-handle-refinement-traces
+
             - name: Validate Windows RTD shutdown traces
               shell: bash
               run: |
-                  traces=(windows-rtd-shutdown-traces/*.json)
-                  if [ "${#traces[@]}" -eq 0 ]; then
-                    echo "No Windows RTD shutdown traces were downloaded." >&2
-                    exit 1
-                  fi
-                  for trace in "${traces[@]}"; do
+                  for target in i686-pc-windows-msvc x86_64-pc-windows-msvc; do
+                    trace="windows-rtd-shutdown-traces/windows-rtd-shutdown-trace-$target.json"
+                    test -f "$trace"
                     formal/.lake/build/bin/shutdown_trace_checker < "$trace"
                   done
 
@@ -720,15 +958,33 @@ jobs:
                     exit 1
                   fi
 
-            - name: Reject invalid H4 handle refinement fixtures
-              shell: bash
+    lean-rust-replay:
+        name: Lean Rust trace replay
+        runs-on: ubuntu-latest
+        needs: lean-static
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                persist-credentials: false
+
+            - name: Download Lean trace checkers
+              uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+              with:
+                  name: lean-trace-checkers
+                  path: ${{ runner.temp }}/lean-checkers
+
+            - name: Extract Lean trace checkers
               run: |
-                  for trace in formal/fixtures/handle-refinement/negative-*.json; do
-                    if formal/.lake/build/bin/published_trace_checker < "$trace"; then
-                      echo "Negative H4 fixture was accepted: $trace" >&2
-                      exit 1
-                    fi
-                  done
+                  mkdir -p formal/.lake/build/bin
+                  tar -xf "${RUNNER_TEMP}/lean-checkers/lean-checkers.tar" -C formal/.lake/build/bin
+
+            - name: Restore Cargo cache
+              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              with:
+                  key: lean-rust-replay
+                  cache-bin: false
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
 
             - name: Validate a Rust-generated shutdown trace
               env:
@@ -792,3 +1048,19 @@ jobs:
                       rust-composition-open-quarantine-*.json
                       rust-shutdown-open-quarantine-*.json
                   if-no-files-found: ignore
+
+    lean:
+        name: Lean formal models
+        runs-on: ubuntu-latest
+        needs: [lean-static, lean-windows-replay, lean-rust-replay]
+        if: always()
+        steps:
+            - name: Require the proofs and all trace replays to pass
+              env:
+                  STATIC_RESULT: ${{ needs.lean-static.result }}
+                  WINDOWS_RESULT: ${{ needs.lean-windows-replay.result }}
+                  RUST_RESULT: ${{ needs.lean-rust-replay.result }}
+              run: |
+                  test "$STATIC_RESULT" = success
+                  test "$WINDOWS_RESULT" = success
+                  test "$RUST_RESULT" = success

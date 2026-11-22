@@ -117,6 +117,23 @@ their state, including the thread identity needed to reject self-join while
 another caller is already joining. Runtime regressions also check abandonment,
 retry ownership, producer destruction, and permit lifetime.
 
+## CI coverage
+
+CI runs against the pull request merge ref. Direct pushes run CI and the
+comparison-XLL workflow only on `main`, `maintenance/**`, and `release/**`;
+other branches can use manual dispatch before a pull request is opened.
+
+Windows nextest runs the full compile-UI suites and records the handle
+publication regression in JUnit. It also runs the dedicated no-async
+compile-fail test with default features disabled. Both Windows artifact
+targets still run same-process runtime tests, the FP12 DLL reload checks,
+and XLL validation; the Excel SDK ABI probe runs on both targets separately.
+
+The Miri core, async, and cache lanes together run the same set as `just miri`.
+Linux and Windows lifecycle-typestate jobs upload their fixture timing
+reports. Lean checks the proofs and checked-in fixtures without waiting for
+Windows, then reuses those exact checkers for Rust and Windows trace replays.
+
 ## Test in Excel
 
 Artifact checks verify binary structure, but end-to-end worksheet behavior
