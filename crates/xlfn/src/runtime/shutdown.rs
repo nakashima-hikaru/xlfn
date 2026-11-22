@@ -20,7 +20,7 @@ pub(crate) use owner::RemovalOwner;
 pub(crate) use pipeline::CompletedResourceCertificates;
 #[cfg(any(test, feature = "refinement"))]
 pub(crate) use pipeline::QuiescenceProof;
-pub(crate) use pipeline::{CompletedResources, ReclaimFailure, ServiceSealFailure};
+pub(crate) use pipeline::{CompletedResources, ShutdownDiagnosticContext};
 pub(in crate::runtime) use pipeline::{ExecutionDrainFailure, ExecutionDrained, TeardownTxn};
 
 // The types are visible to consumers; issuance remains inside the pipeline.

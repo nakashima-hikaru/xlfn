@@ -80,7 +80,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     #[cfg(test)]
     #[inline]
     pub(crate) fn generation(&self) -> ServerGeneration {
-        self.server().expect("registered server").generation
+        self.server().generation
     }
 
     #[inline]
@@ -91,50 +91,45 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     }
 
     #[inline]
-    pub(crate) fn server(&self) -> XllResult<&SubscriptionServer<H, E, C>> {
+    pub(crate) fn server(&self) -> &SubscriptionServer<H, E, C> {
         // SAFETY: registration retains this stable allocation until the runtime
         // and every handle use have been drained. No entry is removed or replaced.
-        Ok(unsafe { self.server.as_ref() })
+        unsafe { self.server.as_ref() }
     }
 
     pub(crate) fn attach_update_notifier(
         &self,
         notifier: H::Notifier,
     ) -> XllResult<Option<H::Notifier>> {
-        self.server()?.publish.attach_update_notifier(notifier)
+        self.server().publish.attach_update_notifier(notifier)
     }
 
     pub(crate) fn detach_update_notifier(&self) -> Option<H::Notifier> {
-        self.server()
-            .ok()
-            .and_then(|server| server.publish.detach_update_notifier())
+        self.server().publish.detach_update_notifier()
     }
 
     pub(crate) fn pulse_notification(&self) -> XllResult<()> {
-        self.server()?.publish.pulse_notification()
+        self.server().publish.pulse_notification()
     }
 
     pub(crate) fn begin_refresh(&self) -> XllResult<RtdRefreshBatch<'_, H>> {
-        self.server()?.publish.begin_refresh()
+        self.server().publish.begin_refresh()
     }
 
     #[cfg(all(test, feature = "rtd"))]
     pub(crate) fn pending_update_count(&self) -> usize {
-        self.server()
-            .expect("test server remains registered")
-            .publish
-            .pending_update_count()
+        self.server().publish.pending_update_count()
     }
 
     #[cfg(test)]
     pub(crate) fn test_server(&self) -> &SubscriptionServer<H, E, C> {
-        self.server().expect("test server remains registered")
+        self.server()
     }
 
     pub(crate) fn claim(&self, id: SubscriptionId) -> XllResult<()> {
         let runtime = self.runtime();
         let _runtime_operation = runtime.enter_external_operation()?;
-        let server = self.server()?;
+        let server = self.server();
         let _server_operation = server.enter_operation()?;
         server.ensure_open()?;
         runtime.claim_server(server.generation, id)
@@ -172,7 +167,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     }
 
     pub(crate) fn terminate(&self) -> XllResult<()> {
-        self.runtime().terminate_server(self.server()?.generation)
+        self.runtime().terminate_server(self.server().generation)
     }
 }
 

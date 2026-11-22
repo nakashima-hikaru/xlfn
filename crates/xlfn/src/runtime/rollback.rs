@@ -217,12 +217,9 @@ fn rollback_open_inner<'runtime, A: Addin>(
     let teardown = match teardown.seal_services() {
         Ok(stage) => stage,
         Err(failure) => {
-            let hazard = failure.hazard();
-            let boundary = match &failure {
-                super::shutdown::ServiceSealFailure::HandleTopics(_) => "xlAutoOpen RTD rollback",
-                super::shutdown::ServiceSealFailure::Handles(_) => "xlAutoOpen handle rollback",
-            };
-            report_boundary_error(boundary, &failure.into_error());
+            let (hazard, boundary, error) =
+                failure.into_diagnostic(super::shutdown::ShutdownDiagnosticContext::OpenRollback);
+            report_boundary_error(boundary, &error);
             return incomplete(runtime, hazard);
         }
     };
@@ -256,12 +253,9 @@ fn rollback_open_inner<'runtime, A: Addin>(
     let teardown = match teardown.reclaim(report_cleanup_issue) {
         Ok(teardown) => teardown,
         Err(failure) => {
-            let hazard = failure.hazard();
-            let boundary = match &failure {
-                super::shutdown::ReclaimFailure::Diagnostics(_) => "xlAutoOpen diagnostic rollback",
-                super::shutdown::ReclaimFailure::Rtd(_) => "xlAutoOpen RTD quiescence rollback",
-            };
-            report_boundary_error(boundary, &failure.into_error());
+            let (hazard, boundary, error) =
+                failure.into_diagnostic(super::shutdown::ShutdownDiagnosticContext::OpenRollback);
+            report_boundary_error(boundary, &error);
             return incomplete(runtime, hazard);
         }
     };

@@ -344,7 +344,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         id: SubscriptionId,
     ) -> XllResult<SubscriptionConnection<H, E, C>> {
         let runtime = server_handle.runtime();
-        let server = server_handle.server()?;
+        let server = server_handle.server();
         // SAFETY: the runtime is derived from this handle; the
         // runtime and its server arena remain allocated for this owned
         // connection operation under the register/close lifecycle contract.
@@ -521,7 +521,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         topic_id: TopicId,
     ) -> XllResult<()> {
         let runtime = server_handle.runtime();
-        let server = server_handle.server()?;
+        let server = server_handle.server();
         let _operation = server.enter_operation()?;
         #[cfg(test)]
         {
@@ -576,7 +576,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         completion: H::DisconnectCompletion,
     ) -> XllResult<()> {
         let runtime = server_handle.runtime();
-        let server = server_handle.server()?;
+        let server = server_handle.server();
         // SAFETY: the COM caller owns runtime admission while transferring
         // this operation to the generation-owned queue. Close drains that
         // queue's admissions and joins its workers before reclaiming servers.

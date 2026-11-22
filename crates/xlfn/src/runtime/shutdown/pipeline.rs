@@ -491,17 +491,34 @@ pub(crate) enum ServiceSealFailure {
     Handles(crate::XllError),
 }
 
-impl ServiceSealFailure {
-    pub(crate) fn hazard(&self) -> crate::shutdown::UnloadHazard {
-        match self {
-            Self::HandleTopics(_) => crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered,
-            Self::Handles(_) => crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
-        }
-    }
+/// The shutdown boundary selects the report label, not the hazard classification.
+pub(crate) enum ShutdownDiagnosticContext {
+    OpenRollback,
+    Removal,
+}
 
-    pub(crate) fn into_error(self) -> crate::XllError {
+type ShutdownDiagnostic = (crate::shutdown::UnloadHazard, &'static str, crate::XllError);
+
+impl ServiceSealFailure {
+    pub(crate) fn into_diagnostic(self, context: ShutdownDiagnosticContext) -> ShutdownDiagnostic {
+        use crate::shutdown::UnloadHazard;
         match self {
-            Self::HandleTopics(error) | Self::Handles(error) => error,
+            Self::HandleTopics(error) => (
+                UnloadHazard::RtdGitCallbackStillRegistered,
+                match context {
+                    ShutdownDiagnosticContext::OpenRollback => "xlAutoOpen RTD rollback",
+                    ShutdownDiagnosticContext::Removal => "xlAutoRemove RTD shutdown",
+                },
+                error,
+            ),
+            Self::Handles(error) => (
+                UnloadHazard::HandleStoreNotQuiescent,
+                match context {
+                    ShutdownDiagnosticContext::OpenRollback => "xlAutoOpen handle rollback",
+                    ShutdownDiagnosticContext::Removal => "xlAutoRemove handle table shutdown",
+                },
+                error,
+            ),
         }
     }
 }
@@ -744,27 +761,41 @@ pub(crate) enum ReclaimFailure {
 }
 
 impl ReclaimFailure {
-    pub(crate) fn hazard(&self) -> crate::shutdown::UnloadHazard {
+    pub(crate) fn into_diagnostic(self, context: ShutdownDiagnosticContext) -> ShutdownDiagnostic {
+        use crate::diagnostics::catalog::{MODULE_RESIDENCY, RTD_GIT_QUIESCENCE};
         use crate::shutdown::UnloadHazard;
         match self {
-            Self::Diagnostics(_) => UnloadHazard::DiagnosticWorkerStillRunning,
-            Self::Rtd(error) if error.missing_module_residency => {
-                UnloadHazard::RtdComObjectsWithoutResidency
-            }
-            Self::Rtd(error) if error.revocation_debt != 0 => UnloadHazard::RtdGitRevocationDebt,
-            Self::Rtd(_) => UnloadHazard::RtdGitCallbackStillRegistered,
-        }
-    }
-
-    pub(crate) fn into_error(self) -> crate::XllError {
-        match self {
-            Self::Diagnostics(error) => error,
+            Self::Diagnostics(error) => (
+                UnloadHazard::DiagnosticWorkerStillRunning,
+                match context {
+                    ShutdownDiagnosticContext::OpenRollback => "xlAutoOpen diagnostic rollback",
+                    ShutdownDiagnosticContext::Removal => "xlAutoRemove diagnostic refinement",
+                },
+                error,
+            ),
             Self::Rtd(error) => {
-                crate::error::construct::internal(if error.missing_module_residency {
-                    crate::diagnostics::catalog::MODULE_RESIDENCY
+                let (hazard, diagnostic_id) = if error.missing_module_residency {
+                    (
+                        UnloadHazard::RtdComObjectsWithoutResidency,
+                        MODULE_RESIDENCY,
+                    )
+                } else if error.revocation_debt != 0 {
+                    (UnloadHazard::RtdGitRevocationDebt, RTD_GIT_QUIESCENCE)
                 } else {
-                    crate::diagnostics::catalog::RTD_GIT_QUIESCENCE
-                })
+                    (
+                        UnloadHazard::RtdGitCallbackStillRegistered,
+                        RTD_GIT_QUIESCENCE,
+                    )
+                };
+                let boundary = match context {
+                    ShutdownDiagnosticContext::OpenRollback => "xlAutoOpen RTD quiescence rollback",
+                    ShutdownDiagnosticContext::Removal => "xlAutoRemove RTD logical quiescence",
+                };
+                (
+                    hazard,
+                    boundary,
+                    crate::error::construct::internal(diagnostic_id),
+                )
             }
         }
     }
@@ -1807,8 +1838,10 @@ mod tests {
             let Err(failure) = teardown.reclaim(|_| {}) else {
                 panic!("fault did not fire");
             };
+            let (hazard, boundary, error) =
+                failure.into_diagnostic(ShutdownDiagnosticContext::Removal);
             assert_eq!(
-                failure.hazard(),
+                hazard,
                 match point {
                     ReclaimFault::Diagnostics =>
                         crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,
@@ -1819,6 +1852,25 @@ mod tests {
                         crate::shutdown::UnloadHazard::RtdComObjectsWithoutResidency,
                 }
             );
+            let (expected_boundary, expected_id) = match point {
+                ReclaimFault::Diagnostics => ("xlAutoRemove diagnostic refinement", None),
+                ReclaimFault::Cookies | ReclaimFault::Debt => (
+                    "xlAutoRemove RTD logical quiescence",
+                    Some(crate::diagnostics::catalog::RTD_GIT_QUIESCENCE),
+                ),
+                ReclaimFault::Residency => (
+                    "xlAutoRemove RTD logical quiescence",
+                    Some(crate::diagnostics::catalog::MODULE_RESIDENCY),
+                ),
+            };
+            assert_eq!(boundary, expected_boundary);
+            match expected_id {
+                Some(expected) => assert!(matches!(
+                    error,
+                    crate::XllError::Internal { diagnostic_id, .. } if diagnostic_id == expected
+                )),
+                None => assert!(matches!(error, crate::XllError::Closing)),
+            }
             RECLAIM_FAULT.with(|fault| assert!(fault.get().is_none()));
             assert_eq!(
                 runtime.phase(),
@@ -1941,6 +1993,7 @@ mod tests {
         generation: crate::generation::RuntimeGeneration,
         drops: &AtomicUsize,
         point: ServiceSealPoint,
+        context: ShutdownDiagnosticContext,
     ) {
         let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
         #[cfg(feature = "handles")]
@@ -1955,8 +2008,24 @@ mod tests {
             }
             ServiceSealPoint::Handles => crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
         };
-        assert_eq!(failure.hazard(), expected_hazard);
-        assert!(matches!(failure.into_error(), crate::XllError::Closing));
+        let expected_boundary = match (&context, point) {
+            (ShutdownDiagnosticContext::OpenRollback, ServiceSealPoint::HandleTopics) => {
+                "xlAutoOpen RTD rollback"
+            }
+            (ShutdownDiagnosticContext::OpenRollback, ServiceSealPoint::Handles) => {
+                "xlAutoOpen handle rollback"
+            }
+            (ShutdownDiagnosticContext::Removal, ServiceSealPoint::HandleTopics) => {
+                "xlAutoRemove RTD shutdown"
+            }
+            (ShutdownDiagnosticContext::Removal, ServiceSealPoint::Handles) => {
+                "xlAutoRemove handle table shutdown"
+            }
+        };
+        let (hazard, boundary, error) = failure.into_diagnostic(context);
+        assert_eq!(hazard, expected_hazard);
+        assert_eq!(boundary, expected_boundary);
+        assert!(matches!(error, crate::XllError::Closing));
         SERVICE_SEAL_FAULT.with(|fault| assert!(fault.get().is_none()));
         SERVICE_SEAL_ATTEMPTS.with(|attempts| {
             assert_eq!(
@@ -2033,7 +2102,14 @@ mod tests {
                     let teardown = teardown
                         .quiesce_addin(&runtime, &lifecycle, Some(generation))
                         .unwrap_or_else(|_| panic!("addin quiesce"));
-                    assert_service_seal_failure(&runtime, teardown, generation, &drops, point);
+                    assert_service_seal_failure(
+                        &runtime,
+                        teardown,
+                        generation,
+                        &drops,
+                        point,
+                        ShutdownDiagnosticContext::OpenRollback,
+                    );
                 } else {
                     runtime.finish_open(opening, Vec::new()).unwrap();
                     let owner = runtime.begin_final_removal().unwrap();
@@ -2050,7 +2126,14 @@ mod tests {
                         .unwrap_or_else(|_| panic!("addin quiesce"));
                     #[cfg(feature = "handles")]
                     runtime.with_formula_handle_service(|_| ()).unwrap();
-                    assert_service_seal_failure(&runtime, teardown, generation, &drops, point);
+                    assert_service_seal_failure(
+                        &runtime,
+                        teardown,
+                        generation,
+                        &drops,
+                        point,
+                        ShutdownDiagnosticContext::Removal,
+                    );
                 }
             }
         }

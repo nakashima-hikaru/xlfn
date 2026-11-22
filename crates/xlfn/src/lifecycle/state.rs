@@ -372,12 +372,9 @@ impl<A: crate::Addin> ClosePayload<A> {
         matches!(self, Self::Published(_))
     }
 
-    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
-    fn opening(&self) -> Option<&OpeningGeneration<A>> {
-        match self {
-            Self::Staged(opening) => Some(opening),
-            Self::Empty | Self::Published(_) | Self::Retiring(_) => None,
-        }
+    #[cfg(any(test, feature = "refinement"))]
+    fn has_staged_opening(&self) -> bool {
+        matches!(self, Self::Staged(_))
     }
 
     fn retiring_services(&self) -> Option<&AddinGenerationServices<A>> {
@@ -429,12 +426,9 @@ impl<A: crate::Addin> OpenAbortPayload<A> {
         }
     }
 
-    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
-    fn opening(&self) -> Option<&OpeningGeneration<A>> {
-        match self {
-            Self::Staged(opening) => Some(opening),
-            Self::Empty => None,
-        }
+    #[cfg(any(test, feature = "refinement"))]
+    fn has_staged_opening(&self) -> bool {
+        matches!(self, Self::Staged(_))
     }
 
     fn take_staged(&mut self) -> Option<OpeningGeneration<A>> {
@@ -652,11 +646,11 @@ impl<A: crate::Addin> CloseResources<A> {
         self.payload().is_some_and(ClosePayload::is_published)
     }
 
-    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
-    fn opening(&self) -> Option<&OpeningGeneration<A>> {
+    #[cfg(any(test, feature = "refinement"))]
+    fn has_staged_opening(&self) -> bool {
         match self {
-            Self::AwaitingOpenAbort { payload, .. } => payload.opening(),
-            _ => self.payload().and_then(ClosePayload::opening),
+            Self::AwaitingOpenAbort { payload, .. } => payload.has_staged_opening(),
+            _ => self.payload().is_some_and(ClosePayload::has_staged_opening),
         }
     }
 
@@ -909,18 +903,18 @@ impl<A: crate::Addin> ClosingState<A> {
         }
     }
 
-    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
-    fn opening(&self) -> Option<&OpeningGeneration<A>> {
+    #[cfg(any(test, feature = "refinement"))]
+    fn has_staged_opening(&self) -> bool {
         match self {
             Self::OpeningActive {
                 resources: ActiveOpeningClose::AwaitingAbort { payload },
                 ..
-            } => payload.opening(),
+            } => payload.has_staged_opening(),
             Self::OpeningActive {
                 resources: ActiveOpeningClose::Published { .. },
                 ..
-            } => None,
-            Self::Ready { resources } => resources.opening(),
+            } => false,
+            Self::Ready { resources } => resources.has_staged_opening(),
         }
     }
 
@@ -1108,8 +1102,8 @@ trait NativeState<A: crate::Addin> {
         &self,
         last_committed: Option<RuntimeGeneration>,
     ) -> Option<RuntimeGeneration>;
-    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
-    fn opening(&self) -> Option<&OpeningGeneration<A>>;
+    #[cfg(any(test, feature = "refinement"))]
+    fn has_staged_opening(&self) -> bool;
     #[cfg(any(test, feature = "refinement"))]
     fn has_current_generation(&self) -> bool;
     fn generation_services(&self) -> Option<&AddinGenerationServices<A>>;
@@ -1163,17 +1157,16 @@ impl<A: crate::Addin> NativeState<A> for LifecycleState<A> {
         }
     }
 
-    #[cfg(any(test, feature = "bench-internals", feature = "refinement"))]
-    fn opening(&self) -> Option<&OpeningGeneration<A>> {
+    #[cfg(any(test, feature = "refinement"))]
+    fn has_staged_opening(&self) -> bool {
         match self {
-            Self::Opening { payload, .. } => match payload {
-                OpeningPayload::Staged(opening) => Some(opening),
-                OpeningPayload::Empty | OpeningPayload::Published(_) => None,
-            },
-            Self::Stopping(StoppingState::Remove(closing)) => closing.opening(),
+            Self::Opening { payload, .. } => matches!(payload, OpeningPayload::Staged(_)),
+            Self::Stopping(StoppingState::Remove(closing)) => closing.has_staged_opening(),
             Self::Stopping(StoppingState::RollbackOpen(resources))
-            | Self::Quarantined(resources) => resources.opening(),
-            Self::Closed | Self::Stopping(StoppingState::Finalizing(_)) | Self::Open { .. } => None,
+            | Self::Quarantined(resources) => resources.has_staged_opening(),
+            Self::Closed | Self::Stopping(StoppingState::Finalizing(_)) | Self::Open { .. } => {
+                false
+            }
         }
     }
 
@@ -1569,7 +1562,7 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn has_opening_generation(&self) -> bool {
-        self.core.state.opening().is_some()
+        self.core.state.has_staged_opening()
     }
 
     pub(crate) fn generation_services(&self) -> Option<&AddinGenerationServices<A>> {

@@ -1584,7 +1584,7 @@ mod owner_tests {
         };
         FAIL_PREPARE_SERVICES.with(|fault| fault.set(true));
         let result = crate::runtime::transactions::open_addin_inner(
-            crate::BuildInfo::new(
+            crate::addin::BuildInfo::new(
                 crate::diagnostics::AddinId::parse("prepare-failure").unwrap(),
                 "0",
                 "test",
