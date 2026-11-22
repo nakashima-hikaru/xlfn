@@ -5,6 +5,8 @@
 //! A dispatch-only control exposes the synchronization floor; its duration must
 //! not be subtracted from the cache cases. Same-key batches include both pending
 //! singleflight followers and resident hits after another worker publishes.
+//! The separate long-key group measures one thread and distinct cold keys,
+//! with cache reset and allocation of caller-owned input outside each interval.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -354,5 +356,68 @@ fn benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, benchmarks);
+const HASH_BATCH_KEYS: usize = 128;
+
+fn long_key_misses(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cache_miss_key_hash");
+    group.measurement_time(benchmark_measurement_time());
+    group.throughput(Throughput::Elements(HASH_BATCH_KEYS as u64));
+    for len in [16, 1_024, 8_192] {
+        let suffix = "x".repeat(len - 16);
+        let keys = (0..HASH_BATCH_KEYS)
+            .map(|index| format!("{index:016x}{suffix}"))
+            .collect::<Vec<_>>();
+        for owned in [true, false] {
+            let cache =
+                CalculationCache::new(xlfn::cache::CacheBudget::weight_units(HASH_BATCH_KEYS));
+            let run = |probe| {
+                cache.clear();
+                // The owned case receives already allocated caller keys. The
+                // borrowed case must still acquire ownership on a true miss.
+                let input = owned.then(|| keys.clone());
+                let mut initialized = 0;
+                let start = Instant::now();
+                if let Some(input) = input {
+                    for key in input {
+                        let value = cache
+                            .get_or_try_insert_with(black_box(key), || {
+                                initialized += 1;
+                                Ok(7_u64)
+                            })
+                            .unwrap();
+                        black_box(*value);
+                    }
+                } else {
+                    for key in &keys {
+                        let value = cache
+                            .get_or_try_insert_borrowed(black_box(key.as_str()), || {
+                                initialized += 1;
+                                Ok(7_u64)
+                            })
+                            .unwrap();
+                        black_box(*value);
+                    }
+                }
+                let elapsed = start.elapsed();
+                if probe {
+                    assert_eq!(initialized, HASH_BATCH_KEYS);
+                    assert_eq!(cache.len(), HASH_BATCH_KEYS);
+                    assert_eq!(*cache.get(keys[0].as_str()).unwrap(), 7);
+                }
+                elapsed
+            };
+            run(true);
+            group.bench_function(
+                BenchmarkId::new(
+                    if owned { "owned" } else { "borrowed" },
+                    format!("bytes_{len}"),
+                ),
+                |b| b.iter_custom(|iterations| (0..iterations).map(|_| run(false)).sum()),
+            );
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(benches, long_key_misses, benchmarks);
 criterion_main!(benches);
