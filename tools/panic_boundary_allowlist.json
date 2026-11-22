@@ -368,22 +368,6 @@
     "reason": "Observes injected leader computation panic to verify retrying follower after clear does not pollute new epoch."
   },
   {
-    "path": "crates/xlfn/tests/cache_review_regressions.rs",
-    "context": "# [ test ] fn post_compute_hash_panic_must_not_leak_the_creator_pin",
-    "code": "let outcome = catch_unwind(AssertUnwindSafe(|| {",
-    "count": 1,
-    "category": "test",
-    "reason": "Observes injected post-compute hash panic to verify creator pin guard cleanup does not leak."
-  },
-  {
-    "path": "crates/xlfn/tests/cache_review_regressions.rs",
-    "context": "module root",
-    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
-    "count": 1,
-    "category": "test",
-    "reason": "Test-only import; the direct panic observation in this module is separately inventoried."
-  },
-  {
     "path": "crates/xlfn/src/cache.rs",
     "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn miri_resident_insertion_panic_preserves_creator_pin",
     "code": "let result = std::panic::catch_unwind(AssertUnwindSafe(|| {",

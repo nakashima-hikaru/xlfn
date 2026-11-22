@@ -8,7 +8,7 @@
 use super::{CacheNode, NodePtr, ResidentPin, VersionedKey, VersionedKeyRef};
 use quick_cache::Equivalent;
 use std::borrow::Borrow;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::ptr::NonNull;
 use xlfn_kernel::published_owner::PublishedOwner;
 
@@ -42,12 +42,6 @@ unsafe impl<K: Send + Sync> Sync for ResidentKey<K> {}
 impl<K> ResidentKey<K> {
     fn get(&self) -> &VersionedKey<K> {
         self.key.as_ref().expect("resident key owns its payload")
-    }
-}
-
-impl<K: Hash> Hash for ResidentKey<K> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.get().hash(state);
     }
 }
 
@@ -202,33 +196,36 @@ where
         self.index.estimated_index_bytes()
     }
 
+    /// Computes the keyed resident hash once, outside coordination locks.
     #[inline]
+    pub(super) fn prepare<Q: Hash + ?Sized>(
+        &self,
+        key: &VersionedKeyRef<'_, Q>,
+    ) -> PreparedResident<'_, K, V> {
+        PreparedResident {
+            index: self,
+            epoch: key.epoch,
+            hash: self.index.hash(key),
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn get<Q>(&self, key: &VersionedKeyRef<'_, Q>) -> Option<Entry<V>>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        self.index.get(key)
+        self.prepare(key).get(key.key)
     }
 
-    /// Stores an initialized entry in the resident index.
+    #[cfg(test)]
     pub(super) fn insert_resident(&self, key: &VersionedKey<K>, entry: ResidentEntry<V>) {
-        // Do not expose a constructor returning ResidentKey: its queue pointer
-        // is valid only inside this method or the containing backend. Cloning K
-        // happens before constructing the wrapper, so a panic cannot publish a
-        // partially initialized pointer-bearing key.
-        let key = ResidentKey {
-            key: Some(key.clone()),
-            retired: self
-                .retired_keys
-                .as_ref()
-                .map(|owner| NonNull::from(owner.as_ref())),
-        };
-        self.index.insert_resident(key, entry);
+        self.prepare(&key.as_ref()).insert(key, entry);
     }
 
+    #[cfg(test)]
     pub(super) fn invalidate(&self, key: &VersionedKey<K>) {
-        self.index.invalidate(key);
+        self.prepare(&key.as_ref()).invalidate(key);
     }
 
     pub(super) fn invalidate_before(&self, epoch: u64) {
@@ -258,5 +255,53 @@ where
 
     pub(super) fn resident_weight(&self) -> u64 {
         self.index.resident_weight()
+    }
+}
+
+// Carries the hash domain and original epoch through one cache request, including
+// a borrowing-to-owning transition and leader publication. Callers use the same
+// logical key throughout; Borrow requires equivalent Hash/Eq across that transition.
+pub(super) struct PreparedResident<'a, K, V> {
+    index: &'a ResidentIndex<K, V>,
+    epoch: u64,
+    hash: u64,
+}
+
+impl<K, V> PreparedResident<'_, K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    #[inline]
+    pub(super) fn get<Q>(&self, key: &Q) -> Option<Entry<V>>
+    where
+        K: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
+        let key = VersionedKeyRef {
+            epoch: self.epoch,
+            key,
+        };
+        self.index.index.get(&key, self.hash)
+    }
+
+    pub(super) fn insert(&self, key: &VersionedKey<K>, entry: ResidentEntry<V>) {
+        debug_assert_eq!(key.epoch, self.epoch);
+        // Clone before constructing the pointer-bearing wrapper or locking the
+        // policy table. On panic, entry still discharges its residency pin.
+        let key = ResidentKey {
+            key: Some(key.clone()),
+            retired: self
+                .index
+                .retired_keys
+                .as_ref()
+                .map(|owner| NonNull::from(owner.as_ref())),
+        };
+        self.index.index.insert_resident(key, self.hash, entry);
+    }
+
+    pub(super) fn invalidate(&self, key: &VersionedKey<K>) {
+        debug_assert_eq!(key.epoch, self.epoch);
+        self.index.index.invalidate(key, self.hash);
     }
 }

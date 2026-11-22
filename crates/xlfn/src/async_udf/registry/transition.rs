@@ -29,24 +29,44 @@ enum AdvanceAcquisition<'registry> {
 }
 
 impl<'registry> AdvanceOwner<'registry> {
+    fn allocate_successor(
+        _registry: &TaskRegistry,
+        next: CalculationEpoch,
+    ) -> PublishedOwner<CalculationState> {
+        #[cfg(test)]
+        tests::before_successor_allocation(_registry);
+        PublishedOwner::new(CalculationState::new(next))
+    }
+
     fn acquire(registry: &'registry TaskRegistry) -> AdvanceAcquisition<'registry> {
+        // Declare the possible displaced owner before locks so unwinding
+        // also releases the management guards before its destruction.
+        let displaced;
         let transition = registry.transition.lock();
         let mut control = registry.control.lock();
-        let publication = registry.publication.lock();
-        // SAFETY: publication excludes allocation reclamation while pinning.
-        let current = unsafe { &*registry.current.load(Ordering::Acquire) };
-        let Some(next) = current.epoch.checked_next() else {
+        // Control excludes changes to the current generation (transition
+        // also serializes advances); only pinning requires publication.
+        let Some(next) = registry.current_epoch().checked_next() else {
             return AdvanceAcquisition::Done(false);
         };
         if let Some(mut stopped) = control.stopped() {
-            let state = PublishedOwner::new(CalculationState::new(next));
+            let state = Self::allocate_successor(registry, next);
             state.seal_admission();
             let pointer = NonNull::from(state.as_ref());
-            stopped.calculations().insert(next, state);
-            registry.publish_current(pointer, next);
-            stopped
-                .calculations()
-                .retain(|id, state| *id == next || state.pin_count() != 0);
+            // Insertion under control cannot affect concurrent snapshots
+            // before the atomic current pointer changes.
+            // A previously interrupted advance may have inserted an owner
+            // at this epoch without publishing it.
+            displaced = stopped.calculations().insert(next, state);
+            {
+                let _publication = registry.publication.lock();
+                registry.publish_current(pointer, next);
+            }
+            let retired = stopped.take_retired(next);
+            drop(control);
+            drop(transition);
+            drop(displaced);
+            drop(retired);
             return AdvanceAcquisition::Done(true);
         }
         if registry.closing.load(Ordering::Acquire) {
@@ -55,6 +75,9 @@ impl<'registry> AdvanceOwner<'registry> {
         let Some(running) = control.running() else {
             return AdvanceAcquisition::Done(false);
         };
+        let publication = registry.publication.lock();
+        // SAFETY: publication excludes allocation reclamation while pinning.
+        let current = unsafe { &*registry.current.load(Ordering::Acquire) };
         let pending = RollbackGuard::new(PendingAdvance {
             registry,
             _transition: transition,
@@ -73,6 +96,7 @@ impl<'registry> AdvanceOwner<'registry> {
     fn finish(self) -> bool {
         let registry = self.pending.get().registry;
         let _drained_admission = self.old.get().close_admission().wait();
+        let displaced;
         let mut control = registry.control.lock();
         // Close may preempt the in-flight advance while admission drains. The
         // transition lock excludes another advance; this owner retains its own
@@ -90,28 +114,28 @@ impl<'registry> AdvanceOwner<'registry> {
                 return false;
             }
         };
+        let state = Self::allocate_successor(registry, self.next);
+        let pointer = NonNull::from(state.as_ref());
+        displaced = advancing.calculations().insert(self.next, state);
         let publication = registry.publication.lock();
         // After publication the successor's gate is open. On unwind, publish
         // close intent before unlocking publication and exposing the successor
         // to new snapshots.
         let Self { pending, old, next } = self;
-        let state = PublishedOwner::new(CalculationState::new(next));
-        let pointer = NonNull::from(state.as_ref());
-        advancing.calculations().insert(next, state);
         #[cfg(test)]
         tests::inject_fault(tests::AdvanceFault::BeforePublication);
         registry.publish_current(pointer, next);
         #[cfg(test)]
         tests::inject_fault(tests::AdvanceFault::Published);
-        drop(old);
-        advancing
-            .calculations()
-            .retain(|id, state| *id == next || state.pin_count() != 0);
-        advancing.finish();
         let pending = pending.complete();
         drop(publication);
+        drop(old);
+        let retired = advancing.take_retired(next);
+        advancing.finish();
         drop(control);
         drop(pending);
+        drop(displaced);
+        drop(retired);
         #[cfg(test)]
         {
             let hook = registry.after_publish_hook.lock().clone();
@@ -161,6 +185,56 @@ mod tests {
             ADVANCE_FAULT.set(None);
             panic!("injected calculation advance fault at {point:?}");
         }
+    }
+
+    std::thread_local! {
+        static INSPECT_SUCCESSOR_ALLOCATION: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn before_successor_allocation(registry: &TaskRegistry) {
+        if INSPECT_SUCCESSOR_ALLOCATION.replace(false) {
+            assert!(
+                registry.publication.try_lock().is_some(),
+                "a launch snapshot must not wait for successor allocation"
+            );
+            // Still pin the previous generation through the normal reader path.
+            assert_eq!(registry.snapshot().epoch(), registry.current_epoch());
+        }
+    }
+
+    #[test]
+    fn miri_advance_allocates_stopped_and_running_successors_without_publication_lock() {
+        let registry = TaskRegistry::new();
+        INSPECT_SUCCESSOR_ALLOCATION.set(true);
+        assert!(registry.advance());
+        assert!(!INSPECT_SUCCESSOR_ALLOCATION.get());
+        registry.start(crate::AsyncTaskLimit::DEFAULT).unwrap();
+        INSPECT_SUCCESSOR_ALLOCATION.set(true);
+        assert!(registry.advance());
+        assert!(!INSPECT_SUCCESSOR_ALLOCATION.get());
+        assert_eq!(registry.control.lock().calculations().len(), 1);
+        registry.request_close().unwrap().cancel().wait().finish();
+    }
+
+    #[test]
+    fn miri_stopped_advance_replaces_an_unpublished_successor_after_close() {
+        let registry = TaskRegistry::new();
+        registry.start(crate::AsyncTaskLimit::DEFAULT).unwrap();
+        let old = registry.current_epoch();
+        let next = old.checked_next().unwrap();
+        ADVANCE_FAULT.set(Some(AdvanceFault::BeforePublication));
+        let error = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            registry.advance();
+        }));
+        assert!(error.is_err());
+        assert_eq!(registry.current_epoch(), old);
+        let unpublished = registry.control.lock().calculations()[&next].as_ptr();
+
+        registry.request_close().unwrap().cancel().wait().finish();
+        assert!(registry.advance());
+        assert_eq!(registry.current_epoch(), next);
+        assert_ne!(registry.current.load(Ordering::Acquire), unpublished);
+        assert_eq!(registry.control.lock().calculations().len(), 1);
     }
 
     #[test]

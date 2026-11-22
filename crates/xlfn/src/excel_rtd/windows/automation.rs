@@ -674,6 +674,14 @@ pub(super) unsafe fn write_bstr_variant(result: *mut VARIANT, value: &str) -> i3
             // Write directly without borrowing uninitialized BSTR contents.
             unsafe { bstr.as_ptr().add(index).write(u16::from(byte)) };
         }
+    } else if value.len() == length * 3 {
+        // The exact checked length and maximum of three UTF-8 bytes per
+        // UTF-16 unit prove that each scalar is one three-byte BMP unit.
+        for (index, unit) in crate::utf16::fixed_bmp_units(value).enumerate() {
+            // SAFETY: the fixed-width iterator yields exactly the allocated
+            // number of units, excluding the allocator-supplied terminator.
+            unsafe { bstr.as_ptr().add(index).write(unit) };
+        }
     } else {
         for (index, unit) in value.encode_utf16().enumerate() {
             // SAFETY: checked_utf16_len counted this same immutable string, so
@@ -692,6 +700,19 @@ pub(super) unsafe fn write_bstr_variant(result: *mut VARIANT, value: &str) -> i3
     let _ = std::mem::DropGuard::dismiss(owner);
 
     S_OK
+}
+
+/// Bench the actual Windows BSTR writer, including allocation and release
+/// but not the separate SAFEARRAY and transport stages.
+#[cfg(all(feature = "bench-internals", feature = "rtd"))]
+pub fn benchmark_rtd_bstr(value: &str) {
+    let mut variant = VARIANT::default();
+    // SAFETY: variant is live writable storage; success transfers its BSTR
+    // ownership to the initialized variant.
+    assert_eq!(unsafe { write_bstr_variant(&mut variant, value) }, S_OK);
+    std::hint::black_box(&variant);
+    // SAFETY: this local variant has sole ownership and is cleared exactly once.
+    assert_eq!(unsafe { VariantClear(&mut variant) }, S_OK);
 }
 
 pub(super) unsafe fn write_value_variant(result: *mut VARIANT, value: &StoredRtdValue) -> i32 {

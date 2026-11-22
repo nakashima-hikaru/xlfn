@@ -45,83 +45,52 @@ impl<H: SubscriptionHost> PublishCore<H> {
             outcome
         };
 
-        // Collection groups each shard in dense pending-entry order. Retire
-        // backwards so the common full-buffer drain removes tail entries
-        // without moving survivors or repairing their indices.
-        let mut updates_iter = delivered_updates.drain(..).rev();
-        let mut current_opt = updates_iter.next();
-        while let Some(first_update) = current_opt {
-            let shard_idx = shard_index(TopicId(first_update.topic_id));
+        if delivered_updates.len() == 1 {
+            // A sparse refresh has no batch to amortize. Avoid building a
+            // drain iterator and shard guard; account immediately.
+            let update = delivered_updates
+                .pop()
+                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+            let shard_idx = shard_index(TopicId(update.topic_id));
             let mut shard = self.shards[shard_idx].lock();
-            let mut current = first_update;
-            loop {
-                let topic_id = TopicId(current.topic_id);
-                let slot = current.buffer.index();
+            complete_update(
+                &mut shard,
+                update,
+                outcome,
+                |deliverable_count, deliverable| {
+                    self.record_pending_removal(deliverable_count, shard_idx, deliverable);
+                },
+            );
+        } else {
+            // Collection groups each shard in dense pending-entry order. Retire
+            // backwards so the common full-buffer drain removes tail entries
+            // without moving survivors or repairing their indices.
+            let mut updates_iter = delivered_updates.drain(..).rev();
+            let mut current_opt = updates_iter.next();
+            while let Some(first_update) = current_opt {
+                let shard_idx = shard_index(TopicId(first_update.topic_id));
+                let mut shard = self.shards[shard_idx].lock();
+                // The batch borrows the mutex-protected shard and flushes
+                // before the lock can be released, including during unwinding.
+                let mut retirements = RefreshRetirements::new(self, shard_idx, &mut shard);
+                let mut current = first_update;
+                loop {
+                    retirements.complete(current, outcome);
 
-                match outcome {
-                    RefreshOutcome::Delivered => {
-                        if let Some(active) = shard.active_by_topic.get_mut(&topic_id)
-                            && active.generation == current.connection_generation
-                            && let ValueSlot::InFlight {
-                                generation,
-                                sequence,
-                            } = active.values[slot]
-                            && generation == current.connection_generation
-                            && sequence == current.sequence
+                    match updates_iter.next() {
+                        Some(next_update)
+                            if shard_index(TopicId(next_update.topic_id)) == shard_idx =>
                         {
-                            if active.latest_slot == Some(current.buffer) {
-                                active.values[slot] = ValueSlot::Resident(VersionedRtdValue {
-                                    generation,
-                                    sequence,
-                                    value: current.value,
-                                });
-                            } else {
-                                active.values[slot] = ValueSlot::Empty;
-                            }
+                            current = next_update;
                         }
-
-                        self.retire_pending_through(
-                            &mut shard,
-                            shard_idx,
-                            topic_id,
-                            current.connection_generation,
-                            current.sequence,
-                        );
-                    }
-                    RefreshOutcome::Failed => {
-                        if let Some(active) = shard.active_by_topic.get_mut(&topic_id)
-                            && active.generation == current.connection_generation
-                            && let ValueSlot::InFlight {
-                                generation,
-                                sequence,
-                            } = active.values[slot]
-                            && generation == current.connection_generation
-                            && sequence == current.sequence
-                        {
-                            active.values[slot] = ValueSlot::Resident(VersionedRtdValue {
-                                generation,
-                                sequence,
-                                value: current.value,
-                            });
+                        other => {
+                            current_opt = other;
+                            break;
                         }
-                    }
-                }
-
-                match updates_iter.next() {
-                    Some(next_update)
-                        if shard_index(TopicId(next_update.topic_id)) == shard_idx =>
-                    {
-                        current = next_update;
-                    }
-                    other => {
-                        current_opt = other;
-                        break;
                     }
                 }
             }
         }
-
-        drop(updates_iter);
         let mut refresh = self.refresh.lock();
         let DeliveryPhase::Refreshing {
             refresh_id: active_id,
@@ -250,6 +219,121 @@ impl<H: SubscriptionHost> PublishCore<H> {
             shards &= shards - 1;
             self.collect_shard_into(index, updates);
             after_shard(index);
+        }
+    }
+}
+
+/// Holds amortized accounting for entries already removed from one shard.
+/// While a refresh is active, another shard may observe an overestimate, but
+/// notification is suppressed by the refresh phase. The totals and ready mask
+/// are flushed under the shard lock before the phase can change.
+struct RefreshRetirements<'a, H: SubscriptionHost> {
+    publish: &'a PublishCore<H>,
+    shard_index: usize,
+    shard: &'a mut TopicShard,
+    removed: usize,
+    deliverable: usize,
+}
+
+impl<'a, H: SubscriptionHost> RefreshRetirements<'a, H> {
+    fn new(publish: &'a PublishCore<H>, shard_index: usize, shard: &'a mut TopicShard) -> Self {
+        Self {
+            publish,
+            shard_index,
+            shard,
+            removed: 0,
+            deliverable: 0,
+        }
+    }
+
+    #[inline]
+    fn complete(&mut self, update: RtdUpdate, outcome: RefreshOutcome) {
+        let removed = &mut self.removed;
+        let deliverable = &mut self.deliverable;
+        complete_update(self.shard, update, outcome, |_, was_deliverable| {
+            // A shard can contribute no more removals than the number of
+            // entries in its two buffers when the lock was acquired.
+            *removed += 1;
+            *deliverable += usize::from(was_deliverable);
+        });
+    }
+}
+
+#[inline(always)]
+fn complete_update(
+    shard: &mut TopicShard,
+    update: RtdUpdate,
+    outcome: RefreshOutcome,
+    mut record_removal: impl FnMut(&mut usize, bool),
+) {
+    let topic_id = TopicId(update.topic_id);
+    let generation = update.connection_generation;
+    let sequence = update.sequence;
+    let mut active = shard.active_by_topic.get_mut(&topic_id);
+    let delivered = matches!(outcome, RefreshOutcome::Delivered);
+
+    if let Some(active) = active.as_deref_mut()
+        && active.generation == generation
+        && let ValueSlot::InFlight {
+            generation: slot_generation,
+            sequence: slot_sequence,
+        } = active.values[update.buffer.index()]
+        && slot_generation == generation
+        && slot_sequence == sequence
+    {
+        let replacement = if !delivered || active.latest_slot == Some(update.buffer) {
+            ValueSlot::Resident(VersionedRtdValue {
+                generation,
+                sequence,
+                value: update.value,
+            })
+        } else {
+            ValueSlot::Empty
+        };
+        active.values[update.buffer.index()] = replacement;
+    }
+
+    if !delivered {
+        return;
+    }
+
+    let deliverable = active.as_ref().is_some_and(|active| active.committed);
+    for buffer in BufferIndex::ALL {
+        if remove_queued_if(&mut shard.pending[buffer.index()], topic_id, |queued| {
+            queued.connection_generation == generation && queued.sequence <= sequence
+        }) {
+            record_removal(&mut shard.deliverable_count, deliverable);
+        }
+    }
+
+    if let Some(active) = active {
+        for buffer in BufferIndex::ALL {
+            let slot = &mut active.values[buffer.index()];
+            if let ValueSlot::Resident(versioned) = slot
+                && versioned.generation == generation
+                && versioned.sequence <= sequence
+                && active.latest_slot != Some(buffer)
+                && !shard.pending[buffer.index()].contains_key(&topic_id)
+            {
+                *slot = ValueSlot::Empty;
+            }
+        }
+    }
+}
+
+impl<H: SubscriptionHost> Drop for RefreshRetirements<'_, H> {
+    #[inline]
+    fn drop(&mut self) {
+        if self.removed != 0 {
+            let _ = xlfn_kernel::invariant::checked_atomic_sub(
+                &self.publish.pending_updates,
+                self.removed,
+            );
+            self.publish.record_deliverable_decrease(
+                &mut self.shard.deliverable_count,
+                self.shard_index,
+                self.deliverable,
+            );
         }
     }
 }
@@ -440,6 +524,107 @@ mod tests {
         assert_eq!(retry.updates()[0].value, StoredRtdValue::Integer(42));
         retry.complete(super::RefreshOutcome::Delivered).unwrap();
         assert_eq!(publish.pending_update_count(), 0);
+    }
+
+    #[test]
+    fn retirements_flush_on_unwind_without_subtracting_newer_updates() {
+        use super::{Ordering, RefreshOutcome, RefreshRetirements, shard_index};
+        use crate::subscription::tests::SourceFixture;
+        use crate::subscription::{RtdTopic, StoredRtdValue, TopicId};
+        use std::panic::AssertUnwindSafe;
+
+        let fixture = SourceFixture::new();
+        let sources = [
+            fixture.add::<i32>(None),
+            fixture.add::<i32>(None),
+            fixture.add::<i32>(None),
+        ];
+        let runtime =
+            SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost, _>::with_sources_for_internal(
+                fixture.finish(),
+            );
+        let server = runtime.register_test_server(1);
+        let topics = [TopicId(1), TopicId(33), TopicId(2)];
+        for (topic, (source, sink, _)) in topics.into_iter().zip(&sources) {
+            let prepared = runtime
+                .prepare(
+                    source,
+                    RtdTopic::single(format!("batched-{}", topic.0))
+                        .unwrap()
+                        .borrowed(),
+                )
+                .unwrap();
+            let id = prepared.id();
+            prepared.commit();
+            runtime
+                .connect_transaction(&server, topic, id)
+                .unwrap()
+                .commit()
+                .unwrap();
+            sink.lock()
+                .as_ref()
+                .unwrap()
+                .publish(100 + topic.0)
+                .unwrap();
+        }
+
+        let publish = &server.test_server().publish;
+        publish
+            .begin_refresh()
+            .unwrap()
+            .complete(RefreshOutcome::Failed)
+            .unwrap();
+        // Topic 33 has two pending versions in different
+        // buffers; the newer delivery retires both.
+        sources[0].1.lock().as_ref().unwrap().publish(201).unwrap();
+        sources[1].1.lock().as_ref().unwrap().publish(233).unwrap();
+        let mut batch = publish.begin_refresh().unwrap();
+        assert_eq!(batch.updates().len(), 3);
+
+        // This publication targets the new epoch while the older values are
+        // in flight, and completion must retain it in the same shard.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| sources[0].1.lock().as_ref().unwrap().publish(301).unwrap())
+                .join()
+                .unwrap();
+        });
+        assert_eq!(publish.pending_update_count(), 5);
+        assert_eq!(publish.queued_update_count(), 5);
+        let update_index = batch
+            .updates()
+            .iter()
+            .position(|update| update.topic_id == 33)
+            .unwrap();
+        let retired = batch.updates.remove(update_index);
+        let index = shard_index(TopicId(retired.topic_id));
+        assert!(
+            crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+                let mut shard = publish.shards[index].lock();
+                let mut retirements = RefreshRetirements::new(publish, index, &mut shard);
+                retirements.complete(retired, RefreshOutcome::Delivered);
+                panic!("injected unwind before shard accounting flush");
+            }))
+            .is_err()
+        );
+        assert_eq!(publish.pending_update_count(), 3);
+        assert_eq!(publish.queued_update_count(), 3);
+        assert_eq!(publish.shards[index].lock().deliverable_count, 2);
+
+        batch.complete(RefreshOutcome::Delivered).unwrap();
+        assert_eq!(publish.pending_update_count(), 1);
+        assert_eq!(publish.queued_update_count(), 1);
+        assert_eq!(publish.shards[index].lock().deliverable_count, 1);
+        assert_eq!(publish.ready_shards.load(Ordering::Acquire), 1_u32 << index);
+
+        let retry = publish.begin_refresh().unwrap();
+        assert_eq!(retry.updates().len(), 1);
+        assert_eq!(retry.updates()[0].topic_id, 1);
+        assert_eq!(retry.updates()[0].value, StoredRtdValue::Integer(301));
+        retry.complete(RefreshOutcome::Delivered).unwrap();
+        assert_eq!(publish.pending_update_count(), 0);
+        assert_eq!(publish.queued_update_count(), 0);
+        assert_eq!(publish.ready_shards.load(Ordering::Acquire), 0);
     }
 
     #[test]

@@ -1757,6 +1757,64 @@ mod tests {
     }
 
     #[test]
+    fn udf_wrapper_expansion_selects_only_its_execution_path() {
+        let sync = expand_excel_function(
+            quote!(),
+            function(quote!(
+                fn value(input: f64) -> f64 {
+                    input
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+        let plain = expand_excel_function(
+            quote!(),
+            function(quote!(
+                async fn value(input: f64) -> f64 {
+                    input
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+        let scoped = expand_excel_function(
+            quote!(),
+            function(quote!(
+                async fn value(input: f64, object: HandleLease<'_, Dataset>) -> f64 {
+                    input
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+
+        for (expansion, expected) in [
+            (&sync, "prepare_sync_udf_with_mode"),
+            (&plain, "prepare_async_udf"),
+            (&scoped, "prepare_async_udf_handle"),
+        ] {
+            for boundary in [
+                "prepare_sync_udf_with_mode",
+                "prepare_async_udf",
+                "prepare_async_udf_handle",
+            ] {
+                assert_eq!(
+                    expansion.contains(&format!("{boundary} :: <")),
+                    boundary == expected,
+                    "{expansion}"
+                );
+            }
+        }
+        assert!(sync.contains(". materialize () ?"));
+        assert!(!plain.contains(". materialize () ?"));
+        assert!(!scoped.contains(". materialize () ?"));
+        assert!(scoped.contains("HandleScopedBuilder"));
+        assert!(!sync.contains("HandleScopedBuilder"));
+        assert!(!plain.contains("HandleScopedBuilder"));
+    }
+
+    #[test]
     fn asyncness_requires_the_matching_context_type() {
         for context in [
             quote!(MainThreadContext<'_, State>),

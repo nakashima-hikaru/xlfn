@@ -2273,11 +2273,11 @@ mod tests {
     #[test]
     fn uninstrumented_udf_allocates_correlation_ids_for_history() {
         let _test = test_lock();
-        let fixture = open_static_test_runtime();
+        static RUNTIME: Runtime<()> = Runtime::new();
+        let fixture = open_test_runtime(crate::runtime::StaticTestRuntime::from_static(&RUNTIME));
         let runtime = fixture.runtime();
 
-        let before = runtime.peek_next_call_id();
-
+        let before = runtime.next_call_id();
         for _ in 0..100 {
             let ptr = udf_boundary_named(runtime, "test_fast_path", "TEST.FAST_PATH", |_, _| {
                 ReturnPayload::scalar(42.0)
@@ -2286,9 +2286,8 @@ mod tests {
             let free_guard = unsafe { free_return_boundary(ptr) };
             drop(free_guard);
         }
-
-        let after = runtime.peek_next_call_id();
-        assert_eq!(after - before, 100);
+        let after = runtime.next_call_id();
+        assert_eq!(after - before, 101);
     }
     #[test]
     fn fp12_failures_record_original_error_and_correlation_without_sink() {

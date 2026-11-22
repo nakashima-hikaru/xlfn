@@ -29,8 +29,15 @@ impl<K, V> Weighter<K, ResidentEntry<V>> for EntryWeight {
     }
 }
 
+// The keyed input is already well distributed. Keep a full 64-bit hash
+// even on 32-bit Excel: quick_cache uses it to identify evicted ghost entries.
+#[cfg(target_pointer_width = "64")]
+type PolicyHashBuilder = rustc_hash::FxBuildHasher;
+#[cfg(not(target_pointer_width = "64"))]
+type PolicyHashBuilder = RandomState;
+
 type PolicyCache<K, V> =
-    Cache<HashedKey<ResidentKey<K>>, ResidentEntry<V>, EntryWeight, RandomState>;
+    Cache<HashedKey<ResidentKey<K>>, ResidentEntry<V>, EntryWeight, PolicyHashBuilder>;
 
 /// Only invoke user Hash before taking policy locks. Both backends rehash
 /// stored keys under a lock during operations such as growth and eviction;
@@ -101,10 +108,16 @@ where
             .hot_allocation(1.0)
             .build()
             .expect("valid resident cache options");
+        // Only the keyed 64-bit output from hash_builder reaches the policy
+        // table. User-provided Hash still runs before taking locks.
+        #[cfg(target_pointer_width = "64")]
+        let policy_hasher = rustc_hash::FxBuildHasher;
+        #[cfg(not(target_pointer_width = "64"))]
+        let policy_hasher = RandomState::new();
         let cache = Cache::with_options(
             options,
             EntryWeight,
-            RandomState::new(),
+            policy_hasher,
             DefaultLifecycle::default(),
         );
         Self {
@@ -126,31 +139,26 @@ where
         operation(&mut self.cache.lock())
     }
 
-    pub(super) fn get<Q>(&self, key: &VersionedKeyRef<'_, Q>) -> Option<Entry<V>>
+    pub(super) fn hash<Q: Hash + ?Sized>(&self, key: &VersionedKeyRef<'_, Q>) -> u64 {
+        self.hash_builder.hash_one(key)
+    }
+
+    pub(super) fn get<Q>(&self, key: &VersionedKeyRef<'_, Q>, hash: u64) -> Option<Entry<V>>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
+        Q: Eq + ?Sized,
     {
-        let key = &HashedKey {
-            hash: self.hash_builder.hash_one(key),
-            key,
-        };
+        let key = &HashedKey { hash, key };
         self.with_cache(|cache| cache.get(key).map(|entry| entry.snapshot()))
     }
 
-    pub(super) fn insert_resident(&self, key: ResidentKey<K>, entry: ResidentEntry<V>) {
-        let key = HashedKey {
-            hash: self.hash_builder.hash_one(&key),
-            key,
-        };
+    pub(super) fn insert_resident(&self, key: ResidentKey<K>, hash: u64, entry: ResidentEntry<V>) {
+        let key = HashedKey { hash, key };
         self.with_cache(|cache| cache.insert(key, entry));
     }
 
-    pub(super) fn invalidate(&self, key: &VersionedKey<K>) {
-        let key = &HashedKey {
-            hash: self.hash_builder.hash_one(key),
-            key,
-        };
+    pub(super) fn invalidate(&self, key: &VersionedKey<K>, hash: u64) {
+        let key = &HashedKey { hash, key };
         self.with_cache(|cache| drop(cache.remove(key)));
     }
 

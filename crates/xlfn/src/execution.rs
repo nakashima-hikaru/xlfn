@@ -7,6 +7,9 @@ use std::panic::catch_unwind;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Identifier of one worksheet-function invocation within the runtime.
+///
+/// IDs can have gaps, and their numeric order does not indicate the order in
+/// which calls on different threads began or completed.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CallId(u64);
 

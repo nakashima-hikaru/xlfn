@@ -25,7 +25,7 @@ mod types;
 
 pub use callback::{
     XLRET_ABORT, XLRET_FAILED, XLRET_SUCCESS, XLRET_UNCALCED, excel_free, excel12,
-    excel12_async_return, excel12_with_invocation,
+    excel12_async_return, excel12_with_invocation, excel12_with_invocation_scratch,
 };
 
 #[cfg(feature = "abi-probe")]

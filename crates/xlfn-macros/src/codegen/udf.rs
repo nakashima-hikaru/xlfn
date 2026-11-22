@@ -11,32 +11,11 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     let krate = &plan.crate_path;
     let gating = &plan.gating;
     let return_type = &plan.return_type;
-    let numeric_return = plan.return_abi == ReturnAbi::NumericArray12;
-    let (return_abi, return_pointer, sync_boundary, export_boundary, return_trait) =
-        if numeric_return {
-            (
-                quote_spanned!(generated=>#krate::__private::v1::ReturnAbi::NumericArray12),
-                quote_spanned!(generated=>*mut #krate::__private::v1::FP12),
-                quote_spanned!(generated=>sync_udf_fp12_with_mode),
-                quote_spanned!(generated=>export_numeric_boundary),
-                quote_spanned!(generated=>NumericReturn),
-            )
-        } else {
-            (
-                quote_spanned!(generated=>#krate::__private::v1::ReturnAbi::Value12),
-                quote_spanned!(generated=>*mut #krate::__private::v1::XLOPER12),
-                quote_spanned!(generated=>sync_udf_with_mode),
-                quote_spanned!(generated=>export_value_boundary),
-                quote_spanned!(generated=>ExcelReturn),
-            )
-        };
-    let prepare_sync_boundary = if numeric_return {
-        quote_spanned!(generated=>prepare_sync_udf_fp12_with_mode)
-    } else {
-        quote_spanned!(generated=>prepare_sync_udf_with_mode)
+    let return_variant = match plan.return_abi {
+        ReturnAbi::NumericArray12 => quote_spanned!(generated=>NumericArray12),
+        ReturnAbi::Value12 => quote_spanned!(generated=>Value12),
     };
-    let function_ident = &function.sig.ident;
-    let udf_id = plan.metadata.id.as_str();
+    let return_abi = quote_spanned!(generated=>#krate::__private::v1::ReturnAbi::#return_variant);
     let excel_name = &plan.metadata.excel_name;
     let category = &plan.metadata.category;
     let description = &plan.metadata.description;
@@ -49,94 +28,32 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         proc_macro2::Span::call_site(),
     );
     let execution = &plan.execution;
-    let is_async = execution.is_async();
-    let context = execution.context();
-    let context_type = execution.context_type();
     let arguments = &plan.arguments;
-    let has_handle_lease = arguments
-        .iter()
-        .any(|argument| argument.conversion.is_handle_lease());
-    let raw_parameters = arguments
-        .iter()
-        .map(|argument| {
-            let raw = &argument.raw_ident;
-            let ty = match argument.abi() {
-                ArgumentAbi::Value12 | ArgumentAbi::Reference12 => {
-                    quote_spanned!(generated=>*mut #krate::__private::v1::XLOPER12)
-                }
-                ArgumentAbi::NumericArray12 => {
-                    quote_spanned!(generated=>*const #krate::__private::v1::FP12)
-                }
-                ArgumentAbi::Float64 => quote_spanned!(generated=>::core::primitive::f64),
-                ArgumentAbi::Boolean16 => quote_spanned!(generated=>::core::primitive::i16),
-                ArgumentAbi::Integer32 => quote_spanned!(generated=>::core::primitive::i32),
-                ArgumentAbi::CountedUtf16 => {
-                    quote_spanned!(generated=>*const ::core::primitive::u16)
-                }
-            };
-            quote_spanned!(generated=>#raw: #ty)
-        })
-        .collect::<Vec<_>>();
-    let converted_names = arguments
-        .iter()
-        .map(|argument| argument.local_ident.clone())
-        .collect::<Vec<_>>();
-    let argument_name_literals = arguments
-        .iter()
-        .map(|argument| argument.excel_name.clone())
-        .collect::<Vec<_>>();
-    let argument_descriptions = arguments
-        .iter()
-        .map(|argument| argument.description.clone())
-        .collect::<Vec<_>>();
-    let argument_count = arguments.len();
-    let generated_context_expression = context.map(|context| {
-        let expression = match execution {
-            model::ExecutionSpec::ThreadSafe { .. } => {
-                quote_spanned!(generated=>#krate::__private::v1::thread_safe_context(__frame.environment(), __state))
+    let raw_parameters = arguments.iter().map(|argument| {
+        let raw = &argument.raw_ident;
+        let ty = match argument.abi() {
+            ArgumentAbi::Value12 | ArgumentAbi::Reference12 => {
+                quote_spanned!(generated=>*mut #krate::__private::v1::XLOPER12)
             }
-            model::ExecutionSpec::MainThread { .. } => {
-                quote_spanned!(generated=>#krate::__private::v1::main_thread_context(
-                    __frame.environment(),
-                    __state,
-                ))
+            ArgumentAbi::NumericArray12 => {
+                quote_spanned!(generated=>*const #krate::__private::v1::FP12)
             }
-            model::ExecutionSpec::MacroSheet { .. } => {
-                quote_spanned!(generated=>#krate::__private::v1::macro_sheet_context(
-                    __frame.environment(),
-                    __state,
-                ))
+            ArgumentAbi::Float64 => quote_spanned!(generated=>::core::primitive::f64),
+            ArgumentAbi::Boolean16 => quote_spanned!(generated=>::core::primitive::i16),
+            ArgumentAbi::Integer32 => quote_spanned!(generated=>::core::primitive::i32),
+            ArgumentAbi::CountedUtf16 => {
+                quote_spanned!(generated=>*const ::core::primitive::u16)
             }
-            model::ExecutionSpec::Async { .. } => quote_spanned!(generated=>#krate::__private::v1::async_context(
-                &__lease,
-                &__cancellation,
-                &crate::__XLFN_RUNTIME,
-            )),
         };
-        (context.ty(), expression)
+        quote_spanned!(generated=>#raw: #ty)
+    });
+    let argument_descriptors = arguments.iter().map(|argument| {
+        let name = &argument.excel_name;
+        let description = &argument.description;
+        quote_spanned!(generated=>#krate::__private::v1::ArgumentDescriptor { name: #name, description: #description, })
     });
     let hidden = plan.hidden;
-    let invocation = if generated_context_expression.is_some() {
-        quote_spanned!(generated=>#function_ident(__context, #(#converted_names),*))
-    } else {
-        quote_spanned!(generated=>#function_ident(#(#converted_names),*))
-    };
-    let async_result_expression = quote_spanned! {generated=>
-        let __result = #invocation.await;
-        ::core::result::Result::Ok(__result)
-    };
-    let context_setup = generated_context_expression.map(|(ty, expression)| {
-        quote_spanned! {generated=>
-            let __generated_context = #expression;
-            let __context: #ty = __generated_context;
-        }
-    });
     let volatile = plan.volatile;
-    let handle_reuse = plan.handle_reuse.map(|reuse_inputs| {
-        quote_spanned! {generated=>
-            __return_context.set_handle_reuse(#reuse_inputs)?;
-        }
-    });
     let execution_mode = match execution {
         model::ExecutionSpec::MainThread { .. } => {
             quote_spanned!(generated=>#krate::__private::v1::MainThreadMode)
@@ -178,9 +95,424 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         #mode_assertion
         #volatile_assertion
     };
-    let conversions = arguments
+    let wrapper = match execution {
+        model::ExecutionSpec::Async { .. } => {
+            let boundary = if arguments
+                .iter()
+                .any(|argument| argument.conversion.is_handle_lease())
+            {
+                emit_handle_async(plan, &return_assertion)
+            } else {
+                emit_plain_async(plan, &return_assertion)
+            };
+            quote_spanned! {generated=>
+                #(#gating)*
+                #[doc = ::core::concat!("Excel async ABI wrapper for `", #excel_name, "`.")]
+                #[doc = ""]
+                #[doc = "# Safety"]
+                #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument must match its registered ABI; argument pointers must remain live for this call, and the async handle must be a live XLOPER12 supplied by Excel. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
+                #[deny(unsafe_op_in_unsafe_fn)]
+                #[unsafe(no_mangle)]
+                pub unsafe extern "system" fn #export_ident(
+                    #(#raw_parameters,)*
+                    __async_handle: *mut #krate::__private::v1::XLOPER12,
+                ) {
+                    #krate::__private::v1::export_void_boundary(|| { #boundary });
+                }
+            }
+        }
+        _ => emit_sync(plan, &return_assertion, &execution_mode, raw_parameters),
+    };
+
+    let argument_abi_tokens = arguments.iter().map(|argument| {
+        let variant = match argument.abi() {
+            ArgumentAbi::Value12 => quote_spanned!(generated=>Value12),
+            ArgumentAbi::Reference12 => quote_spanned!(generated=>Reference12),
+            ArgumentAbi::Float64 => quote_spanned!(generated=>Float64),
+            ArgumentAbi::Boolean16 => quote_spanned!(generated=>Boolean16),
+            ArgumentAbi::Integer32 => quote_spanned!(generated=>Integer32),
+            ArgumentAbi::CountedUtf16 => quote_spanned!(generated=>CountedUtf16),
+            ArgumentAbi::NumericArray12 => quote_spanned!(generated=>NumericArray12),
+        };
+        quote_spanned!(generated=>#krate::__private::v1::ArgumentAbi::#variant)
+    });
+
+    quote_spanned! {generated=>
+        #function
+
+        #(#gating)*
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals, reason = "Generated registration descriptor identifier")]
+        static #descriptor_ident: #krate::__private::v1::FunctionRegistration =
+            #krate::__private::v1::FunctionRegistration::new(
+                ::core::stringify!(#export_ident),
+                #excel_name,
+                #category,
+                #description,
+                #help_topic,
+                &[
+                    #(#argument_descriptors,)*
+                ],
+                &[
+                    #(#argument_abi_tokens),*
+                ],
+                #return_abi,
+                #execution_kind,
+                #volatile,
+                #visibility,
+            );
+
+        #(#gating)*
+        #krate::__private::v1::submit_registration! {
+            #descriptor_ident
+        }
+
+        #(#gating)*
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals, reason = "Generated export symbol identifier")]
+        #[used]
+        #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
+        #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
+        static #export_manifest_entry_ident: [::core::primitive::u8; #export_name_bytes.len()] =
+            *#export_name_bytes;
+
+        #wrapper
+    }
+}
+
+fn emit_sync(
+    plan: &model::UdfPlan,
+    return_assertion: &proc_macro2::TokenStream,
+    execution_mode: &proc_macro2::TokenStream,
+    raw_parameters: impl Iterator<Item = proc_macro2::TokenStream>,
+) -> proc_macro2::TokenStream {
+    let generated = proc_macro2::Span::mixed_site();
+    let krate = &plan.crate_path;
+    let return_type = &plan.return_type;
+    let arguments = &plan.arguments;
+    let argument_count = arguments.len();
+    let udf_id = plan.metadata.id.as_str();
+    let excel_name = &plan.metadata.excel_name;
+    let export_ident = &plan.symbols.export_ident;
+    let gating = &plan.gating;
+    let numeric_return = plan.return_abi == ReturnAbi::NumericArray12;
+    let (return_pointer, sync_boundary, export_boundary, return_trait) = if numeric_return {
+        (
+            quote_spanned!(generated=>*mut #krate::__private::v1::FP12),
+            quote_spanned!(generated=>sync_udf_fp12_with_mode),
+            quote_spanned!(generated=>export_numeric_boundary),
+            quote_spanned!(generated=>NumericReturn),
+        )
+    } else {
+        (
+            quote_spanned!(generated=>*mut #krate::__private::v1::XLOPER12),
+            quote_spanned!(generated=>sync_udf_with_mode),
+            quote_spanned!(generated=>export_value_boundary),
+            quote_spanned!(generated=>ExcelReturn),
+        )
+    };
+    let prepare_sync_boundary = if numeric_return {
+        quote_spanned!(generated=>prepare_sync_udf_fp12_with_mode)
+    } else {
+        quote_spanned!(generated=>prepare_sync_udf_with_mode)
+    };
+    let conversions = emit_conversions(plan);
+    let context_setup = emit_context_setup(plan);
+    let invocation = emit_invocation(plan);
+    let materializations = arguments.iter().map(|argument| {
+        let converted = &argument.local_ident;
+        quote_spanned!(generated=>let #converted = #converted.materialize()?;)
+    });
+
+    let handle_reuse = plan.handle_reuse.map(|reuse_inputs| {
+        quote_spanned! {generated=>
+            __return_context.set_handle_reuse(#reuse_inputs)?;
+        }
+    });
+    let boundary = quote_spanned! {generated=>
+        let __execute = #krate::__private::v1::#prepare_sync_boundary::<_, #return_type, #execution_mode, _>(
+            &crate::__XLFN_RUNTIME,
+            |__state, mut __frame| {
+                #return_assertion
+                #context_setup
+                #(#conversions)*
+                let mut __return_context =
+                    __frame.return_context(#udf_id)?;
+                #handle_reuse
+                #krate::__private::v1::#return_trait::invoke(
+                    &mut __return_context,
+                    || {
+                        #(#materializations)*
+                        ::core::result::Result::Ok(#invocation)
+                    },
+                )
+            },
+        );
+        // SAFETY: the generated wrapper is invoked by Excel using the
+        // registered execution mode and starts this invocation exactly once.
+        unsafe {
+            #krate::__private::v1::#sync_boundary::<_, #return_type, #execution_mode, _>(
+                &crate::__XLFN_RUNTIME,
+                #udf_id,
+                #excel_name,
+                #argument_count,
+                __execute,
+            )
+        }
+    };
+    quote_spanned! {generated=>
+        #(#gating)*
+        #[doc = ::core::concat!("Excel ABI wrapper for `", #excel_name, "`.")]
+        #[doc = ""]
+        #[doc = "# Safety"]
+        #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument must match its registered ABI; pointer arguments must refer to live XLOPER12, FP12, or counted UTF-16 storage as registered for this call. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
+        #[deny(unsafe_op_in_unsafe_fn)]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "system" fn #export_ident(
+            #(#raw_parameters),*
+        ) -> #return_pointer {
+            #krate::__private::v1::#export_boundary(|| { #boundary })
+        }
+    }
+}
+
+fn emit_plain_async(
+    plan: &model::UdfPlan,
+    return_assertion: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let generated = proc_macro2::Span::mixed_site();
+    let krate = &plan.crate_path;
+    let return_type = &plan.return_type;
+    let udf_id = plan.metadata.id.as_str();
+    let excel_name = &plan.metadata.excel_name;
+    let argument_count = plan.arguments.len();
+    let conversions = emit_conversions(plan);
+    let context_setup = emit_context_setup(plan);
+    let invocation = emit_invocation(plan);
+    quote_spanned! {generated=>
+        #krate::__private::v1::__xlfn_async_only! {
+            const { #krate::__private::v1::assert_async_executor(&crate::__XLFN_RUNTIME); }
+            let __execute = #krate::__private::v1::prepare_async_udf::<_, #return_type, _, _>(
+                &crate::__XLFN_RUNTIME,
+                |__call, __lease, __cancellation, mut __frame| {
+                    #(#conversions)*
+                    let _ = __frame.finish_arguments()?;
+                    ::core::result::Result::Ok(async move {
+                        #context_setup
+                        #return_assertion
+                        let __result = #invocation.await;
+                        ::core::result::Result::Ok(__result)
+                    })
+                },
+            );
+            // SAFETY: `__async_handle` is provided by Excel via the extern "system"
+            // entry point generated by this macro and points to a valid async handle.
+            unsafe {
+                #krate::__private::v1::async_udf::<_, #return_type, _, _>(
+                    &crate::__XLFN_RUNTIME,
+                    #udf_id,
+                    #excel_name,
+                    #argument_count,
+                    __async_handle,
+                    __execute,
+                )
+            }
+        }
+    }
+}
+
+fn emit_handle_async(
+    plan: &model::UdfPlan,
+    return_assertion: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let generated = proc_macro2::Span::mixed_site();
+    let krate = &plan.crate_path;
+    let return_type = &plan.return_type;
+    let udf_id = plan.metadata.id.as_str();
+    let excel_name = &plan.metadata.excel_name;
+    let argument_count = plan.arguments.len();
+    let conversions = emit_conversions(plan);
+    let invocation = emit_invocation(plan);
+    let arguments = &plan.arguments;
+    let context = plan.execution.context();
+    let handle_bindings = arguments.iter().filter_map(|argument| {
+        if !argument.conversion.is_handle_lease() {
+            return None;
+        }
+        let converted = &argument.local_ident;
+        Some(quote_spanned! {generated=>
+            let #converted = #krate::__private::v1::bind_handle_lease(
+                #converted,
+                __scope,
+            )?;
+        })
+    });
+
+    let builder_ident = syn::Ident::new("__XlfnHandleTaskBuilder", proc_macro2::Span::mixed_site());
+    let builder_struct_fields = arguments.iter().map(|argument| {
+        let name = &argument.local_ident;
+        let ty = &argument.ty;
+        if let model::ArgumentConversion::HandleLease { object } = &argument.conversion {
+            quote_spanned!(generated=>#name: #krate::__private::v1::PendingHandleLease<#object>,)
+        } else {
+            quote_spanned!(generated=>#name: #ty,)
+        }
+    });
+    let builder_context_fields = context.map(|context| {
+        let addin = context.addin();
+        quote_spanned! {generated=>
+            __lease: #krate::__private::v1::ExecutionLease<#addin>,
+            __cancellation: #krate::__private::v1::CancellationToken,
+        }
+    });
+    let builder_argument_moves = arguments.iter().map(|argument| {
+        let name = &argument.local_ident;
+        quote_spanned!(generated=>let #name = self.#name;)
+    });
+    let builder_context_moves = context.map(|_| {
+        quote_spanned! {generated=>
+            let __lease = self.__lease;
+            let __cancellation = self.__cancellation;
+        }
+    });
+    let builder_initializers = arguments.iter().map(|argument| {
+        let name = &argument.local_ident;
+        quote_spanned!(generated=>#name: #name,)
+    });
+    let builder_context_initializers = context.map(|_| {
+        quote_spanned! {generated=>
+            __lease: __lease,
+            __cancellation: __cancellation,
+        }
+    });
+    let builder_context_setup = context.map(|context| {
+        let addin = context.addin();
+        let context = context.ty();
+        quote_spanned! {generated=>
+            let __generated_context = #krate::__private::v1::async_context::<#addin>(
+                &__lease,
+                &__cancellation,
+                &crate::__XLFN_RUNTIME,
+            );
+            let __context: #context = __generated_context;
+        }
+    });
+    let builder_definition = quote_spanned! {generated=>
+        struct #builder_ident {
+            #(#builder_struct_fields)*
+            #builder_context_fields
+        }
+
+        impl
+            #krate::__private::v1::HandleScopedBuilder<#return_type>
+            for #builder_ident
+        {
+            fn build<'generation>(
+                self,
+                __scope: #krate::__private::v1::AsyncTaskScope<'generation>,
+            ) -> impl ::std::future::Future<
+                Output = #krate::error::XllResult<#return_type>,
+            > + ::core::marker::Send + 'generation {
+                #(#builder_argument_moves)*
+                #builder_context_moves
+                async move {
+                    #(#handle_bindings)*
+                    #builder_context_setup
+                    #return_assertion
+                    let __result = #invocation.await;
+                        ::core::result::Result::Ok(__result)
+                }
+            }
+        }
+    };
+    quote_spanned! {generated=>
+        #krate::__private::v1::__xlfn_async_only! {
+            const { #krate::__private::v1::assert_async_executor(&crate::__XLFN_RUNTIME); }
+            let __execute = #krate::__private::v1::prepare_async_udf_handle::<_, #return_type, _, _>(
+                &crate::__XLFN_RUNTIME,
+                |__call, __lease, __cancellation, mut __frame| {
+                    #builder_definition
+                    #(#conversions)*
+                    let _ = __frame.finish_arguments()?;
+                    ::core::result::Result::Ok(#builder_ident {
+                        #(#builder_initializers)*
+                        #builder_context_initializers
+                    })
+                },
+            );
+            // SAFETY: `__async_handle` is provided by Excel via the extern "system"
+            // entry point generated by this macro and points to a valid async handle.
+            unsafe {
+                #krate::__private::v1::async_udf_handle::<_, #return_type, _, _>(
+                    &crate::__XLFN_RUNTIME,
+                    #udf_id,
+                    #excel_name,
+                    #argument_count,
+                    __async_handle,
+                    __execute,
+                )
+            }
+        }
+    }
+}
+
+fn emit_context_setup(plan: &model::UdfPlan) -> Option<proc_macro2::TokenStream> {
+    let generated = proc_macro2::Span::mixed_site();
+    let krate = &plan.crate_path;
+    let execution = &plan.execution;
+    let context = execution.context();
+    let generated_context_expression = context.map(|context| {
+        let expression = match execution {
+            model::ExecutionSpec::ThreadSafe { .. } => {
+                quote_spanned!(generated=>#krate::__private::v1::thread_safe_context(__frame.environment(), __state))
+            }
+            model::ExecutionSpec::MainThread { .. } => {
+                quote_spanned!(generated=>#krate::__private::v1::main_thread_context(
+                    __frame.environment(),
+                    __state,
+                ))
+            }
+            model::ExecutionSpec::MacroSheet { .. } => {
+                quote_spanned!(generated=>#krate::__private::v1::macro_sheet_context(
+                    __frame.environment(),
+                    __state,
+                ))
+            }
+            model::ExecutionSpec::Async { .. } => quote_spanned!(generated=>#krate::__private::v1::async_context(
+                &__lease,
+                &__cancellation,
+                &crate::__XLFN_RUNTIME,
+            )),
+        };
+        (context.ty(), expression)
+    });
+    generated_context_expression.map(|(ty, expression)| {
+        quote_spanned! {generated=>
+            let __generated_context = #expression;
+            let __context: #ty = __generated_context;
+        }
+    })
+}
+
+fn emit_invocation(plan: &model::UdfPlan) -> proc_macro2::TokenStream {
+    let generated = proc_macro2::Span::mixed_site();
+    let function_ident = &plan.function.sig.ident;
+    let converted_names = plan.arguments.iter().map(|argument| &argument.local_ident);
+    if plan.execution.context_type().is_some() {
+        quote_spanned!(generated=>#function_ident(__context, #(#converted_names),*))
+    } else {
+        quote_spanned!(generated=>#function_ident(#(#converted_names),*))
+    }
+}
+
+fn emit_conversions(plan: &model::UdfPlan) -> impl Iterator<Item = proc_macro2::TokenStream> {
+    let generated = proc_macro2::Span::mixed_site();
+    let krate = &plan.crate_path;
+    let return_type = &plan.return_type;
+    let is_async = plan.execution.is_async();
+    plan.arguments
         .iter()
-        .map(|argument| {
+        .map(move |argument| {
             let index = argument.index;
             let ty = &argument.ty;
             let converted = &argument.local_ident;
@@ -330,315 +662,4 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                 }
             }
         })
-        .collect::<Vec<_>>();
-
-    let materializations = arguments
-        .iter()
-        .map(|argument| {
-            let converted = &argument.local_ident;
-            quote_spanned!(generated=>let #converted = #converted.materialize()?;)
-        })
-        .collect::<Vec<_>>();
-
-    let handle_bindings = arguments
-        .iter()
-        .filter_map(|argument| {
-            if !argument.conversion.is_handle_lease() {
-                return None;
-            }
-            let converted = &argument.local_ident;
-            Some(quote_spanned! {generated=>
-                let #converted = #krate::__private::v1::bind_handle_lease(
-                    #converted,
-                    __scope,
-                )?;
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let builder_ident = syn::Ident::new("__XlfnHandleTaskBuilder", proc_macro2::Span::mixed_site());
-    let mut builder_struct_fields = Vec::with_capacity(arguments.len() + 2);
-    for argument in arguments {
-        let name = &argument.local_ident;
-        let ty = &argument.ty;
-        let field_type =
-            if let model::ArgumentConversion::HandleLease { object } = &argument.conversion {
-                quote_spanned!(generated=>#krate::__private::v1::PendingHandleLease<#object>)
-            } else {
-                quote_spanned!(generated=>#ty)
-            };
-        builder_struct_fields.push(quote_spanned!(generated=>#name: #field_type,));
-    }
-    let context_addin_type = context.map(model::ValidatedContext::addin);
-    let builder_lease_field = context_addin_type.map(
-        |addin| quote_spanned!(generated=>__lease: #krate::__private::v1::ExecutionLease<#addin>,),
-    );
-    if let Some(field) = builder_lease_field {
-        builder_struct_fields.push(field);
-    }
-    if context_type.is_some() {
-        builder_struct_fields.push(
-            quote_spanned!(generated=>__cancellation: #krate::__private::v1::CancellationToken,),
-        );
-    }
-    let builder_argument_moves = arguments
-        .iter()
-        .map(|argument| {
-            let name = &argument.local_ident;
-            quote_spanned!(generated=>let #name = self.#name;)
-        })
-        .collect::<Vec<_>>();
-    let builder_lease_move = if context_type.is_some() {
-        quote_spanned!(generated=>let __lease = self.__lease;)
-    } else {
-        quote_spanned!(generated=>)
-    };
-    let builder_cancellation_move = context_type
-        .map(|_| quote_spanned!(generated=>let __cancellation = self.__cancellation;))
-        .unwrap_or_else(|| quote_spanned!(generated=>));
-    let mut builder_initializers = arguments
-        .iter()
-        .map(|argument| {
-            let name = &argument.local_ident;
-            quote_spanned!(generated=>#name: #name,)
-        })
-        .collect::<Vec<_>>();
-    if context_type.is_some() {
-        builder_initializers.push(quote_spanned!(generated=>__lease: __lease,));
-    }
-    if context_type.is_some() {
-        builder_initializers.push(quote_spanned!(generated=>__cancellation: __cancellation,));
-    }
-    let builder_context_setup = context.map(|context| {
-        let addin = context.addin();
-        let context = context.ty();
-        quote_spanned! {generated=>
-            let __generated_context = #krate::__private::v1::async_context::<#addin>(
-                &__lease,
-                &__cancellation,
-                &crate::__XLFN_RUNTIME,
-            );
-            let __context: #context = __generated_context;
-        }
-    });
-    let builder_context_setup =
-        builder_context_setup.unwrap_or_else(|| quote_spanned!(generated=>));
-    let builder_definition = if has_handle_lease {
-        quote_spanned! {generated=>
-            struct #builder_ident {
-                #(#builder_struct_fields)*
-            }
-
-            impl
-                #krate::__private::v1::HandleScopedBuilder<#return_type>
-                for #builder_ident
-            {
-                fn build<'generation>(
-                    self,
-                    __scope: #krate::__private::v1::AsyncTaskScope<'generation>,
-                ) -> impl ::std::future::Future<
-                    Output = #krate::error::XllResult<#return_type>,
-                > + ::core::marker::Send + 'generation {
-                    #(#builder_argument_moves)*
-                    #builder_lease_move
-                    #builder_cancellation_move
-                    async move {
-                        #(#handle_bindings)*
-                        #builder_context_setup
-                        #return_assertion
-                        #async_result_expression
-                    }
-                }
-            }
-        }
-    } else {
-        quote_spanned!(generated=>)
-    };
-
-    let boundary = if is_async {
-        if has_handle_lease {
-            quote_spanned! {generated=>
-                #krate::__private::v1::__xlfn_async_only! {
-                    const { #krate::__private::v1::assert_async_executor(&crate::__XLFN_RUNTIME); }
-                    let __execute = #krate::__private::v1::prepare_async_udf_handle::<_, #return_type, _, _>(
-                        &crate::__XLFN_RUNTIME,
-                        |__call, __lease, __cancellation, mut __frame| {
-                            #builder_definition
-                            #(#conversions)*
-                            let _ = __frame.finish_arguments()?;
-                            ::core::result::Result::Ok(#builder_ident {
-                                #(#builder_initializers)*
-                            })
-                        },
-                    );
-                    // SAFETY: `__async_handle` is provided by Excel via the extern "system"
-                    // entry point generated by this macro and points to a valid async handle.
-                    unsafe {
-                        #krate::__private::v1::async_udf_handle::<_, #return_type, _, _>(
-                            &crate::__XLFN_RUNTIME,
-                            #udf_id,
-                            #excel_name,
-                            #argument_count,
-                            __async_handle,
-                            __execute,
-                        )
-                    }
-                }
-            }
-        } else {
-            quote_spanned! {generated=>
-                #krate::__private::v1::__xlfn_async_only! {
-                    const { #krate::__private::v1::assert_async_executor(&crate::__XLFN_RUNTIME); }
-                    let __execute = #krate::__private::v1::prepare_async_udf::<_, #return_type, _, _>(
-                        &crate::__XLFN_RUNTIME,
-                        |__call, __lease, __cancellation, mut __frame| {
-                            #(#conversions)*
-                            let _ = __frame.finish_arguments()?;
-                            ::core::result::Result::Ok(async move {
-                                #context_setup
-                                #return_assertion
-                                #async_result_expression
-                            })
-                        },
-                    );
-                    // SAFETY: `__async_handle` is provided by Excel via the extern "system"
-                    // entry point generated by this macro and points to a valid async handle.
-                    unsafe {
-                        #krate::__private::v1::async_udf::<_, #return_type, _, _>(
-                            &crate::__XLFN_RUNTIME,
-                            #udf_id,
-                            #excel_name,
-                            #argument_count,
-                            __async_handle,
-                            __execute,
-                        )
-                    }
-                }
-            }
-        }
-    } else {
-        quote_spanned! {generated=>
-            let __execute = #krate::__private::v1::#prepare_sync_boundary::<_, #return_type, #execution_mode, _>(
-                &crate::__XLFN_RUNTIME,
-                |__state, mut __frame| {
-                    #return_assertion
-                    #context_setup
-                    #(#conversions)*
-                    let mut __return_context =
-                        __frame.return_context(#udf_id)?;
-                    #handle_reuse
-                    #krate::__private::v1::#return_trait::invoke(
-                        &mut __return_context,
-                        || {
-                            #(#materializations)*
-                            ::core::result::Result::Ok(#invocation)
-                        },
-                    )
-                },
-            );
-            // SAFETY: the generated wrapper is invoked by Excel using the
-            // registered execution mode and starts this invocation exactly once.
-            unsafe {
-                #krate::__private::v1::#sync_boundary::<_, #return_type, #execution_mode, _>(
-                    &crate::__XLFN_RUNTIME,
-                    #udf_id,
-                    #excel_name,
-                    #argument_count,
-                    __execute,
-                )
-            }
-        }
-    };
-    let wrapper = if is_async {
-        quote_spanned! {generated=>
-            #(#gating)*
-            #[doc = ::core::concat!("Excel async ABI wrapper for `", #excel_name, "`.")]
-            #[doc = ""]
-            #[doc = "# Safety"]
-            #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument must match its registered ABI; argument pointers must remain live for this call, and the async handle must be a live XLOPER12 supplied by Excel. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
-            #[deny(unsafe_op_in_unsafe_fn)]
-            #[unsafe(no_mangle)]
-            pub unsafe extern "system" fn #export_ident(
-                #(#raw_parameters,)*
-                __async_handle: *mut #krate::__private::v1::XLOPER12,
-            ) {
-                #krate::__private::v1::export_void_boundary(|| { #boundary });
-            }
-        }
-    } else {
-        quote_spanned! {generated=>
-            #(#gating)*
-            #[doc = ::core::concat!("Excel ABI wrapper for `", #excel_name, "`.")]
-            #[doc = ""]
-            #[doc = "# Safety"]
-            #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument must match its registered ABI; pointer arguments must refer to live XLOPER12, FP12, or counted UTF-16 storage as registered for this call. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
-            #[deny(unsafe_op_in_unsafe_fn)]
-            #[unsafe(no_mangle)]
-            pub unsafe extern "system" fn #export_ident(
-                #(#raw_parameters),*
-            ) -> #return_pointer {
-                #krate::__private::v1::#export_boundary(|| { #boundary })
-            }
-        }
-    };
-
-    let argument_abi_tokens = arguments.iter().map(|argument| {
-        let variant = match argument.abi() {
-            ArgumentAbi::Value12 => quote_spanned!(generated=>Value12),
-            ArgumentAbi::Reference12 => quote_spanned!(generated=>Reference12),
-            ArgumentAbi::Float64 => quote_spanned!(generated=>Float64),
-            ArgumentAbi::Boolean16 => quote_spanned!(generated=>Boolean16),
-            ArgumentAbi::Integer32 => quote_spanned!(generated=>Integer32),
-            ArgumentAbi::CountedUtf16 => quote_spanned!(generated=>CountedUtf16),
-            ArgumentAbi::NumericArray12 => quote_spanned!(generated=>NumericArray12),
-        };
-        quote_spanned!(generated=>#krate::__private::v1::ArgumentAbi::#variant)
-    });
-
-    quote_spanned! {generated=>
-        #function
-
-        #(#gating)*
-        #[doc(hidden)]
-        #[allow(non_upper_case_globals, reason = "Generated registration descriptor identifier")]
-        static #descriptor_ident: #krate::__private::v1::FunctionRegistration =
-            #krate::__private::v1::FunctionRegistration::new(
-                ::core::stringify!(#export_ident),
-                #excel_name,
-                #category,
-                #description,
-                #help_topic,
-                &[
-                    #(
-                        #krate::__private::v1::ArgumentDescriptor {
-                            name: #argument_name_literals,
-                            description: #argument_descriptions,
-                        },
-                    )*
-                ],
-                &[
-                    #(#argument_abi_tokens),*
-                ],
-                #return_abi,
-                #execution_kind,
-                #volatile,
-                #visibility,
-            );
-
-        #(#gating)*
-        #krate::__private::v1::submit_registration! {
-            #descriptor_ident
-        }
-
-        #(#gating)*
-        #[doc(hidden)]
-        #[allow(non_upper_case_globals, reason = "Generated export symbol identifier")]
-        #[used]
-        #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
-        #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
-        static #export_manifest_entry_ident: [::core::primitive::u8; #export_name_bytes.len()] =
-            *#export_name_bytes;
-
-        #wrapper
-    }
 }
