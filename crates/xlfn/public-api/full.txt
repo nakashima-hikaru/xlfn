@@ -1,10 +1,11 @@
-# nightly-2026-09-28; cargo-public-api 0.52.0; features=(none)
+# nightly-2026-09-28; cargo-public-api 0.52.0; features=async-builtin,rtd,handles,cache,serde,jiff,blake3/pure
 pub mod xlfn
 pub use xlfn::ExcelApiFailure
 pub use xlfn::ExcelApiFunction
 pub use xlfn::ExcelCallbackStatus
 pub use xlfn::ExcelEnum
 pub use xlfn::ExcelError
+pub use xlfn::ExcelHandleObject
 pub use xlfn::ExcelInputIdentity
 pub use xlfn::ExcelPrepare
 pub use xlfn::UdfError
@@ -79,8 +80,8 @@ impl<'a, A> core::marker::Send for xlfn::addin::DiagnosticsSetup<'a, A> where &'
 impl<'a, A> core::marker::Sync for xlfn::addin::DiagnosticsSetup<'a, A> where &'a xlfn::addin::OpenContext<A>: core::marker::Sync
 impl<'a, A> core::marker::Unpin for xlfn::addin::DiagnosticsSetup<'a, A> where &'a xlfn::addin::OpenContext<A>: core::marker::Unpin
 impl<'a, A> core::marker::UnsafeUnpin for xlfn::addin::DiagnosticsSetup<'a, A> where &'a xlfn::addin::OpenContext<A>: core::marker::UnsafeUnpin
-impl<'a, A> core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::DiagnosticsSetup<'a, A> where &'a xlfn::addin::OpenContext<A>: core::panic::unwind_safe::RefUnwindSafe
-impl<'a, A> core::panic::unwind_safe::UnwindSafe for xlfn::addin::DiagnosticsSetup<'a, A> where &'a xlfn::addin::OpenContext<A>: core::panic::unwind_safe::UnwindSafe
+impl<'a, A> !core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::DiagnosticsSetup<'a, A>
+impl<'a, A> !core::panic::unwind_safe::UnwindSafe for xlfn::addin::DiagnosticsSetup<'a, A>
 pub struct xlfn::addin::MacroSheetContext<'call, A: xlfn::Addin>
 impl<'call, A: xlfn::Addin> xlfn::addin::MacroSheetContext<'call, A>
 pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn_engine::error::XllResult<xlfn::value::ExcelValue>
@@ -104,16 +105,17 @@ impl<'call, A> !core::panic::unwind_safe::UnwindSafe for xlfn::addin::MacroSheet
 pub struct xlfn::addin::MainThreadContext<'call, A: xlfn::Addin>
 impl<'call, A: xlfn::Addin> xlfn::addin::MainThreadContext<'call, A>
 pub const fn xlfn::addin::MainThreadContext<'call, A>::diagnostics(&self) -> &'call xlfn::diagnostics::DiagnosticHistory
+pub fn xlfn::addin::MainThreadContext<'call, A>::rtd(&self) -> xlfn::rtd::RtdCallContext<'call, <A as xlfn::Addin>::RtdSubscription, <A as xlfn::Addin>::RtdSources>
 pub const fn xlfn::addin::MainThreadContext<'call, A>::state(&self) -> &'call <A as xlfn::Addin>::SharedState
 impl<A: xlfn::Addin> core::clone::Clone for xlfn::addin::MainThreadContext<'_, A>
 pub fn xlfn::addin::MainThreadContext<'_, A>::clone(&self) -> Self
 impl<A: xlfn::Addin> core::convert::AsRef<<A as xlfn::Addin>::SharedState> for xlfn::addin::MainThreadContext<'_, A>
 pub fn xlfn::addin::MainThreadContext<'_, A>::as_ref(&self) -> &<A as xlfn::Addin>::SharedState
-impl<'call, A> core::marker::Freeze for xlfn::addin::MainThreadContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Freeze
+impl<'call, A> core::marker::Freeze for xlfn::addin::MainThreadContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Freeze, xlfn::rtd::RtdCallContext<'call, <A as xlfn::Addin>::RtdSubscription, <A as xlfn::Addin>::RtdSources>: core::marker::Freeze
 impl<'call, A> !core::marker::Send for xlfn::addin::MainThreadContext<'call, A>
 impl<'call, A> !core::marker::Sync for xlfn::addin::MainThreadContext<'call, A>
-impl<'call, A> core::marker::Unpin for xlfn::addin::MainThreadContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Unpin
-impl<'call, A> core::marker::UnsafeUnpin for xlfn::addin::MainThreadContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::UnsafeUnpin
+impl<'call, A> core::marker::Unpin for xlfn::addin::MainThreadContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Unpin, xlfn::rtd::RtdCallContext<'call, <A as xlfn::Addin>::RtdSubscription, <A as xlfn::Addin>::RtdSources>: core::marker::Unpin
+impl<'call, A> core::marker::UnsafeUnpin for xlfn::addin::MainThreadContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::UnsafeUnpin, xlfn::rtd::RtdCallContext<'call, <A as xlfn::Addin>::RtdSubscription, <A as xlfn::Addin>::RtdSources>: core::marker::UnsafeUnpin
 impl<'call, A> !core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::MainThreadContext<'call, A>
 impl<'call, A> !core::panic::unwind_safe::UnwindSafe for xlfn::addin::MainThreadContext<'call, A>
 pub struct xlfn::addin::OpenContext<A: xlfn::Addin>
@@ -122,17 +124,19 @@ pub const fn xlfn::addin::OpenContext<A>::build_info(&self) -> &xlfn::addin::Bui
 pub fn xlfn::addin::OpenContext<A>::diagnostics(&self) -> xlfn::addin::DiagnosticsSetup<'_, A>
 pub fn xlfn::addin::OpenContext<A>::module_directory(&self) -> &std::path::Path
 pub fn xlfn::addin::OpenContext<A>::module_path(&self) -> &std::path::Path
+pub fn xlfn::addin::OpenContext<A>::rtd(&self) -> xlfn::rtd::RtdOpenContext<'_, <A as xlfn::Addin>::RtdSubscription, <A as xlfn::Addin>::RtdSources>
 impl<A: xlfn::Addin> core::fmt::Debug for xlfn::addin::OpenContext<A>
 pub fn xlfn::addin::OpenContext<A>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<A> core::marker::Freeze for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Freeze
-impl<A> core::marker::Send for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Send
-impl<A> core::marker::Sync for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Sync
-impl<A> core::marker::Unpin for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Unpin
-impl<A> core::marker::UnsafeUnpin for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::UnsafeUnpin
-impl<A> core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::panic::unwind_safe::RefUnwindSafe
-impl<A> core::panic::unwind_safe::UnwindSafe for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::panic::unwind_safe::UnwindSafe
+impl<A> !core::marker::Freeze for xlfn::addin::OpenContext<A>
+impl<A> core::marker::Send for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Send, SourceRegistration<<A as AddinRtdTypes>::Subscription, <A as AddinRtdTypes>::Sources>: core::marker::Send
+impl<A> core::marker::Sync for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Sync, SourceRegistration<<A as AddinRtdTypes>::Subscription, <A as AddinRtdTypes>::Sources>: core::marker::Sync
+impl<A> core::marker::Unpin for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Unpin, SourceRegistration<<A as AddinRtdTypes>::Subscription, <A as AddinRtdTypes>::Sources>: core::marker::Unpin
+impl<A> core::marker::UnsafeUnpin for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::UnsafeUnpin, SourceRegistration<<A as AddinRtdTypes>::Subscription, <A as AddinRtdTypes>::Sources>: core::marker::UnsafeUnpin
+impl<A> !core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::OpenContext<A>
+impl<A> core::panic::unwind_safe::UnwindSafe for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::panic::unwind_safe::UnwindSafe, SourceRegistration<<A as AddinRtdTypes>::Subscription, <A as AddinRtdTypes>::Sources>: core::panic::unwind_safe::UnwindSafe
 pub struct xlfn::addin::Opened<S, L, U, E>
 impl<S, L, U, E> xlfn::addin::Opened<S, L, U, E>
+pub fn xlfn::addin::Opened<S, L, U, E>::with_async_executor<NewE: xlfn::task::AsyncExecutor>(self, NewE) -> xlfn::addin::Opened<S, L, U, NewE>
 pub fn xlfn::addin::Opened<S, L, U, E>::with_layers<NewU>(self, NewU) -> xlfn::addin::Opened<S, L, NewU, E>
 pub fn xlfn::addin::Opened<S, L, U, E>::with_lifecycle<NewL>(self, NewL) -> xlfn::addin::Opened<S, NewL, U, E>
 pub const fn xlfn::addin::Opened<S, L, U, E>::with_runtime_config(self, xlfn::addin::RuntimeConfig) -> Self
@@ -150,7 +154,10 @@ impl<S, L, U, E> core::panic::unwind_safe::UnwindSafe for xlfn::addin::Opened<S,
 pub struct xlfn::addin::RuntimeConfig
 impl xlfn::addin::RuntimeConfig
 pub const fn xlfn::addin::RuntimeConfig::new() -> Self
+pub const fn xlfn::addin::RuntimeConfig::with_async(self, xlfn::task::AsyncConfig) -> Self
 pub const fn xlfn::addin::RuntimeConfig::with_calculation_end_notifications(self, bool) -> Self
+pub const fn xlfn::addin::RuntimeConfig::with_handles(self, xlfn::handle::HandleConfig) -> Self
+pub const fn xlfn::addin::RuntimeConfig::with_rtd(self, xlfn::rtd::RtdConfig) -> Self
 impl core::clone::Clone for xlfn::addin::RuntimeConfig
 pub fn xlfn::addin::RuntimeConfig::clone(&self) -> Self
 impl core::cmp::Eq for xlfn::addin::RuntimeConfig
@@ -186,16 +193,78 @@ impl<'call, A> core::marker::UnsafeUnpin for xlfn::addin::ThreadSafeContext<'cal
 impl<'call, A> !core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::ThreadSafeContext<'call, A>
 impl<'call, A> !core::panic::unwind_safe::UnwindSafe for xlfn::addin::ThreadSafeContext<'call, A>
 pub trait xlfn::addin::Addin: core::marker::Sized + core::marker::Send + core::marker::Sync + 'static
+pub type xlfn::addin::Addin::AsyncExecutor: xlfn::task::AsyncExecutor
 pub type xlfn::addin::Addin::Error: xlfn_engine::error::IntoXllError
 pub type xlfn::addin::Addin::Layers: xlfn::execution::UdfLayers
 pub type xlfn::addin::Addin::LifecycleState: 'static
+pub type xlfn::addin::Addin::RtdSources: xlfn::rtd::RtdSourceCatalog<Self::RtdSubscription>
+pub type xlfn::addin::Addin::RtdSubscription: xlfn::rtd::RtdSubscription
 pub type xlfn::addin::Addin::SharedState: core::marker::Send + core::marker::Sync + 'static
 pub fn xlfn::addin::Addin::cleanup(&mut Self::LifecycleState, &mut xlfn::addin::CleanupReporter<'_>)
 pub fn xlfn::addin::Addin::open(&xlfn::addin::OpenContext<Self>) -> xlfn::addin::OpenResult<Self>
 pub fn xlfn::addin::Addin::quiesce(&mut Self::SharedState, &mut Self::LifecycleState) -> core::result::Result<(), Self::Error>
 pub unsafe trait xlfn::addin::PhysicallyUnloadableAddin: xlfn::Addin
 pub fn xlfn::addin::PhysicallyUnloadableAddin::quiesce_for_physical_unload(&mut Self::SharedState, &mut Self::LifecycleState) -> core::result::Result<(), Self::Error>
-pub type xlfn::addin::OpenResult<A> = core::result::Result<xlfn::addin::Opened<<A as xlfn::Addin>::SharedState, <A as xlfn::Addin>::LifecycleState, <A as xlfn::Addin>::Layers>, <A as xlfn::Addin>::Error>
+pub type xlfn::addin::OpenResult<A> = core::result::Result<xlfn::addin::Opened<<A as xlfn::Addin>::SharedState, <A as xlfn::Addin>::LifecycleState, <A as xlfn::Addin>::Layers, <A as xlfn::Addin>::AsyncExecutor>, <A as xlfn::Addin>::Error>
+pub mod xlfn::cache
+pub use xlfn::cache::CacheBudget
+pub use xlfn::cache::CacheEndpoint
+pub use xlfn::cache::CacheWeightPolicy
+pub use xlfn::cache::CanonicalF64
+pub struct xlfn::cache::CacheLease<'a, V>
+impl<V: core::cmp::Eq> core::cmp::Eq for xlfn::cache::CacheLease<'_, V>
+impl<V: core::cmp::PartialEq> core::cmp::PartialEq for xlfn::cache::CacheLease<'_, V>
+pub fn xlfn::cache::CacheLease<'_, V>::eq(&self, &Self) -> bool
+impl<V: core::fmt::Debug> core::fmt::Debug for xlfn::cache::CacheLease<'_, V>
+pub fn xlfn::cache::CacheLease<'_, V>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<V: core::fmt::Display> core::fmt::Display for xlfn::cache::CacheLease<'_, V>
+pub fn xlfn::cache::CacheLease<'_, V>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<V> core::ops::deref::Deref for xlfn::cache::CacheLease<'_, V>
+pub type xlfn::cache::CacheLease<'_, V>::Target = V
+pub fn xlfn::cache::CacheLease<'_, V>::deref(&self) -> &Self::Target
+impl<V> core::ops::drop::Drop for xlfn::cache::CacheLease<'_, V>
+pub fn xlfn::cache::CacheLease<'_, V>::drop(&mut self)
+impl<'a, V> core::marker::Freeze for xlfn::cache::CacheLease<'a, V> where xlfn_services::cache::CacheLease<'a, V>: core::marker::Freeze
+impl<'a, V> core::marker::Send for xlfn::cache::CacheLease<'a, V> where xlfn_services::cache::CacheLease<'a, V>: core::marker::Send
+impl<'a, V> core::marker::Sync for xlfn::cache::CacheLease<'a, V> where xlfn_services::cache::CacheLease<'a, V>: core::marker::Sync
+impl<'a, V> core::marker::Unpin for xlfn::cache::CacheLease<'a, V> where xlfn_services::cache::CacheLease<'a, V>: core::marker::Unpin
+impl<'a, V> core::marker::UnsafeUnpin for xlfn::cache::CacheLease<'a, V> where xlfn_services::cache::CacheLease<'a, V>: core::marker::UnsafeUnpin
+impl<'a, V> !core::panic::unwind_safe::RefUnwindSafe for xlfn::cache::CacheLease<'a, V>
+impl<'a, V> !core::panic::unwind_safe::UnwindSafe for xlfn::cache::CacheLease<'a, V>
+pub struct xlfn::cache::CacheRegistry
+impl xlfn::cache::CacheRegistry
+pub fn xlfn::cache::CacheRegistry::clear(&self)
+pub fn xlfn::cache::CacheRegistry::get<'a, K, V, Marker, Q>(&'a self, &xlfn_services::cache::CacheEndpoint<K, V, Marker>, &Q) -> xlfn_engine::error::XllResult<core::option::Option<xlfn::cache::CacheLease<'a, V>>> where Marker: 'static, K: core::borrow::Borrow<Q> + core::clone::Clone + core::cmp::Eq + core::hash::Hash + core::marker::Send + core::marker::Sync + 'static, V: core::marker::Send + core::marker::Sync + 'static, Q: core::hash::Hash + core::cmp::Eq + ?core::marker::Sized
+pub fn xlfn::cache::CacheRegistry::get_or_try_insert<'a, K, V, Marker, F>(&'a self, &xlfn_services::cache::CacheEndpoint<K, V, Marker>, K, F) -> xlfn_engine::error::XllResult<xlfn::cache::CacheLease<'a, V>> where Marker: 'static, K: core::clone::Clone + core::cmp::Eq + core::hash::Hash + core::marker::Send + core::marker::Sync + 'static, V: core::marker::Send + core::marker::Sync + 'static, F: core::ops::function::FnOnce() -> xlfn_engine::error::XllResult<V>
+pub fn xlfn::cache::CacheRegistry::get_or_try_insert_borrowed<'a, K, V, Marker, Q, F>(&'a self, &xlfn_services::cache::CacheEndpoint<K, V, Marker>, &Q, F) -> xlfn_engine::error::XllResult<xlfn::cache::CacheLease<'a, V>> where Marker: 'static, K: core::borrow::Borrow<Q> + core::clone::Clone + core::cmp::Eq + core::hash::Hash + core::marker::Send + core::marker::Sync + 'static, V: core::marker::Send + core::marker::Sync + 'static, Q: alloc::borrow::ToOwned<Owned = K> + core::hash::Hash + core::cmp::Eq + ?core::marker::Sized, F: core::ops::function::FnOnce() -> xlfn_engine::error::XllResult<V>
+pub fn xlfn::cache::CacheRegistry::new(xlfn_services::cache::CacheBudget) -> Self
+impl !core::marker::Freeze for xlfn::cache::CacheRegistry
+impl core::marker::Send for xlfn::cache::CacheRegistry
+impl core::marker::Sync for xlfn::cache::CacheRegistry
+impl core::marker::Unpin for xlfn::cache::CacheRegistry
+impl core::marker::UnsafeUnpin for xlfn::cache::CacheRegistry
+impl !core::panic::unwind_safe::RefUnwindSafe for xlfn::cache::CacheRegistry
+impl !core::panic::unwind_safe::UnwindSafe for xlfn::cache::CacheRegistry
+pub struct xlfn::cache::CalculationCache<K, V> where K: core::clone::Clone + core::cmp::Eq + core::hash::Hash + core::marker::Send + core::marker::Sync + 'static, V: core::marker::Send + core::marker::Sync + 'static
+impl<K, V> xlfn::cache::CalculationCache<K, V> where K: core::clone::Clone + core::cmp::Eq + core::hash::Hash + core::marker::Send + core::marker::Sync + 'static, V: core::marker::Send + core::marker::Sync + 'static
+pub fn xlfn::cache::CalculationCache<K, V>::clear(&self)
+pub fn xlfn::cache::CalculationCache<K, V>::get<'a, Q>(&'a self, &Q) -> core::option::Option<xlfn::cache::CacheLease<'a, V>> where K: core::borrow::Borrow<Q>, Q: core::hash::Hash + core::cmp::Eq + ?core::marker::Sized
+pub fn xlfn::cache::CalculationCache<K, V>::get_or_try_insert_borrowed<'a, Q, F>(&'a self, &Q, F) -> xlfn_engine::error::XllResult<xlfn::cache::CacheLease<'a, V>> where K: core::borrow::Borrow<Q>, Q: alloc::borrow::ToOwned<Owned = K> + core::hash::Hash + core::cmp::Eq + ?core::marker::Sized, F: core::ops::function::FnOnce() -> xlfn_engine::error::XllResult<V>
+pub fn xlfn::cache::CalculationCache<K, V>::get_or_try_insert_with<'a, F>(&'a self, K, F) -> xlfn_engine::error::XllResult<xlfn::cache::CacheLease<'a, V>> where F: core::ops::function::FnOnce() -> xlfn_engine::error::XllResult<V>
+pub fn xlfn::cache::CalculationCache<K, V>::is_empty(&self) -> bool
+pub fn xlfn::cache::CalculationCache<K, V>::len(&self) -> usize
+pub fn xlfn::cache::CalculationCache<K, V>::new(xlfn_services::cache::CacheBudget) -> Self
+pub fn xlfn::cache::CalculationCache<K, V>::used_weight(&self) -> usize
+pub fn xlfn::cache::CalculationCache<K, V>::with_weigher(xlfn_services::cache::CacheBudget, fn(&V) -> usize) -> Self
+impl<K, V> core::ops::drop::Drop for xlfn::cache::CalculationCache<K, V> where K: core::clone::Clone + core::cmp::Eq + core::hash::Hash + core::marker::Send + core::marker::Sync + 'static, V: core::marker::Send + core::marker::Sync + 'static
+pub fn xlfn::cache::CalculationCache<K, V>::drop(&mut self)
+impl<K, V> !core::marker::Freeze for xlfn::cache::CalculationCache<K, V>
+impl<K, V> core::marker::Send for xlfn::cache::CalculationCache<K, V> where xlfn_services::cache::CalculationCache<K, V>: core::marker::Send
+impl<K, V> core::marker::Sync for xlfn::cache::CalculationCache<K, V> where xlfn_services::cache::CalculationCache<K, V>: core::marker::Sync
+impl<K, V> core::marker::Unpin for xlfn::cache::CalculationCache<K, V> where xlfn_services::cache::CalculationCache<K, V>: core::marker::Unpin
+impl<K, V> core::marker::UnsafeUnpin for xlfn::cache::CalculationCache<K, V> where xlfn_services::cache::CalculationCache<K, V>: core::marker::UnsafeUnpin
+impl<K, V> !core::panic::unwind_safe::RefUnwindSafe for xlfn::cache::CalculationCache<K, V>
+impl<K, V> !core::panic::unwind_safe::UnwindSafe for xlfn::cache::CalculationCache<K, V>
 pub mod xlfn::diagnostics
 pub use xlfn::diagnostics::DiagnosticId
 pub use xlfn::diagnostics::DiagnosticInitError
@@ -652,6 +721,113 @@ impl<T0: xlfn::execution::UdfLayerGuard> xlfn::execution::UdfLayerGuard for (T0)
 pub fn (T0)::exit(self, &xlfn::execution::CallOutcome<'_>)
 pub trait xlfn::execution::UdfLayers: xlfn::execution::private::UdfLayersImpl
 impl<T> xlfn::execution::UdfLayers for T where T: xlfn::execution::private::UdfLayersImpl
+pub mod xlfn::handle
+pub struct xlfn::handle::Handle<'call, T: xlfn::handle::ExcelHandleObject>
+impl<'call, T: xlfn::handle::ExcelHandleObject> xlfn::handle::Handle<'call, T>
+pub fn xlfn::handle::Handle<'call, T>::alias(self) -> xlfn::handle::HandleAlias<'call, T>
+pub fn xlfn::handle::Handle<'call, T>::object_id(&self) -> xlfn::handle::HandleObjectId
+impl<T: xlfn::handle::ExcelHandleObject> core::convert::AsRef<T> for xlfn::handle::Handle<'_, T>
+pub fn xlfn::handle::Handle<'_, T>::as_ref(&self) -> &T
+impl<T: xlfn::handle::ExcelHandleObject> core::ops::deref::Deref for xlfn::handle::Handle<'_, T>
+pub type xlfn::handle::Handle<'_, T>::Target = T
+pub fn xlfn::handle::Handle<'_, T>::deref(&self) -> &Self::Target
+impl<'call, T> core::marker::Freeze for xlfn::handle::Handle<'call, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::Freeze
+impl<'call, T> !core::marker::Send for xlfn::handle::Handle<'call, T>
+impl<'call, T> !core::marker::Sync for xlfn::handle::Handle<'call, T>
+impl<'call, T> core::marker::Unpin for xlfn::handle::Handle<'call, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::Unpin
+impl<'call, T> core::marker::UnsafeUnpin for xlfn::handle::Handle<'call, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::UnsafeUnpin
+impl<'call, T> !core::panic::unwind_safe::RefUnwindSafe for xlfn::handle::Handle<'call, T>
+impl<'call, T> !core::panic::unwind_safe::UnwindSafe for xlfn::handle::Handle<'call, T>
+pub struct xlfn::handle::HandleAlias<'call, T: xlfn::handle::ExcelHandleObject>
+impl<'call, T> core::marker::Freeze for xlfn::handle::HandleAlias<'call, T> where core::marker::PhantomData<(&'call CallScope<'call>, fn(T) -> T)>: core::marker::Freeze
+impl<'call, T> !core::marker::Send for xlfn::handle::HandleAlias<'call, T>
+impl<'call, T> !core::marker::Sync for xlfn::handle::HandleAlias<'call, T>
+impl<'call, T> core::marker::Unpin for xlfn::handle::HandleAlias<'call, T> where core::marker::PhantomData<(&'call CallScope<'call>, fn(T) -> T)>: core::marker::Unpin
+impl<'call, T> core::marker::UnsafeUnpin for xlfn::handle::HandleAlias<'call, T> where core::marker::PhantomData<(&'call CallScope<'call>, fn(T) -> T)>: core::marker::UnsafeUnpin
+impl<'call, T> !core::panic::unwind_safe::RefUnwindSafe for xlfn::handle::HandleAlias<'call, T>
+impl<'call, T> !core::panic::unwind_safe::UnwindSafe for xlfn::handle::HandleAlias<'call, T>
+pub struct xlfn::handle::HandleBindingLimit(_)
+impl xlfn::handle::HandleBindingLimit
+pub const fn xlfn::handle::HandleBindingLimit::get(self) -> u32
+pub const fn xlfn::handle::HandleBindingLimit::new(u32) -> core::option::Option<Self>
+impl core::clone::Clone for xlfn::handle::HandleBindingLimit
+pub fn xlfn::handle::HandleBindingLimit::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::handle::HandleBindingLimit
+impl core::cmp::PartialEq for xlfn::handle::HandleBindingLimit
+pub fn xlfn::handle::HandleBindingLimit::eq(&self, &Self) -> bool
+impl core::convert::TryFrom<u32> for xlfn::handle::HandleBindingLimit
+pub type xlfn::handle::HandleBindingLimit::Error = xlfn_engine::error::InvalidLimit
+pub fn xlfn::handle::HandleBindingLimit::try_from(u32) -> core::result::Result<Self, Self::Error>
+impl core::fmt::Debug for xlfn::handle::HandleBindingLimit
+pub fn xlfn::handle::HandleBindingLimit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::handle::HandleBindingLimit
+impl core::marker::StructuralPartialEq for xlfn::handle::HandleBindingLimit
+impl core::marker::Freeze for xlfn::handle::HandleBindingLimit
+impl core::marker::Send for xlfn::handle::HandleBindingLimit
+impl core::marker::Sync for xlfn::handle::HandleBindingLimit
+impl core::marker::Unpin for xlfn::handle::HandleBindingLimit
+impl core::marker::UnsafeUnpin for xlfn::handle::HandleBindingLimit
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::handle::HandleBindingLimit
+impl core::panic::unwind_safe::UnwindSafe for xlfn::handle::HandleBindingLimit
+pub struct xlfn::handle::HandleConfig
+impl xlfn::handle::HandleConfig
+pub const xlfn::handle::HandleConfig::DEFAULT_MAX_BINDINGS: u32
+pub const xlfn::handle::HandleConfig::MAX_SUPPORTED_BINDINGS: u32
+pub const fn xlfn::handle::HandleConfig::new() -> Self
+pub const fn xlfn::handle::HandleConfig::with_binding_limit(self, xlfn::handle::HandleBindingLimit) -> Self
+impl core::clone::Clone for xlfn::handle::HandleConfig
+pub fn xlfn::handle::HandleConfig::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::handle::HandleConfig
+impl core::cmp::PartialEq for xlfn::handle::HandleConfig
+pub fn xlfn::handle::HandleConfig::eq(&self, &Self) -> bool
+impl core::default::Default for xlfn::handle::HandleConfig
+pub fn xlfn::handle::HandleConfig::default() -> Self
+impl core::fmt::Debug for xlfn::handle::HandleConfig
+pub fn xlfn::handle::HandleConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::handle::HandleConfig
+impl core::marker::StructuralPartialEq for xlfn::handle::HandleConfig
+impl core::marker::Freeze for xlfn::handle::HandleConfig
+impl core::marker::Send for xlfn::handle::HandleConfig
+impl core::marker::Sync for xlfn::handle::HandleConfig
+impl core::marker::Unpin for xlfn::handle::HandleConfig
+impl core::marker::UnsafeUnpin for xlfn::handle::HandleConfig
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::handle::HandleConfig
+impl core::panic::unwind_safe::UnwindSafe for xlfn::handle::HandleConfig
+pub struct xlfn::handle::HandleLease<'generation, T: xlfn::handle::ExcelHandleObject>
+impl<T: xlfn::handle::ExcelHandleObject> xlfn::handle::HandleLease<'_, T>
+pub fn xlfn::handle::HandleLease<'_, T>::object_id(&self) -> xlfn::handle::HandleObjectId
+impl<T: xlfn::handle::ExcelHandleObject> core::convert::AsRef<T> for xlfn::handle::HandleLease<'_, T>
+pub fn xlfn::handle::HandleLease<'_, T>::as_ref(&self) -> &T
+impl<T: xlfn::handle::ExcelHandleObject> core::marker::Send for xlfn::handle::HandleLease<'_, T>
+impl<T: xlfn::handle::ExcelHandleObject> core::marker::Sync for xlfn::handle::HandleLease<'_, T>
+impl<T: xlfn::handle::ExcelHandleObject> core::ops::deref::Deref for xlfn::handle::HandleLease<'_, T>
+pub type xlfn::handle::HandleLease<'_, T>::Target = T
+pub fn xlfn::handle::HandleLease<'_, T>::deref(&self) -> &Self::Target
+impl<'generation, T> core::marker::Freeze for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::Freeze
+impl<'generation, T> core::marker::Unpin for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::Unpin
+impl<'generation, T> core::marker::UnsafeUnpin for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::UnsafeUnpin
+impl<'generation, T> !core::panic::unwind_safe::RefUnwindSafe for xlfn::handle::HandleLease<'generation, T>
+impl<'generation, T> !core::panic::unwind_safe::UnwindSafe for xlfn::handle::HandleLease<'generation, T>
+pub struct xlfn::handle::HandleObjectId
+impl core::clone::Clone for xlfn::handle::HandleObjectId
+pub fn xlfn::handle::HandleObjectId::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::handle::HandleObjectId
+impl core::cmp::PartialEq for xlfn::handle::HandleObjectId
+pub fn xlfn::handle::HandleObjectId::eq(&self, &Self) -> bool
+impl core::fmt::Debug for xlfn::handle::HandleObjectId
+pub fn xlfn::handle::HandleObjectId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for xlfn::handle::HandleObjectId
+pub fn xlfn::handle::HandleObjectId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for xlfn::handle::HandleObjectId
+impl core::marker::StructuralPartialEq for xlfn::handle::HandleObjectId
+impl core::marker::Freeze for xlfn::handle::HandleObjectId
+impl core::marker::Send for xlfn::handle::HandleObjectId
+impl core::marker::Sync for xlfn::handle::HandleObjectId
+impl core::marker::Unpin for xlfn::handle::HandleObjectId
+impl core::marker::UnsafeUnpin for xlfn::handle::HandleObjectId
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::handle::HandleObjectId
+impl core::panic::unwind_safe::UnwindSafe for xlfn::handle::HandleObjectId
+pub trait xlfn::handle::ExcelHandleObject: core::marker::Send + core::marker::Sync + 'static
 pub mod xlfn::output
 pub struct xlfn::output::ExcelArrayBuilder
 impl xlfn::output::ExcelArrayBuilder
@@ -748,6 +924,7 @@ pub fn xlfn::output::numeric_return_memory_metrics() -> xlfn_engine::error::XllR
 pub mod xlfn::prelude
 pub use xlfn::prelude::ExcelEnum
 pub use xlfn::prelude::ExcelError
+pub use xlfn::prelude::ExcelHandleObject
 pub use xlfn::prelude::ExcelInputIdentity
 pub use xlfn::prelude::ExcelPrepare
 pub use xlfn::prelude::UdfError
@@ -799,6 +976,8 @@ pub enum xlfn::prelude::OptionalExcelValue<T>
 pub xlfn::prelude::OptionalExcelValue::Blank
 pub xlfn::prelude::OptionalExcelValue::Missing
 pub xlfn::prelude::OptionalExcelValue::Value(T)
+impl<'de, T> serde_core::de::Deserialize<'de> for xlfn::value::OptionalExcelValue<T> where T: serde_core::de::Deserialize<'de>
+pub fn xlfn::value::OptionalExcelValue<T>::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 impl<T: core::clone::Clone> core::clone::Clone for xlfn::value::OptionalExcelValue<T>
 pub fn xlfn::value::OptionalExcelValue<T>::clone(&self) -> Self
 impl<T: core::cmp::PartialEq> core::cmp::PartialEq for xlfn::value::OptionalExcelValue<T>
@@ -808,6 +987,8 @@ impl<T: core::fmt::Debug> core::fmt::Debug for xlfn::value::OptionalExcelValue<T
 pub fn xlfn::value::OptionalExcelValue<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<T: xlfn::value::ExcelInputIdentity> xlfn::value::ExcelInputIdentity for xlfn::value::OptionalExcelValue<T>
 pub fn xlfn::value::OptionalExcelValue<T>::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
+impl<T> serde_core::ser::Serialize for xlfn::value::OptionalExcelValue<T> where T: serde_core::ser::Serialize
+pub fn xlfn::value::OptionalExcelValue<T>::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<T> core::marker::Freeze for xlfn::value::OptionalExcelValue<T> where T: core::marker::Freeze
 impl<T> core::marker::Send for xlfn::value::OptionalExcelValue<T> where T: core::marker::Send
 impl<T> core::marker::Sync for xlfn::value::OptionalExcelValue<T> where T: core::marker::Sync
@@ -815,6 +996,149 @@ impl<T> core::marker::Unpin for xlfn::value::OptionalExcelValue<T> where T: core
 impl<T> core::marker::UnsafeUnpin for xlfn::value::OptionalExcelValue<T> where T: core::marker::UnsafeUnpin
 impl<T> core::panic::unwind_safe::RefUnwindSafe for xlfn::value::OptionalExcelValue<T> where T: core::panic::unwind_safe::RefUnwindSafe
 impl<T> core::panic::unwind_safe::UnwindSafe for xlfn::value::OptionalExcelValue<T> where T: core::panic::unwind_safe::UnwindSafe
+pub struct xlfn::prelude::AsyncConfig
+impl xlfn::task::AsyncConfig
+pub const fn xlfn::task::AsyncConfig::new() -> Self
+pub const fn xlfn::task::AsyncConfig::with_task_limit(self, xlfn::task::AsyncTaskLimit) -> Self
+impl core::clone::Clone for xlfn::task::AsyncConfig
+pub fn xlfn::task::AsyncConfig::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::task::AsyncConfig
+impl core::cmp::PartialEq for xlfn::task::AsyncConfig
+pub fn xlfn::task::AsyncConfig::eq(&self, &Self) -> bool
+impl core::default::Default for xlfn::task::AsyncConfig
+pub fn xlfn::task::AsyncConfig::default() -> Self
+impl core::fmt::Debug for xlfn::task::AsyncConfig
+pub fn xlfn::task::AsyncConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::task::AsyncConfig
+impl core::marker::StructuralPartialEq for xlfn::task::AsyncConfig
+impl core::marker::Freeze for xlfn::task::AsyncConfig
+impl core::marker::Send for xlfn::task::AsyncConfig
+impl core::marker::Sync for xlfn::task::AsyncConfig
+impl core::marker::Unpin for xlfn::task::AsyncConfig
+impl core::marker::UnsafeUnpin for xlfn::task::AsyncConfig
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::task::AsyncConfig
+impl core::panic::unwind_safe::UnwindSafe for xlfn::task::AsyncConfig
+pub struct xlfn::prelude::AsyncContext<'call, A: xlfn::Addin>
+impl<'call, A: xlfn::Addin> xlfn::task::AsyncContext<'call, A>
+pub const fn xlfn::task::AsyncContext<'call, A>::cancellation(&self) -> &'call xlfn::task::CancellationToken
+pub const fn xlfn::task::AsyncContext<'call, A>::cancellation_guarantee(&self) -> xlfn::task::CancellationGuarantee
+pub fn xlfn::task::AsyncContext<'call, A>::check_cancelled(&self) -> xlfn_engine::error::XllResult<()>
+pub const fn xlfn::task::AsyncContext<'call, A>::diagnostics(&self) -> &'call xlfn::diagnostics::DiagnosticHistory
+pub const fn xlfn::task::AsyncContext<'call, A>::state(&self) -> &'call <A as xlfn::Addin>::SharedState
+impl<A: xlfn::Addin> core::convert::AsRef<<A as xlfn::Addin>::SharedState> for xlfn::task::AsyncContext<'_, A>
+pub fn xlfn::task::AsyncContext<'_, A>::as_ref(&self) -> &<A as xlfn::Addin>::SharedState
+impl<'call, A> core::marker::Freeze for xlfn::task::AsyncContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Freeze
+impl<'call, A> core::marker::Send for xlfn::task::AsyncContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Send
+impl<'call, A> core::marker::Sync for xlfn::task::AsyncContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Sync
+impl<'call, A> core::marker::Unpin for xlfn::task::AsyncContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Unpin
+impl<'call, A> core::marker::UnsafeUnpin for xlfn::task::AsyncContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::UnsafeUnpin
+impl<'call, A> !core::panic::unwind_safe::RefUnwindSafe for xlfn::task::AsyncContext<'call, A>
+impl<'call, A> !core::panic::unwind_safe::UnwindSafe for xlfn::task::AsyncContext<'call, A>
+pub struct xlfn::prelude::AsyncPollerCount(_)
+impl xlfn::task::AsyncPollerCount
+pub const xlfn::task::AsyncPollerCount::DEFAULT: Self
+pub const xlfn::task::AsyncPollerCount::MAX: usize
+pub const fn xlfn::task::AsyncPollerCount::get(self) -> usize
+pub const fn xlfn::task::AsyncPollerCount::new(usize) -> core::option::Option<Self>
+impl core::clone::Clone for xlfn::task::AsyncPollerCount
+pub fn xlfn::task::AsyncPollerCount::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::task::AsyncPollerCount
+impl core::cmp::PartialEq for xlfn::task::AsyncPollerCount
+pub fn xlfn::task::AsyncPollerCount::eq(&self, &Self) -> bool
+impl core::convert::TryFrom<usize> for xlfn::task::AsyncPollerCount
+pub type xlfn::task::AsyncPollerCount::Error = xlfn_engine::error::InvalidLimit
+pub fn xlfn::task::AsyncPollerCount::try_from(usize) -> core::result::Result<Self, Self::Error>
+impl core::default::Default for xlfn::task::AsyncPollerCount
+pub fn xlfn::task::AsyncPollerCount::default() -> Self
+impl core::fmt::Debug for xlfn::task::AsyncPollerCount
+pub fn xlfn::task::AsyncPollerCount::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::task::AsyncPollerCount
+impl core::marker::StructuralPartialEq for xlfn::task::AsyncPollerCount
+impl core::marker::Freeze for xlfn::task::AsyncPollerCount
+impl core::marker::Send for xlfn::task::AsyncPollerCount
+impl core::marker::Sync for xlfn::task::AsyncPollerCount
+impl core::marker::Unpin for xlfn::task::AsyncPollerCount
+impl core::marker::UnsafeUnpin for xlfn::task::AsyncPollerCount
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::task::AsyncPollerCount
+impl core::panic::unwind_safe::UnwindSafe for xlfn::task::AsyncPollerCount
+pub struct xlfn::prelude::AsyncTask<F>
+impl<F: core::future::future::Future<Output = ()>> core::future::future::Future for xlfn::task::AsyncTask<F>
+pub type xlfn::task::AsyncTask<F>::Output = ()
+pub fn xlfn::task::AsyncTask<F>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<()>
+impl<F> core::marker::Freeze for xlfn::task::AsyncTask<F> where F: core::marker::Freeze
+impl<F> core::marker::Send for xlfn::task::AsyncTask<F> where F: core::marker::Send
+impl<F> core::marker::Sync for xlfn::task::AsyncTask<F> where F: core::marker::Sync
+impl<F> core::marker::Unpin for xlfn::task::AsyncTask<F> where F: core::marker::Unpin
+impl<F> core::marker::UnsafeUnpin for xlfn::task::AsyncTask<F> where F: core::marker::UnsafeUnpin
+impl<F> core::panic::unwind_safe::RefUnwindSafe for xlfn::task::AsyncTask<F> where F: core::panic::unwind_safe::RefUnwindSafe
+impl<F> core::panic::unwind_safe::UnwindSafe for xlfn::task::AsyncTask<F> where F: core::panic::unwind_safe::UnwindSafe
+pub struct xlfn::prelude::AsyncTaskLimit(_)
+impl xlfn::task::AsyncTaskLimit
+pub const xlfn::task::AsyncTaskLimit::DEFAULT: Self
+pub const fn xlfn::task::AsyncTaskLimit::get(self) -> usize
+pub const fn xlfn::task::AsyncTaskLimit::new(usize) -> core::option::Option<Self>
+impl core::clone::Clone for xlfn::task::AsyncTaskLimit
+pub fn xlfn::task::AsyncTaskLimit::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::task::AsyncTaskLimit
+impl core::cmp::PartialEq for xlfn::task::AsyncTaskLimit
+pub fn xlfn::task::AsyncTaskLimit::eq(&self, &Self) -> bool
+impl core::convert::TryFrom<usize> for xlfn::task::AsyncTaskLimit
+pub type xlfn::task::AsyncTaskLimit::Error = xlfn_engine::error::InvalidLimit
+pub fn xlfn::task::AsyncTaskLimit::try_from(usize) -> core::result::Result<Self, Self::Error>
+impl core::default::Default for xlfn::task::AsyncTaskLimit
+pub fn xlfn::task::AsyncTaskLimit::default() -> Self
+impl core::fmt::Debug for xlfn::task::AsyncTaskLimit
+pub fn xlfn::task::AsyncTaskLimit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::task::AsyncTaskLimit
+impl core::marker::StructuralPartialEq for xlfn::task::AsyncTaskLimit
+impl core::marker::Freeze for xlfn::task::AsyncTaskLimit
+impl core::marker::Send for xlfn::task::AsyncTaskLimit
+impl core::marker::Sync for xlfn::task::AsyncTaskLimit
+impl core::marker::Unpin for xlfn::task::AsyncTaskLimit
+impl core::marker::UnsafeUnpin for xlfn::task::AsyncTaskLimit
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::task::AsyncTaskLimit
+impl core::panic::unwind_safe::UnwindSafe for xlfn::task::AsyncTaskLimit
+pub struct xlfn::prelude::BuiltinAsyncExecutor
+impl xlfn::task::BuiltinAsyncExecutor
+pub const fn xlfn::task::BuiltinAsyncExecutor::new(xlfn::task::BuiltinExecutorConfig) -> Self
+impl core::ops::drop::Drop for xlfn::task::BuiltinAsyncExecutor
+pub fn xlfn::task::BuiltinAsyncExecutor::drop(&mut self)
+impl xlfn::task::AsyncExecutor for xlfn::task::BuiltinAsyncExecutor
+pub type xlfn::task::BuiltinAsyncExecutor::Reservation = BuiltinReservation
+pub const xlfn::task::BuiltinAsyncExecutor::ENABLED: bool
+pub fn xlfn::task::BuiltinAsyncExecutor::reserve(&self) -> xlfn_engine::error::XllResult<Self::Reservation>
+pub fn xlfn::task::BuiltinAsyncExecutor::shutdown(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::BuiltinAsyncExecutor::start(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::BuiltinAsyncExecutor::submit<F>(&self, Self::Reservation, xlfn::task::AsyncTask<F>) where F: core::future::future::Future<Output = ()> + core::marker::Send + 'static
+impl !core::marker::Freeze for xlfn::task::BuiltinAsyncExecutor
+impl core::marker::Send for xlfn::task::BuiltinAsyncExecutor
+impl core::marker::Sync for xlfn::task::BuiltinAsyncExecutor
+impl core::marker::Unpin for xlfn::task::BuiltinAsyncExecutor
+impl core::marker::UnsafeUnpin for xlfn::task::BuiltinAsyncExecutor
+impl !core::panic::unwind_safe::RefUnwindSafe for xlfn::task::BuiltinAsyncExecutor
+impl !core::panic::unwind_safe::UnwindSafe for xlfn::task::BuiltinAsyncExecutor
+pub struct xlfn::prelude::BuiltinExecutorConfig
+impl xlfn::task::BuiltinExecutorConfig
+pub const fn xlfn::task::BuiltinExecutorConfig::new() -> Self
+pub const fn xlfn::task::BuiltinExecutorConfig::with_poller_count(self, xlfn::task::AsyncPollerCount) -> Self
+impl core::clone::Clone for xlfn::task::BuiltinExecutorConfig
+pub fn xlfn::task::BuiltinExecutorConfig::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::task::BuiltinExecutorConfig
+impl core::cmp::PartialEq for xlfn::task::BuiltinExecutorConfig
+pub fn xlfn::task::BuiltinExecutorConfig::eq(&self, &Self) -> bool
+impl core::default::Default for xlfn::task::BuiltinExecutorConfig
+pub fn xlfn::task::BuiltinExecutorConfig::default() -> Self
+impl core::fmt::Debug for xlfn::task::BuiltinExecutorConfig
+pub fn xlfn::task::BuiltinExecutorConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::task::BuiltinExecutorConfig
+impl core::marker::StructuralPartialEq for xlfn::task::BuiltinExecutorConfig
+impl core::marker::Freeze for xlfn::task::BuiltinExecutorConfig
+impl core::marker::Send for xlfn::task::BuiltinExecutorConfig
+impl core::marker::Sync for xlfn::task::BuiltinExecutorConfig
+impl core::marker::Unpin for xlfn::task::BuiltinExecutorConfig
+impl core::marker::UnsafeUnpin for xlfn::task::BuiltinExecutorConfig
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::task::BuiltinExecutorConfig
+impl core::panic::unwind_safe::UnwindSafe for xlfn::task::BuiltinExecutorConfig
 pub struct xlfn::prelude::Column<T>(_)
 impl<T> xlfn::value::Column<T>
 pub fn xlfn::value::Column<T>::as_slice(&self) -> &[T]
@@ -828,6 +1152,8 @@ impl<'a, T> core::iter::traits::collect::IntoIterator for &'a xlfn::value::Colum
 pub type &'a xlfn::value::Column<T>::IntoIter = core::slice::iter::Iter<'a, T>
 pub type &'a xlfn::value::Column<T>::Item = &'a T
 pub fn &'a xlfn::value::Column<T>::into_iter(self) -> Self::IntoIter
+impl<'de, T: serde_core::de::Deserialize<'de>> serde_core::de::Deserialize<'de> for xlfn::value::Column<T>
+pub fn xlfn::value::Column<T>::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
 impl<T, I> core::ops::index::Index<I> for xlfn::value::Column<T> where I: core::slice::index::SliceIndex<[T]>
 pub type xlfn::value::Column<T>::Output = <I as core::slice::index::SliceIndex<[T]>>::Output
 pub fn xlfn::value::Column<T>::index(&self, I) -> &Self::Output
@@ -860,6 +1186,8 @@ pub type xlfn::value::Column<T>::Target = [T]
 pub fn xlfn::value::Column<T>::deref(&self) -> &Self::Target
 impl<T> core::ops::deref::DerefMut for xlfn::value::Column<T>
 pub fn xlfn::value::Column<T>::deref_mut(&mut self) -> &mut Self::Target
+impl<T> serde_core::ser::Serialize for xlfn::value::Column<T> where T: serde_core::ser::Serialize
+pub fn xlfn::value::Column<T>::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<T> core::marker::Freeze for xlfn::value::Column<T> where alloc::vec::Vec<T>: core::marker::Freeze
 impl<T> core::marker::Send for xlfn::value::Column<T> where alloc::vec::Vec<T>: core::marker::Send
 impl<T> core::marker::Sync for xlfn::value::Column<T> where alloc::vec::Vec<T>: core::marker::Sync
@@ -891,10 +1219,12 @@ pub struct xlfn::prelude::ExcelSerialDate
 impl xlfn::value::ExcelSerialDate
 pub const fn xlfn::value::ExcelSerialDate::date_system(self) -> xlfn::value::ExcelDateSystem
 pub fn xlfn::value::ExcelSerialDate::fractional_day(self) -> f64
+pub fn xlfn::value::ExcelSerialDate::from_jiff(jiff::civil::date::Date, xlfn::value::ExcelDateSystem) -> xlfn_engine::error::XllResult<Self>
 pub fn xlfn::value::ExcelSerialDate::from_ymd(i16, i8, i8, xlfn::value::ExcelDateSystem) -> xlfn_engine::error::XllResult<Self>
 pub fn xlfn::value::ExcelSerialDate::is_fictitious_1900_leap_day(self) -> bool
 pub fn xlfn::value::ExcelSerialDate::new(f64, xlfn::value::ExcelDateSystem) -> xlfn_engine::error::XllResult<Self>
 pub const fn xlfn::value::ExcelSerialDate::serial(self) -> f64
+pub fn xlfn::value::ExcelSerialDate::to_jiff(self) -> xlfn_engine::error::XllResult<jiff::civil::date::Date>
 pub fn xlfn::value::ExcelSerialDate::to_ymd(self) -> xlfn_engine::error::XllResult<xlfn::value::CalendarDate>
 pub const fn xlfn::value::ExcelSerialDate::with_date_system(self, xlfn::value::ExcelDateSystem) -> Self
 impl core::clone::Clone for xlfn::value::ExcelSerialDate
@@ -905,6 +1235,8 @@ impl core::fmt::Debug for xlfn::value::ExcelSerialDate
 pub fn xlfn::value::ExcelSerialDate::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for xlfn::value::ExcelSerialDate
 impl core::marker::StructuralPartialEq for xlfn::value::ExcelSerialDate
+impl xlfn::rtd::IntoRtdValue for xlfn::value::ExcelSerialDate
+pub fn xlfn::value::ExcelSerialDate::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
 impl xlfn::value::ExcelInputIdentity for xlfn::value::ExcelSerialDate
 pub fn xlfn::value::ExcelSerialDate::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl xlfn::value::IntoExcel for xlfn::value::ExcelSerialDate
@@ -923,6 +1255,45 @@ impl core::marker::Unpin for xlfn::value::ExcelSerialDate
 impl core::marker::UnsafeUnpin for xlfn::value::ExcelSerialDate
 impl core::panic::unwind_safe::RefUnwindSafe for xlfn::value::ExcelSerialDate
 impl core::panic::unwind_safe::UnwindSafe for xlfn::value::ExcelSerialDate
+pub struct xlfn::prelude::Handle<'call, T: xlfn::handle::ExcelHandleObject>
+impl<'call, T: xlfn::handle::ExcelHandleObject> xlfn::handle::Handle<'call, T>
+pub fn xlfn::handle::Handle<'call, T>::alias(self) -> xlfn::handle::HandleAlias<'call, T>
+pub fn xlfn::handle::Handle<'call, T>::object_id(&self) -> xlfn::handle::HandleObjectId
+impl<T: xlfn::handle::ExcelHandleObject> core::convert::AsRef<T> for xlfn::handle::Handle<'_, T>
+pub fn xlfn::handle::Handle<'_, T>::as_ref(&self) -> &T
+impl<T: xlfn::handle::ExcelHandleObject> core::ops::deref::Deref for xlfn::handle::Handle<'_, T>
+pub type xlfn::handle::Handle<'_, T>::Target = T
+pub fn xlfn::handle::Handle<'_, T>::deref(&self) -> &Self::Target
+impl<'call, T> core::marker::Freeze for xlfn::handle::Handle<'call, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::Freeze
+impl<'call, T> !core::marker::Send for xlfn::handle::Handle<'call, T>
+impl<'call, T> !core::marker::Sync for xlfn::handle::Handle<'call, T>
+impl<'call, T> core::marker::Unpin for xlfn::handle::Handle<'call, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::Unpin
+impl<'call, T> core::marker::UnsafeUnpin for xlfn::handle::Handle<'call, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::UnsafeUnpin
+impl<'call, T> !core::panic::unwind_safe::RefUnwindSafe for xlfn::handle::Handle<'call, T>
+impl<'call, T> !core::panic::unwind_safe::UnwindSafe for xlfn::handle::Handle<'call, T>
+pub struct xlfn::prelude::HandleAlias<'call, T: xlfn::handle::ExcelHandleObject>
+impl<'call, T> core::marker::Freeze for xlfn::handle::HandleAlias<'call, T> where core::marker::PhantomData<(&'call CallScope<'call>, fn(T) -> T)>: core::marker::Freeze
+impl<'call, T> !core::marker::Send for xlfn::handle::HandleAlias<'call, T>
+impl<'call, T> !core::marker::Sync for xlfn::handle::HandleAlias<'call, T>
+impl<'call, T> core::marker::Unpin for xlfn::handle::HandleAlias<'call, T> where core::marker::PhantomData<(&'call CallScope<'call>, fn(T) -> T)>: core::marker::Unpin
+impl<'call, T> core::marker::UnsafeUnpin for xlfn::handle::HandleAlias<'call, T> where core::marker::PhantomData<(&'call CallScope<'call>, fn(T) -> T)>: core::marker::UnsafeUnpin
+impl<'call, T> !core::panic::unwind_safe::RefUnwindSafe for xlfn::handle::HandleAlias<'call, T>
+impl<'call, T> !core::panic::unwind_safe::UnwindSafe for xlfn::handle::HandleAlias<'call, T>
+pub struct xlfn::prelude::HandleLease<'generation, T: xlfn::handle::ExcelHandleObject>
+impl<T: xlfn::handle::ExcelHandleObject> xlfn::handle::HandleLease<'_, T>
+pub fn xlfn::handle::HandleLease<'_, T>::object_id(&self) -> xlfn::handle::HandleObjectId
+impl<T: xlfn::handle::ExcelHandleObject> core::convert::AsRef<T> for xlfn::handle::HandleLease<'_, T>
+pub fn xlfn::handle::HandleLease<'_, T>::as_ref(&self) -> &T
+impl<T: xlfn::handle::ExcelHandleObject> core::marker::Send for xlfn::handle::HandleLease<'_, T>
+impl<T: xlfn::handle::ExcelHandleObject> core::marker::Sync for xlfn::handle::HandleLease<'_, T>
+impl<T: xlfn::handle::ExcelHandleObject> core::ops::deref::Deref for xlfn::handle::HandleLease<'_, T>
+pub type xlfn::handle::HandleLease<'_, T>::Target = T
+pub fn xlfn::handle::HandleLease<'_, T>::deref(&self) -> &Self::Target
+impl<'generation, T> core::marker::Freeze for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::Freeze
+impl<'generation, T> core::marker::Unpin for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::Unpin
+impl<'generation, T> core::marker::UnsafeUnpin for xlfn::handle::HandleLease<'generation, T> where xlfn_services::handle_objects::TypedObjectProjection<T>: core::marker::UnsafeUnpin
+impl<'generation, T> !core::panic::unwind_safe::RefUnwindSafe for xlfn::handle::HandleLease<'generation, T>
+impl<'generation, T> !core::panic::unwind_safe::UnwindSafe for xlfn::handle::HandleLease<'generation, T>
 pub struct xlfn::prelude::MacroSheetContext<'call, A: xlfn::Addin>
 impl<'call, A: xlfn::Addin> xlfn::addin::MacroSheetContext<'call, A>
 pub fn xlfn::addin::MacroSheetContext<'call, A>::coerce(&self, &xlfn::reference::ExcelReference<'_>) -> xlfn_engine::error::XllResult<xlfn::value::ExcelValue>
@@ -946,16 +1317,17 @@ impl<'call, A> !core::panic::unwind_safe::UnwindSafe for xlfn::addin::MacroSheet
 pub struct xlfn::prelude::MainThreadContext<'call, A: xlfn::Addin>
 impl<'call, A: xlfn::Addin> xlfn::addin::MainThreadContext<'call, A>
 pub const fn xlfn::addin::MainThreadContext<'call, A>::diagnostics(&self) -> &'call xlfn::diagnostics::DiagnosticHistory
+pub fn xlfn::addin::MainThreadContext<'call, A>::rtd(&self) -> xlfn::rtd::RtdCallContext<'call, <A as xlfn::Addin>::RtdSubscription, <A as xlfn::Addin>::RtdSources>
 pub const fn xlfn::addin::MainThreadContext<'call, A>::state(&self) -> &'call <A as xlfn::Addin>::SharedState
 impl<A: xlfn::Addin> core::clone::Clone for xlfn::addin::MainThreadContext<'_, A>
 pub fn xlfn::addin::MainThreadContext<'_, A>::clone(&self) -> Self
 impl<A: xlfn::Addin> core::convert::AsRef<<A as xlfn::Addin>::SharedState> for xlfn::addin::MainThreadContext<'_, A>
 pub fn xlfn::addin::MainThreadContext<'_, A>::as_ref(&self) -> &<A as xlfn::Addin>::SharedState
-impl<'call, A> core::marker::Freeze for xlfn::addin::MainThreadContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Freeze
+impl<'call, A> core::marker::Freeze for xlfn::addin::MainThreadContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Freeze, xlfn::rtd::RtdCallContext<'call, <A as xlfn::Addin>::RtdSubscription, <A as xlfn::Addin>::RtdSources>: core::marker::Freeze
 impl<'call, A> !core::marker::Send for xlfn::addin::MainThreadContext<'call, A>
 impl<'call, A> !core::marker::Sync for xlfn::addin::MainThreadContext<'call, A>
-impl<'call, A> core::marker::Unpin for xlfn::addin::MainThreadContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Unpin
-impl<'call, A> core::marker::UnsafeUnpin for xlfn::addin::MainThreadContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::UnsafeUnpin
+impl<'call, A> core::marker::Unpin for xlfn::addin::MainThreadContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Unpin, xlfn::rtd::RtdCallContext<'call, <A as xlfn::Addin>::RtdSubscription, <A as xlfn::Addin>::RtdSources>: core::marker::Unpin
+impl<'call, A> core::marker::UnsafeUnpin for xlfn::addin::MainThreadContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::UnsafeUnpin, xlfn::rtd::RtdCallContext<'call, <A as xlfn::Addin>::RtdSubscription, <A as xlfn::Addin>::RtdSources>: core::marker::UnsafeUnpin
 impl<'call, A> !core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::MainThreadContext<'call, A>
 impl<'call, A> !core::panic::unwind_safe::UnwindSafe for xlfn::addin::MainThreadContext<'call, A>
 pub struct xlfn::prelude::Matrix<T>
@@ -988,6 +1360,8 @@ impl<'a, T> core::iter::traits::collect::IntoIterator for &'a xlfn::value::Matri
 pub type &'a xlfn::value::Matrix<T>::IntoIter = core::slice::iter::Iter<'a, T>
 pub type &'a xlfn::value::Matrix<T>::Item = &'a T
 pub fn &'a xlfn::value::Matrix<T>::into_iter(self) -> Self::IntoIter
+impl<'de, T: serde_core::de::Deserialize<'de>> serde_core::de::Deserialize<'de> for xlfn::value::Matrix<T>
+pub fn xlfn::value::Matrix<T>::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
 impl<T: core::clone::Clone> core::clone::Clone for xlfn::value::Matrix<T>
 pub fn xlfn::value::Matrix<T>::clone(&self) -> Self
 impl<T: core::cmp::PartialEq> core::cmp::PartialEq for xlfn::value::Matrix<T>
@@ -1011,6 +1385,8 @@ pub type xlfn::value::Matrix<T>::Output = T
 pub fn xlfn::value::Matrix<T>::index(&self, (usize, usize)) -> &Self::Output
 impl<T> core::ops::index::IndexMut<(usize, usize)> for xlfn::value::Matrix<T>
 pub fn xlfn::value::Matrix<T>::index_mut(&mut self, (usize, usize)) -> &mut Self::Output
+impl<T> serde_core::ser::Serialize for xlfn::value::Matrix<T> where T: serde_core::ser::Serialize
+pub fn xlfn::value::Matrix<T>::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<T> core::marker::Freeze for xlfn::value::Matrix<T> where alloc::vec::Vec<T>: core::marker::Freeze
 impl<T> core::marker::Send for xlfn::value::Matrix<T> where alloc::vec::Vec<T>: core::marker::Send
 impl<T> core::marker::Sync for xlfn::value::Matrix<T> where alloc::vec::Vec<T>: core::marker::Sync
@@ -1073,6 +1449,13 @@ impl core::fmt::Debug for xlfn::task::NoAsyncExecutor
 pub fn xlfn::task::NoAsyncExecutor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for xlfn::task::NoAsyncExecutor
 impl core::marker::StructuralPartialEq for xlfn::task::NoAsyncExecutor
+impl xlfn::task::AsyncExecutor for xlfn::task::NoAsyncExecutor
+pub type xlfn::task::NoAsyncExecutor::Reservation = never
+pub const xlfn::task::NoAsyncExecutor::ENABLED: bool
+pub fn xlfn::task::NoAsyncExecutor::reserve(&self) -> xlfn_engine::error::XllResult<Self::Reservation>
+pub fn xlfn::task::NoAsyncExecutor::shutdown(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::NoAsyncExecutor::start(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::NoAsyncExecutor::submit<F>(&self, Self::Reservation, xlfn::task::AsyncTask<F>) where F: core::future::future::Future<Output = ()> + core::marker::Send + 'static
 impl core::marker::Freeze for xlfn::task::NoAsyncExecutor
 impl core::marker::Send for xlfn::task::NoAsyncExecutor
 impl core::marker::Sync for xlfn::task::NoAsyncExecutor
@@ -1121,17 +1504,19 @@ pub const fn xlfn::addin::OpenContext<A>::build_info(&self) -> &xlfn::addin::Bui
 pub fn xlfn::addin::OpenContext<A>::diagnostics(&self) -> xlfn::addin::DiagnosticsSetup<'_, A>
 pub fn xlfn::addin::OpenContext<A>::module_directory(&self) -> &std::path::Path
 pub fn xlfn::addin::OpenContext<A>::module_path(&self) -> &std::path::Path
+pub fn xlfn::addin::OpenContext<A>::rtd(&self) -> xlfn::rtd::RtdOpenContext<'_, <A as xlfn::Addin>::RtdSubscription, <A as xlfn::Addin>::RtdSources>
 impl<A: xlfn::Addin> core::fmt::Debug for xlfn::addin::OpenContext<A>
 pub fn xlfn::addin::OpenContext<A>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<A> core::marker::Freeze for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Freeze
-impl<A> core::marker::Send for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Send
-impl<A> core::marker::Sync for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Sync
-impl<A> core::marker::Unpin for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Unpin
-impl<A> core::marker::UnsafeUnpin for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::UnsafeUnpin
-impl<A> core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::panic::unwind_safe::RefUnwindSafe
-impl<A> core::panic::unwind_safe::UnwindSafe for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::panic::unwind_safe::UnwindSafe
+impl<A> !core::marker::Freeze for xlfn::addin::OpenContext<A>
+impl<A> core::marker::Send for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Send, SourceRegistration<<A as AddinRtdTypes>::Subscription, <A as AddinRtdTypes>::Sources>: core::marker::Send
+impl<A> core::marker::Sync for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Sync, SourceRegistration<<A as AddinRtdTypes>::Subscription, <A as AddinRtdTypes>::Sources>: core::marker::Sync
+impl<A> core::marker::Unpin for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::Unpin, SourceRegistration<<A as AddinRtdTypes>::Subscription, <A as AddinRtdTypes>::Sources>: core::marker::Unpin
+impl<A> core::marker::UnsafeUnpin for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::marker::UnsafeUnpin, SourceRegistration<<A as AddinRtdTypes>::Subscription, <A as AddinRtdTypes>::Sources>: core::marker::UnsafeUnpin
+impl<A> !core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::OpenContext<A>
+impl<A> core::panic::unwind_safe::UnwindSafe for xlfn::addin::OpenContext<A> where core::marker::PhantomData<fn() -> A>: core::panic::unwind_safe::UnwindSafe, SourceRegistration<<A as AddinRtdTypes>::Subscription, <A as AddinRtdTypes>::Sources>: core::panic::unwind_safe::UnwindSafe
 pub struct xlfn::prelude::Opened<S, L, U, E>
 impl<S, L, U, E> xlfn::addin::Opened<S, L, U, E>
+pub fn xlfn::addin::Opened<S, L, U, E>::with_async_executor<NewE: xlfn::task::AsyncExecutor>(self, NewE) -> xlfn::addin::Opened<S, L, U, NewE>
 pub fn xlfn::addin::Opened<S, L, U, E>::with_layers<NewU>(self, NewU) -> xlfn::addin::Opened<S, L, NewU, E>
 pub fn xlfn::addin::Opened<S, L, U, E>::with_lifecycle<NewL>(self, NewL) -> xlfn::addin::Opened<S, NewL, U, E>
 pub const fn xlfn::addin::Opened<S, L, U, E>::with_runtime_config(self, xlfn::addin::RuntimeConfig) -> Self
@@ -1159,6 +1544,8 @@ impl<'a, T> core::iter::traits::collect::IntoIterator for &'a xlfn::value::Row<T
 pub type &'a xlfn::value::Row<T>::IntoIter = core::slice::iter::Iter<'a, T>
 pub type &'a xlfn::value::Row<T>::Item = &'a T
 pub fn &'a xlfn::value::Row<T>::into_iter(self) -> Self::IntoIter
+impl<'de, T: serde_core::de::Deserialize<'de>> serde_core::de::Deserialize<'de> for xlfn::value::Row<T>
+pub fn xlfn::value::Row<T>::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
 impl<T, I> core::ops::index::Index<I> for xlfn::value::Row<T> where I: core::slice::index::SliceIndex<[T]>
 pub type xlfn::value::Row<T>::Output = <I as core::slice::index::SliceIndex<[T]>>::Output
 pub fn xlfn::value::Row<T>::index(&self, I) -> &Self::Output
@@ -1191,6 +1578,8 @@ pub type xlfn::value::Row<T>::Target = [T]
 pub fn xlfn::value::Row<T>::deref(&self) -> &Self::Target
 impl<T> core::ops::deref::DerefMut for xlfn::value::Row<T>
 pub fn xlfn::value::Row<T>::deref_mut(&mut self) -> &mut Self::Target
+impl<T> serde_core::ser::Serialize for xlfn::value::Row<T> where T: serde_core::ser::Serialize
+pub fn xlfn::value::Row<T>::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<T> core::marker::Freeze for xlfn::value::Row<T> where alloc::vec::Vec<T>: core::marker::Freeze
 impl<T> core::marker::Send for xlfn::value::Row<T> where alloc::vec::Vec<T>: core::marker::Send
 impl<T> core::marker::Sync for xlfn::value::Row<T> where alloc::vec::Vec<T>: core::marker::Sync
@@ -1215,14 +1604,38 @@ impl<'call, A> core::marker::UnsafeUnpin for xlfn::addin::ThreadSafeContext<'cal
 impl<'call, A> !core::panic::unwind_safe::RefUnwindSafe for xlfn::addin::ThreadSafeContext<'call, A>
 impl<'call, A> !core::panic::unwind_safe::UnwindSafe for xlfn::addin::ThreadSafeContext<'call, A>
 pub trait xlfn::prelude::Addin: core::marker::Sized + core::marker::Send + core::marker::Sync + 'static
+pub type xlfn::prelude::Addin::AsyncExecutor: xlfn::task::AsyncExecutor
 pub type xlfn::prelude::Addin::Error: xlfn_engine::error::IntoXllError
 pub type xlfn::prelude::Addin::Layers: xlfn::execution::UdfLayers
 pub type xlfn::prelude::Addin::LifecycleState: 'static
+pub type xlfn::prelude::Addin::RtdSources: xlfn::rtd::RtdSourceCatalog<Self::RtdSubscription>
+pub type xlfn::prelude::Addin::RtdSubscription: xlfn::rtd::RtdSubscription
 pub type xlfn::prelude::Addin::SharedState: core::marker::Send + core::marker::Sync + 'static
 pub fn xlfn::prelude::Addin::cleanup(&mut Self::LifecycleState, &mut xlfn::addin::CleanupReporter<'_>)
 pub fn xlfn::prelude::Addin::open(&xlfn::addin::OpenContext<Self>) -> xlfn::addin::OpenResult<Self>
 pub fn xlfn::prelude::Addin::quiesce(&mut Self::SharedState, &mut Self::LifecycleState) -> core::result::Result<(), Self::Error>
-pub type xlfn::prelude::OpenResult<A> = core::result::Result<xlfn::addin::Opened<<A as xlfn::Addin>::SharedState, <A as xlfn::Addin>::LifecycleState, <A as xlfn::Addin>::Layers>, <A as xlfn::Addin>::Error>
+pub trait xlfn::prelude::AsyncExecutor: core::marker::Send + core::marker::Sync + 'static
+pub type xlfn::prelude::AsyncExecutor::Reservation: core::marker::Send + 'static
+pub const xlfn::prelude::AsyncExecutor::ENABLED: bool
+pub fn xlfn::prelude::AsyncExecutor::reserve(&self) -> xlfn_engine::error::XllResult<Self::Reservation>
+pub fn xlfn::prelude::AsyncExecutor::shutdown(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::prelude::AsyncExecutor::start(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::prelude::AsyncExecutor::submit<F>(&self, Self::Reservation, xlfn::task::AsyncTask<F>) where F: core::future::future::Future<Output = ()> + core::marker::Send + 'static
+impl xlfn::task::AsyncExecutor for xlfn::task::BuiltinAsyncExecutor
+pub type xlfn::task::BuiltinAsyncExecutor::Reservation = BuiltinReservation
+pub const xlfn::task::BuiltinAsyncExecutor::ENABLED: bool
+pub fn xlfn::task::BuiltinAsyncExecutor::reserve(&self) -> xlfn_engine::error::XllResult<Self::Reservation>
+pub fn xlfn::task::BuiltinAsyncExecutor::shutdown(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::BuiltinAsyncExecutor::start(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::BuiltinAsyncExecutor::submit<F>(&self, Self::Reservation, xlfn::task::AsyncTask<F>) where F: core::future::future::Future<Output = ()> + core::marker::Send + 'static
+impl xlfn::task::AsyncExecutor for xlfn::task::NoAsyncExecutor
+pub type xlfn::task::NoAsyncExecutor::Reservation = never
+pub const xlfn::task::NoAsyncExecutor::ENABLED: bool
+pub fn xlfn::task::NoAsyncExecutor::reserve(&self) -> xlfn_engine::error::XllResult<Self::Reservation>
+pub fn xlfn::task::NoAsyncExecutor::shutdown(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::NoAsyncExecutor::start(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::NoAsyncExecutor::submit<F>(&self, Self::Reservation, xlfn::task::AsyncTask<F>) where F: core::future::future::Future<Output = ()> + core::marker::Send + 'static
+pub type xlfn::prelude::OpenResult<A> = core::result::Result<xlfn::addin::Opened<<A as xlfn::Addin>::SharedState, <A as xlfn::Addin>::LifecycleState, <A as xlfn::Addin>::Layers, <A as xlfn::Addin>::AsyncExecutor>, <A as xlfn::Addin>::Error>
 pub mod xlfn::reference
 pub struct xlfn::reference::ExcelReference<'call>
 impl xlfn::reference::ExcelReference<'_>
@@ -1306,7 +1719,890 @@ pub trait xlfn::reference::FromExcelReference<'call>: core::marker::Sized
 pub fn xlfn::reference::FromExcelReference::from_excel_reference(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
 impl<'call> xlfn::reference::FromExcelReference<'call> for xlfn::reference::ExcelReference<'call>
 pub fn xlfn::reference::ExcelReference<'call>::from_excel_reference(xlfn::value::raw::XlValueRef<'call>, &'static str) -> xlfn_engine::error::XllResult<Self>
+pub mod xlfn::rtd
+#[non_exhaustive] pub enum xlfn::rtd::RtdBatchSendError<T>
+pub xlfn::rtd::RtdBatchSendError::Closed(xlfn::rtd::RtdPendingBatch<T>)
+pub xlfn::rtd::RtdBatchSendError::Full(xlfn::rtd::RtdPendingBatch<T>)
+pub xlfn::rtd::RtdBatchSendError::Invalid(xlfn_engine::error::XllError)
+impl<T> xlfn::rtd::RtdBatchSendError<T>
+pub fn xlfn::rtd::RtdBatchSendError<T>::into_error(self) -> xlfn_engine::error::XllError
+pub fn xlfn::rtd::RtdBatchSendError<T>::into_pending(self) -> core::result::Result<xlfn::rtd::RtdPendingBatch<T>, xlfn_engine::error::XllError>
+impl<T> core::convert::From<xlfn::rtd::RtdBatchSendError<T>> for xlfn_engine::error::XllError
+pub fn xlfn_engine::error::XllError::from(xlfn::rtd::RtdBatchSendError<T>) -> Self
+impl<T> core::error::Error for xlfn::rtd::RtdBatchSendError<T>
+pub fn xlfn::rtd::RtdBatchSendError<T>::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl<T> core::fmt::Debug for xlfn::rtd::RtdBatchSendError<T>
+pub fn xlfn::rtd::RtdBatchSendError<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::fmt::Display for xlfn::rtd::RtdBatchSendError<T>
+pub fn xlfn::rtd::RtdBatchSendError<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::Freeze for xlfn::rtd::RtdBatchSendError<T> where xlfn::rtd::RtdPendingBatch<T>: core::marker::Freeze + core::marker::Freeze
+impl<T> core::marker::Send for xlfn::rtd::RtdBatchSendError<T> where xlfn::rtd::RtdPendingBatch<T>: core::marker::Send + core::marker::Send
+impl<T> core::marker::Sync for xlfn::rtd::RtdBatchSendError<T> where xlfn::rtd::RtdPendingBatch<T>: core::marker::Sync + core::marker::Sync
+impl<T> core::marker::Unpin for xlfn::rtd::RtdBatchSendError<T> where xlfn::rtd::RtdPendingBatch<T>: core::marker::Unpin + core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for xlfn::rtd::RtdBatchSendError<T> where xlfn::rtd::RtdPendingBatch<T>: core::marker::UnsafeUnpin + core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdBatchSendError<T> where xlfn::rtd::RtdPendingBatch<T>: core::panic::unwind_safe::RefUnwindSafe + core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdBatchSendError<T> where xlfn::rtd::RtdPendingBatch<T>: core::panic::unwind_safe::UnwindSafe + core::panic::unwind_safe::UnwindSafe
+#[non_exhaustive] pub enum xlfn::rtd::RtdDelivery
+pub xlfn::rtd::RtdDelivery::Fifo(core::num::nonzero::NonZeroUsize)
+pub xlfn::rtd::RtdDelivery::Latest
+impl core::clone::Clone for xlfn::rtd::RtdDelivery
+pub fn xlfn::rtd::RtdDelivery::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::rtd::RtdDelivery
+impl core::cmp::PartialEq for xlfn::rtd::RtdDelivery
+pub fn xlfn::rtd::RtdDelivery::eq(&self, &Self) -> bool
+impl core::fmt::Debug for xlfn::rtd::RtdDelivery
+pub fn xlfn::rtd::RtdDelivery::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::rtd::RtdDelivery
+impl core::marker::StructuralPartialEq for xlfn::rtd::RtdDelivery
+impl core::marker::Freeze for xlfn::rtd::RtdDelivery
+impl core::marker::Send for xlfn::rtd::RtdDelivery
+impl core::marker::Sync for xlfn::rtd::RtdDelivery
+impl core::marker::Unpin for xlfn::rtd::RtdDelivery
+impl core::marker::UnsafeUnpin for xlfn::rtd::RtdDelivery
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdDelivery
+impl core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdDelivery
+#[non_exhaustive] pub enum xlfn::rtd::RtdProducerErrorPolicy
+pub xlfn::rtd::RtdProducerErrorPolicy::PublishError(xlfn_engine::error::ExcelError)
+pub xlfn::rtd::RtdProducerErrorPolicy::RetainLastValue
+impl core::clone::Clone for xlfn::rtd::RtdProducerErrorPolicy
+pub fn xlfn::rtd::RtdProducerErrorPolicy::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::rtd::RtdProducerErrorPolicy
+impl core::cmp::PartialEq for xlfn::rtd::RtdProducerErrorPolicy
+pub fn xlfn::rtd::RtdProducerErrorPolicy::eq(&self, &Self) -> bool
+impl core::default::Default for xlfn::rtd::RtdProducerErrorPolicy
+pub fn xlfn::rtd::RtdProducerErrorPolicy::default() -> Self
+impl core::fmt::Debug for xlfn::rtd::RtdProducerErrorPolicy
+pub fn xlfn::rtd::RtdProducerErrorPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::rtd::RtdProducerErrorPolicy
+impl core::marker::StructuralPartialEq for xlfn::rtd::RtdProducerErrorPolicy
+impl core::marker::Freeze for xlfn::rtd::RtdProducerErrorPolicy
+impl core::marker::Send for xlfn::rtd::RtdProducerErrorPolicy
+impl core::marker::Sync for xlfn::rtd::RtdProducerErrorPolicy
+impl core::marker::Unpin for xlfn::rtd::RtdProducerErrorPolicy
+impl core::marker::UnsafeUnpin for xlfn::rtd::RtdProducerErrorPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdProducerErrorPolicy
+impl core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdProducerErrorPolicy
+#[non_exhaustive] pub enum xlfn::rtd::RtdSendError<T>
+pub xlfn::rtd::RtdSendError::Closed(xlfn::rtd::RtdPendingValue<T>)
+pub xlfn::rtd::RtdSendError::Full(xlfn::rtd::RtdPendingValue<T>)
+pub xlfn::rtd::RtdSendError::Invalid(xlfn_engine::error::XllError)
+impl<T> xlfn::rtd::RtdSendError<T>
+pub fn xlfn::rtd::RtdSendError<T>::into_error(self) -> xlfn_engine::error::XllError
+impl<T> xlfn::rtd::RtdSendError<T>
+pub fn xlfn::rtd::RtdSendError<T>::into_pending(self) -> core::result::Result<xlfn::rtd::RtdPendingValue<T>, xlfn_engine::error::XllError>
+impl<T> core::convert::From<xlfn::rtd::RtdSendError<T>> for xlfn_engine::error::XllError
+pub fn xlfn_engine::error::XllError::from(xlfn::rtd::RtdSendError<T>) -> Self
+impl<T> core::error::Error for xlfn::rtd::RtdSendError<T>
+pub fn xlfn::rtd::RtdSendError<T>::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl<T> core::fmt::Debug for xlfn::rtd::RtdSendError<T>
+pub fn xlfn::rtd::RtdSendError<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::fmt::Display for xlfn::rtd::RtdSendError<T>
+pub fn xlfn::rtd::RtdSendError<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::Freeze for xlfn::rtd::RtdSendError<T> where xlfn::rtd::RtdPendingValue<T>: core::marker::Freeze + core::marker::Freeze
+impl<T> core::marker::Send for xlfn::rtd::RtdSendError<T> where xlfn::rtd::RtdPendingValue<T>: core::marker::Send + core::marker::Send
+impl<T> core::marker::Sync for xlfn::rtd::RtdSendError<T> where xlfn::rtd::RtdPendingValue<T>: core::marker::Sync + core::marker::Sync
+impl<T> core::marker::Unpin for xlfn::rtd::RtdSendError<T> where xlfn::rtd::RtdPendingValue<T>: core::marker::Unpin + core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for xlfn::rtd::RtdSendError<T> where xlfn::rtd::RtdPendingValue<T>: core::marker::UnsafeUnpin + core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdSendError<T> where xlfn::rtd::RtdPendingValue<T>: core::panic::unwind_safe::RefUnwindSafe + core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdSendError<T> where xlfn::rtd::RtdPendingValue<T>: core::panic::unwind_safe::UnwindSafe + core::panic::unwind_safe::UnwindSafe
+#[non_exhaustive] pub enum xlfn::rtd::RtdSourceEvent<T, D: xlfn::rtd::RtdDeliveryPolicy>
+pub xlfn::rtd::RtdSourceEvent::Subscribe
+pub xlfn::rtd::RtdSourceEvent::Subscribe::id: xlfn::rtd::RtdSubscriptionId
+pub xlfn::rtd::RtdSourceEvent::Subscribe::sender: xlfn::rtd::RtdSender<T, D>
+pub xlfn::rtd::RtdSourceEvent::Subscribe::topic: xlfn::rtd::RtdTopic
+pub xlfn::rtd::RtdSourceEvent::Unsubscribe
+pub xlfn::rtd::RtdSourceEvent::Unsubscribe::id: xlfn::rtd::RtdSubscriptionId
+impl<T, D> core::marker::Freeze for xlfn::rtd::RtdSourceEvent<T, D> where xlfn::rtd::RtdSender<T, D>: core::marker::Freeze
+impl<T, D> core::marker::Send for xlfn::rtd::RtdSourceEvent<T, D> where xlfn::rtd::RtdSender<T, D>: core::marker::Send
+impl<T, D> core::marker::Sync for xlfn::rtd::RtdSourceEvent<T, D> where xlfn::rtd::RtdSender<T, D>: core::marker::Sync
+impl<T, D> core::marker::Unpin for xlfn::rtd::RtdSourceEvent<T, D> where xlfn::rtd::RtdSender<T, D>: core::marker::Unpin
+impl<T, D> core::marker::UnsafeUnpin for xlfn::rtd::RtdSourceEvent<T, D> where xlfn::rtd::RtdSender<T, D>: core::marker::UnsafeUnpin
+impl<T, D> !core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdSourceEvent<T, D>
+impl<T, D> !core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdSourceEvent<T, D>
+pub enum xlfn::rtd::RtdValue
+pub xlfn::rtd::RtdValue::Boolean(bool)
+pub xlfn::rtd::RtdValue::Empty
+pub xlfn::rtd::RtdValue::Error(xlfn_engine::error::ExcelError)
+pub xlfn::rtd::RtdValue::Integer(i32)
+pub xlfn::rtd::RtdValue::Number(f64)
+pub xlfn::rtd::RtdValue::String(alloc::string::String)
+impl core::clone::Clone for xlfn::rtd::RtdValue
+pub fn xlfn::rtd::RtdValue::clone(&self) -> Self
+impl core::cmp::PartialEq for xlfn::rtd::RtdValue
+pub fn xlfn::rtd::RtdValue::eq(&self, &Self) -> bool
+impl core::convert::TryFrom<xlfn::value::ExcelValue> for xlfn::rtd::RtdValue
+pub type xlfn::rtd::RtdValue::Error = xlfn_engine::error::XllError
+pub fn xlfn::rtd::RtdValue::try_from(xlfn::value::ExcelValue) -> xlfn_engine::error::XllResult<Self>
+impl core::fmt::Debug for xlfn::rtd::RtdValue
+pub fn xlfn::rtd::RtdValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for xlfn::rtd::RtdValue
+impl xlfn::rtd::IntoRtdValue for xlfn::rtd::RtdValue
+pub fn xlfn::rtd::RtdValue::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
+impl core::marker::Freeze for xlfn::rtd::RtdValue
+impl core::marker::Send for xlfn::rtd::RtdValue
+impl core::marker::Sync for xlfn::rtd::RtdValue
+impl core::marker::Unpin for xlfn::rtd::RtdValue
+impl core::marker::UnsafeUnpin for xlfn::rtd::RtdValue
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdValue
+impl core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdValue
+pub struct xlfn::rtd::BoxedRtdSubscription
+impl xlfn::rtd::BoxedRtdSubscription
+pub fn xlfn::rtd::BoxedRtdSubscription::new<S: xlfn::rtd::RtdSubscription>(S) -> Self
+impl xlfn::rtd::RtdSubscription for xlfn::rtd::BoxedRtdSubscription
+pub fn xlfn::rtd::BoxedRtdSubscription::disconnect_and_wait(self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::rtd::BoxedRtdSubscription::request_cancel(&self)
+impl core::marker::Freeze for xlfn::rtd::BoxedRtdSubscription
+impl core::marker::Send for xlfn::rtd::BoxedRtdSubscription
+impl !core::marker::Sync for xlfn::rtd::BoxedRtdSubscription
+impl core::marker::Unpin for xlfn::rtd::BoxedRtdSubscription
+impl core::marker::UnsafeUnpin for xlfn::rtd::BoxedRtdSubscription
+impl !core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::BoxedRtdSubscription
+impl !core::panic::unwind_safe::UnwindSafe for xlfn::rtd::BoxedRtdSubscription
+pub struct xlfn::rtd::DynamicRtdSources<E: xlfn::rtd::RtdSubscription>
+impl<E: xlfn::rtd::RtdSubscription> core::convert::AsRef<xlfn::rtd::DynamicRtdSources<E>> for xlfn::rtd::DynamicRtdSources<E>
+pub fn xlfn::rtd::DynamicRtdSources<E>::as_ref(&self) -> &Self
+impl<E: xlfn::rtd::RtdSubscription> core::default::Default for xlfn::rtd::DynamicRtdSources<E>
+pub fn xlfn::rtd::DynamicRtdSources<E>::default() -> Self
+impl<E: xlfn::rtd::RtdSubscription> xlfn::rtd::RtdSourceCatalog<E> for xlfn::rtd::DynamicRtdSources<E>
+pub type xlfn::rtd::DynamicRtdSources<E>::Handles = ()
+impl<E> core::marker::Freeze for xlfn::rtd::DynamicRtdSources<E> where alloc::vec::Vec<alloc::boxed::Box<dyn ErasedRtdSource<E>>>: core::marker::Freeze, core::marker::PhantomData<fn() -> E>: core::marker::Freeze
+impl<E> core::marker::Send for xlfn::rtd::DynamicRtdSources<E> where alloc::vec::Vec<alloc::boxed::Box<dyn ErasedRtdSource<E>>>: core::marker::Send, core::marker::PhantomData<fn() -> E>: core::marker::Send
+impl<E> core::marker::Sync for xlfn::rtd::DynamicRtdSources<E> where alloc::vec::Vec<alloc::boxed::Box<dyn ErasedRtdSource<E>>>: core::marker::Sync, core::marker::PhantomData<fn() -> E>: core::marker::Sync
+impl<E> core::marker::Unpin for xlfn::rtd::DynamicRtdSources<E> where alloc::vec::Vec<alloc::boxed::Box<dyn ErasedRtdSource<E>>>: core::marker::Unpin, core::marker::PhantomData<fn() -> E>: core::marker::Unpin
+impl<E> core::marker::UnsafeUnpin for xlfn::rtd::DynamicRtdSources<E> where alloc::vec::Vec<alloc::boxed::Box<dyn ErasedRtdSource<E>>>: core::marker::UnsafeUnpin, core::marker::PhantomData<fn() -> E>: core::marker::UnsafeUnpin
+impl<E> !core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::DynamicRtdSources<E>
+impl<E> !core::panic::unwind_safe::UnwindSafe for xlfn::rtd::DynamicRtdSources<E>
+pub struct xlfn::rtd::NoTopicValidator
+impl core::clone::Clone for xlfn::rtd::NoTopicValidator
+pub fn xlfn::rtd::NoTopicValidator::clone(&self) -> Self
+impl core::default::Default for xlfn::rtd::NoTopicValidator
+pub fn xlfn::rtd::NoTopicValidator::default() -> Self
+impl core::fmt::Debug for xlfn::rtd::NoTopicValidator
+pub fn xlfn::rtd::NoTopicValidator::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::rtd::NoTopicValidator
+impl xlfn::rtd::RtdTopicValidator for xlfn::rtd::NoTopicValidator
+pub fn xlfn::rtd::NoTopicValidator::validate(&self, &xlfn::rtd::RtdTopic) -> xlfn_engine::error::XllResult<()>
+impl core::marker::Freeze for xlfn::rtd::NoTopicValidator
+impl core::marker::Send for xlfn::rtd::NoTopicValidator
+impl core::marker::Sync for xlfn::rtd::NoTopicValidator
+impl core::marker::Unpin for xlfn::rtd::NoTopicValidator
+impl core::marker::UnsafeUnpin for xlfn::rtd::NoTopicValidator
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::NoTopicValidator
+impl core::panic::unwind_safe::UnwindSafe for xlfn::rtd::NoTopicValidator
+pub struct xlfn::rtd::RtdCallContext<'call, E: xlfn::rtd::RtdSubscription, C: xlfn::rtd::RtdSourceCatalog<E>>
+impl<'call, E: xlfn::rtd::RtdSubscription, C: xlfn::rtd::RtdSourceCatalog<E>> xlfn::rtd::RtdCallContext<'call, E, C>
+pub fn xlfn::rtd::RtdCallContext<'call, E, C>::subscribe<Source, Parts: xlfn::rtd::RtdTopicInput + ?core::marker::Sized>(&self, &xlfn::rtd::RtdSourceHandle<Source>, &Parts) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
+impl<E: xlfn::rtd::RtdSubscription, C: xlfn::rtd::RtdSourceCatalog<E>> core::clone::Clone for xlfn::rtd::RtdCallContext<'_, E, C>
+pub fn xlfn::rtd::RtdCallContext<'_, E, C>::clone(&self) -> Self
+impl<E: xlfn::rtd::RtdSubscription, C: xlfn::rtd::RtdSourceCatalog<E>> core::marker::Copy for xlfn::rtd::RtdCallContext<'_, E, C>
+impl<'call, E, C> core::marker::Freeze for xlfn::rtd::RtdCallContext<'call, E, C> where RtdGenerationAccess<'call, E, C>: core::marker::Freeze
+impl<'call, E, C> !core::marker::Send for xlfn::rtd::RtdCallContext<'call, E, C>
+impl<'call, E, C> !core::marker::Sync for xlfn::rtd::RtdCallContext<'call, E, C>
+impl<'call, E, C> core::marker::Unpin for xlfn::rtd::RtdCallContext<'call, E, C> where RtdGenerationAccess<'call, E, C>: core::marker::Unpin
+impl<'call, E, C> core::marker::UnsafeUnpin for xlfn::rtd::RtdCallContext<'call, E, C> where RtdGenerationAccess<'call, E, C>: core::marker::UnsafeUnpin
+impl<'call, E, C> !core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdCallContext<'call, E, C>
+impl<'call, E, C> !core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdCallContext<'call, E, C>
+pub struct xlfn::rtd::RtdCapacity(_)
+impl xlfn::rtd::RtdCapacity
+pub const fn xlfn::rtd::RtdCapacity::bounded(core::num::nonzero::NonZeroUsize) -> Self
+pub const fn xlfn::rtd::RtdCapacity::disabled() -> Self
+pub const fn xlfn::rtd::RtdCapacity::disabled_if_zero(usize) -> Self
+pub const fn xlfn::rtd::RtdCapacity::get(self) -> usize
+pub const fn xlfn::rtd::RtdCapacity::is_disabled(self) -> bool
+impl core::clone::Clone for xlfn::rtd::RtdCapacity
+pub fn xlfn::rtd::RtdCapacity::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::rtd::RtdCapacity
+impl core::cmp::PartialEq for xlfn::rtd::RtdCapacity
+pub fn xlfn::rtd::RtdCapacity::eq(&self, &Self) -> bool
+impl core::fmt::Debug for xlfn::rtd::RtdCapacity
+pub fn xlfn::rtd::RtdCapacity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::rtd::RtdCapacity
+impl core::marker::StructuralPartialEq for xlfn::rtd::RtdCapacity
+impl core::marker::Freeze for xlfn::rtd::RtdCapacity
+impl core::marker::Send for xlfn::rtd::RtdCapacity
+impl core::marker::Sync for xlfn::rtd::RtdCapacity
+impl core::marker::Unpin for xlfn::rtd::RtdCapacity
+impl core::marker::UnsafeUnpin for xlfn::rtd::RtdCapacity
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdCapacity
+impl core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdCapacity
+pub struct xlfn::rtd::RtdChannelSource<T, F, D: xlfn::rtd::RtdDeliveryPolicy>
+impl<T: xlfn::rtd::IntoRtdValue + core::marker::Send + 'static, F, D: xlfn::rtd::RtdDeliveryPolicy> xlfn::rtd::RtdChannelSource<T, F, D>
+pub fn xlfn::rtd::RtdChannelSource<T, F, D>::delivery(&self) -> xlfn::rtd::RtdDelivery
+pub const fn xlfn::rtd::RtdChannelSource<T, F, D>::error_policy(&self) -> xlfn::rtd::RtdProducerErrorPolicy
+pub const fn xlfn::rtd::RtdChannelSource<T, F, D>::limits(&self) -> xlfn::rtd::RtdSourceLimits
+pub fn xlfn::rtd::RtdChannelSource<T, F, D>::max_producers(&self) -> core::num::nonzero::NonZeroUsize
+pub fn xlfn::rtd::RtdChannelSource<T, F, D>::new<P>(D, F) -> Self where F: core::ops::function::Fn(xlfn::rtd::RtdTopic) -> xlfn_engine::error::XllResult<P> + core::marker::Send + core::marker::Sync + 'static, P: core::ops::function::FnOnce(xlfn::rtd::RtdSender<T, D>) -> xlfn_engine::error::XllResult<()> + core::marker::Send + 'static
+pub fn xlfn::rtd::RtdChannelSource<T, F, D>::with_error_policy(self, xlfn::rtd::RtdProducerErrorPolicy) -> Self
+pub fn xlfn::rtd::RtdChannelSource<T, F, D>::with_limits(self, xlfn::rtd::RtdSourceLimits) -> Self
+pub fn xlfn::rtd::RtdChannelSource<T, F, D>::with_max_producers(self, core::num::nonzero::NonZeroUsize) -> Self
+impl<T, F, P, D> xlfn::rtd::RtdSource for xlfn::rtd::RtdChannelSource<T, F, D> where T: xlfn::rtd::IntoRtdValue + core::marker::Send + 'static, F: core::ops::function::Fn(xlfn::rtd::RtdTopic) -> xlfn_engine::error::XllResult<P> + core::marker::Send + core::marker::Sync + 'static, P: core::ops::function::FnOnce(xlfn::rtd::RtdSender<T, D>) -> xlfn_engine::error::XllResult<()> + core::marker::Send + 'static, D: xlfn::rtd::RtdDeliveryPolicy
+pub type xlfn::rtd::RtdChannelSource<T, F, D>::Subscription = xlfn::rtd::RtdChannelSubscription
+pub type xlfn::rtd::RtdChannelSource<T, F, D>::Value = T
+pub fn xlfn::rtd::RtdChannelSource<T, F, D>::request_stop(&self)
+pub fn xlfn::rtd::RtdChannelSource<T, F, D>::shutdown_and_wait(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::rtd::RtdChannelSource<T, F, D>::subscribe(&self, &xlfn::rtd::RtdTopic, xlfn::rtd::RtdSink<T>) -> xlfn_engine::error::XllResult<Self::Subscription>
+impl<T, F, D> core::marker::Freeze for xlfn::rtd::RtdChannelSource<T, F, D> where D: core::marker::Freeze, F: core::marker::Freeze, core::marker::PhantomData<fn(T)>: core::marker::Freeze
+impl<T, F, D> core::marker::Send for xlfn::rtd::RtdChannelSource<T, F, D> where F: core::marker::Send, core::marker::PhantomData<fn(T)>: core::marker::Send
+impl<T, F, D> core::marker::Sync for xlfn::rtd::RtdChannelSource<T, F, D> where F: core::marker::Sync, core::marker::PhantomData<fn(T)>: core::marker::Sync
+impl<T, F, D> core::marker::Unpin for xlfn::rtd::RtdChannelSource<T, F, D> where D: core::marker::Unpin, F: core::marker::Unpin, core::marker::PhantomData<fn(T)>: core::marker::Unpin
+impl<T, F, D> core::marker::UnsafeUnpin for xlfn::rtd::RtdChannelSource<T, F, D> where D: core::marker::UnsafeUnpin, F: core::marker::UnsafeUnpin, core::marker::PhantomData<fn(T)>: core::marker::UnsafeUnpin
+impl<T, F, D> !core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdChannelSource<T, F, D>
+impl<T, F, D> !core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdChannelSource<T, F, D>
+pub struct xlfn::rtd::RtdChannelSubscription
+impl core::ops::drop::Drop for xlfn::rtd::RtdChannelSubscription
+pub fn xlfn::rtd::RtdChannelSubscription::drop(&mut self)
+impl xlfn::rtd::RtdSubscription for xlfn::rtd::RtdChannelSubscription
+pub fn xlfn::rtd::RtdChannelSubscription::disconnect_and_wait(self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::rtd::RtdChannelSubscription::request_cancel(&self)
+impl core::marker::Freeze for xlfn::rtd::RtdChannelSubscription
+impl core::marker::Send for xlfn::rtd::RtdChannelSubscription
+impl core::marker::Sync for xlfn::rtd::RtdChannelSubscription
+impl core::marker::Unpin for xlfn::rtd::RtdChannelSubscription
+impl core::marker::UnsafeUnpin for xlfn::rtd::RtdChannelSubscription
+impl !core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdChannelSubscription
+impl !core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdChannelSubscription
+pub struct xlfn::rtd::RtdConfig
+impl xlfn::rtd::RtdConfig
+pub const fn xlfn::rtd::RtdConfig::new() -> Self
+pub const fn xlfn::rtd::RtdConfig::with_limits(self, xlfn::rtd::RtdLimits) -> Self
+impl core::clone::Clone for xlfn::rtd::RtdConfig
+pub fn xlfn::rtd::RtdConfig::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::rtd::RtdConfig
+impl core::cmp::PartialEq for xlfn::rtd::RtdConfig
+pub fn xlfn::rtd::RtdConfig::eq(&self, &Self) -> bool
+impl core::default::Default for xlfn::rtd::RtdConfig
+pub fn xlfn::rtd::RtdConfig::default() -> Self
+impl core::fmt::Debug for xlfn::rtd::RtdConfig
+pub fn xlfn::rtd::RtdConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::rtd::RtdConfig
+impl core::marker::StructuralPartialEq for xlfn::rtd::RtdConfig
+impl core::marker::Freeze for xlfn::rtd::RtdConfig
+impl core::marker::Send for xlfn::rtd::RtdConfig
+impl core::marker::Sync for xlfn::rtd::RtdConfig
+impl core::marker::Unpin for xlfn::rtd::RtdConfig
+impl core::marker::UnsafeUnpin for xlfn::rtd::RtdConfig
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdConfig
+impl core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdConfig
+pub struct xlfn::rtd::RtdFifo(_)
+impl xlfn::rtd::RtdFifo
+pub const fn xlfn::rtd::RtdFifo::new(core::num::nonzero::NonZeroUsize) -> Self
+impl core::clone::Clone for xlfn::rtd::RtdFifo
+pub fn xlfn::rtd::RtdFifo::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::rtd::RtdFifo
+impl core::cmp::PartialEq for xlfn::rtd::RtdFifo
+pub fn xlfn::rtd::RtdFifo::eq(&self, &Self) -> bool
+impl core::fmt::Debug for xlfn::rtd::RtdFifo
+pub fn xlfn::rtd::RtdFifo::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::rtd::RtdFifo
+impl core::marker::StructuralPartialEq for xlfn::rtd::RtdFifo
+impl xlfn::rtd::RtdDeliveryPolicy for xlfn::rtd::RtdFifo
+pub fn xlfn::rtd::RtdFifo::delivery(self) -> xlfn::rtd::RtdDelivery
+impl core::marker::Freeze for xlfn::rtd::RtdFifo
+impl core::marker::Send for xlfn::rtd::RtdFifo
+impl core::marker::Sync for xlfn::rtd::RtdFifo
+impl core::marker::Unpin for xlfn::rtd::RtdFifo
+impl core::marker::UnsafeUnpin for xlfn::rtd::RtdFifo
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdFifo
+impl core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdFifo
+pub struct xlfn::rtd::RtdLatest
+impl core::clone::Clone for xlfn::rtd::RtdLatest
+pub fn xlfn::rtd::RtdLatest::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::rtd::RtdLatest
+impl core::cmp::PartialEq for xlfn::rtd::RtdLatest
+pub fn xlfn::rtd::RtdLatest::eq(&self, &Self) -> bool
+impl core::default::Default for xlfn::rtd::RtdLatest
+pub fn xlfn::rtd::RtdLatest::default() -> Self
+impl core::fmt::Debug for xlfn::rtd::RtdLatest
+pub fn xlfn::rtd::RtdLatest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::rtd::RtdLatest
+impl core::marker::StructuralPartialEq for xlfn::rtd::RtdLatest
+impl xlfn::rtd::RtdDeliveryPolicy for xlfn::rtd::RtdLatest
+pub fn xlfn::rtd::RtdLatest::delivery(self) -> xlfn::rtd::RtdDelivery
+impl core::marker::Freeze for xlfn::rtd::RtdLatest
+impl core::marker::Send for xlfn::rtd::RtdLatest
+impl core::marker::Sync for xlfn::rtd::RtdLatest
+impl core::marker::Unpin for xlfn::rtd::RtdLatest
+impl core::marker::UnsafeUnpin for xlfn::rtd::RtdLatest
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdLatest
+impl core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdLatest
+#[non_exhaustive] pub struct xlfn::rtd::RtdLimits
+impl xlfn::rtd::RtdLimits
+pub const fn xlfn::rtd::RtdLimits::max_active(self) -> xlfn::rtd::RtdCapacity
+pub const fn xlfn::rtd::RtdLimits::max_buffered_bytes(self) -> xlfn::rtd::RtdCapacity
+pub const fn xlfn::rtd::RtdLimits::max_buffered_values(self) -> xlfn::rtd::RtdCapacity
+pub const fn xlfn::rtd::RtdLimits::max_pending(self) -> xlfn::rtd::RtdCapacity
+pub const fn xlfn::rtd::RtdLimits::max_queued_updates(self) -> xlfn::rtd::RtdCapacity
+pub const fn xlfn::rtd::RtdLimits::max_source_ids(self) -> xlfn::rtd::RtdCapacity
+pub const fn xlfn::rtd::RtdLimits::max_total_topic_bytes(self) -> xlfn::rtd::RtdCapacity
+pub const fn xlfn::rtd::RtdLimits::max_workers(self) -> xlfn::rtd::RtdCapacity
+pub const fn xlfn::rtd::RtdLimits::standard() -> Self
+pub const fn xlfn::rtd::RtdLimits::with_max_active(self, xlfn::rtd::RtdCapacity) -> Self
+pub const fn xlfn::rtd::RtdLimits::with_max_buffered_bytes(self, xlfn::rtd::RtdCapacity) -> Self
+pub const fn xlfn::rtd::RtdLimits::with_max_buffered_values(self, xlfn::rtd::RtdCapacity) -> Self
+pub const fn xlfn::rtd::RtdLimits::with_max_pending(self, xlfn::rtd::RtdCapacity) -> Self
+pub const fn xlfn::rtd::RtdLimits::with_max_queued_updates(self, xlfn::rtd::RtdCapacity) -> Self
+pub const fn xlfn::rtd::RtdLimits::with_max_source_ids(self, xlfn::rtd::RtdCapacity) -> Self
+pub const fn xlfn::rtd::RtdLimits::with_max_total_topic_bytes(self, xlfn::rtd::RtdCapacity) -> Self
+pub const fn xlfn::rtd::RtdLimits::with_max_workers(self, xlfn::rtd::RtdCapacity) -> Self
+impl core::clone::Clone for xlfn::rtd::RtdLimits
+pub fn xlfn::rtd::RtdLimits::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::rtd::RtdLimits
+impl core::cmp::PartialEq for xlfn::rtd::RtdLimits
+pub fn xlfn::rtd::RtdLimits::eq(&self, &Self) -> bool
+impl core::default::Default for xlfn::rtd::RtdLimits
+pub fn xlfn::rtd::RtdLimits::default() -> Self
+impl core::fmt::Debug for xlfn::rtd::RtdLimits
+pub fn xlfn::rtd::RtdLimits::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::rtd::RtdLimits
+impl core::marker::StructuralPartialEq for xlfn::rtd::RtdLimits
+impl core::marker::Freeze for xlfn::rtd::RtdLimits
+impl core::marker::Send for xlfn::rtd::RtdLimits
+impl core::marker::Sync for xlfn::rtd::RtdLimits
+impl core::marker::Unpin for xlfn::rtd::RtdLimits
+impl core::marker::UnsafeUnpin for xlfn::rtd::RtdLimits
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdLimits
+impl core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdLimits
+pub struct xlfn::rtd::RtdMultiplexedSource<T, P, V, D: xlfn::rtd::RtdDeliveryPolicy>
+impl<T, P, V, D> xlfn::rtd::RtdMultiplexedSource<T, P, V, D> where T: xlfn::rtd::IntoRtdValue + core::marker::Send + 'static, P: core::ops::function::FnOnce(xlfn::rtd::RtdSourceContext<T, D>) -> xlfn_engine::error::XllResult<()> + core::marker::Send + 'static, V: xlfn::rtd::RtdTopicValidator, D: xlfn::rtd::RtdDeliveryPolicy
+pub fn xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::delivery(&self) -> xlfn::rtd::RtdDelivery
+pub const fn xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::error_policy(&self) -> xlfn::rtd::RtdProducerErrorPolicy
+pub const fn xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::limits(&self) -> xlfn::rtd::RtdSourceLimits
+pub fn xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::with_error_policy(self, xlfn::rtd::RtdProducerErrorPolicy) -> Self
+pub fn xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::with_limits(self, xlfn::rtd::RtdSourceLimits) -> Self
+pub fn xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::with_topic_validator<W>(self, W) -> xlfn::rtd::RtdMultiplexedSource<T, P, W, D> where W: core::ops::function::Fn(&xlfn::rtd::RtdTopic) -> xlfn_engine::error::XllResult<()> + core::marker::Send + core::marker::Sync + 'static
+pub fn xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::without_topic_validator(self) -> xlfn::rtd::RtdMultiplexedSource<T, P, xlfn::rtd::NoTopicValidator, D>
+impl<T: xlfn::rtd::IntoRtdValue + core::marker::Send + 'static, P, D: xlfn::rtd::RtdDeliveryPolicy> xlfn::rtd::RtdMultiplexedSource<T, P, xlfn::rtd::NoTopicValidator, D> where P: core::ops::function::FnOnce(xlfn::rtd::RtdSourceContext<T, D>) -> xlfn_engine::error::XllResult<()> + core::marker::Send + 'static
+pub fn xlfn::rtd::RtdMultiplexedSource<T, P, xlfn::rtd::NoTopicValidator, D>::new(D, P) -> Self
+impl<T, P, V, D> xlfn::rtd::RtdSource for xlfn::rtd::RtdMultiplexedSource<T, P, V, D> where T: xlfn::rtd::IntoRtdValue + core::marker::Send + 'static, P: core::ops::function::FnOnce(xlfn::rtd::RtdSourceContext<T, D>) -> xlfn_engine::error::XllResult<()> + core::marker::Send + 'static, V: xlfn::rtd::RtdTopicValidator, D: xlfn::rtd::RtdDeliveryPolicy
+pub type xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::Subscription = xlfn::rtd::RtdMultiplexedSubscription<T, D>
+pub type xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::Value = T
+pub fn xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::request_stop(&self)
+pub fn xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::shutdown_and_wait(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::subscribe(&self, &xlfn::rtd::RtdTopic, xlfn::rtd::RtdSink<T>) -> xlfn_engine::error::XllResult<Self::Subscription>
+impl<T, P, V, D> !core::marker::Freeze for xlfn::rtd::RtdMultiplexedSource<T, P, V, D>
+impl<T, P, V, D> core::marker::Send for xlfn::rtd::RtdMultiplexedSource<T, P, V, D> where WorkerOwner<T, P, D>: core::marker::Send, V: core::marker::Send
+impl<T, P, V, D> core::marker::Sync for xlfn::rtd::RtdMultiplexedSource<T, P, V, D> where WorkerOwner<T, P, D>: core::marker::Sync, V: core::marker::Sync
+impl<T, P, V, D> core::marker::Unpin for xlfn::rtd::RtdMultiplexedSource<T, P, V, D> where WorkerOwner<T, P, D>: core::marker::Unpin, D: core::marker::Unpin, V: core::marker::Unpin
+impl<T, P, V, D> core::marker::UnsafeUnpin for xlfn::rtd::RtdMultiplexedSource<T, P, V, D> where WorkerOwner<T, P, D>: core::marker::UnsafeUnpin, D: core::marker::UnsafeUnpin, V: core::marker::UnsafeUnpin
+impl<T, P, V, D> !core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdMultiplexedSource<T, P, V, D>
+impl<T, P, V, D> !core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdMultiplexedSource<T, P, V, D>
+pub struct xlfn::rtd::RtdMultiplexedSubscription<T, D: xlfn::rtd::RtdDeliveryPolicy>
+impl<T, D: xlfn::rtd::RtdDeliveryPolicy> core::ops::drop::Drop for xlfn::rtd::RtdMultiplexedSubscription<T, D>
+pub fn xlfn::rtd::RtdMultiplexedSubscription<T, D>::drop(&mut self)
+impl<T: core::marker::Send + 'static, D: xlfn::rtd::RtdDeliveryPolicy> xlfn::rtd::RtdSubscription for xlfn::rtd::RtdMultiplexedSubscription<T, D>
+pub fn xlfn::rtd::RtdMultiplexedSubscription<T, D>::disconnect_and_wait(self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::rtd::RtdMultiplexedSubscription<T, D>::request_cancel(&self)
+impl<T, D> core::marker::Freeze for xlfn::rtd::RtdMultiplexedSubscription<T, D> where triomphe::arc::Arc<Shared<T, D>>: core::marker::Freeze
+impl<T, D> core::marker::Send for xlfn::rtd::RtdMultiplexedSubscription<T, D> where triomphe::arc::Arc<Shared<T, D>>: core::marker::Send
+impl<T, D> core::marker::Sync for xlfn::rtd::RtdMultiplexedSubscription<T, D> where triomphe::arc::Arc<Shared<T, D>>: core::marker::Sync
+impl<T, D> core::marker::Unpin for xlfn::rtd::RtdMultiplexedSubscription<T, D> where triomphe::arc::Arc<Shared<T, D>>: core::marker::Unpin
+impl<T, D> core::marker::UnsafeUnpin for xlfn::rtd::RtdMultiplexedSubscription<T, D> where triomphe::arc::Arc<Shared<T, D>>: core::marker::UnsafeUnpin
+impl<T, D> !core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdMultiplexedSubscription<T, D>
+impl<T, D> !core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdMultiplexedSubscription<T, D>
+pub struct xlfn::rtd::RtdOpenContext<'a, E: xlfn::rtd::RtdSubscription, C: xlfn::rtd::RtdSourceCatalog<E>>
+impl xlfn::rtd::RtdOpenContext<'_, xlfn::rtd::BoxedRtdSubscription>
+pub fn xlfn::rtd::RtdOpenContext<'_, xlfn::rtd::BoxedRtdSubscription>::register<S: xlfn::rtd::RtdSource>(&self, S) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdSourceHandle>
+impl<E: xlfn::rtd::RtdSubscription, C: xlfn::rtd::RtdSourceCatalog<E>> xlfn::rtd::RtdOpenContext<'_, E, C>
+pub fn xlfn::rtd::RtdOpenContext<'_, E, C>::register_sources(&self, C) -> xlfn_engine::error::XllResult<<C as xlfn::rtd::RtdSourceCatalog>::Handles>
+impl<E: xlfn::rtd::RtdSubscription> xlfn::rtd::RtdOpenContext<'_, E>
+pub fn xlfn::rtd::RtdOpenContext<'_, E>::register_source<S>(&self, S) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdSourceHandle<S>> where S: xlfn::rtd::RtdSource, <S as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+impl<E: xlfn::rtd::RtdSubscription, C: xlfn::rtd::RtdSourceCatalog<E>> core::clone::Clone for xlfn::rtd::RtdOpenContext<'_, E, C>
+pub fn xlfn::rtd::RtdOpenContext<'_, E, C>::clone(&self) -> Self
+impl<E: xlfn::rtd::RtdSubscription, C: xlfn::rtd::RtdSourceCatalog<E>> core::fmt::Debug for xlfn::rtd::RtdOpenContext<'_, E, C>
+pub fn xlfn::rtd::RtdOpenContext<'_, E, C>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<E: xlfn::rtd::RtdSubscription, C: xlfn::rtd::RtdSourceCatalog<E>> core::marker::Copy for xlfn::rtd::RtdOpenContext<'_, E, C>
+impl<'a, E, C> core::marker::Freeze for xlfn::rtd::RtdOpenContext<'a, E, C> where &'a SourceRegistration<E, C>: core::marker::Freeze
+impl<'a, E, C> core::marker::Send for xlfn::rtd::RtdOpenContext<'a, E, C> where &'a SourceRegistration<E, C>: core::marker::Send
+impl<'a, E, C> core::marker::Sync for xlfn::rtd::RtdOpenContext<'a, E, C> where &'a SourceRegistration<E, C>: core::marker::Sync
+impl<'a, E, C> core::marker::Unpin for xlfn::rtd::RtdOpenContext<'a, E, C> where &'a SourceRegistration<E, C>: core::marker::Unpin
+impl<'a, E, C> core::marker::UnsafeUnpin for xlfn::rtd::RtdOpenContext<'a, E, C> where &'a SourceRegistration<E, C>: core::marker::UnsafeUnpin
+impl<'a, E, C> !core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdOpenContext<'a, E, C>
+impl<'a, E, C> !core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdOpenContext<'a, E, C>
+pub struct xlfn::rtd::RtdPendingBatch<T>
+impl<T> xlfn::rtd::RtdPendingBatch<T>
+pub fn xlfn::rtd::RtdPendingBatch<T>::is_empty(&self) -> bool
+pub fn xlfn::rtd::RtdPendingBatch<T>::len(&self) -> usize
+impl<T> core::fmt::Debug for xlfn::rtd::RtdPendingBatch<T>
+pub fn xlfn::rtd::RtdPendingBatch<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::Freeze for xlfn::rtd::RtdPendingBatch<T> where core::marker::PhantomData<fn(T) -> T>: core::marker::Freeze
+impl<T> core::marker::Send for xlfn::rtd::RtdPendingBatch<T> where core::marker::PhantomData<fn(T) -> T>: core::marker::Send
+impl<T> core::marker::Sync for xlfn::rtd::RtdPendingBatch<T> where core::marker::PhantomData<fn(T) -> T>: core::marker::Sync
+impl<T> core::marker::Unpin for xlfn::rtd::RtdPendingBatch<T> where core::marker::PhantomData<fn(T) -> T>: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for xlfn::rtd::RtdPendingBatch<T> where core::marker::PhantomData<fn(T) -> T>: core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdPendingBatch<T> where core::marker::PhantomData<fn(T) -> T>: core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdPendingBatch<T> where core::marker::PhantomData<fn(T) -> T>: core::panic::unwind_safe::UnwindSafe
+pub struct xlfn::rtd::RtdPendingValue<T>
+impl<T> core::fmt::Debug for xlfn::rtd::RtdPendingValue<T>
+pub fn xlfn::rtd::RtdPendingValue<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::Freeze for xlfn::rtd::RtdPendingValue<T> where core::marker::PhantomData<fn(T) -> T>: core::marker::Freeze
+impl<T> core::marker::Send for xlfn::rtd::RtdPendingValue<T> where core::marker::PhantomData<fn(T) -> T>: core::marker::Send
+impl<T> core::marker::Sync for xlfn::rtd::RtdPendingValue<T> where core::marker::PhantomData<fn(T) -> T>: core::marker::Sync
+impl<T> core::marker::Unpin for xlfn::rtd::RtdPendingValue<T> where core::marker::PhantomData<fn(T) -> T>: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for xlfn::rtd::RtdPendingValue<T> where core::marker::PhantomData<fn(T) -> T>: core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdPendingValue<T> where core::marker::PhantomData<fn(T) -> T>: core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdPendingValue<T> where core::marker::PhantomData<fn(T) -> T>: core::panic::unwind_safe::UnwindSafe
+pub struct xlfn::rtd::RtdSender<T, D: xlfn::rtd::RtdDeliveryPolicy>
+impl<T, D: xlfn::rtd::RtdDeliveryPolicy> xlfn::rtd::RtdSender<T, D>
+pub fn xlfn::rtd::RtdSender<T, D>::is_closed(&self) -> bool
+pub fn xlfn::rtd::RtdSender<T, D>::wait_closed(&self, core::time::Duration) -> bool
+impl<T, D: xlfn::rtd::RtdDeliveryPolicy> xlfn::rtd::RtdSender<T, D>
+pub fn xlfn::rtd::RtdSender<T, D>::try_send_pending(&self, xlfn::rtd::RtdPendingValue<T>) -> core::result::Result<(), xlfn::rtd::RtdSendError<T>>
+pub fn xlfn::rtd::RtdSender<T, D>::try_send_pending_batch(&self, xlfn::rtd::RtdPendingBatch<T>) -> core::result::Result<(), xlfn::rtd::RtdBatchSendError<T>>
+impl<T: xlfn::rtd::IntoRtdValue, D: xlfn::rtd::RtdDeliveryPolicy> xlfn::rtd::RtdSender<T, D>
+pub fn xlfn::rtd::RtdSender<T, D>::try_send(&self, T) -> core::result::Result<(), xlfn::rtd::RtdSendError<T>>
+pub fn xlfn::rtd::RtdSender<T, D>::try_send_batch(&self, impl core::iter::traits::collect::IntoIterator<Item = T>) -> core::result::Result<(), xlfn::rtd::RtdBatchSendError<T>>
+impl<T, D: xlfn::rtd::RtdDeliveryPolicy> core::clone::Clone for xlfn::rtd::RtdSender<T, D>
+pub fn xlfn::rtd::RtdSender<T, D>::clone(&self) -> Self
+impl<T, D> core::marker::Freeze for xlfn::rtd::RtdSender<T, D> where triomphe::arc::Arc<xlfn::subscription::channel::Channel<D>>: core::marker::Freeze, core::marker::PhantomData<fn(T)>: core::marker::Freeze
+impl<T, D> core::marker::Send for xlfn::rtd::RtdSender<T, D> where triomphe::arc::Arc<xlfn::subscription::channel::Channel<D>>: core::marker::Send, core::marker::PhantomData<fn(T)>: core::marker::Send
+impl<T, D> core::marker::Sync for xlfn::rtd::RtdSender<T, D> where triomphe::arc::Arc<xlfn::subscription::channel::Channel<D>>: core::marker::Sync, core::marker::PhantomData<fn(T)>: core::marker::Sync
+impl<T, D> core::marker::Unpin for xlfn::rtd::RtdSender<T, D> where triomphe::arc::Arc<xlfn::subscription::channel::Channel<D>>: core::marker::Unpin, core::marker::PhantomData<fn(T)>: core::marker::Unpin
+impl<T, D> core::marker::UnsafeUnpin for xlfn::rtd::RtdSender<T, D> where triomphe::arc::Arc<xlfn::subscription::channel::Channel<D>>: core::marker::UnsafeUnpin, core::marker::PhantomData<fn(T)>: core::marker::UnsafeUnpin
+impl<T, D> !core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdSender<T, D>
+impl<T, D> !core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdSender<T, D>
+pub struct xlfn::rtd::RtdSink<T>
+impl<T> xlfn::rtd::RtdSink<T> where T: xlfn::rtd::IntoRtdValue
+pub fn xlfn::rtd::RtdSink<T>::publish(&self, T) -> xlfn_engine::error::XllResult<()>
+impl<T> core::clone::Clone for xlfn::rtd::RtdSink<T>
+pub fn xlfn::rtd::RtdSink<T>::clone(&self) -> Self
+impl<T> core::marker::Freeze for xlfn::rtd::RtdSink<T> where core::marker::PhantomData<fn(T)>: core::marker::Freeze
+impl<T> core::marker::Send for xlfn::rtd::RtdSink<T> where core::marker::PhantomData<fn(T)>: core::marker::Send
+impl<T> core::marker::Sync for xlfn::rtd::RtdSink<T> where core::marker::PhantomData<fn(T)>: core::marker::Sync
+impl<T> core::marker::Unpin for xlfn::rtd::RtdSink<T> where core::marker::PhantomData<fn(T)>: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for xlfn::rtd::RtdSink<T> where core::marker::PhantomData<fn(T)>: core::marker::UnsafeUnpin
+impl<T> !core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdSink<T>
+impl<T> !core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdSink<T>
+pub struct xlfn::rtd::RtdSourceContext<T, D: xlfn::rtd::RtdDeliveryPolicy>
+impl<T, D: xlfn::rtd::RtdDeliveryPolicy> xlfn::rtd::RtdSourceContext<T, D>
+pub fn xlfn::rtd::RtdSourceContext<T, D>::is_closed(&self) -> bool
+pub fn xlfn::rtd::RtdSourceContext<T, D>::recv_timeout(&self, core::time::Duration) -> xlfn_engine::error::XllResult<core::option::Option<xlfn::rtd::RtdSourceEvent<T, D>>>
+impl<T, D> core::marker::Freeze for xlfn::rtd::RtdSourceContext<T, D> where triomphe::arc::Arc<Shared<T, D>>: core::marker::Freeze
+impl<T, D> core::marker::Send for xlfn::rtd::RtdSourceContext<T, D> where triomphe::arc::Arc<Shared<T, D>>: core::marker::Send
+impl<T, D> core::marker::Sync for xlfn::rtd::RtdSourceContext<T, D> where triomphe::arc::Arc<Shared<T, D>>: core::marker::Sync
+impl<T, D> core::marker::Unpin for xlfn::rtd::RtdSourceContext<T, D> where triomphe::arc::Arc<Shared<T, D>>: core::marker::Unpin
+impl<T, D> core::marker::UnsafeUnpin for xlfn::rtd::RtdSourceContext<T, D> where triomphe::arc::Arc<Shared<T, D>>: core::marker::UnsafeUnpin
+impl<T, D> !core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdSourceContext<T, D>
+impl<T, D> !core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdSourceContext<T, D>
+pub struct xlfn::rtd::RtdSourceHandle<S>
+impl<S> xlfn::rtd::RtdSourceHandle<S>
+pub const fn xlfn::rtd::RtdSourceHandle<S>::erase(self) -> xlfn::rtd::RtdSourceHandle
+impl<S> core::clone::Clone for xlfn::rtd::RtdSourceHandle<S>
+pub fn xlfn::rtd::RtdSourceHandle<S>::clone(&self) -> Self
+impl<S> core::fmt::Debug for xlfn::rtd::RtdSourceHandle<S>
+pub fn xlfn::rtd::RtdSourceHandle<S>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<S> core::marker::Copy for xlfn::rtd::RtdSourceHandle<S>
+impl<S> core::marker::Freeze for xlfn::rtd::RtdSourceHandle<S> where core::marker::PhantomData<fn() -> S>: core::marker::Freeze
+impl<S> core::marker::Send for xlfn::rtd::RtdSourceHandle<S> where core::marker::PhantomData<fn() -> S>: core::marker::Send
+impl<S> core::marker::Sync for xlfn::rtd::RtdSourceHandle<S> where core::marker::PhantomData<fn() -> S>: core::marker::Sync
+impl<S> core::marker::Unpin for xlfn::rtd::RtdSourceHandle<S> where core::marker::PhantomData<fn() -> S>: core::marker::Unpin
+impl<S> core::marker::UnsafeUnpin for xlfn::rtd::RtdSourceHandle<S> where core::marker::PhantomData<fn() -> S>: core::marker::UnsafeUnpin
+impl<S> core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdSourceHandle<S> where core::marker::PhantomData<fn() -> S>: core::panic::unwind_safe::RefUnwindSafe
+impl<S> core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdSourceHandle<S> where core::marker::PhantomData<fn() -> S>: core::panic::unwind_safe::UnwindSafe
+#[non_exhaustive] pub struct xlfn::rtd::RtdSourceLimits
+impl xlfn::rtd::RtdSourceLimits
+pub const fn xlfn::rtd::RtdSourceLimits::max_buffered_bytes(self) -> xlfn::rtd::RtdCapacity
+pub const fn xlfn::rtd::RtdSourceLimits::max_buffered_values(self) -> xlfn::rtd::RtdCapacity
+pub const fn xlfn::rtd::RtdSourceLimits::max_subscriptions(self) -> xlfn::rtd::RtdCapacity
+pub const fn xlfn::rtd::RtdSourceLimits::standard() -> Self
+pub const fn xlfn::rtd::RtdSourceLimits::with_max_buffered_bytes(self, xlfn::rtd::RtdCapacity) -> Self
+pub const fn xlfn::rtd::RtdSourceLimits::with_max_buffered_values(self, xlfn::rtd::RtdCapacity) -> Self
+pub const fn xlfn::rtd::RtdSourceLimits::with_max_subscriptions(self, xlfn::rtd::RtdCapacity) -> Self
+impl core::clone::Clone for xlfn::rtd::RtdSourceLimits
+pub fn xlfn::rtd::RtdSourceLimits::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::rtd::RtdSourceLimits
+impl core::cmp::PartialEq for xlfn::rtd::RtdSourceLimits
+pub fn xlfn::rtd::RtdSourceLimits::eq(&self, &Self) -> bool
+impl core::default::Default for xlfn::rtd::RtdSourceLimits
+pub fn xlfn::rtd::RtdSourceLimits::default() -> Self
+impl core::fmt::Debug for xlfn::rtd::RtdSourceLimits
+pub fn xlfn::rtd::RtdSourceLimits::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::rtd::RtdSourceLimits
+impl core::marker::StructuralPartialEq for xlfn::rtd::RtdSourceLimits
+impl core::marker::Freeze for xlfn::rtd::RtdSourceLimits
+impl core::marker::Send for xlfn::rtd::RtdSourceLimits
+impl core::marker::Sync for xlfn::rtd::RtdSourceLimits
+impl core::marker::Unpin for xlfn::rtd::RtdSourceLimits
+impl core::marker::UnsafeUnpin for xlfn::rtd::RtdSourceLimits
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdSourceLimits
+impl core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdSourceLimits
+pub struct xlfn::rtd::RtdSubscriptionId(_)
+impl core::clone::Clone for xlfn::rtd::RtdSubscriptionId
+pub fn xlfn::rtd::RtdSubscriptionId::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::rtd::RtdSubscriptionId
+impl core::cmp::Ord for xlfn::rtd::RtdSubscriptionId
+pub fn xlfn::rtd::RtdSubscriptionId::cmp(&self, &Self) -> core::cmp::Ordering
+impl core::cmp::PartialEq for xlfn::rtd::RtdSubscriptionId
+pub fn xlfn::rtd::RtdSubscriptionId::eq(&self, &Self) -> bool
+impl core::cmp::PartialOrd for xlfn::rtd::RtdSubscriptionId
+pub fn xlfn::rtd::RtdSubscriptionId::partial_cmp(&self, &Self) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for xlfn::rtd::RtdSubscriptionId
+pub fn xlfn::rtd::RtdSubscriptionId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for xlfn::rtd::RtdSubscriptionId
+pub fn xlfn::rtd::RtdSubscriptionId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for xlfn::rtd::RtdSubscriptionId
+impl core::marker::StructuralPartialEq for xlfn::rtd::RtdSubscriptionId
+impl core::marker::Freeze for xlfn::rtd::RtdSubscriptionId
+impl core::marker::Send for xlfn::rtd::RtdSubscriptionId
+impl core::marker::Sync for xlfn::rtd::RtdSubscriptionId
+impl core::marker::Unpin for xlfn::rtd::RtdSubscriptionId
+impl core::marker::UnsafeUnpin for xlfn::rtd::RtdSubscriptionId
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdSubscriptionId
+impl core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdSubscriptionId
+pub struct xlfn::rtd::RtdTopic
+impl xlfn::rtd::RtdTopic
+pub fn xlfn::rtd::RtdTopic::is_empty(&self) -> bool
+pub fn xlfn::rtd::RtdTopic::len(&self) -> usize
+pub fn xlfn::rtd::RtdTopic::new(impl core::iter::traits::collect::IntoIterator<Item = impl core::convert::AsRef<str>>) -> xlfn_engine::error::XllResult<Self>
+pub fn xlfn::rtd::RtdTopic::part(&self, usize) -> core::option::Option<&str>
+pub fn xlfn::rtd::RtdTopic::parts(&self) -> xlfn::rtd::RtdTopicParts<'_>
+pub fn xlfn::rtd::RtdTopic::single(impl core::convert::AsRef<str>) -> xlfn_engine::error::XllResult<Self>
+impl core::clone::Clone for xlfn::rtd::RtdTopic
+pub fn xlfn::rtd::RtdTopic::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::rtd::RtdTopic
+impl core::cmp::PartialEq for xlfn::rtd::RtdTopic
+pub fn xlfn::rtd::RtdTopic::eq(&self, &Self) -> bool
+impl core::fmt::Debug for xlfn::rtd::RtdTopic
+pub fn xlfn::rtd::RtdTopic::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for xlfn::rtd::RtdTopic
+pub fn xlfn::rtd::RtdTopic::hash<H: core::hash::Hasher>(&self, &mut H)
+impl<'a> core::iter::traits::collect::IntoIterator for &'a xlfn::rtd::RtdTopic
+pub type &'a xlfn::rtd::RtdTopic::IntoIter = xlfn::rtd::RtdTopicParts<'a>
+pub type &'a xlfn::rtd::RtdTopic::Item = &'a str
+pub fn &'a xlfn::rtd::RtdTopic::into_iter(self) -> Self::IntoIter
+impl core::marker::Freeze for xlfn::rtd::RtdTopic
+impl core::marker::Send for xlfn::rtd::RtdTopic
+impl core::marker::Sync for xlfn::rtd::RtdTopic
+impl core::marker::Unpin for xlfn::rtd::RtdTopic
+impl core::marker::UnsafeUnpin for xlfn::rtd::RtdTopic
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdTopic
+impl core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdTopic
+pub struct xlfn::rtd::RtdTopicParts<'a>
+impl core::iter::traits::exact_size::ExactSizeIterator for xlfn::rtd::RtdTopicParts<'_>
+impl core::iter::traits::marker::FusedIterator for xlfn::rtd::RtdTopicParts<'_>
+impl<'a> core::clone::Clone for xlfn::rtd::RtdTopicParts<'a>
+pub fn xlfn::rtd::RtdTopicParts<'a>::clone(&self) -> Self
+impl<'a> core::fmt::Debug for xlfn::rtd::RtdTopicParts<'a>
+pub fn xlfn::rtd::RtdTopicParts<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::iter::traits::iterator::Iterator for xlfn::rtd::RtdTopicParts<'a>
+pub type xlfn::rtd::RtdTopicParts<'a>::Item = &'a str
+pub fn xlfn::rtd::RtdTopicParts<'a>::next(&mut self) -> core::option::Option<Self::Item>
+pub fn xlfn::rtd::RtdTopicParts<'a>::size_hint(&self) -> (usize, core::option::Option<usize>)
+impl<'a> core::marker::Freeze for xlfn::rtd::RtdTopicParts<'a>
+impl<'a> core::marker::Send for xlfn::rtd::RtdTopicParts<'a>
+impl<'a> core::marker::Sync for xlfn::rtd::RtdTopicParts<'a>
+impl<'a> core::marker::Unpin for xlfn::rtd::RtdTopicParts<'a>
+impl<'a> core::marker::UnsafeUnpin for xlfn::rtd::RtdTopicParts<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for xlfn::rtd::RtdTopicParts<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for xlfn::rtd::RtdTopicParts<'a>
+pub unsafe trait xlfn::rtd::IntoRtdSubscription<E: xlfn::rtd::RtdSubscription>: xlfn::rtd::RtdSubscription
+pub fn xlfn::rtd::IntoRtdSubscription::into_rtd_subscription(self) -> E
+impl<T: xlfn::rtd::RtdSubscription> xlfn::rtd::IntoRtdSubscription<T> for T
+pub fn T::into_rtd_subscription(self) -> T
+pub trait xlfn::rtd::IntoRtdValue
+pub fn xlfn::rtd::IntoRtdValue::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
+impl xlfn::rtd::IntoRtdValue for &str
+pub fn &str::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
+impl xlfn::rtd::IntoRtdValue for ()
+pub fn ()::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
+impl xlfn::rtd::IntoRtdValue for alloc::string::String
+pub fn alloc::string::String::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
+impl xlfn::rtd::IntoRtdValue for bool
+pub fn bool::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
+impl xlfn::rtd::IntoRtdValue for f64
+pub fn f64::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
+impl xlfn::rtd::IntoRtdValue for i32
+pub fn i32::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
+impl xlfn::rtd::IntoRtdValue for i64
+pub fn i64::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
+impl xlfn::rtd::IntoRtdValue for xlfn::rtd::RtdValue
+pub fn xlfn::rtd::RtdValue::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
+impl xlfn::rtd::IntoRtdValue for xlfn::value::ExcelSerialDate
+pub fn xlfn::value::ExcelSerialDate::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
+impl xlfn::rtd::IntoRtdValue for xlfn_engine::error::ExcelError
+pub fn xlfn_engine::error::ExcelError::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
+pub trait xlfn::rtd::RtdDeliveryPolicy: xlfn::subscription::budget::delivery_policy::Sealed + core::marker::Copy + core::marker::Send + core::marker::Sync + 'static
+pub fn xlfn::rtd::RtdDeliveryPolicy::delivery(self) -> xlfn::rtd::RtdDelivery
+impl xlfn::rtd::RtdDeliveryPolicy for xlfn::rtd::RtdFifo
+pub fn xlfn::rtd::RtdFifo::delivery(self) -> xlfn::rtd::RtdDelivery
+impl xlfn::rtd::RtdDeliveryPolicy for xlfn::rtd::RtdLatest
+pub fn xlfn::rtd::RtdLatest::delivery(self) -> xlfn::rtd::RtdDelivery
+pub unsafe trait xlfn::rtd::RtdSource: core::marker::Send + core::marker::Sync + 'static
+pub type xlfn::rtd::RtdSource::Subscription: xlfn::rtd::RtdSubscription
+pub type xlfn::rtd::RtdSource::Value: xlfn::rtd::IntoRtdValue + core::marker::Send + 'static
+pub fn xlfn::rtd::RtdSource::request_stop(&self)
+pub fn xlfn::rtd::RtdSource::shutdown_and_wait(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::rtd::RtdSource::subscribe(&self, &xlfn::rtd::RtdTopic, xlfn::rtd::RtdSink<Self::Value>) -> xlfn_engine::error::XllResult<Self::Subscription>
+impl<T, F, P, D> xlfn::rtd::RtdSource for xlfn::rtd::RtdChannelSource<T, F, D> where T: xlfn::rtd::IntoRtdValue + core::marker::Send + 'static, F: core::ops::function::Fn(xlfn::rtd::RtdTopic) -> xlfn_engine::error::XllResult<P> + core::marker::Send + core::marker::Sync + 'static, P: core::ops::function::FnOnce(xlfn::rtd::RtdSender<T, D>) -> xlfn_engine::error::XllResult<()> + core::marker::Send + 'static, D: xlfn::rtd::RtdDeliveryPolicy
+pub type xlfn::rtd::RtdChannelSource<T, F, D>::Subscription = xlfn::rtd::RtdChannelSubscription
+pub type xlfn::rtd::RtdChannelSource<T, F, D>::Value = T
+pub fn xlfn::rtd::RtdChannelSource<T, F, D>::request_stop(&self)
+pub fn xlfn::rtd::RtdChannelSource<T, F, D>::shutdown_and_wait(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::rtd::RtdChannelSource<T, F, D>::subscribe(&self, &xlfn::rtd::RtdTopic, xlfn::rtd::RtdSink<T>) -> xlfn_engine::error::XllResult<Self::Subscription>
+impl<T, P, V, D> xlfn::rtd::RtdSource for xlfn::rtd::RtdMultiplexedSource<T, P, V, D> where T: xlfn::rtd::IntoRtdValue + core::marker::Send + 'static, P: core::ops::function::FnOnce(xlfn::rtd::RtdSourceContext<T, D>) -> xlfn_engine::error::XllResult<()> + core::marker::Send + 'static, V: xlfn::rtd::RtdTopicValidator, D: xlfn::rtd::RtdDeliveryPolicy
+pub type xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::Subscription = xlfn::rtd::RtdMultiplexedSubscription<T, D>
+pub type xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::Value = T
+pub fn xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::request_stop(&self)
+pub fn xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::shutdown_and_wait(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::rtd::RtdMultiplexedSource<T, P, V, D>::subscribe(&self, &xlfn::rtd::RtdTopic, xlfn::rtd::RtdSink<T>) -> xlfn_engine::error::XllResult<Self::Subscription>
+pub trait xlfn::rtd::RtdSourceCatalog<E: xlfn::rtd::RtdSubscription>: xlfn::source_catalog::sealed::Catalog<E> + core::marker::Send + core::marker::Sync + 'static
+pub type xlfn::rtd::RtdSourceCatalog::Handles
+impl<E, S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S3: xlfn::rtd::RtdSource, <S3 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S4: xlfn::rtd::RtdSource, <S4 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S5: xlfn::rtd::RtdSource, <S5 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S6: xlfn::rtd::RtdSource, <S6 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S7: xlfn::rtd::RtdSource, <S7 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S8: xlfn::rtd::RtdSource, <S8 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S9: xlfn::rtd::RtdSource, <S9 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S10: xlfn::rtd::RtdSource, <S10 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S11: xlfn::rtd::RtdSource, <S11 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S12: xlfn::rtd::RtdSource, <S12 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S13: xlfn::rtd::RtdSource, <S13 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S14: xlfn::rtd::RtdSource, <S14 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S15: xlfn::rtd::RtdSource, <S15 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>, xlfn::rtd::RtdSourceHandle<S3>, xlfn::rtd::RtdSourceHandle<S4>, xlfn::rtd::RtdSourceHandle<S5>, xlfn::rtd::RtdSourceHandle<S6>, xlfn::rtd::RtdSourceHandle<S7>, xlfn::rtd::RtdSourceHandle<S8>, xlfn::rtd::RtdSourceHandle<S9>, xlfn::rtd::RtdSourceHandle<S10>, xlfn::rtd::RtdSourceHandle<S11>, xlfn::rtd::RtdSourceHandle<S12>, xlfn::rtd::RtdSourceHandle<S13>, xlfn::rtd::RtdSourceHandle<S14>, xlfn::rtd::RtdSourceHandle<S15>)
+impl<E, S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S3: xlfn::rtd::RtdSource, <S3 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S4: xlfn::rtd::RtdSource, <S4 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S5: xlfn::rtd::RtdSource, <S5 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S6: xlfn::rtd::RtdSource, <S6 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S7: xlfn::rtd::RtdSource, <S7 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S8: xlfn::rtd::RtdSource, <S8 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S9: xlfn::rtd::RtdSource, <S9 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S10: xlfn::rtd::RtdSource, <S10 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S11: xlfn::rtd::RtdSource, <S11 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S12: xlfn::rtd::RtdSource, <S12 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S13: xlfn::rtd::RtdSource, <S13 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S14: xlfn::rtd::RtdSource, <S14 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>, xlfn::rtd::RtdSourceHandle<S3>, xlfn::rtd::RtdSourceHandle<S4>, xlfn::rtd::RtdSourceHandle<S5>, xlfn::rtd::RtdSourceHandle<S6>, xlfn::rtd::RtdSourceHandle<S7>, xlfn::rtd::RtdSourceHandle<S8>, xlfn::rtd::RtdSourceHandle<S9>, xlfn::rtd::RtdSourceHandle<S10>, xlfn::rtd::RtdSourceHandle<S11>, xlfn::rtd::RtdSourceHandle<S12>, xlfn::rtd::RtdSourceHandle<S13>, xlfn::rtd::RtdSourceHandle<S14>)
+impl<E, S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S3: xlfn::rtd::RtdSource, <S3 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S4: xlfn::rtd::RtdSource, <S4 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S5: xlfn::rtd::RtdSource, <S5 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S6: xlfn::rtd::RtdSource, <S6 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S7: xlfn::rtd::RtdSource, <S7 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S8: xlfn::rtd::RtdSource, <S8 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S9: xlfn::rtd::RtdSource, <S9 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S10: xlfn::rtd::RtdSource, <S10 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S11: xlfn::rtd::RtdSource, <S11 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S12: xlfn::rtd::RtdSource, <S12 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S13: xlfn::rtd::RtdSource, <S13 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>, xlfn::rtd::RtdSourceHandle<S3>, xlfn::rtd::RtdSourceHandle<S4>, xlfn::rtd::RtdSourceHandle<S5>, xlfn::rtd::RtdSourceHandle<S6>, xlfn::rtd::RtdSourceHandle<S7>, xlfn::rtd::RtdSourceHandle<S8>, xlfn::rtd::RtdSourceHandle<S9>, xlfn::rtd::RtdSourceHandle<S10>, xlfn::rtd::RtdSourceHandle<S11>, xlfn::rtd::RtdSourceHandle<S12>, xlfn::rtd::RtdSourceHandle<S13>)
+impl<E, S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S3: xlfn::rtd::RtdSource, <S3 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S4: xlfn::rtd::RtdSource, <S4 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S5: xlfn::rtd::RtdSource, <S5 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S6: xlfn::rtd::RtdSource, <S6 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S7: xlfn::rtd::RtdSource, <S7 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S8: xlfn::rtd::RtdSource, <S8 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S9: xlfn::rtd::RtdSource, <S9 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S10: xlfn::rtd::RtdSource, <S10 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S11: xlfn::rtd::RtdSource, <S11 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S12: xlfn::rtd::RtdSource, <S12 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>, xlfn::rtd::RtdSourceHandle<S3>, xlfn::rtd::RtdSourceHandle<S4>, xlfn::rtd::RtdSourceHandle<S5>, xlfn::rtd::RtdSourceHandle<S6>, xlfn::rtd::RtdSourceHandle<S7>, xlfn::rtd::RtdSourceHandle<S8>, xlfn::rtd::RtdSourceHandle<S9>, xlfn::rtd::RtdSourceHandle<S10>, xlfn::rtd::RtdSourceHandle<S11>, xlfn::rtd::RtdSourceHandle<S12>)
+impl<E, S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S3: xlfn::rtd::RtdSource, <S3 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S4: xlfn::rtd::RtdSource, <S4 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S5: xlfn::rtd::RtdSource, <S5 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S6: xlfn::rtd::RtdSource, <S6 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S7: xlfn::rtd::RtdSource, <S7 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S8: xlfn::rtd::RtdSource, <S8 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S9: xlfn::rtd::RtdSource, <S9 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S10: xlfn::rtd::RtdSource, <S10 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S11: xlfn::rtd::RtdSource, <S11 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>, xlfn::rtd::RtdSourceHandle<S3>, xlfn::rtd::RtdSourceHandle<S4>, xlfn::rtd::RtdSourceHandle<S5>, xlfn::rtd::RtdSourceHandle<S6>, xlfn::rtd::RtdSourceHandle<S7>, xlfn::rtd::RtdSourceHandle<S8>, xlfn::rtd::RtdSourceHandle<S9>, xlfn::rtd::RtdSourceHandle<S10>, xlfn::rtd::RtdSourceHandle<S11>)
+impl<E, S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S3: xlfn::rtd::RtdSource, <S3 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S4: xlfn::rtd::RtdSource, <S4 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S5: xlfn::rtd::RtdSource, <S5 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S6: xlfn::rtd::RtdSource, <S6 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S7: xlfn::rtd::RtdSource, <S7 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S8: xlfn::rtd::RtdSource, <S8 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S9: xlfn::rtd::RtdSource, <S9 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S10: xlfn::rtd::RtdSource, <S10 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>, xlfn::rtd::RtdSourceHandle<S3>, xlfn::rtd::RtdSourceHandle<S4>, xlfn::rtd::RtdSourceHandle<S5>, xlfn::rtd::RtdSourceHandle<S6>, xlfn::rtd::RtdSourceHandle<S7>, xlfn::rtd::RtdSourceHandle<S8>, xlfn::rtd::RtdSourceHandle<S9>, xlfn::rtd::RtdSourceHandle<S10>)
+impl<E, S0, S1, S2, S3, S4, S5, S6, S7, S8, S9> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S3: xlfn::rtd::RtdSource, <S3 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S4: xlfn::rtd::RtdSource, <S4 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S5: xlfn::rtd::RtdSource, <S5 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S6: xlfn::rtd::RtdSource, <S6 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S7: xlfn::rtd::RtdSource, <S7 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S8: xlfn::rtd::RtdSource, <S8 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S9: xlfn::rtd::RtdSource, <S9 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2, S3, S4, S5, S6, S7, S8, S9)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>, xlfn::rtd::RtdSourceHandle<S3>, xlfn::rtd::RtdSourceHandle<S4>, xlfn::rtd::RtdSourceHandle<S5>, xlfn::rtd::RtdSourceHandle<S6>, xlfn::rtd::RtdSourceHandle<S7>, xlfn::rtd::RtdSourceHandle<S8>, xlfn::rtd::RtdSourceHandle<S9>)
+impl<E, S0, S1, S2, S3, S4, S5, S6, S7, S8> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2, S3, S4, S5, S6, S7, S8) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S3: xlfn::rtd::RtdSource, <S3 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S4: xlfn::rtd::RtdSource, <S4 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S5: xlfn::rtd::RtdSource, <S5 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S6: xlfn::rtd::RtdSource, <S6 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S7: xlfn::rtd::RtdSource, <S7 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S8: xlfn::rtd::RtdSource, <S8 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2, S3, S4, S5, S6, S7, S8)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>, xlfn::rtd::RtdSourceHandle<S3>, xlfn::rtd::RtdSourceHandle<S4>, xlfn::rtd::RtdSourceHandle<S5>, xlfn::rtd::RtdSourceHandle<S6>, xlfn::rtd::RtdSourceHandle<S7>, xlfn::rtd::RtdSourceHandle<S8>)
+impl<E, S0, S1, S2, S3, S4, S5, S6, S7> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2, S3, S4, S5, S6, S7) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S3: xlfn::rtd::RtdSource, <S3 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S4: xlfn::rtd::RtdSource, <S4 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S5: xlfn::rtd::RtdSource, <S5 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S6: xlfn::rtd::RtdSource, <S6 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S7: xlfn::rtd::RtdSource, <S7 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2, S3, S4, S5, S6, S7)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>, xlfn::rtd::RtdSourceHandle<S3>, xlfn::rtd::RtdSourceHandle<S4>, xlfn::rtd::RtdSourceHandle<S5>, xlfn::rtd::RtdSourceHandle<S6>, xlfn::rtd::RtdSourceHandle<S7>)
+impl<E, S0, S1, S2, S3, S4, S5, S6> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2, S3, S4, S5, S6) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S3: xlfn::rtd::RtdSource, <S3 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S4: xlfn::rtd::RtdSource, <S4 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S5: xlfn::rtd::RtdSource, <S5 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S6: xlfn::rtd::RtdSource, <S6 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2, S3, S4, S5, S6)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>, xlfn::rtd::RtdSourceHandle<S3>, xlfn::rtd::RtdSourceHandle<S4>, xlfn::rtd::RtdSourceHandle<S5>, xlfn::rtd::RtdSourceHandle<S6>)
+impl<E, S0, S1, S2, S3, S4, S5> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2, S3, S4, S5) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S3: xlfn::rtd::RtdSource, <S3 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S4: xlfn::rtd::RtdSource, <S4 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S5: xlfn::rtd::RtdSource, <S5 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2, S3, S4, S5)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>, xlfn::rtd::RtdSourceHandle<S3>, xlfn::rtd::RtdSourceHandle<S4>, xlfn::rtd::RtdSourceHandle<S5>)
+impl<E, S0, S1, S2, S3, S4> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2, S3, S4) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S3: xlfn::rtd::RtdSource, <S3 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S4: xlfn::rtd::RtdSource, <S4 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2, S3, S4)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>, xlfn::rtd::RtdSourceHandle<S3>, xlfn::rtd::RtdSourceHandle<S4>)
+impl<E, S0, S1, S2, S3> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2, S3) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S3: xlfn::rtd::RtdSource, <S3 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2, S3)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>, xlfn::rtd::RtdSourceHandle<S3>)
+impl<E, S0, S1, S2> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1, S2) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S2: xlfn::rtd::RtdSource, <S2 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1, S2)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>, xlfn::rtd::RtdSourceHandle<S2>)
+impl<E, S0, S1> xlfn::rtd::RtdSourceCatalog<E> for (S0, S1) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>, S1: xlfn::rtd::RtdSource, <S1 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0, S1)::Handles = (xlfn::rtd::RtdSourceHandle<S0>, xlfn::rtd::RtdSourceHandle<S1>)
+impl<E, S0> xlfn::rtd::RtdSourceCatalog<E> for (S0) where E: xlfn::rtd::RtdSubscription, S0: xlfn::rtd::RtdSource, <S0 as xlfn::rtd::RtdSource>::Subscription: xlfn::rtd::IntoRtdSubscription<E>
+pub type (S0)::Handles = (xlfn::rtd::RtdSourceHandle<S0>)
+impl<E: xlfn::rtd::RtdSubscription> xlfn::rtd::RtdSourceCatalog<E> for ()
+pub type ()::Handles = ()
+impl<E: xlfn::rtd::RtdSubscription> xlfn::rtd::RtdSourceCatalog<E> for xlfn::rtd::DynamicRtdSources<E>
+pub type xlfn::rtd::DynamicRtdSources<E>::Handles = ()
+pub unsafe trait xlfn::rtd::RtdSubscription: core::marker::Sized + core::marker::Send + 'static
+pub fn xlfn::rtd::RtdSubscription::disconnect_and_wait(self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::rtd::RtdSubscription::request_cancel(&self)
+impl xlfn::rtd::RtdSubscription for ()
+pub fn ()::disconnect_and_wait(self) -> xlfn_engine::error::XllResult<()>
+pub fn ()::request_cancel(&self)
+impl xlfn::rtd::RtdSubscription for xlfn::rtd::BoxedRtdSubscription
+pub fn xlfn::rtd::BoxedRtdSubscription::disconnect_and_wait(self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::rtd::BoxedRtdSubscription::request_cancel(&self)
+impl xlfn::rtd::RtdSubscription for xlfn::rtd::RtdChannelSubscription
+pub fn xlfn::rtd::RtdChannelSubscription::disconnect_and_wait(self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::rtd::RtdChannelSubscription::request_cancel(&self)
+impl<T: core::marker::Send + 'static, D: xlfn::rtd::RtdDeliveryPolicy> xlfn::rtd::RtdSubscription for xlfn::rtd::RtdMultiplexedSubscription<T, D>
+pub fn xlfn::rtd::RtdMultiplexedSubscription<T, D>::disconnect_and_wait(self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::rtd::RtdMultiplexedSubscription<T, D>::request_cancel(&self)
+pub trait xlfn::rtd::RtdTopicInput: input::Input
+impl<Parts: input::Input + ?core::marker::Sized> xlfn::rtd::RtdTopicInput for Parts
+pub trait xlfn::rtd::RtdTopicValidator: core::marker::Send + core::marker::Sync + 'static
+pub fn xlfn::rtd::RtdTopicValidator::validate(&self, &xlfn::rtd::RtdTopic) -> xlfn_engine::error::XllResult<()>
+impl xlfn::rtd::RtdTopicValidator for xlfn::rtd::NoTopicValidator
+pub fn xlfn::rtd::NoTopicValidator::validate(&self, &xlfn::rtd::RtdTopic) -> xlfn_engine::error::XllResult<()>
+impl<F> xlfn::rtd::RtdTopicValidator for F where F: core::ops::function::Fn(&xlfn::rtd::RtdTopic) -> xlfn_engine::error::XllResult<()> + core::marker::Send + core::marker::Sync + 'static
+pub fn F::validate(&self, &xlfn::rtd::RtdTopic) -> xlfn_engine::error::XllResult<()>
 pub mod xlfn::task
+pub enum xlfn::task::CancellationGuarantee
+pub xlfn::task::CancellationGuarantee::BestEffort
+pub xlfn::task::CancellationGuarantee::CalculationScoped
+pub xlfn::task::CancellationGuarantee::SubscriptionScoped
+impl core::clone::Clone for xlfn::task::CancellationGuarantee
+pub fn xlfn::task::CancellationGuarantee::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::task::CancellationGuarantee
+impl core::cmp::PartialEq for xlfn::task::CancellationGuarantee
+pub fn xlfn::task::CancellationGuarantee::eq(&self, &Self) -> bool
+impl core::fmt::Debug for xlfn::task::CancellationGuarantee
+pub fn xlfn::task::CancellationGuarantee::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::task::CancellationGuarantee
+impl core::marker::StructuralPartialEq for xlfn::task::CancellationGuarantee
+impl core::marker::Freeze for xlfn::task::CancellationGuarantee
+impl core::marker::Send for xlfn::task::CancellationGuarantee
+impl core::marker::Sync for xlfn::task::CancellationGuarantee
+impl core::marker::Unpin for xlfn::task::CancellationGuarantee
+impl core::marker::UnsafeUnpin for xlfn::task::CancellationGuarantee
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::task::CancellationGuarantee
+impl core::panic::unwind_safe::UnwindSafe for xlfn::task::CancellationGuarantee
+pub struct xlfn::task::AsyncConfig
+impl xlfn::task::AsyncConfig
+pub const fn xlfn::task::AsyncConfig::new() -> Self
+pub const fn xlfn::task::AsyncConfig::with_task_limit(self, xlfn::task::AsyncTaskLimit) -> Self
+impl core::clone::Clone for xlfn::task::AsyncConfig
+pub fn xlfn::task::AsyncConfig::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::task::AsyncConfig
+impl core::cmp::PartialEq for xlfn::task::AsyncConfig
+pub fn xlfn::task::AsyncConfig::eq(&self, &Self) -> bool
+impl core::default::Default for xlfn::task::AsyncConfig
+pub fn xlfn::task::AsyncConfig::default() -> Self
+impl core::fmt::Debug for xlfn::task::AsyncConfig
+pub fn xlfn::task::AsyncConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::task::AsyncConfig
+impl core::marker::StructuralPartialEq for xlfn::task::AsyncConfig
+impl core::marker::Freeze for xlfn::task::AsyncConfig
+impl core::marker::Send for xlfn::task::AsyncConfig
+impl core::marker::Sync for xlfn::task::AsyncConfig
+impl core::marker::Unpin for xlfn::task::AsyncConfig
+impl core::marker::UnsafeUnpin for xlfn::task::AsyncConfig
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::task::AsyncConfig
+impl core::panic::unwind_safe::UnwindSafe for xlfn::task::AsyncConfig
+pub struct xlfn::task::AsyncContext<'call, A: xlfn::Addin>
+impl<'call, A: xlfn::Addin> xlfn::task::AsyncContext<'call, A>
+pub const fn xlfn::task::AsyncContext<'call, A>::cancellation(&self) -> &'call xlfn::task::CancellationToken
+pub const fn xlfn::task::AsyncContext<'call, A>::cancellation_guarantee(&self) -> xlfn::task::CancellationGuarantee
+pub fn xlfn::task::AsyncContext<'call, A>::check_cancelled(&self) -> xlfn_engine::error::XllResult<()>
+pub const fn xlfn::task::AsyncContext<'call, A>::diagnostics(&self) -> &'call xlfn::diagnostics::DiagnosticHistory
+pub const fn xlfn::task::AsyncContext<'call, A>::state(&self) -> &'call <A as xlfn::Addin>::SharedState
+impl<A: xlfn::Addin> core::convert::AsRef<<A as xlfn::Addin>::SharedState> for xlfn::task::AsyncContext<'_, A>
+pub fn xlfn::task::AsyncContext<'_, A>::as_ref(&self) -> &<A as xlfn::Addin>::SharedState
+impl<'call, A> core::marker::Freeze for xlfn::task::AsyncContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Freeze
+impl<'call, A> core::marker::Send for xlfn::task::AsyncContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Send
+impl<'call, A> core::marker::Sync for xlfn::task::AsyncContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Sync
+impl<'call, A> core::marker::Unpin for xlfn::task::AsyncContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::Unpin
+impl<'call, A> core::marker::UnsafeUnpin for xlfn::task::AsyncContext<'call, A> where &'call <A as xlfn::Addin>::SharedState: core::marker::UnsafeUnpin
+impl<'call, A> !core::panic::unwind_safe::RefUnwindSafe for xlfn::task::AsyncContext<'call, A>
+impl<'call, A> !core::panic::unwind_safe::UnwindSafe for xlfn::task::AsyncContext<'call, A>
+pub struct xlfn::task::AsyncPollerCount(_)
+impl xlfn::task::AsyncPollerCount
+pub const xlfn::task::AsyncPollerCount::DEFAULT: Self
+pub const xlfn::task::AsyncPollerCount::MAX: usize
+pub const fn xlfn::task::AsyncPollerCount::get(self) -> usize
+pub const fn xlfn::task::AsyncPollerCount::new(usize) -> core::option::Option<Self>
+impl core::clone::Clone for xlfn::task::AsyncPollerCount
+pub fn xlfn::task::AsyncPollerCount::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::task::AsyncPollerCount
+impl core::cmp::PartialEq for xlfn::task::AsyncPollerCount
+pub fn xlfn::task::AsyncPollerCount::eq(&self, &Self) -> bool
+impl core::convert::TryFrom<usize> for xlfn::task::AsyncPollerCount
+pub type xlfn::task::AsyncPollerCount::Error = xlfn_engine::error::InvalidLimit
+pub fn xlfn::task::AsyncPollerCount::try_from(usize) -> core::result::Result<Self, Self::Error>
+impl core::default::Default for xlfn::task::AsyncPollerCount
+pub fn xlfn::task::AsyncPollerCount::default() -> Self
+impl core::fmt::Debug for xlfn::task::AsyncPollerCount
+pub fn xlfn::task::AsyncPollerCount::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::task::AsyncPollerCount
+impl core::marker::StructuralPartialEq for xlfn::task::AsyncPollerCount
+impl core::marker::Freeze for xlfn::task::AsyncPollerCount
+impl core::marker::Send for xlfn::task::AsyncPollerCount
+impl core::marker::Sync for xlfn::task::AsyncPollerCount
+impl core::marker::Unpin for xlfn::task::AsyncPollerCount
+impl core::marker::UnsafeUnpin for xlfn::task::AsyncPollerCount
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::task::AsyncPollerCount
+impl core::panic::unwind_safe::UnwindSafe for xlfn::task::AsyncPollerCount
+pub struct xlfn::task::AsyncTask<F>
+impl<F: core::future::future::Future<Output = ()>> core::future::future::Future for xlfn::task::AsyncTask<F>
+pub type xlfn::task::AsyncTask<F>::Output = ()
+pub fn xlfn::task::AsyncTask<F>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<()>
+impl<F> core::marker::Freeze for xlfn::task::AsyncTask<F> where F: core::marker::Freeze
+impl<F> core::marker::Send for xlfn::task::AsyncTask<F> where F: core::marker::Send
+impl<F> core::marker::Sync for xlfn::task::AsyncTask<F> where F: core::marker::Sync
+impl<F> core::marker::Unpin for xlfn::task::AsyncTask<F> where F: core::marker::Unpin
+impl<F> core::marker::UnsafeUnpin for xlfn::task::AsyncTask<F> where F: core::marker::UnsafeUnpin
+impl<F> core::panic::unwind_safe::RefUnwindSafe for xlfn::task::AsyncTask<F> where F: core::panic::unwind_safe::RefUnwindSafe
+impl<F> core::panic::unwind_safe::UnwindSafe for xlfn::task::AsyncTask<F> where F: core::panic::unwind_safe::UnwindSafe
+pub struct xlfn::task::AsyncTaskLimit(_)
+impl xlfn::task::AsyncTaskLimit
+pub const xlfn::task::AsyncTaskLimit::DEFAULT: Self
+pub const fn xlfn::task::AsyncTaskLimit::get(self) -> usize
+pub const fn xlfn::task::AsyncTaskLimit::new(usize) -> core::option::Option<Self>
+impl core::clone::Clone for xlfn::task::AsyncTaskLimit
+pub fn xlfn::task::AsyncTaskLimit::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::task::AsyncTaskLimit
+impl core::cmp::PartialEq for xlfn::task::AsyncTaskLimit
+pub fn xlfn::task::AsyncTaskLimit::eq(&self, &Self) -> bool
+impl core::convert::TryFrom<usize> for xlfn::task::AsyncTaskLimit
+pub type xlfn::task::AsyncTaskLimit::Error = xlfn_engine::error::InvalidLimit
+pub fn xlfn::task::AsyncTaskLimit::try_from(usize) -> core::result::Result<Self, Self::Error>
+impl core::default::Default for xlfn::task::AsyncTaskLimit
+pub fn xlfn::task::AsyncTaskLimit::default() -> Self
+impl core::fmt::Debug for xlfn::task::AsyncTaskLimit
+pub fn xlfn::task::AsyncTaskLimit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::task::AsyncTaskLimit
+impl core::marker::StructuralPartialEq for xlfn::task::AsyncTaskLimit
+impl core::marker::Freeze for xlfn::task::AsyncTaskLimit
+impl core::marker::Send for xlfn::task::AsyncTaskLimit
+impl core::marker::Sync for xlfn::task::AsyncTaskLimit
+impl core::marker::Unpin for xlfn::task::AsyncTaskLimit
+impl core::marker::UnsafeUnpin for xlfn::task::AsyncTaskLimit
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::task::AsyncTaskLimit
+impl core::panic::unwind_safe::UnwindSafe for xlfn::task::AsyncTaskLimit
+pub struct xlfn::task::BuiltinAsyncExecutor
+impl xlfn::task::BuiltinAsyncExecutor
+pub const fn xlfn::task::BuiltinAsyncExecutor::new(xlfn::task::BuiltinExecutorConfig) -> Self
+impl core::ops::drop::Drop for xlfn::task::BuiltinAsyncExecutor
+pub fn xlfn::task::BuiltinAsyncExecutor::drop(&mut self)
+impl xlfn::task::AsyncExecutor for xlfn::task::BuiltinAsyncExecutor
+pub type xlfn::task::BuiltinAsyncExecutor::Reservation = BuiltinReservation
+pub const xlfn::task::BuiltinAsyncExecutor::ENABLED: bool
+pub fn xlfn::task::BuiltinAsyncExecutor::reserve(&self) -> xlfn_engine::error::XllResult<Self::Reservation>
+pub fn xlfn::task::BuiltinAsyncExecutor::shutdown(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::BuiltinAsyncExecutor::start(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::BuiltinAsyncExecutor::submit<F>(&self, Self::Reservation, xlfn::task::AsyncTask<F>) where F: core::future::future::Future<Output = ()> + core::marker::Send + 'static
+impl !core::marker::Freeze for xlfn::task::BuiltinAsyncExecutor
+impl core::marker::Send for xlfn::task::BuiltinAsyncExecutor
+impl core::marker::Sync for xlfn::task::BuiltinAsyncExecutor
+impl core::marker::Unpin for xlfn::task::BuiltinAsyncExecutor
+impl core::marker::UnsafeUnpin for xlfn::task::BuiltinAsyncExecutor
+impl !core::panic::unwind_safe::RefUnwindSafe for xlfn::task::BuiltinAsyncExecutor
+impl !core::panic::unwind_safe::UnwindSafe for xlfn::task::BuiltinAsyncExecutor
+pub struct xlfn::task::BuiltinExecutorConfig
+impl xlfn::task::BuiltinExecutorConfig
+pub const fn xlfn::task::BuiltinExecutorConfig::new() -> Self
+pub const fn xlfn::task::BuiltinExecutorConfig::with_poller_count(self, xlfn::task::AsyncPollerCount) -> Self
+impl core::clone::Clone for xlfn::task::BuiltinExecutorConfig
+pub fn xlfn::task::BuiltinExecutorConfig::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::task::BuiltinExecutorConfig
+impl core::cmp::PartialEq for xlfn::task::BuiltinExecutorConfig
+pub fn xlfn::task::BuiltinExecutorConfig::eq(&self, &Self) -> bool
+impl core::default::Default for xlfn::task::BuiltinExecutorConfig
+pub fn xlfn::task::BuiltinExecutorConfig::default() -> Self
+impl core::fmt::Debug for xlfn::task::BuiltinExecutorConfig
+pub fn xlfn::task::BuiltinExecutorConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::task::BuiltinExecutorConfig
+impl core::marker::StructuralPartialEq for xlfn::task::BuiltinExecutorConfig
+impl core::marker::Freeze for xlfn::task::BuiltinExecutorConfig
+impl core::marker::Send for xlfn::task::BuiltinExecutorConfig
+impl core::marker::Sync for xlfn::task::BuiltinExecutorConfig
+impl core::marker::Unpin for xlfn::task::BuiltinExecutorConfig
+impl core::marker::UnsafeUnpin for xlfn::task::BuiltinExecutorConfig
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn::task::BuiltinExecutorConfig
+impl core::panic::unwind_safe::UnwindSafe for xlfn::task::BuiltinExecutorConfig
+pub struct xlfn::task::CancellationToken
+impl xlfn::task::CancellationToken
+pub fn xlfn::task::CancellationToken::cancelled(&self) -> xlfn::task::Cancelled<'_>
+pub const fn xlfn::task::CancellationToken::guarantee(&self) -> xlfn::task::CancellationGuarantee
+pub fn xlfn::task::CancellationToken::is_cancelled(&self) -> bool
+impl core::clone::Clone for xlfn::task::CancellationToken
+pub fn xlfn::task::CancellationToken::clone(&self) -> Self
+impl core::cmp::Eq for xlfn::task::CancellationToken
+impl core::cmp::PartialEq for xlfn::task::CancellationToken
+pub fn xlfn::task::CancellationToken::eq(&self, &Self) -> bool
+impl core::fmt::Debug for xlfn::task::CancellationToken
+pub fn xlfn::task::CancellationToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for xlfn::task::CancellationToken
+impl core::marker::Send for xlfn::task::CancellationToken
+impl core::marker::StructuralPartialEq for xlfn::task::CancellationToken
+impl core::marker::Sync for xlfn::task::CancellationToken
+impl core::marker::Freeze for xlfn::task::CancellationToken
+impl core::marker::Unpin for xlfn::task::CancellationToken
+impl core::marker::UnsafeUnpin for xlfn::task::CancellationToken
+impl !core::panic::unwind_safe::RefUnwindSafe for xlfn::task::CancellationToken
+impl !core::panic::unwind_safe::UnwindSafe for xlfn::task::CancellationToken
+pub struct xlfn::task::Cancelled<'token>
+impl core::future::future::Future for xlfn::task::Cancelled<'_>
+pub type xlfn::task::Cancelled<'_>::Output = ()
+pub fn xlfn::task::Cancelled<'_>::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+impl core::ops::drop::Drop for xlfn::task::Cancelled<'_>
+pub fn xlfn::task::Cancelled<'_>::drop(&mut self)
+impl<'token> core::marker::Freeze for xlfn::task::Cancelled<'token>
+impl<'token> core::marker::Send for xlfn::task::Cancelled<'token>
+impl<'token> core::marker::Sync for xlfn::task::Cancelled<'token>
+impl<'token> core::marker::Unpin for xlfn::task::Cancelled<'token>
+impl<'token> core::marker::UnsafeUnpin for xlfn::task::Cancelled<'token>
+impl<'token> !core::panic::unwind_safe::RefUnwindSafe for xlfn::task::Cancelled<'token>
+impl<'token> !core::panic::unwind_safe::UnwindSafe for xlfn::task::Cancelled<'token>
 pub struct xlfn::task::NoAsyncExecutor
 impl core::clone::Clone for xlfn::task::NoAsyncExecutor
 pub fn xlfn::task::NoAsyncExecutor::clone(&self) -> Self
@@ -1319,6 +2615,13 @@ impl core::fmt::Debug for xlfn::task::NoAsyncExecutor
 pub fn xlfn::task::NoAsyncExecutor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for xlfn::task::NoAsyncExecutor
 impl core::marker::StructuralPartialEq for xlfn::task::NoAsyncExecutor
+impl xlfn::task::AsyncExecutor for xlfn::task::NoAsyncExecutor
+pub type xlfn::task::NoAsyncExecutor::Reservation = never
+pub const xlfn::task::NoAsyncExecutor::ENABLED: bool
+pub fn xlfn::task::NoAsyncExecutor::reserve(&self) -> xlfn_engine::error::XllResult<Self::Reservation>
+pub fn xlfn::task::NoAsyncExecutor::shutdown(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::NoAsyncExecutor::start(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::NoAsyncExecutor::submit<F>(&self, Self::Reservation, xlfn::task::AsyncTask<F>) where F: core::future::future::Future<Output = ()> + core::marker::Send + 'static
 impl core::marker::Freeze for xlfn::task::NoAsyncExecutor
 impl core::marker::Send for xlfn::task::NoAsyncExecutor
 impl core::marker::Sync for xlfn::task::NoAsyncExecutor
@@ -1326,6 +2629,27 @@ impl core::marker::Unpin for xlfn::task::NoAsyncExecutor
 impl core::marker::UnsafeUnpin for xlfn::task::NoAsyncExecutor
 impl core::panic::unwind_safe::RefUnwindSafe for xlfn::task::NoAsyncExecutor
 impl core::panic::unwind_safe::UnwindSafe for xlfn::task::NoAsyncExecutor
+pub trait xlfn::task::AsyncExecutor: core::marker::Send + core::marker::Sync + 'static
+pub type xlfn::task::AsyncExecutor::Reservation: core::marker::Send + 'static
+pub const xlfn::task::AsyncExecutor::ENABLED: bool
+pub fn xlfn::task::AsyncExecutor::reserve(&self) -> xlfn_engine::error::XllResult<Self::Reservation>
+pub fn xlfn::task::AsyncExecutor::shutdown(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::AsyncExecutor::start(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::AsyncExecutor::submit<F>(&self, Self::Reservation, xlfn::task::AsyncTask<F>) where F: core::future::future::Future<Output = ()> + core::marker::Send + 'static
+impl xlfn::task::AsyncExecutor for xlfn::task::BuiltinAsyncExecutor
+pub type xlfn::task::BuiltinAsyncExecutor::Reservation = BuiltinReservation
+pub const xlfn::task::BuiltinAsyncExecutor::ENABLED: bool
+pub fn xlfn::task::BuiltinAsyncExecutor::reserve(&self) -> xlfn_engine::error::XllResult<Self::Reservation>
+pub fn xlfn::task::BuiltinAsyncExecutor::shutdown(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::BuiltinAsyncExecutor::start(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::BuiltinAsyncExecutor::submit<F>(&self, Self::Reservation, xlfn::task::AsyncTask<F>) where F: core::future::future::Future<Output = ()> + core::marker::Send + 'static
+impl xlfn::task::AsyncExecutor for xlfn::task::NoAsyncExecutor
+pub type xlfn::task::NoAsyncExecutor::Reservation = never
+pub const xlfn::task::NoAsyncExecutor::ENABLED: bool
+pub fn xlfn::task::NoAsyncExecutor::reserve(&self) -> xlfn_engine::error::XllResult<Self::Reservation>
+pub fn xlfn::task::NoAsyncExecutor::shutdown(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::NoAsyncExecutor::start(&self) -> xlfn_engine::error::XllResult<()>
+pub fn xlfn::task::NoAsyncExecutor::submit<F>(&self, Self::Reservation, xlfn::task::AsyncTask<F>) where F: core::future::future::Future<Output = ()> + core::marker::Send + 'static
 pub mod xlfn::value
 pub use xlfn::value::Shape
 pub mod xlfn::value::convert
@@ -1439,8 +2763,12 @@ pub fn xlfn::value::ExcelCellOutput::eq(&self, &Self) -> bool
 impl core::fmt::Debug for xlfn::value::ExcelCellOutput
 pub fn xlfn::value::ExcelCellOutput::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for xlfn::value::ExcelCellOutput
+impl serde_core::ser::Serialize for xlfn::value::ExcelCellOutput
+pub fn xlfn::value::ExcelCellOutput::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl xlfn::value::IntoExcel for xlfn::value::ExcelCellOutput
 pub fn xlfn::value::ExcelCellOutput::into_excel(self) -> xlfn_engine::error::XllResult<xlfn::value::ExcelCellOutput>
+impl<'de> serde_core::de::Deserialize<'de> for xlfn::value::ExcelCellOutput
+pub fn xlfn::value::ExcelCellOutput::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for xlfn::value::ExcelCellOutput
 impl core::marker::Send for xlfn::value::ExcelCellOutput
 impl core::marker::Sync for xlfn::value::ExcelCellOutput
@@ -1484,6 +2812,8 @@ pub fn xlfn::value::ExcelCellValue::eq(&self, &Self) -> bool
 impl core::fmt::Debug for xlfn::value::ExcelCellValue
 pub fn xlfn::value::ExcelCellValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for xlfn::value::ExcelCellValue
+impl serde_core::ser::Serialize for xlfn::value::ExcelCellValue
+pub fn xlfn::value::ExcelCellValue::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl xlfn::value::ExcelInputIdentity for xlfn::value::ExcelCellValue
 pub fn xlfn::value::ExcelCellValue::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl<'call> xlfn::value::FromExcel<'call> for xlfn::value::ExcelCellValue
@@ -1493,6 +2823,8 @@ impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::value::ExcelCellValue
 pub type xlfn::value::ExcelCellValue::Prepared = xlfn::value::ExcelCellValue
 pub fn xlfn::value::ExcelCellValue::materialize(Self) -> xlfn_engine::error::XllResult<Self>
 pub fn xlfn::value::ExcelCellValue::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
+impl<'de> serde_core::de::Deserialize<'de> for xlfn::value::ExcelCellValue
+pub fn xlfn::value::ExcelCellValue::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for xlfn::value::ExcelCellValue
 impl core::marker::Send for xlfn::value::ExcelCellValue
 impl core::marker::Sync for xlfn::value::ExcelCellValue
@@ -1530,9 +2862,14 @@ impl core::clone::Clone for xlfn::value::ExcelValue
 pub fn xlfn::value::ExcelValue::clone(&self) -> Self
 impl core::cmp::PartialEq for xlfn::value::ExcelValue
 pub fn xlfn::value::ExcelValue::eq(&self, &Self) -> bool
+impl core::convert::TryFrom<xlfn::value::ExcelValue> for xlfn::rtd::RtdValue
+pub type xlfn::rtd::RtdValue::Error = xlfn_engine::error::XllError
+pub fn xlfn::rtd::RtdValue::try_from(xlfn::value::ExcelValue) -> xlfn_engine::error::XllResult<Self>
 impl core::fmt::Debug for xlfn::value::ExcelValue
 pub fn xlfn::value::ExcelValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for xlfn::value::ExcelValue
+impl serde_core::ser::Serialize for xlfn::value::ExcelValue
+pub fn xlfn::value::ExcelValue::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl xlfn::value::ExcelInputIdentity for xlfn::value::ExcelValue
 pub fn xlfn::value::ExcelValue::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl<'call> xlfn::value::FromExcel<'call> for xlfn::value::ExcelValue
@@ -1542,6 +2879,8 @@ impl<'call> xlfn::value::PrepareExcel<'call> for xlfn::value::ExcelValue
 pub type xlfn::value::ExcelValue::Prepared = xlfn::value::ExcelValue
 pub fn xlfn::value::ExcelValue::materialize(Self) -> xlfn_engine::error::XllResult<Self>
 pub fn xlfn::value::ExcelValue::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
+impl<'de> serde_core::de::Deserialize<'de> for xlfn::value::ExcelValue
+pub fn xlfn::value::ExcelValue::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for xlfn::value::ExcelValue
 impl core::marker::Send for xlfn::value::ExcelValue
 impl core::marker::Sync for xlfn::value::ExcelValue
@@ -1569,6 +2908,8 @@ pub enum xlfn::value::OptionalExcelValue<T>
 pub xlfn::value::OptionalExcelValue::Blank
 pub xlfn::value::OptionalExcelValue::Missing
 pub xlfn::value::OptionalExcelValue::Value(T)
+impl<'de, T> serde_core::de::Deserialize<'de> for xlfn::value::OptionalExcelValue<T> where T: serde_core::de::Deserialize<'de>
+pub fn xlfn::value::OptionalExcelValue<T>::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 impl<T: core::clone::Clone> core::clone::Clone for xlfn::value::OptionalExcelValue<T>
 pub fn xlfn::value::OptionalExcelValue<T>::clone(&self) -> Self
 impl<T: core::cmp::PartialEq> core::cmp::PartialEq for xlfn::value::OptionalExcelValue<T>
@@ -1578,6 +2919,8 @@ impl<T: core::fmt::Debug> core::fmt::Debug for xlfn::value::OptionalExcelValue<T
 pub fn xlfn::value::OptionalExcelValue<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<T: xlfn::value::ExcelInputIdentity> xlfn::value::ExcelInputIdentity for xlfn::value::OptionalExcelValue<T>
 pub fn xlfn::value::OptionalExcelValue<T>::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
+impl<T> serde_core::ser::Serialize for xlfn::value::OptionalExcelValue<T> where T: serde_core::ser::Serialize
+pub fn xlfn::value::OptionalExcelValue<T>::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<T> core::marker::Freeze for xlfn::value::OptionalExcelValue<T> where T: core::marker::Freeze
 impl<T> core::marker::Send for xlfn::value::OptionalExcelValue<T> where T: core::marker::Send
 impl<T> core::marker::Sync for xlfn::value::OptionalExcelValue<T> where T: core::marker::Sync
@@ -1598,6 +2941,8 @@ impl<'a, T, const MAX: usize> core::iter::traits::collect::IntoIterator for &'a 
 pub type &'a xlfn::value::BoundedVarArgs<T, MAX>::IntoIter = core::slice::iter::Iter<'a, T>
 pub type &'a xlfn::value::BoundedVarArgs<T, MAX>::Item = &'a T
 pub fn &'a xlfn::value::BoundedVarArgs<T, MAX>::into_iter(self) -> Self::IntoIter
+impl<'de, T: serde_core::de::Deserialize<'de>, const MAX: usize> serde_core::de::Deserialize<'de> for xlfn::value::BoundedVarArgs<T, MAX>
+pub fn xlfn::value::BoundedVarArgs<T, MAX>::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
 impl<T, I, const MAX: usize> core::ops::index::Index<I> for xlfn::value::BoundedVarArgs<T, MAX> where I: core::slice::index::SliceIndex<[T]>
 pub type xlfn::value::BoundedVarArgs<T, MAX>::Output = <I as core::slice::index::SliceIndex<[T]>>::Output
 pub fn xlfn::value::BoundedVarArgs<T, MAX>::index(&self, I) -> &Self::Output
@@ -1614,6 +2959,8 @@ pub type xlfn::value::BoundedVarArgs<T, MAX>::Target = [T]
 pub fn xlfn::value::BoundedVarArgs<T, MAX>::deref(&self) -> &Self::Target
 impl<T, const MAX: usize> core::ops::deref::DerefMut for xlfn::value::BoundedVarArgs<T, MAX>
 pub fn xlfn::value::BoundedVarArgs<T, MAX>::deref_mut(&mut self) -> &mut Self::Target
+impl<T, const MAX: usize> serde_core::ser::Serialize for xlfn::value::BoundedVarArgs<T, MAX> where T: serde_core::ser::Serialize
+pub fn xlfn::value::BoundedVarArgs<T, MAX>::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<T: core::clone::Clone, const MAX: usize> core::clone::Clone for xlfn::value::BoundedVarArgs<T, MAX>
 pub fn xlfn::value::BoundedVarArgs<T, MAX>::clone(&self) -> Self
 impl<T: core::cmp::PartialEq, const MAX: usize> core::cmp::PartialEq for xlfn::value::BoundedVarArgs<T, MAX>
@@ -1661,6 +3008,8 @@ impl<'a, T> core::iter::traits::collect::IntoIterator for &'a xlfn::value::Colum
 pub type &'a xlfn::value::Column<T>::IntoIter = core::slice::iter::Iter<'a, T>
 pub type &'a xlfn::value::Column<T>::Item = &'a T
 pub fn &'a xlfn::value::Column<T>::into_iter(self) -> Self::IntoIter
+impl<'de, T: serde_core::de::Deserialize<'de>> serde_core::de::Deserialize<'de> for xlfn::value::Column<T>
+pub fn xlfn::value::Column<T>::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
 impl<T, I> core::ops::index::Index<I> for xlfn::value::Column<T> where I: core::slice::index::SliceIndex<[T]>
 pub type xlfn::value::Column<T>::Output = <I as core::slice::index::SliceIndex<[T]>>::Output
 pub fn xlfn::value::Column<T>::index(&self, I) -> &Self::Output
@@ -1693,6 +3042,8 @@ pub type xlfn::value::Column<T>::Target = [T]
 pub fn xlfn::value::Column<T>::deref(&self) -> &Self::Target
 impl<T> core::ops::deref::DerefMut for xlfn::value::Column<T>
 pub fn xlfn::value::Column<T>::deref_mut(&mut self) -> &mut Self::Target
+impl<T> serde_core::ser::Serialize for xlfn::value::Column<T> where T: serde_core::ser::Serialize
+pub fn xlfn::value::Column<T>::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<T> core::marker::Freeze for xlfn::value::Column<T> where alloc::vec::Vec<T>: core::marker::Freeze
 impl<T> core::marker::Send for xlfn::value::Column<T> where alloc::vec::Vec<T>: core::marker::Send
 impl<T> core::marker::Sync for xlfn::value::Column<T> where alloc::vec::Vec<T>: core::marker::Sync
@@ -1724,10 +3075,12 @@ pub struct xlfn::value::ExcelSerialDate
 impl xlfn::value::ExcelSerialDate
 pub const fn xlfn::value::ExcelSerialDate::date_system(self) -> xlfn::value::ExcelDateSystem
 pub fn xlfn::value::ExcelSerialDate::fractional_day(self) -> f64
+pub fn xlfn::value::ExcelSerialDate::from_jiff(jiff::civil::date::Date, xlfn::value::ExcelDateSystem) -> xlfn_engine::error::XllResult<Self>
 pub fn xlfn::value::ExcelSerialDate::from_ymd(i16, i8, i8, xlfn::value::ExcelDateSystem) -> xlfn_engine::error::XllResult<Self>
 pub fn xlfn::value::ExcelSerialDate::is_fictitious_1900_leap_day(self) -> bool
 pub fn xlfn::value::ExcelSerialDate::new(f64, xlfn::value::ExcelDateSystem) -> xlfn_engine::error::XllResult<Self>
 pub const fn xlfn::value::ExcelSerialDate::serial(self) -> f64
+pub fn xlfn::value::ExcelSerialDate::to_jiff(self) -> xlfn_engine::error::XllResult<jiff::civil::date::Date>
 pub fn xlfn::value::ExcelSerialDate::to_ymd(self) -> xlfn_engine::error::XllResult<xlfn::value::CalendarDate>
 pub const fn xlfn::value::ExcelSerialDate::with_date_system(self, xlfn::value::ExcelDateSystem) -> Self
 impl core::clone::Clone for xlfn::value::ExcelSerialDate
@@ -1738,6 +3091,8 @@ impl core::fmt::Debug for xlfn::value::ExcelSerialDate
 pub fn xlfn::value::ExcelSerialDate::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for xlfn::value::ExcelSerialDate
 impl core::marker::StructuralPartialEq for xlfn::value::ExcelSerialDate
+impl xlfn::rtd::IntoRtdValue for xlfn::value::ExcelSerialDate
+pub fn xlfn::value::ExcelSerialDate::into_rtd_value(self) -> xlfn_engine::error::XllResult<xlfn::rtd::RtdValue>
 impl xlfn::value::ExcelInputIdentity for xlfn::value::ExcelSerialDate
 pub fn xlfn::value::ExcelSerialDate::encode_input_identity(&self, &mut xlfn::value::InputIdentityEncoder)
 impl xlfn::value::IntoExcel for xlfn::value::ExcelSerialDate
@@ -1803,6 +3158,8 @@ impl<'a, T> core::iter::traits::collect::IntoIterator for &'a xlfn::value::Matri
 pub type &'a xlfn::value::Matrix<T>::IntoIter = core::slice::iter::Iter<'a, T>
 pub type &'a xlfn::value::Matrix<T>::Item = &'a T
 pub fn &'a xlfn::value::Matrix<T>::into_iter(self) -> Self::IntoIter
+impl<'de, T: serde_core::de::Deserialize<'de>> serde_core::de::Deserialize<'de> for xlfn::value::Matrix<T>
+pub fn xlfn::value::Matrix<T>::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
 impl<T: core::clone::Clone> core::clone::Clone for xlfn::value::Matrix<T>
 pub fn xlfn::value::Matrix<T>::clone(&self) -> Self
 impl<T: core::cmp::PartialEq> core::cmp::PartialEq for xlfn::value::Matrix<T>
@@ -1826,6 +3183,8 @@ pub type xlfn::value::Matrix<T>::Output = T
 pub fn xlfn::value::Matrix<T>::index(&self, (usize, usize)) -> &Self::Output
 impl<T> core::ops::index::IndexMut<(usize, usize)> for xlfn::value::Matrix<T>
 pub fn xlfn::value::Matrix<T>::index_mut(&mut self, (usize, usize)) -> &mut Self::Output
+impl<T> serde_core::ser::Serialize for xlfn::value::Matrix<T> where T: serde_core::ser::Serialize
+pub fn xlfn::value::Matrix<T>::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<T> core::marker::Freeze for xlfn::value::Matrix<T> where alloc::vec::Vec<T>: core::marker::Freeze
 impl<T> core::marker::Send for xlfn::value::Matrix<T> where alloc::vec::Vec<T>: core::marker::Send
 impl<T> core::marker::Sync for xlfn::value::Matrix<T> where alloc::vec::Vec<T>: core::marker::Sync
@@ -1924,6 +3283,8 @@ impl<'a, T> core::iter::traits::collect::IntoIterator for &'a xlfn::value::Row<T
 pub type &'a xlfn::value::Row<T>::IntoIter = core::slice::iter::Iter<'a, T>
 pub type &'a xlfn::value::Row<T>::Item = &'a T
 pub fn &'a xlfn::value::Row<T>::into_iter(self) -> Self::IntoIter
+impl<'de, T: serde_core::de::Deserialize<'de>> serde_core::de::Deserialize<'de> for xlfn::value::Row<T>
+pub fn xlfn::value::Row<T>::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
 impl<T, I> core::ops::index::Index<I> for xlfn::value::Row<T> where I: core::slice::index::SliceIndex<[T]>
 pub type xlfn::value::Row<T>::Output = <I as core::slice::index::SliceIndex<[T]>>::Output
 pub fn xlfn::value::Row<T>::index(&self, I) -> &Self::Output
@@ -1956,6 +3317,8 @@ pub type xlfn::value::Row<T>::Target = [T]
 pub fn xlfn::value::Row<T>::deref(&self) -> &Self::Target
 impl<T> core::ops::deref::DerefMut for xlfn::value::Row<T>
 pub fn xlfn::value::Row<T>::deref_mut(&mut self) -> &mut Self::Target
+impl<T> serde_core::ser::Serialize for xlfn::value::Row<T> where T: serde_core::ser::Serialize
+pub fn xlfn::value::Row<T>::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<T> core::marker::Freeze for xlfn::value::Row<T> where alloc::vec::Vec<T>: core::marker::Freeze
 impl<T> core::marker::Send for xlfn::value::Row<T> where alloc::vec::Vec<T>: core::marker::Send
 impl<T> core::marker::Sync for xlfn::value::Row<T> where alloc::vec::Vec<T>: core::marker::Sync
@@ -2118,10 +3481,14 @@ impl<'call> xlfn::value::PrepareExcel<'call> for xlfn_engine::error::ExcelError
 pub type xlfn_engine::error::ExcelError::Prepared = xlfn_engine::error::ExcelError
 pub fn xlfn_engine::error::ExcelError::materialize(Self) -> xlfn_engine::error::XllResult<Self>
 pub fn xlfn_engine::error::ExcelError::prepare(xlfn::value::raw::XlValueRef<'call>, &'static str, &mut xlfn::value::InputIdentityEncoder) -> xlfn_engine::error::XllResult<Self>
+pub macro xlfn::rtd_subscriptions!
 pub trait xlfn::Addin: core::marker::Sized + core::marker::Send + core::marker::Sync + 'static
+pub type xlfn::Addin::AsyncExecutor: xlfn::task::AsyncExecutor
 pub type xlfn::Addin::Error: xlfn_engine::error::IntoXllError
 pub type xlfn::Addin::Layers: xlfn::execution::UdfLayers
 pub type xlfn::Addin::LifecycleState: 'static
+pub type xlfn::Addin::RtdSources: xlfn::rtd::RtdSourceCatalog<Self::RtdSubscription>
+pub type xlfn::Addin::RtdSubscription: xlfn::rtd::RtdSubscription
 pub type xlfn::Addin::SharedState: core::marker::Send + core::marker::Sync + 'static
 pub fn xlfn::Addin::cleanup(&mut Self::LifecycleState, &mut xlfn::addin::CleanupReporter<'_>)
 pub fn xlfn::Addin::open(&xlfn::addin::OpenContext<Self>) -> xlfn::addin::OpenResult<Self>

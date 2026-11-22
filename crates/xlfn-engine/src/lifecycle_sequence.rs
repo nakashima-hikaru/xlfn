@@ -81,9 +81,8 @@ impl LifecycleSequence {
         self
     }
 
-    /// Read the next raw value for tests that check issuance is all-or-nothing.
-    #[doc(hidden)]
-    pub const fn next_open_for_test(&self) -> u64 {
+    /// Read the next open sequence value (monotonic identity boundary for residency).
+    pub const fn next_open_sequence(&self) -> u64 {
         self.next_open
     }
 }
@@ -127,12 +126,12 @@ mod tests {
             exhausted.claim_open(true, exhausted.removal_epoch()),
             Err(OpenClaimError::Exhausted)
         );
-        assert_eq!(exhausted.next_open_for_test(), u64::MAX);
+        assert_eq!(exhausted.next_open_sequence(), u64::MAX);
         let mut zero = LifecycleSequence::new().seeded_next_open_for_test(0);
         assert_eq!(
             zero.claim_open(true, zero.removal_epoch()),
             Err(OpenClaimError::InvalidSequence)
         );
-        assert_eq!(zero.next_open_for_test(), 0);
+        assert_eq!(zero.next_open_sequence(), 0);
     }
 }

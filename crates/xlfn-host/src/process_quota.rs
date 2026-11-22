@@ -391,27 +391,34 @@ mod tests {
     }
 
     #[test]
-    fn consumed_reservation_holds_both_charges_until_confirmed_free() {
-        static STATE: ProcessState = ProcessState::new();
-        STATE.initialize().unwrap();
-        STATE.reserve(41, 128).unwrap();
-        let charge = Reservation {
-            state: &STATE,
-            bytes: 41,
+    fn abandoned_or_forgotten_published_charge_holds_capacity_until_confirmed_free() {
+        static STATES: [ProcessState; 2] = [ProcessState::new(), ProcessState::new()];
+        for (state, forget) in [(&STATES[0], false), (&STATES[1], true)] {
+            state.initialize().unwrap();
+            state.reserve(41, 64).unwrap();
+            let charge = Reservation { state, bytes: 41 }.publish();
+            assert_eq!(state.reserved_bytes.load(Ordering::Relaxed), 41);
+            assert_eq!(state.published_bytes.load(Ordering::Relaxed), 41);
+            if forget {
+                #[expect(
+                    clippy::forget_non_drop,
+                    reason = "assert forgetting the plain retained charge never reopens capacity"
+                )]
+                std::mem::forget(charge);
+            } else {
+                #[allow(
+                    clippy::drop_non_drop,
+                    reason = "assert abandonment of the plain retained charge never discharges it"
+                )]
+                drop(charge);
+            }
+            assert!(state.reserve(24, 64).is_err());
+            assert_eq!(state.reserved_bytes.load(Ordering::Relaxed), 41);
+            assert_eq!(state.published_bytes.load(Ordering::Relaxed), 41);
+            assert_eq!(state.reserved_buffers.load(Ordering::Relaxed), 1);
+            assert_eq!(state.published_buffers.load(Ordering::Relaxed), 1);
+            state.release_published(41);
         }
-        .publish();
-        assert_eq!(STATE.reserved_bytes.load(Ordering::Relaxed), 41);
-        assert_eq!(STATE.published_bytes.load(Ordering::Relaxed), 41);
-        // A charge has no automatic destructor: even ordinary abandonment
-        // does not claim that its corresponding payload was destroyed.
-        #[allow(
-            clippy::drop_non_drop,
-            reason = "assert abandonment of the plain retained charge never discharges it"
-        )]
-        drop(charge);
-        assert_eq!(STATE.reserved_buffers.load(Ordering::Relaxed), 1);
-        assert_eq!(STATE.published_buffers.load(Ordering::Relaxed), 1);
-        STATE.release_published(41);
     }
 
     #[test]
@@ -458,28 +465,6 @@ mod tests {
         assert_eq!(released, Some(bytes));
         assert_eq!(STATE.reserved_bytes.load(Ordering::Relaxed), 0);
         assert_eq!(STATE.published_bytes.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn forgotten_published_charge_never_reopens_reserved_capacity() {
-        static STATE: ProcessState = ProcessState::new();
-        STATE.initialize().unwrap();
-        STATE.reserve(41, 64).unwrap();
-        #[expect(
-            clippy::forget_non_drop,
-            reason = "assert forgetting the plain retained charge never reopens capacity"
-        )]
-        std::mem::forget(
-            Reservation {
-                state: &STATE,
-                bytes: 41,
-            }
-            .publish(),
-        );
-        assert!(STATE.reserve(24, 64).is_err());
-        assert_eq!(STATE.reserved_bytes.load(Ordering::Relaxed), 41);
-        assert_eq!(STATE.published_bytes.load(Ordering::Relaxed), 41);
-        STATE.release_published(41);
     }
 
     #[test]

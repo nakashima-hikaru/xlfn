@@ -590,15 +590,15 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 .entries
                 .iter()
                 .filter(|(_, entry)| {
-                    !entry.is_active()
-                        && entry.server_generation() == Some(resources.server.generation)
+                    !entry.state().is_active()
+                        && entry.state().server_generation() == Some(resources.server.generation)
                 })
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>();
             for id in pending_ids {
-                let Some(should_remove) = catalog.with_entry(id, |entry| {
-                    entry.revoke_for_server_termination(resources.server.generation)
-                        && entry.can_remove()
+                let Some(should_remove) = catalog.with_entry(id, |state| {
+                    state.revoke_for_server_termination(resources.server.generation)
+                        && state.can_remove()
                 }) else {
                     continue;
                 };
@@ -667,13 +667,13 @@ pub(crate) fn cleanup_catalog_binding_and_pending(
     server_generation: ServerGeneration,
     connection_generation: ConnectionGeneration,
 ) {
-    let Some((_, should_remove)) = catalog.with_entry(id, |entry| {
-        if entry.connection_generation() != Some(connection_generation)
-            || entry.server_generation() != Some(server_generation)
+    let Some((_, should_remove)) = catalog.with_entry(id, |state| {
+        if state.connection_generation() != Some(connection_generation)
+            || state.server_generation() != Some(server_generation)
         {
             return (false, false);
         }
-        entry.cleanup_connection(server_generation, connection_generation)
+        state.cleanup_connection(server_generation, connection_generation)
     }) else {
         return;
     };

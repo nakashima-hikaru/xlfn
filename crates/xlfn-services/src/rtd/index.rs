@@ -181,6 +181,7 @@ mod tests {
     fn index_admission_is_affine_per_bucket_and_counts_live_sources() {
         let mut index = IdentityIndex::default();
         let one = Key(1, 10);
+        let one_other = Key(1, 20);
         let two = Key(2, 10);
         {
             let _abandoned = index.prepare_insert(one, 1, 1).unwrap();
@@ -194,16 +195,31 @@ mod tests {
             Err(IndexError::Duplicate)
         ));
         assert!(matches!(
+            index.insert(one, 2, 1),
+            Err(IndexError::Duplicate)
+        ));
+        assert_eq!(index.buckets().len(), 1);
+        assert!(matches!(
             index.prepare_insert(two, 3, 1),
             Err(IndexError::SourceLimit)
         ));
-        assert_eq!(index.source_ref_count(1).map(NonZeroUsize::get), Some(2));
+        index.insert(one_other, 4, 1).unwrap();
+        assert_eq!(index.distinct_source_count(), 1);
+        assert_eq!(index.source_ref_count(1).map(NonZeroUsize::get), Some(3));
         assert_eq!(index.candidates(one), [1, 2]);
         assert!(!index.remove(one, 3));
+        assert_eq!(index.candidates(one), [1, 2]);
+        assert_eq!(index.source_ref_count(1).map(NonZeroUsize::get), Some(3));
+        assert!(index.remove(one_other, 4));
         assert!(index.remove(one, 1));
+        assert_eq!(index.source_ref_count(1).map(NonZeroUsize::get), Some(1));
         assert!(index.remove(one, 2));
         assert_eq!(index.distinct_source_count(), 0);
         index.insert(two, 3, 1).unwrap();
+        index.assert_invariants();
+        index.clear();
+        assert!(index.candidates(two).is_empty());
+        assert!(!index.remove(two, 3));
         index.assert_invariants();
     }
 }

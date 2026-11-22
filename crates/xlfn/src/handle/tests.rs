@@ -1950,23 +1950,35 @@ fn excel_topic_id_cannot_be_connected_to_two_formula_topics() {
     assert_eq!(runtime.len(), 1);
 }
 
-#[test]
-fn handle_lease_keeps_payload_alive_after_binding_retirement() {
+fn prepare_pinned_counted_record(
+    runtime: &FormulaHandleService,
+    label: &str,
+) -> (
+    Arc<AtomicUsize>,
+    String,
+    crate::handle::PendingHandleLease<CountedDataRecord>,
+) {
     let drops = Arc::new(AtomicUsize::new(0));
-    let runtime = FormulaHandleService::new(8);
-    let key = test_topic_key("handle-lease-retirement");
     let token = runtime
-        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
+        .prepare(test_topic_key(label), || {
+            Ok(CountedDataRecord(Arc::clone(&drops)))
+        })
         .unwrap()
         .into_token();
-
-    let pinned = with_decode_scope_and_state(&runtime, |runtime, scope| {
+    let pinned = with_decode_scope_and_state(runtime, |runtime, scope| {
         runtime
             .lookup::<CountedDataRecord>(scope, &token)
             .unwrap()
             .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
             .unwrap()
     });
+    (drops, token, pinned)
+}
+
+#[test]
+fn handle_lease_keeps_payload_alive_after_binding_retirement() {
+    let runtime = FormulaHandleService::new(8);
+    let (drops, token, pinned) = prepare_pinned_counted_record(&runtime, "handle-lease-retirement");
     runtime
         .store
         .registry
@@ -2027,21 +2039,8 @@ fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
         }
     }
 
-    let drops = Arc::new(AtomicUsize::new(0));
     let handles = FormulaHandleService::new(8);
-    let token = handles
-        .prepare(test_topic_key("scoped-task-drain"), || {
-            Ok(CountedDataRecord(Arc::clone(&drops)))
-        })
-        .unwrap()
-        .into_token();
-    let pending = with_decode_scope_and_state(&handles, |handles, scope| {
-        handles
-            .lookup::<CountedDataRecord>(scope, &token)
-            .unwrap()
-            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
-            .unwrap()
-    });
+    let (drops, token, pending) = prepare_pinned_counted_record(&handles, "scoped-task-drain");
     handles
         .store
         .registry
@@ -2086,21 +2085,8 @@ fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
 
 #[test]
 fn handle_lease_survives_terminal_runtime_close() {
-    let drops = Arc::new(AtomicUsize::new(0));
     let runtime = FormulaHandleService::new(8);
-    let key = test_topic_key("handle-lease-close");
-    let token = runtime
-        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
-        .unwrap()
-        .into_token();
-
-    let pinned = with_decode_scope_and_state(&runtime, |runtime, scope| {
-        runtime
-            .lookup::<CountedDataRecord>(scope, &token)
-            .unwrap()
-            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
-            .unwrap()
-    });
+    let (drops, _token, pinned) = prepare_pinned_counted_record(&runtime, "handle-lease-close");
     let sealed = runtime.seal().unwrap();
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
@@ -2312,6 +2298,19 @@ fn panicking_factory_does_not_publish_a_topic() {
     );
 }
 
+fn assert_published_data_record(
+    runtime: &FormulaHandleService,
+    preparation: crate::handle::runtime::HandlePreparation,
+    expected: u32,
+) {
+    assert!(preparation.is_published());
+    let token = preparation.into_token();
+    assert_eq!(
+        with_handle::<DataRecord, _>(runtime, &token, |value| value.0).unwrap(),
+        expected
+    );
+}
+
 #[test]
 fn same_thread_factory_reentry_returns_an_error_without_waiting() {
     let runtime = FormulaHandleService::new(8);
@@ -2323,13 +2322,7 @@ fn same_thread_factory_reentry_returns_an_error_without_waiting() {
             Ok(DataRecord(1))
         })
         .unwrap();
-    let created = preparation.is_published();
-    let token = preparation.into_token();
-    assert!(created);
-    assert_eq!(
-        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
-        1
-    );
+    assert_published_data_record(&runtime, preparation, 1);
 }
 
 #[test]
@@ -2367,13 +2360,7 @@ fn different_key_factory_reentry_is_allowed() {
             Ok(DataRecord(1))
         })
         .unwrap();
-    let created = preparation.is_published();
-    let token = preparation.into_token();
-    assert!(created);
-    assert_eq!(
-        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
-        1
-    );
+    assert_published_data_record(&runtime, preparation, 1);
     assert_eq!(runtime.len(), 2);
 }
 
@@ -2392,13 +2379,7 @@ fn same_thread_observer_reentry_returns_an_error_without_waiting() {
             },
         )
         .unwrap();
-    let created = preparation.is_published();
-    let token = preparation.into_token();
-    assert!(created);
-    assert_eq!(
-        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
-        1
-    );
+    assert_published_data_record(&runtime, preparation, 1);
 }
 
 #[test]
@@ -2417,13 +2398,7 @@ fn different_key_observer_reentry_is_allowed() {
             },
         )
         .unwrap();
-    let created = preparation.is_published();
-    let token = preparation.into_token();
-    assert!(created);
-    assert_eq!(
-        with_handle::<DataRecord, _>(&runtime, &token, |value| value.0).unwrap(),
-        1
-    );
+    assert_published_data_record(&runtime, preparation, 1);
     assert_eq!(runtime.len(), 2);
 }
 

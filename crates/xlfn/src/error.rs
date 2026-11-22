@@ -9,48 +9,30 @@ pub use xlfn_engine::error::{
     ExcelError, InputError, IntoXllError, InvalidLimit, UdfError, UdfResult, XllError, XllResult,
 };
 
-const _: () = {
-    assert!(ExcelError::Null.code() == xlfn_sys::XLERR_NULL);
-    assert!(matches!(
-        ExcelError::from_code(xlfn_sys::XLERR_NULL),
-        Some(ExcelError::Null)
-    ));
-    assert!(ExcelError::DivisionByZero.code() == xlfn_sys::XLERR_DIV0);
-    assert!(matches!(
-        ExcelError::from_code(xlfn_sys::XLERR_DIV0),
-        Some(ExcelError::DivisionByZero)
-    ));
-    assert!(ExcelError::Value.code() == xlfn_sys::XLERR_VALUE);
-    assert!(matches!(
-        ExcelError::from_code(xlfn_sys::XLERR_VALUE),
-        Some(ExcelError::Value)
-    ));
-    assert!(ExcelError::Reference.code() == xlfn_sys::XLERR_REF);
-    assert!(matches!(
-        ExcelError::from_code(xlfn_sys::XLERR_REF),
-        Some(ExcelError::Reference)
-    ));
-    assert!(ExcelError::Name.code() == xlfn_sys::XLERR_NAME);
-    assert!(matches!(
-        ExcelError::from_code(xlfn_sys::XLERR_NAME),
-        Some(ExcelError::Name)
-    ));
-    assert!(ExcelError::Number.code() == xlfn_sys::XLERR_NUM);
-    assert!(matches!(
-        ExcelError::from_code(xlfn_sys::XLERR_NUM),
-        Some(ExcelError::Number)
-    ));
-    assert!(ExcelError::NotAvailable.code() == xlfn_sys::XLERR_NA);
-    assert!(matches!(
-        ExcelError::from_code(xlfn_sys::XLERR_NA),
-        Some(ExcelError::NotAvailable)
-    ));
-    assert!(ExcelError::GettingData.code() == xlfn_sys::XLERR_GETTING_DATA);
-    assert!(matches!(
-        ExcelError::from_code(xlfn_sys::XLERR_GETTING_DATA),
-        Some(ExcelError::GettingData)
-    ));
-};
+macro_rules! assert_excel_error_codes {
+    ($(($variant:ident, $code:ident)),+ $(,)?) => {
+        const _: () = {
+            $(
+                assert!(ExcelError::$variant.code() == xlfn_sys::$code);
+                assert!(matches!(
+                    ExcelError::from_code(xlfn_sys::$code),
+                    Some(ExcelError::$variant)
+                ));
+            )+
+        };
+    };
+}
+
+assert_excel_error_codes!(
+    (Null, XLERR_NULL),
+    (DivisionByZero, XLERR_DIV0),
+    (Value, XLERR_VALUE),
+    (Reference, XLERR_REF),
+    (Name, XLERR_NAME),
+    (Number, XLERR_NUM),
+    (NotAvailable, XLERR_NA),
+    (GettingData, XLERR_GETTING_DATA),
+);
 
 #[cfg(any(feature = "handles", feature = "rtd"))]
 pub(crate) fn map_service_slot_error(

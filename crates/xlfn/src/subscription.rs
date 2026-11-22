@@ -115,8 +115,6 @@ pub(crate) use delivery::{RefreshState, ValueSlot, shard_index};
 ))]
 pub(crate) use delivery::TOPIC_SHARDS;
 pub(crate) use host::SubscriptionHost;
-#[cfg(all(test, feature = "rtd"))]
-pub(crate) use identity::SubscriptionIdentityIndex;
 pub(crate) use runtime_services::RuntimeServices;
 #[cfg(all(test, feature = "rtd"))]
 pub(crate) use server::PANIC_AFTER_TERMINATION_GUARD;

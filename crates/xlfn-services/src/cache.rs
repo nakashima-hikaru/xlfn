@@ -2821,51 +2821,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn clear_generation_isolation() {
-        let cache = CalculationCache::<u32, &'static str>::new(
-            crate::cache::CacheBudget::weight_units(1024),
-        );
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-
-        let cache_ref = &cache;
-        std::thread::scope(|s| {
-            let handle_a = s.spawn(move || {
-                let lease = cache_ref
-                    .get_or_try_insert_weighted(
-                        1,
-                        |_| 4,
-                        || {
-                            started_tx.send(()).unwrap();
-                            std::thread::sleep(Duration::from_millis(50));
-                            Ok("epoch_0_value")
-                        },
-                    )
-                    .unwrap();
-                *lease
-            });
-
-            // Wait until A is inside compute() at epoch 0
-            started_rx.recv().unwrap();
-
-            // Clear while A's computation is in-flight at epoch 0
-            cache.clear();
-
-            let handle_b = s.spawn(move || {
-                let lease = cache_ref
-                    .get_or_try_insert_weighted(1, |_| 4, || Ok("epoch_1_value"))
-                    .unwrap();
-                *lease
-            });
-
-            let val_a = handle_a.join().unwrap();
-            let val_b = handle_b.join().unwrap();
-
-            assert_eq!(val_a, "epoch_0_value");
-            assert_eq!(val_b, "epoch_1_value");
-        });
-    }
-
     #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
     #[test]
     fn loom_clear_never_leaves_a_stale_generation_visible() {

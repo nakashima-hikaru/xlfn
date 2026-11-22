@@ -27,12 +27,6 @@ impl<'a, V> CacheLease<'a, V> {
     }
 }
 
-// SAFETY: the inner lease is Send under these exact bounds and exclusively
-// owns the pin; the facade adds no data or separate synchronization.
-unsafe impl<V: Send + Sync> Send for CacheLease<'_, V> {}
-// SAFETY: the inner lease allows shared access under V: Sync.
-unsafe impl<V: Sync> Sync for CacheLease<'_, V> {}
-
 impl<V> Drop for CacheLease<'_, V> {
     #[inline]
     fn drop(&mut self) {
@@ -366,4 +360,18 @@ where
             .get_or_try_insert_borrowed(key, compute)
             .map(CacheLease::wrap)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CacheLease;
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::MutexGuard;
+
+    static_assertions::assert_impl_all!(CacheLease<'_, String>: Send, Sync);
+    static_assertions::assert_impl_all!(CacheLease<'_, MutexGuard<'static, ()>>: Sync);
+    static_assertions::assert_not_impl_any!(CacheLease<'_, MutexGuard<'static, ()>>: Send);
+    static_assertions::assert_not_impl_any!(CacheLease<'_, Rc<u8>>: Send, Sync);
+    static_assertions::assert_not_impl_any!(CacheLease<'_, Cell<u8>>: Send, Sync);
 }

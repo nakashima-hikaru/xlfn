@@ -380,17 +380,6 @@ pub(super) struct BufferPermit<'a> {
     bytes: usize,
 }
 
-#[cfg(test)]
-impl BufferPermit<'_> {
-    fn resize(&mut self, bytes: usize) -> bool {
-        if !resize_charge(self.budgets, self.bytes, bytes) {
-            return false;
-        }
-        self.bytes = bytes;
-        true
-    }
-}
-
 impl Drop for BufferPermit<'_> {
     fn drop(&mut self) {
         if self.values != 0 || self.bytes != 0 {
@@ -499,16 +488,18 @@ mod tests {
             RtdLimits::standard().with_max_buffered_bytes(bounded(12)),
         ));
         let pair = BudgetPair::new(Arc::clone(&source), Arc::clone(&runtime));
-        let mut permit = pair.try_value(10).unwrap();
-        assert!(!permit.resize(13));
+        let mut queue = BufferLedger::default();
+        assert!(queue.try_push(&pair, 10));
+        assert!(!queue.resize(&pair, 13));
         assert_eq!(source.0.usage().bytes, 10);
         assert_eq!(runtime.0.usage().bytes, 10);
-        assert!(permit.resize(12));
+        assert!(queue.resize(&pair, 12));
         assert_eq!(source.0.usage().values, 1);
-        assert!(permit.resize(2));
+        assert!(queue.resize(&pair, 2));
         assert_eq!(runtime.0.usage().bytes, 2);
-        drop(permit);
+        drop(queue.take_all(&pair));
         assert_eq!(source.0.usage(), Usage::default());
+        assert_eq!(runtime.0.usage(), Usage::default());
     }
 
     #[test]
