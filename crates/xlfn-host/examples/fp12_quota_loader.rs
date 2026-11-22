@@ -138,10 +138,9 @@ mod native {
         // SAFETY: this call produces the current-process pseudo-handle.
         let process = unsafe { GetCurrentProcess() };
         // SAFETY: the pseudo-handle and four distinct outputs are live.
-        assert_ne!(
-            unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) },
-            0
-        );
+        let status =
+            unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) };
+        assert_ne!(status, 0);
         let creation = u64::from(creation.low) | (u64::from(creation.high) << 32);
         let pid = std::process::id();
         format!("Local\\xlfn.numeric-returns.{pid}.{creation:016x}")

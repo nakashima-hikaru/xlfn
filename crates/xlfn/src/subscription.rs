@@ -41,6 +41,8 @@ pub(crate) use topic::TopicId as SinkTopicId;
 #[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
 pub(crate) type RtdRefreshBatch<'a> =
     data_plane::RtdRefreshBatch<'a, crate::excel_rtd::RtdSubscriptionHost>;
+#[cfg(all(feature = "bench-internals", feature = "rtd"))]
+pub(crate) use runtime::PreparedSubscription;
 pub(crate) type SubscriptionRuntime<E = (), C = crate::DynamicRtdSources<E>> =
     runtime::SubscriptionRuntime<crate::excel_rtd::RtdSubscriptionHost, E, C>;
 pub(crate) type SubscriptionServerHandle<E = (), C = crate::DynamicRtdSources<E>> =

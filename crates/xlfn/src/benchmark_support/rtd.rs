@@ -40,9 +40,9 @@ unsafe impl crate::subscription::RtdSource for InlineBenchmarkSource {
 ///
 /// Adapter mode uses the actual registered-source adapter with a nonallocating,
 /// nonzero-sized subscription. Runtime mode additionally includes connection
-/// publication, catalog transitions and synchronous server disconnection. An
-/// outstanding preparation guard preserves each canonical topic between runs.
-/// `warm` recycles a complete batch before passing the operation to `measure`.
+/// publication, catalog transitions and synchronous server disconnection.
+/// `measure` calls the operation once. With `warm`, a full cycle primes the
+/// runtime, which then prepares fresh topic incarnations before measurement.
 pub fn with_rtd_connection_benchmark<R>(
     count: usize,
     adapter_only: bool,
@@ -201,11 +201,13 @@ where
         }
         measure(&mut operation)
     } else {
-        let prepared: Vec<_> = topics
-            .iter()
-            .map(|topic| runtime.prepare(&source_handle, topic.borrowed()).unwrap())
-            .collect();
-        let mut operation = || {
+        let prepare = || {
+            topics
+                .iter()
+                .map(|topic| runtime.prepare(&source_handle, topic.borrowed()).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let cycle = |prepared: &[crate::subscription::PreparedSubscription<'_, _, _, _>]| {
             for (index, prepared) in prepared.iter().enumerate() {
                 server_handle
                     .connect_transaction(
@@ -223,9 +225,14 @@ where
             }
         };
         if warm {
-            operation();
+            cycle(&prepare());
         }
-        measure(&mut operation)
+        // Disconnect revokes the previous incarnation even if a preparation
+        // guard still exists. The new ticket is prepared outside the measured
+        // region to isolate connection allocations as before.
+        let prepared = prepare();
+        let mut batch = Some(prepared.as_slice());
+        measure(&mut || cycle(batch.take().expect("one measured connection cycle")))
     }
 }
 
@@ -1175,6 +1182,11 @@ mod published_runtime_tests {
         let mut owners = vec![fixture];
         owners.reserve(4);
         owners.remove(0)
+    }
+
+    #[test]
+    fn warm_connection_benchmark_uses_fresh_preparation_tickets() {
+        with_rtd_connection_benchmark(2, false, true, |operation| operation());
     }
 
     #[test]

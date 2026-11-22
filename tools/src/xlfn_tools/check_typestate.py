@@ -42,6 +42,7 @@ MODULES = {
     "async_udf/completion": Path("crates/xlfn/src/async_udf/completion.rs"),
     "async_udf/instrumentation": Path("crates/xlfn/src/async_udf/instrumentation.rs"),
     "cancellation": Path("crates/xlfn/src/cancellation.rs"),
+    "host/lib": Path("crates/xlfn-host/src/lib.rs"),
     "host/drain/windows": Path("crates/xlfn-host/src/drain/windows.rs"),
     "excel_rtd/windows/server": Path("crates/xlfn/src/excel_rtd/windows/server.rs"),
     "excel_rtd/windows/server/termination": Path(
