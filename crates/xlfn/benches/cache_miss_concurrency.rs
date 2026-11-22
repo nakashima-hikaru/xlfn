@@ -5,6 +5,7 @@
 //! A dispatch-only control exposes the synchronization floor; its duration must
 //! not be subtracted from the cache cases. Same-key batches include both pending
 //! singleflight followers and resident hits after another worker publishes.
+//! Mixed batches additionally prewarm alternating keys before the timed run.
 //! The separate long-key group measures one thread and distinct cold keys,
 //! with cache reset and allocation of caller-owned input outside each interval.
 
@@ -26,6 +27,7 @@ const NUMERIC_ELEMENTS: usize = 4096;
 enum Keys {
     Same,
     Distinct,
+    Mixed,
 }
 
 impl Keys {
@@ -33,12 +35,13 @@ impl Keys {
         match self {
             Self::Same => "same_key",
             Self::Distinct => "distinct_keys",
+            Self::Mixed => "half_prewarmed_same_key",
         }
     }
 
     const fn key(self, worker: usize, request: usize) -> u64 {
         match self {
-            Self::Same => request as u64,
+            Self::Same | Self::Mixed => request as u64,
             // Use one fixed stride across all worker counts. The key population
             // changes only by adding workers, rather than changing earlier keys.
             Self::Distinct => (request * WORKERS[WORKERS.len() - 1] + worker) as u64,
@@ -47,8 +50,15 @@ impl Keys {
 
     const fn unique_keys(self, workers: usize) -> usize {
         match self {
-            Self::Same => REQUESTS_PER_WORKER,
+            Self::Same | Self::Mixed => REQUESTS_PER_WORKER,
             Self::Distinct => REQUESTS_PER_WORKER * workers,
+        }
+    }
+
+    const fn prewarmed_keys(self) -> usize {
+        match self {
+            Self::Mixed => REQUESTS_PER_WORKER.div_ceil(2),
+            Self::Same | Self::Distinct => 0,
         }
     }
 }
@@ -219,6 +229,12 @@ impl Pool {
         if matches!(self.operation, Operation::Cache) {
             self.cache.clear();
             self.cache.maintenance();
+            for index in 0..self.keys.prewarmed_keys() {
+                let key = self.keys.key(0, index * 2);
+                self.cache
+                    .get_or_try_insert_with(key, || Ok(self.compute.evaluate(key, &self.input)))
+                    .expect("mixed workload prewarm returned a value");
+            }
         }
         for worker in &self.start {
             worker.send(probe).expect("worker received batch command");
@@ -245,10 +261,13 @@ impl Pool {
         let (_, report) = self.run(true);
         let requests = self.total_requests();
         assert_eq!(report.requests, requests);
-        let expected_computes = match self.operation {
-            Operation::Cache => self.keys.unique_keys(self.threads.len()),
-            Operation::ComputeOnly => requests,
-            Operation::DispatchOnly => 0,
+        let (expected_computes, expected_resident) = match self.operation {
+            Operation::Cache => {
+                let unique_keys = self.keys.unique_keys(self.threads.len());
+                (unique_keys - self.keys.prewarmed_keys(), unique_keys)
+            }
+            Operation::ComputeOnly => (requests, 0),
+            Operation::DispatchOnly => (0, 0),
         };
         assert_eq!(report.computes, expected_computes);
         let mut expected_checksum = 0_u64;
@@ -274,8 +293,8 @@ impl Pool {
         let resident = self.cache.resident_stats();
         assert!(resident.weight <= BUDGET_BYTES as u64);
         if matches!(self.operation, Operation::Cache) {
-            assert_eq!(resident.entries, expected_computes as u64);
-            assert_eq!(resident.weight, (expected_computes * VALUE_BYTES) as u64);
+            assert_eq!(resident.entries, expected_resident as u64);
+            assert_eq!(resident.weight, (expected_resident * VALUE_BYTES) as u64);
             assert_eq!(resident_hits, requests);
         }
         self.cache.clear();
@@ -289,6 +308,8 @@ impl Pool {
                 "workers": self.threads.len(), "keys": self.keys.name(),
                 "compute": self.compute.name(), "operation": self.operation.name(),
                 "requests": requests, "computes": report.computes,
+                "prewarmed_keys": self.keys.prewarmed_keys(),
+                "prewarmed_requests": self.keys.prewarmed_keys() * self.threads.len(),
                 "repeat_resident_hits": resident_hits,
                 "coalesced_or_resident_reuses": if matches!(self.operation, Operation::Cache) {
                     Some(requests - report.computes)
@@ -333,6 +354,18 @@ fn benchmarks(c: &mut Criterion) {
             },
         );
         drop(dispatch);
+        let mixed = Pool::new(workers, Keys::Mixed, Compute::Cheap, Operation::Cache);
+        mixed.verify();
+        group.bench_function(
+            BenchmarkId::new(
+                "half_prewarmed_same_key/cheap_u64/cache",
+                format!("workers_{workers}"),
+            ),
+            |b| {
+                b.iter_custom(|iterations| (0..iterations).map(|_| mixed.run(false).0).sum());
+            },
+        );
+        drop(mixed);
         for compute in [Compute::Cheap, Compute::NumericReduce] {
             for keys in [Keys::Distinct, Keys::Same] {
                 for operation in [Operation::Cache, Operation::ComputeOnly] {
