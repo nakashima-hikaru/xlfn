@@ -851,16 +851,17 @@ mod tests {
             code: 8,
             message: "x".repeat(1024 * 1024),
         };
-        // Another producer can report a Native error while this sink is active.
+        tracing::dispatcher::with_default(&dispatch, || {
+            report_no_unwind("traced-error", &small);
+            report_no_unwind("traced-error", &large);
+        });
+        // Register the tracing callsite under the test dispatcher first.
+        // Then deliver an unrelated native error while the sink is still live.
         std::thread::scope(|scope| {
             scope
                 .spawn(|| report_no_unwind("unrelated_traced_error", &small))
                 .join()
                 .unwrap();
-        });
-        tracing::dispatcher::with_default(&dispatch, || {
-            report_no_unwind("traced-error", &small);
-            report_no_unwind("traced-error", &large);
         });
         clear_diagnostic_sink().unwrap();
         assert_eq!(
