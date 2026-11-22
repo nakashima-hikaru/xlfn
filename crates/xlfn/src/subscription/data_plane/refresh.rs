@@ -45,36 +45,52 @@ impl<H: SubscriptionHost> PublishCore<H> {
             outcome
         };
 
-        // Collection groups each shard in dense pending-entry order. Retire
-        // backwards so the common full-buffer drain removes tail entries
-        // without moving survivors or repairing their indices.
-        let mut updates_iter = delivered_updates.drain(..).rev();
-        let mut current_opt = updates_iter.next();
-        while let Some(first_update) = current_opt {
-            let shard_idx = shard_index(TopicId(first_update.topic_id));
+        if delivered_updates.len() == 1 {
+            // A sparse refresh has no batch to amortize. Avoid building a
+            // drain iterator and shard guard; account immediately.
+            let update = delivered_updates
+                .pop()
+                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+            let shard_idx = shard_index(TopicId(update.topic_id));
             let mut shard = self.shards[shard_idx].lock();
-            // The batch borrows the mutex-protected shard and flushes
-            // before the lock can be released, including during unwinding.
-            let mut retirements = RefreshRetirements::new(self, shard_idx, &mut shard);
-            let mut current = first_update;
-            loop {
-                retirements.complete(current, outcome);
+            complete_update(
+                &mut shard,
+                update,
+                outcome,
+                |deliverable_count, deliverable| {
+                    self.record_pending_removal(deliverable_count, shard_idx, deliverable);
+                },
+            );
+        } else {
+            // Collection groups each shard in dense pending-entry order. Retire
+            // backwards so the common full-buffer drain removes tail entries
+            // without moving survivors or repairing their indices.
+            let mut updates_iter = delivered_updates.drain(..).rev();
+            let mut current_opt = updates_iter.next();
+            while let Some(first_update) = current_opt {
+                let shard_idx = shard_index(TopicId(first_update.topic_id));
+                let mut shard = self.shards[shard_idx].lock();
+                // The batch borrows the mutex-protected shard and flushes
+                // before the lock can be released, including during unwinding.
+                let mut retirements = RefreshRetirements::new(self, shard_idx, &mut shard);
+                let mut current = first_update;
+                loop {
+                    retirements.complete(current, outcome);
 
-                match updates_iter.next() {
-                    Some(next_update)
-                        if shard_index(TopicId(next_update.topic_id)) == shard_idx =>
-                    {
-                        current = next_update;
-                    }
-                    other => {
-                        current_opt = other;
-                        break;
+                    match updates_iter.next() {
+                        Some(next_update)
+                            if shard_index(TopicId(next_update.topic_id)) == shard_idx =>
+                        {
+                            current = next_update;
+                        }
+                        other => {
+                            current_opt = other;
+                            break;
+                        }
                     }
                 }
             }
         }
-
-        drop(updates_iter);
         let mut refresh = self.refresh.lock();
         let DeliveryPhase::Refreshing {
             refresh_id: active_id,
@@ -232,62 +248,74 @@ impl<'a, H: SubscriptionHost> RefreshRetirements<'a, H> {
 
     #[inline]
     fn complete(&mut self, update: RtdUpdate, outcome: RefreshOutcome) {
-        let topic_id = TopicId(update.topic_id);
-        let generation = update.connection_generation;
-        let sequence = update.sequence;
-        let mut active = self.shard.active_by_topic.get_mut(&topic_id);
-        let delivered = matches!(outcome, RefreshOutcome::Delivered);
+        let removed = &mut self.removed;
+        let deliverable = &mut self.deliverable;
+        complete_update(self.shard, update, outcome, |_, was_deliverable| {
+            // A shard can contribute no more removals than the number of
+            // entries in its two buffers when the lock was acquired.
+            *removed += 1;
+            *deliverable += usize::from(was_deliverable);
+        });
+    }
+}
 
-        if let Some(active) = active.as_deref_mut()
-            && active.generation == generation
-            && let ValueSlot::InFlight {
-                generation: slot_generation,
-                sequence: slot_sequence,
-            } = active.values[update.buffer.index()]
-            && slot_generation == generation
-            && slot_sequence == sequence
-        {
-            let replacement = if !delivered || active.latest_slot == Some(update.buffer) {
-                ValueSlot::Resident(VersionedRtdValue {
-                    generation,
-                    sequence,
-                    value: update.value,
-                })
-            } else {
-                ValueSlot::Empty
-            };
-            active.values[update.buffer.index()] = replacement;
+#[inline(always)]
+fn complete_update(
+    shard: &mut TopicShard,
+    update: RtdUpdate,
+    outcome: RefreshOutcome,
+    mut record_removal: impl FnMut(&mut usize, bool),
+) {
+    let topic_id = TopicId(update.topic_id);
+    let generation = update.connection_generation;
+    let sequence = update.sequence;
+    let mut active = shard.active_by_topic.get_mut(&topic_id);
+    let delivered = matches!(outcome, RefreshOutcome::Delivered);
+
+    if let Some(active) = active.as_deref_mut()
+        && active.generation == generation
+        && let ValueSlot::InFlight {
+            generation: slot_generation,
+            sequence: slot_sequence,
+        } = active.values[update.buffer.index()]
+        && slot_generation == generation
+        && slot_sequence == sequence
+    {
+        let replacement = if !delivered || active.latest_slot == Some(update.buffer) {
+            ValueSlot::Resident(VersionedRtdValue {
+                generation,
+                sequence,
+                value: update.value,
+            })
+        } else {
+            ValueSlot::Empty
+        };
+        active.values[update.buffer.index()] = replacement;
+    }
+
+    if !delivered {
+        return;
+    }
+
+    let deliverable = active.as_ref().is_some_and(|active| active.committed);
+    for buffer in BufferIndex::ALL {
+        if remove_queued_if(&mut shard.pending[buffer.index()], topic_id, |queued| {
+            queued.connection_generation == generation && queued.sequence <= sequence
+        }) {
+            record_removal(&mut shard.deliverable_count, deliverable);
         }
+    }
 
-        if !delivered {
-            return;
-        }
-
-        let deliverable = active.as_ref().is_some_and(|active| active.committed);
+    if let Some(active) = active {
         for buffer in BufferIndex::ALL {
-            if remove_queued_if(
-                &mut self.shard.pending[buffer.index()],
-                topic_id,
-                |queued| queued.connection_generation == generation && queued.sequence <= sequence,
-            ) {
-                // A shard can contribute no more removals than the number of
-                // entries in its two buffers when the lock was acquired.
-                self.removed += 1;
-                self.deliverable += usize::from(deliverable);
-            }
-        }
-
-        if let Some(active) = active {
-            for buffer in BufferIndex::ALL {
-                let slot = &mut active.values[buffer.index()];
-                if let ValueSlot::Resident(versioned) = slot
-                    && versioned.generation == generation
-                    && versioned.sequence <= sequence
-                    && active.latest_slot != Some(buffer)
-                    && !self.shard.pending[buffer.index()].contains_key(&topic_id)
-                {
-                    *slot = ValueSlot::Empty;
-                }
+            let slot = &mut active.values[buffer.index()];
+            if let ValueSlot::Resident(versioned) = slot
+                && versioned.generation == generation
+                && versioned.sequence <= sequence
+                && active.latest_slot != Some(buffer)
+                && !shard.pending[buffer.index()].contains_key(&topic_id)
+            {
+                *slot = ValueSlot::Empty;
             }
         }
     }

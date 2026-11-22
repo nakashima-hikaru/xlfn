@@ -216,16 +216,15 @@ impl<'session> ExcelCallbackValue<'session> {
     ) -> Result<(i32, CallbackResult<'session>), crate::callback_gate::CallbackAdmissionSuppressed>
     {
         let callback_admission = crate::callback_gate::enter_callback()?;
-        // SAFETY: The caller supplies live callback arguments. The Scratch
-        // slice is writable and has no non-null invariant to invalidate.
-        let (status, raw, callback_invoked) = unsafe {
-            match arguments {
-                CallbackArguments::Borrowed(arguments) => {
-                    excel12_with_invocation(function, arguments)
-                }
-                CallbackArguments::Scratch(arguments) => {
-                    excel12_with_invocation_scratch(function, arguments)
-                }
+        let (status, raw, callback_invoked) = match arguments {
+            CallbackArguments::Borrowed(arguments) => {
+                // SAFETY: The caller supplies live callback arguments.
+                unsafe { excel12_with_invocation(function, arguments) }
+            }
+            CallbackArguments::Scratch(arguments) => {
+                // SAFETY: The caller supplies live callback arguments and a
+                // writable raw slice with no non-null invariant to invalidate.
+                unsafe { excel12_with_invocation_scratch(function, arguments) }
             }
         };
         let callback_status = ExcelCallbackStatus::from_raw(status);
