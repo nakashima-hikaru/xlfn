@@ -1,8 +1,9 @@
 //! One process-owned mapping for all loaded copies of the accounting protocol.
 //!
 //! Each loaded image keeps its own view of the same physical atomic counters.
-//! Views remain until process exit because published FP12 allocations may
-//! outlive an image. One page of virtual metadata per physical image load is
+//! Each view and its section handle remain until process exit: published FP12
+//! allocations may outlive an image, and later loads must find the same name.
+//! One page of virtual metadata and one handle per physical image load are
 //! deliberate; no address from shared memory is ever dereferenced.
 //!
 //! A protected owner/SYSTEM DACL excludes other users and is checked even on
@@ -68,36 +69,20 @@ fn mapping_name() -> XllResult<Vec<u16>> {
         .collect())
 }
 
-/// The handle's Option only disarms successful CloseHandle during Drop.
-/// An unmapped handle can never be used as a Mapping view.
-struct MappingHandle {
-    pointer: Option<NonNull<c_void>>,
-}
-
-impl MappingHandle {
-    fn close(&mut self) -> XllResult<()> {
-        if let Some(handle) = self.pointer {
-            // SAFETY: this is the unique owned handle. A mapped view keeps
-            // the section alive independently after successful close.
-            if unsafe { CloseHandle(handle.as_ptr()) } == 0 {
-                return Err(os_error("CloseHandle"));
-            }
-            self.pointer = None;
-        }
-        Ok(())
-    }
-}
+/// A temporary section needs a live handle to remain discoverable by name.
+struct MappingHandle(NonNull<c_void>);
 
 impl Drop for MappingHandle {
     fn drop(&mut self) {
-        let _ = self.close();
+        // SAFETY: this is the unique owned handle.
+        let _ = unsafe { CloseHandle(self.0.as_ptr()) };
     }
 }
 
 /// A complete mapped view. Partial construction is owned by MappingHandle;
 /// every value of this type has a real view, including during error cleanup.
 struct Mapping {
-    handle: MappingHandle,
+    _handle: MappingHandle,
     view: NonNull<c_void>,
 }
 
@@ -121,9 +106,7 @@ impl Mapping {
             )
         };
         let pointer = NonNull::new(handle).ok_or_else(|| os_error("CreateFileMappingW"))?;
-        let handle = MappingHandle {
-            pointer: Some(pointer),
-        };
+        let handle = MappingHandle(pointer);
         security.validate_mapping(pointer.as_ptr())?;
         // SAFETY: the unique handle owns a readable/writable mapping covering
         // the complete fixed-layout ProcessState at offset zero.
@@ -137,21 +120,22 @@ impl Mapping {
             )
         };
         let view = NonNull::new(view).ok_or_else(|| os_error("MapViewOfFile"))?;
-        Ok(Self { handle, view })
+        Ok(Self {
+            _handle: handle,
+            view,
+        })
     }
 
     fn view(&self) -> NonNull<c_void> {
         self.view
     }
 
-    /// Initialization, handle release, and permanent view transfer are one
-    /// consuming operation. No reference escapes a failed initialization or
-    /// CloseHandle; error Drop unmaps the view before retrying handle cleanup.
+    /// Validate before transferring both resources to the process lifetime.
     #[allow(
         clippy::mem_forget,
-        reason = "published FP12 blocks retain the initialized OS view until process exit"
+        reason = "FP12 output blocks and future DLL loads require the live named section"
     )]
-    fn initialize_and_retain(mut self) -> XllResult<&'static ProcessState> {
+    fn initialize_and_retain(self) -> XllResult<&'static ProcessState> {
         let pointer = self.view().cast::<ProcessState>();
         if !pointer
             .as_ptr()
@@ -186,9 +170,8 @@ impl Mapping {
         // above. Its atomic fields accept all bit patterns; initialization
         // never resets live accounting from another attachment.
         unsafe { pointer.as_ref() }.initialize()?;
-        self.handle.close()?;
-        // Retained FP12 blocks may outlive this DLL. Retain exactly this view
-        // until process exit; its section is independent of the closed handle.
+        // A view keeps the pages alive, but the name needs a section handle.
+        // Keep both so the next DLL attachment sees the same accounting.
         std::mem::forget(self);
         // SAFETY: the exact initialized view was just permanently retained.
         Ok(unsafe { pointer.as_ref() })
@@ -257,6 +240,35 @@ mod tests {
         c.reserve(80, 80).unwrap();
         c.release_reserved(80);
         assert_eq!(a.reserved_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn retained_mapping_can_be_found_by_a_later_attachment() {
+        let name = format!(
+            "Local\\xlfn.numeric-retained-test.{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+        .encode_utf16()
+        .chain([0])
+        .collect::<Vec<_>>();
+        let first = Mapping::open(&name)
+            .unwrap()
+            .initialize_and_retain()
+            .unwrap();
+        first.reserve(48, 80).unwrap();
+        first.publish(48);
+        let later = Mapping::open(&name)
+            .unwrap()
+            .initialize_and_retain()
+            .unwrap();
+        let published = later.published_bytes.load(Ordering::Relaxed);
+        first.release_published(48);
+        assert_eq!(published, 48);
+        assert_eq!(later.published_bytes.load(Ordering::Relaxed), 0);
     }
 
     #[test]

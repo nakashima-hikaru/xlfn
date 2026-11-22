@@ -105,6 +105,7 @@ pub(crate) fn quarantine_runtime_resources<A: Addin>(
             },
         ),
     };
+    let owns_cleanup = module_cleanup_authority.is_some();
     let _ = catch_no_unwind(AssertUnwindSafe(|| {
         if let Some(module_cleanup_authority) = module_cleanup_authority
             && let Err((error, authority)) = module_cleanup_authority.finish()
@@ -135,4 +136,9 @@ pub(crate) fn quarantine_runtime_resources<A: Addin>(
             );
         }
     }));
+    if owns_cleanup {
+        runtime
+            .lifecycle_control()
+            .finish_module_cleanup_for_quarantine();
+    }
 }

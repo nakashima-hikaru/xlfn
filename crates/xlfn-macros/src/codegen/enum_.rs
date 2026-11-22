@@ -173,7 +173,7 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
                     #(#outputs,)*
                 };
                 ::core::result::Result::Ok(
-                    #krate::value::ExcelCellOutput::String(__text.to_owned())
+                    #krate::value::ExcelCellOutput::String(::std::borrow::ToOwned::to_owned(__text))
                 )
             }
 

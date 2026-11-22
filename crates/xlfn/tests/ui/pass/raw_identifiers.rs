@@ -5,10 +5,10 @@ use xlfn::value::IntoExcel;
 struct r#gen;
 
 #[excel_addin]
-impl Addin for r#gen {
+impl r#Addin for r#gen {
     type SharedState = ();
     type LifecycleState = ();
-    type Error = XllError;
+    type r#Error = XllError;
     type Layers = ();
 
     fn open(_: &OpenContext<Self>) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
@@ -27,6 +27,13 @@ enum Keyword {
 #[excel_function]
 fn r#type(r#match: f64) -> f64 {
     r#match
+}
+
+#[excel_function]
+fn explicit_context(
+    #[excel_context(r#main_thread)] _context: MainThreadContext<'_, r#gen>,
+) -> f64 {
+    4.0
 }
 
 fn main() {

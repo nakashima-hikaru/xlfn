@@ -2111,6 +2111,56 @@ fn preparation_during_connecting_survives_the_first_call_rolling_back() {
 }
 
 #[test]
+fn revoked_preparation_cannot_commit_after_server_detaches() {
+    for terminate in [false, true] {
+        let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+        let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+        let server = runtime.register_test_server(1);
+        let topic = RtdTopic::single("revoked-preparation").unwrap();
+        let prepared = runtime.prepare(&source, topic.borrowed()).unwrap();
+        let id = prepared.id();
+        runtime
+            .connect_transaction(&server, TopicId(1), id)
+            .unwrap()
+            .commit()
+            .unwrap();
+        if terminate {
+            runtime.terminate_server(server.generation()).unwrap();
+        } else {
+            runtime.disconnect(&server, TopicId(1)).unwrap();
+        }
+
+        // The in-flight Excel call can still return success. It only releases
+        // its old reservation; it cannot commit the detached transport key.
+        prepared.commit();
+        let catalog = runtime.catalog.lock();
+        assert_eq!(catalog.pending_len(), 0);
+        assert!(catalog.entries.is_empty());
+        catalog.assert_identity_invariants();
+    }
+}
+
+#[test]
+fn fresh_preparation_can_commit_after_an_older_reservation_is_revoked() {
+    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let server = runtime.register_test_server(1);
+    let topic = RtdTopic::single("fresh-preparation").unwrap();
+    let old = runtime.prepare(&source, topic.borrowed()).unwrap();
+    let id = old.id();
+    runtime.claim_server(server.generation(), id).unwrap();
+    runtime.terminate_server(server.generation()).unwrap();
+    let fresh = runtime.prepare(&source, topic.borrowed()).unwrap();
+    assert_eq!(fresh.id(), id);
+    fresh.commit();
+    old.commit();
+
+    let catalog = runtime.catalog.lock();
+    assert_eq!(catalog.pending_len(), 1);
+    catalog.assert_identity_invariants();
+}
+
+#[test]
 fn distinct_handles_do_not_share_source_identity() {
     let fixture = SourceFixture::new();
     let (source_a, _, _) = fixture.add::<f64>(None);

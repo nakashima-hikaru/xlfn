@@ -206,12 +206,25 @@ impl<V> CacheLookupDomain<V> {
         let mut records = PendingEntries::new();
         let mut consumed = 1;
         loop {
+            let mut consecutive_empty = 0;
             while self.pending_nodes.load(Ordering::Relaxed) != 0 {
                 let Some(Ok(batch)) = self.domain.poll_quiesce() else {
                     break;
                 };
-                let batch = ReclaimEntries::account(self, batch.into_inner());
-                append_records(&mut records, batch.entries);
+                let batch = batch.into_inner();
+                if batch.is_empty() {
+                    consecutive_empty += 1;
+                    // Debt can still cover work detached by another operation.
+                    // After an empty pass over both generations, let that
+                    // owner account for its batch rather than spinning here.
+                    if consecutive_empty == 2 {
+                        break;
+                    }
+                } else {
+                    consecutive_empty = 0;
+                    let batch = ReclaimEntries::account(self, batch);
+                    append_records(&mut records, batch.entries);
+                }
             }
             let requested = self
                 .maintenance_requests

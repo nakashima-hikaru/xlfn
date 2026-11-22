@@ -17,9 +17,35 @@ use std::panic::AssertUnwindSafe;
 /// new object from a UDF; the derive also supplies its owned return protocol.
 pub trait ExcelHandleObject: Send + Sync + 'static {}
 
-/// Compile-time brand used to keep a generated async handle lease inside the
-/// task that acquired its raw object pin.
-pub(crate) struct GenerationLeaseBrand;
+/// Async-task-owned lifetime brand and fallback owner for bound raw pins.
+pub(crate) struct GenerationLeaseBrand {
+    #[cfg(all(feature = "async", feature = "handles"))]
+    pins: crate::sync::Mutex<Vec<Option<RawObjectLeaseGuard>>>,
+}
+
+#[cfg(all(feature = "async", feature = "handles"))]
+impl GenerationLeaseBrand {
+    pub(crate) fn new() -> Self {
+        Self {
+            pins: crate::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn retain(&self, pin: RawObjectLeaseGuard) -> XllResult<usize> {
+        let mut pins = self.pins.lock();
+        pins.try_reserve(1).map_err(|_| XllError::Overloaded)?;
+        let slot = pins.len();
+        pins.push(Some(pin));
+        Ok(slot)
+    }
+
+    fn release(&self, slot: usize) {
+        // Retiring the raw pin may destroy user payloads that reenter the
+        // runtime. Never run the destructor under the task's bookkeeping lock.
+        let pin = self.pins.lock()[slot].take();
+        drop(pin);
+    }
+}
 
 type HandleAliasMarker<'call, T> = (&'call crate::call::CallScope<'call>, fn(T) -> T);
 
@@ -153,11 +179,16 @@ impl<T: ExcelHandleObject> AsRef<T> for Handle<'_, T> {
 /// The framework creates this value only after the generated task has been
 /// admitted. It is intentionally tied to the task's branded generation and
 /// cannot be returned from the UDF, stored in a `'static` location, or moved
-/// into an independently spawned thread.
+/// into an independently spawned thread. The enclosing task retains any pins
+/// whose lease is forgotten and releases them when the task ends.
 pub struct HandleLease<'generation, T: ExcelHandleObject> {
     object_id: ObjectId,
     value: TypedObjectProjection<T>,
+    #[cfg(all(feature = "async", feature = "handles"))]
+    _lease: ScopedPinSlot<'generation>,
+    #[cfg(not(all(feature = "async", feature = "handles")))]
     _lease: RawObjectLeaseGuard,
+    #[cfg(not(all(feature = "async", feature = "handles")))]
     _generation: PhantomData<&'generation GenerationLeaseBrand>,
 }
 
@@ -178,8 +209,9 @@ impl<T: ExcelHandleObject> Deref for HandleLease<'_, T> {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        // SAFETY: `_lease` owns the raw object lease guard for the entire lifetime of this
-        // lease, and `value` was created from that same object cell.
+        // SAFETY: the task's brand owns the raw pin associated with this
+        // lease's slot. The pin and projection refer to the same object cell,
+        // and the pin is released only after the lease is no longer usable.
         unsafe { self.value.as_ref_unchecked() }
     }
 }
@@ -191,7 +223,20 @@ impl<T: ExcelHandleObject> AsRef<T> for HandleLease<'_, T> {
     }
 }
 
-// SAFETY: the object cell and lease guard are Send/Sync, and T is constrained
+#[cfg(all(feature = "async", feature = "handles"))]
+struct ScopedPinSlot<'generation> {
+    brand: &'generation GenerationLeaseBrand,
+    slot: usize,
+}
+
+#[cfg(all(feature = "async", feature = "handles"))]
+impl Drop for ScopedPinSlot<'_> {
+    fn drop(&mut self) {
+        self.brand.release(self.slot);
+    }
+}
+
+// SAFETY: the object cell and the pin owner are Send/Sync, and T is constrained
 // by ExcelHandleObject.
 unsafe impl<T: ExcelHandleObject> Send for HandleLease<'_, T> {}
 // SAFETY: same invariant as `Send`.
@@ -239,11 +284,12 @@ impl<T: ExcelHandleObject> PendingHandleLease<T> {
         if self.generation != scope.generation() {
             return Err(XllError::StaleHandle);
         }
+        let brand = scope.brand();
+        let slot = brand.retain(self.lease)?;
         Ok(HandleLease {
             object_id: self.object_id,
             value: self.value,
-            _lease: self.lease,
-            _generation: PhantomData,
+            _lease: ScopedPinSlot { brand, slot },
         })
     }
 }

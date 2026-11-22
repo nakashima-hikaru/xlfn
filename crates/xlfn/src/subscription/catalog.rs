@@ -63,6 +63,7 @@ pub(crate) struct SubscriptionEntry {
     pub(crate) source_id: SourceId,
     pub(crate) topic: RtdTopic,
     phase: SubscriptionPhase,
+    preparation_epoch: u64,
 }
 
 impl SubscriptionEntry {
@@ -138,7 +139,19 @@ impl SubscriptionEntry {
         Ok(())
     }
 
-    pub(crate) fn finish_preparation(&mut self, committed: bool) -> PreparationFinish {
+    pub(crate) fn preparation_epoch(&self) -> u64 {
+        self.preparation_epoch
+    }
+
+    fn revoke_preparations(&mut self) {
+        self.preparation_epoch = self
+            .preparation_epoch
+            .checked_add(1)
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+    }
+
+    pub(crate) fn finish_preparation(&mut self, epoch: u64, committed: bool) -> PreparationFinish {
+        let committed = committed && epoch == self.preparation_epoch;
         match &mut self.phase {
             SubscriptionPhase::Pending {
                 reservations,
@@ -161,7 +174,7 @@ impl SubscriptionEntry {
                             .expect("a remaining reservation is non-zero");
                     }
                 }
-                if !committed && self.can_remove() {
+                if self.can_remove() {
                     PreparationFinish::Remove
                 } else {
                     PreparationFinish::Keep
@@ -297,6 +310,7 @@ impl SubscriptionEntry {
             } if *current == Some(server) => {
                 *current = None;
                 *commitment = PendingCommitment::Uncommitted;
+                self.revoke_preparations();
                 true
             }
             SubscriptionPhase::Connecting {
@@ -312,6 +326,7 @@ impl SubscriptionEntry {
                     server: None,
                     commitment: PendingCommitment::Uncommitted,
                 };
+                self.revoke_preparations();
                 true
             }
             _ => false,
@@ -336,6 +351,7 @@ impl SubscriptionEntry {
                     server: None,
                     commitment: PendingCommitment::Uncommitted,
                 };
+                self.revoke_preparations();
                 (true, self.can_remove())
             }
             SubscriptionPhase::Active {
@@ -352,6 +368,7 @@ impl SubscriptionEntry {
                     server: None,
                     commitment: PendingCommitment::Uncommitted,
                 };
+                self.revoke_preparations();
                 (true, false)
             }
             _ => (false, false),
@@ -389,6 +406,7 @@ impl<Part: AsRef<str>> PendingInsertPlan<'_, '_, Part> {
         self.entry.insert(SubscriptionEntry {
             source_id: self.source_id,
             topic,
+            preparation_epoch: 0,
             phase: SubscriptionPhase::Pending {
                 reservations: Some(NonZeroUsize::MIN),
                 server: None,
@@ -605,6 +623,7 @@ mod typestate_tests {
                 sequence: 1,
             }),
             topic: RtdTopic::single("ticket-generation").unwrap(),
+            preparation_epoch: 0,
             phase: SubscriptionPhase::Pending {
                 reservations: NonZeroUsize::new(1),
                 server: None,

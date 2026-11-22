@@ -24,6 +24,7 @@ struct ReloadAddin;
 
 thread_local! {
     static OPENS: Cell<usize> = const { Cell::new(0) };
+    static PANIC_ON_OPEN: Cell<bool> = const { Cell::new(false) };
     static QUIESCES: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -41,6 +42,7 @@ impl Addin for ReloadAddin {
 
     fn open(_: &OpenContext<Self>) -> Result<Opened<()>, XllError> {
         OPENS.set(OPENS.get() + 1);
+        assert!(!PANIC_ON_OPEN.replace(false), "test Addin::open panic");
         Ok(Opened::new(()))
     }
 
@@ -234,6 +236,51 @@ fn reload_stops_after_terminal_metadata_cleanup_and_retries_debt_on_later_entry(
             close_replacement(&runtime);
         }
     }
+}
+
+#[test]
+fn panicking_open_finishes_module_admission_cleanup_before_returning() {
+    let _callback_guard = crate::test_callback::lock();
+    let runtime = Runtime::<ReloadAddin>::new_with_physical_unload();
+    runtime
+        .ensure_module_residency(residency_probe_anchor as *const ())
+        .unwrap();
+    let script = CallbackScript::install([Reply::success(XL_GET_NAME, module_name())]);
+    PANIC_ON_OPEN.set(true);
+    assert_eq!(open(&runtime), 0);
+    assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+    assert_eq!(
+        crate::module_runtime::ingress().phase(),
+        crate::ingress::PHASE_CLOSED
+    );
+    assert!(crate::callback_gate::enter_callback().is_err());
+    script.assert_calls(&[XL_GET_NAME]);
+}
+
+#[test]
+fn finalized_pending_rollback_can_reopen_in_the_same_host_invocation() {
+    let _callback_guard = crate::test_callback::lock();
+    OPENS.set(0);
+    let runtime = Runtime::<ReloadAddin>::new_with_physical_unload();
+    runtime
+        .ensure_module_residency(residency_probe_anchor as *const ())
+        .unwrap();
+    assert!(
+        runtime
+            .begin_open()
+            .unwrap()
+            .fail_for_test()
+            .requires_rollback()
+    );
+    assert_eq!(runtime.phase(), LifecyclePhase::OpenRollbackPending);
+
+    let replacement = CallbackScript::install(replacement_replies());
+    assert_eq!(open(&runtime), 1);
+    assert_eq!(runtime.phase(), LifecyclePhase::Open);
+    assert_eq!(OPENS.get(), 1);
+    replacement.assert_calls(&[XL_GET_NAME, XL_EVENT_REGISTER, XLF_EVALUATE, XLF_REGISTER]);
+    drop(replacement);
+    close_replacement(&runtime);
 }
 
 #[test]

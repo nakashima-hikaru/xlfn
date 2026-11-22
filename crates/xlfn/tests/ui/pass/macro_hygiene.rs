@@ -20,6 +20,22 @@ macro_rules! stringify {
     };
 }
 
+#[allow(unused_macros, reason = "detect accidental resolution at the call site")]
+macro_rules! concat {
+    ($($arguments:tt)*) => {
+        compile_error!("generated wrapper must use core::concat!")
+    };
+}
+
+#[allow(dead_code)]
+trait ToOwned {
+    fn to_owned(&self);
+}
+
+impl ToOwned for ::core::primitive::str {
+    fn to_owned(&self) {}
+}
+
 #[allow(non_camel_case_types, dead_code)]
 type u8 = ();
 #[allow(non_camel_case_types, dead_code)]

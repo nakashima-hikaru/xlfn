@@ -378,24 +378,30 @@ impl DiagnosticHistory {
             state.dropped_events = state.dropped_events.saturating_add(1);
             return;
         };
-        // Allocate the bounded ring once. Its capacity is included in the byte
-        // budget; no infallible allocation occurs in the recording path.
+        // Keep room for owned error text even if the first recorded failure
+        // is compact. Count actual capacity in case the allocator rounds up.
         if state.records.capacity() == 0 {
-            let slots = self
-                .limits
-                .max_records
-                .min(self.limits.max_bytes / size_of::<StoredRecord>());
-            if slots == 0 || state.records.try_reserve_exact(slots).is_err() {
+            let slot_bytes = size_of::<StoredRecord>();
+            let ring_budget = (self.limits.max_bytes / 2)
+                .max(slot_bytes)
+                .min(self.limits.max_bytes);
+            let mut slots = self.limits.max_records.min(ring_budget / slot_bytes);
+            while slots > 0 {
+                let mut records = VecDeque::new();
+                if records.try_reserve_exact(slots).is_ok()
+                    && records.capacity() <= ring_budget / slot_bytes
+                {
+                    state.records = records;
+                    break;
+                }
+                slots /= 2;
+            }
+            if state.records.capacity() == 0 {
                 state.dropped_events = state.dropped_events.saturating_add(1);
                 return;
             }
         }
         let fixed_bytes = state.records.capacity() * size_of::<StoredRecord>();
-        if fixed_bytes > self.limits.max_bytes {
-            state.records = VecDeque::new();
-            state.dropped_events = state.dropped_events.saturating_add(1);
-            return;
-        }
         let bytes = record.message.dynamic_bytes();
         if bytes > self.limits.max_bytes.saturating_sub(fixed_bytes) {
             state.dropped_events = state.dropped_events.saturating_add(1);
@@ -735,6 +741,25 @@ mod tests {
     }
 
     #[test]
+    fn small_budget_reserves_room_for_owned_text_after_a_compact_record() {
+        let history = DiagnosticHistory::with_limits(DiagnosticHistoryLimits {
+            max_records: 1024,
+            max_bytes: 4 * size_of::<StoredRecord>(),
+        });
+        record(&history, 1, &XllError::Closing);
+        record(
+            &history,
+            2,
+            &XllError::custom(ExcelError::Value, String::from("owned detail")),
+        );
+        let page = history.errors_since(DiagnosticCursor::START, 10);
+        assert_eq!(page.errors.len(), 2);
+        assert_eq!(page.errors[1].message, "owned detail");
+        assert_eq!(page.missed_events, 0);
+        assert!(history.stats().retained_bytes <= history.limits().max_bytes);
+    }
+
+    #[test]
     fn byte_budget_rejects_oversized_records_without_erasing_retained_records() {
         let history = DiagnosticHistory::with_limits(DiagnosticHistoryLimits {
             max_records: 2,
@@ -762,14 +787,17 @@ mod tests {
             max_records: 8,
             max_bytes: 8 * size_of::<StoredRecord>() + 256,
         });
-        let error = XllError::custom(ExcelError::Value, "m".repeat(100));
+        let max_bytes = history.limits().max_bytes;
+        let slot_bytes = size_of::<StoredRecord>();
+        let text_budget = max_bytes - (max_bytes / 2 / slot_bytes) * slot_bytes;
+        let error = XllError::custom(ExcelError::Value, "m".repeat(text_budget / 3 + 1));
         for id in 1..=4 {
             record(&history, id, &error);
         }
         record(
             &history,
             5,
-            &XllError::custom(ExcelError::Value, "m".repeat(1024)),
+            &XllError::custom(ExcelError::Value, "m".repeat(max_bytes)),
         );
         let page = history.errors_since(DiagnosticCursor::START, 10);
         assert_eq!(page.errors.len(), 2);

@@ -273,6 +273,10 @@ fn complete_evaluation<
     evaluated: Result<XllResult<T>, CaughtPanic>,
 ) -> AsyncCompletion {
     if !token.try_start_delivery() {
+        // Cancellation owns the worksheet outcome, not the panic diagnostic.
+        if evaluated.is_err() {
+            crate::diagnostics::report_no_unwind(responder.udf_id(), &XllError::Panic);
+        }
         drop_evaluation_no_unwind(responder.udf_id(), evaluated);
         let cancel_error = XllError::ExcelValue(crate::ExcelError::NotAvailable);
         return AsyncCompletion {
@@ -355,15 +359,26 @@ pub(crate) unsafe fn async_return(
     // xlFree cleanup path.
     let (raw_status, callback_result, invoked) =
         unsafe { xlfn_sys::excel12_async_return(handle, result) };
-    let status = ExcelCallbackStatus::from_raw(raw_status);
     drop(callback_admission);
+    check_async_acceptance(
+        ExcelCallbackStatus::from_raw(raw_status),
+        callback_result,
+        invoked,
+    )
+}
+
+fn check_async_acceptance(
+    status: ExcelCallbackStatus,
+    callback_result: XLOPER12,
+    invoked: bool,
+) -> XllResult<()> {
     let accepted = invoked
         && status == ExcelCallbackStatus::Success
         && callback_result.base_type() == XLTYPE_BOOL
         // SAFETY: XLTYPE_BOOL selects the boolean union field.
         && unsafe { callback_result.value.boolean != 0 };
     if !accepted {
-        let failure = if !invoked || status == ExcelCallbackStatus::Success {
+        let failure = if status == ExcelCallbackStatus::Success {
             crate::error::ExcelApiFailure::UnexpectedResult
         } else {
             crate::error::ExcelApiFailure::Status(status)
@@ -415,6 +430,87 @@ mod tests {
     };
     use std::task::{Context, Poll};
     use xlfn_sys::{XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG_DATA};
+
+    #[test]
+    fn uninvoked_async_return_preserves_the_callback_failure_status() {
+        use crate::error::{ExcelApiFailure, ExcelApiFunction};
+        let failed = ExcelCallbackStatus::from_raw(xlfn_sys::XLRET_FAILED);
+        assert!(matches!(
+            check_async_acceptance(failed, XLOPER12::nil(), false),
+            Err(XllError::ExcelApi {
+                function: ExcelApiFunction::AsyncReturn,
+                failure: ExcelApiFailure::Status(status),
+            }) if status == failed
+        ));
+        assert!(matches!(
+            check_async_acceptance(ExcelCallbackStatus::Success, XLOPER12::boolean(false), true),
+            Err(XllError::ExcelApi {
+                function: ExcelApiFunction::AsyncReturn,
+                failure: ExcelApiFailure::UnexpectedResult,
+            })
+        ));
+    }
+
+    #[test]
+    fn cancelled_async_panic_is_reported_without_changing_the_worksheet_outcome() {
+        struct DiagnosticCounter(Arc<AtomicUsize>);
+        impl tracing::Subscriber for DiagnosticCounter {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                if event.metadata().fields().field("diagnostic_id").is_some() {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        let _runtime = crate::runtime::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _callbacks = crate::test_callback::lock();
+        crate::test_callback::install();
+        crate::test_callback::reset();
+        let reports = Arc::new(AtomicUsize::new(0));
+        let dispatch = tracing::Dispatch::new(DiagnosticCounter(Arc::clone(&reports)));
+        let mut raw = XLOPER12 {
+            value: XLOPER12Value {
+                big_data: XLOPER12BigData {
+                    handle: XLOPER12BigDataHandle {
+                        data: std::ptr::null_mut(),
+                    },
+                    byte_count: 0,
+                },
+            },
+            xltype: XLTYPE_BIG_DATA,
+        };
+        // SAFETY: the responder copies the live, initialized handle.
+        let responder = unsafe { ExcelAsyncResponder::from_raw("CANCEL.PANIC", &mut raw).unwrap() };
+        let (source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
+        let evaluated =
+            catch_no_unwind(|| -> XllResult<f64> { panic!("injected async evaluation panic") });
+        source.cancel();
+        let completion = tracing::dispatcher::with_default(&dispatch, || {
+            complete_evaluation(responder, token, evaluated)
+        });
+        assert_eq!(reports.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            completion.completion,
+            OwnedCompletionOutcome::Cancelled
+        ));
+        assert!(matches!(
+            completion.delivery,
+            OwnedDeliveryOutcome::Delivered
+        ));
+        assert_eq!(crate::test_callback::async_return_calls(), 1);
+    }
 
     struct Pending {
         callbacks_at_drop: Arc<AtomicUsize>,

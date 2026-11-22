@@ -122,14 +122,20 @@ fn finish_active<G: UdfLayerGuard>(
     }
 }
 
-/// A layer can reject a launch before cancellation or layer-guard ownership
-/// exists. That invocation still has an observed response and trace outcome.
+impl crate::execution::LayerRejection for (AsyncCompletion, std::time::Duration) {
+    fn outcome(&self) -> CallOutcome<'_> {
+        call_outcome(&self.0, self.1)
+    }
+}
+
+/// A layer can reject before ownership of a complete guard tuple exists.
+/// That invocation still has an observed response and trace outcome.
 pub(crate) fn trace_rejected_launch(
     metadata: &CallMetadata,
-    timer: CallTimer,
+    duration: std::time::Duration,
     completion: &AsyncCompletion,
 ) {
-    let outcome = call_outcome(completion, timer.elapsed());
+    let outcome = call_outcome(completion, duration);
     let metadata = UdfTraceMetadata {
         udf_id: metadata.udf_id,
         excel_name: metadata.excel_name,

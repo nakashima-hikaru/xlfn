@@ -536,17 +536,17 @@ impl ExportIngress {
                 message: "injected export drain preparation failure".into(),
             });
         }
-        #[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
+        #[cfg(windows)]
         {
-            use crate::excel_rtd::drain_wait::UnstartedDrain;
+            use crate::drain_wait::{UnstartedDrain, drain_with_com_dispatch};
 
-            let prepared = crate::excel_rtd::drain_with_com_dispatch(UnstartedDrain::new(wait))
+            let prepared = drain_with_com_dispatch(UnstartedDrain::new(wait))
                 .map_err(|(error, _unstarted)| error)?;
             let joined = prepared.run().map_err(|(error, _unstarted)| error)?;
             joined.into_output();
             Ok(())
         }
-        #[cfg(not(all(windows, any(feature = "rtd", feature = "handles"))))]
+        #[cfg(not(windows))]
         {
             wait();
             Ok(())

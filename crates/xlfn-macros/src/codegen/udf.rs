@@ -438,7 +438,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     __scope: #krate::__private::v1::AsyncTaskScope<'generation>,
                 ) -> impl ::std::future::Future<
                     Output = #krate::error::XllResult<#return_type>,
-                > + Send + 'generation {
+                > + ::core::marker::Send + 'generation {
                     #(#builder_argument_moves)*
                     #builder_lease_move
                     #builder_cancellation_move
@@ -552,7 +552,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     let wrapper = if is_async {
         quote_spanned! {generated=>
             #(#gating)*
-            #[doc = concat!("Excel async ABI wrapper for `", #excel_name, "`.")]
+            #[doc = ::core::concat!("Excel async ABI wrapper for `", #excel_name, "`.")]
             #[doc = ""]
             #[doc = "# Safety"]
             #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument must match its registered ABI; argument pointers must remain live for this call, and the async handle must be a live XLOPER12 supplied by Excel. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
@@ -568,7 +568,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     } else {
         quote_spanned! {generated=>
             #(#gating)*
-            #[doc = concat!("Excel ABI wrapper for `", #excel_name, "`.")]
+            #[doc = ::core::concat!("Excel ABI wrapper for `", #excel_name, "`.")]
             #[doc = ""]
             #[doc = "# Safety"]
             #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument must match its registered ABI; pointer arguments must refer to live XLOPER12, FP12, or counted UTF-16 storage as registered for this call. Never call this wrapper to restart an active invocation after Abort or Uncalced."]

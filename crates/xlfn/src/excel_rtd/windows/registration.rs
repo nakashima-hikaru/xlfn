@@ -281,6 +281,11 @@ pub(super) fn scavenge_owned_registrations(
                 return Ok(());
             }
             if !registry_key_exists(&class_key)? {
+                // ProgIDs are shared, while CLSIDs are redirected on WOW64.
+                // Leave the discovery marker for the owning registry view.
+                if registry_key_exists_in_view(&class_key, OTHER_CLSID_VIEW)? {
+                    return Ok(());
+                }
                 // A previous attempt removed the class but could not remove
                 // its marked ProgID. Its identity is still fully validated;
                 // there is no remaining CLSID to validate or delete.
@@ -328,7 +333,17 @@ fn delete_registry_tree(path: &str) -> XllResult<()> {
     }
 }
 
+// RegOpenKeyExW ignores these WOW64 masks on 32-bit Windows.
+#[cfg(target_pointer_width = "64")]
+const OTHER_CLSID_VIEW: u32 = 0x0200; // KEY_WOW64_32KEY
+#[cfg(target_pointer_width = "32")]
+const OTHER_CLSID_VIEW: u32 = 0x0100; // KEY_WOW64_64KEY
+
 fn registry_key_exists(path: &str) -> XllResult<bool> {
+    registry_key_exists_in_view(path, 0)
+}
+
+fn registry_key_exists_in_view(path: &str, view: u32) -> XllResult<bool> {
     let path = wide_nul(path);
     let mut key = ptr::null_mut();
     // SAFETY: path is NUL terminated and key is writable handle storage.
@@ -337,7 +352,7 @@ fn registry_key_exists(path: &str) -> XllResult<bool> {
             HKEY_CURRENT_USER,
             path.as_ptr(),
             0,
-            KEY_READ as u32,
+            KEY_READ as u32 | view,
             &mut key,
         )
     };

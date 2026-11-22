@@ -14,6 +14,7 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(250);
 struct State {
     stopping: bool,
     sequence: u64,
+    acknowledged: u64,
     pending: Option<u64>,
     next_attempt: Option<Instant>,
 }
@@ -120,9 +121,18 @@ impl NotificationPump {
 
     pub(super) fn acknowledge(&self, sequence: Option<u64>) {
         let mut state = self.shared.state.lock();
-        if state.pending == sequence {
-            state.pending = None;
+        if let (Some(sequence), Some(pending)) = (sequence, state.pending)
+            && state.acknowledged < sequence
+            && sequence <= pending
+        {
+            state.acknowledged = sequence;
+            if sequence == pending {
+                state.pending = None;
+            }
+            // A newer notice arrived during RefreshData; its first attempt
+            // should not wait for the acknowledged notice's retry deadline.
             state.next_attempt = None;
+            self.shared.changed.notify_one();
         }
     }
 
@@ -157,6 +167,27 @@ mod tests {
     use std::sync::mpsc;
 
     const DEADLINE: Duration = Duration::from_secs(2);
+
+    #[test]
+    fn acknowledging_older_refresh_clears_its_retry_deadline_only_once() {
+        let pump = NotificationPump {
+            shared: Arc::new(Shared::default()),
+            worker: None,
+        };
+        pump.request().unwrap();
+        let old = pump.pending();
+        pump.request().unwrap();
+        let new = pump.pending();
+        let deadline = Instant::now() + DEADLINE;
+        pump.shared.state.lock().next_attempt = Some(deadline);
+
+        pump.acknowledge(old);
+        assert_eq!(pump.pending(), new);
+        assert_eq!(pump.shared.state.lock().next_attempt, None);
+        pump.shared.state.lock().next_attempt = Some(deadline);
+        pump.acknowledge(old);
+        assert_eq!(pump.shared.state.lock().next_attempt, Some(deadline));
+    }
 
     #[test]
     fn accepted_notice_retries_without_heartbeat_until_refresh_acknowledges() {

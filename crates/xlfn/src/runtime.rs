@@ -1210,6 +1210,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn quarantine_cleanup_defers_until_the_outstanding_owner_finishes() {
+        use crate::module_runtime::ModuleCleanupClaim;
+        let fixture = StaticTestRuntime::<TestU32Addin>::new();
+        let runtime = fixture.runtime();
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime.publish(opening, 23, ());
+        runtime.finish_open(opening, Vec::new()).unwrap();
+        runtime.lifecycle_orchestrator().quarantine();
+
+        let control = runtime.lifecycle_control();
+        let ModuleCleanupClaim::Ready(owner) = control.take_module_cleanup_authority() else {
+            panic!("quarantine did not claim the original cleanup authority");
+        };
+        assert!(matches!(
+            control.take_module_cleanup_authority(),
+            ModuleCleanupClaim::DeferredOwner
+        ));
+        assert!(owner.finish().is_ok());
+        control.finish_module_cleanup_for_quarantine();
+        assert!(matches!(
+            control.take_module_cleanup_authority(),
+            ModuleCleanupClaim::NoModuleAuthority
+        ));
+    }
+
+    #[test]
     fn export_drain_preparation_recovery_retains_the_cleanup_authority() {
         let fixture = StaticTestRuntime::<TestU32Addin>::new();
         let runtime = fixture.runtime();

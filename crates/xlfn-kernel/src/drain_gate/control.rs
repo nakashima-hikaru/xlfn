@@ -58,6 +58,7 @@ impl<'a> GateControl<'a, GateUnknown> {
     /// capability and cannot authorize reopening or allocation reclamation.
     pub fn wait_idle(self) -> Self {
         self.gate.wait_until_idle();
+        self.gate.counter.clear_waiting();
         self
     }
 
@@ -157,6 +158,9 @@ impl<'a, const N: usize> StripedGateControl<'a, GateUnknown, N> {
     /// is created by this observation.
     pub fn wait_idle(self) -> Self {
         self.gate.wait_until_idle();
+        for counter in &self.gate.counters {
+            counter.clear_waiting();
+        }
         self
     }
 

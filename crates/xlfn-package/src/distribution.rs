@@ -674,6 +674,7 @@ fn remove_empty_transaction(
 ) -> PackageResult {
     let transaction_directory = PrivateStagingDirectory::open(transaction)?;
     transaction_directory.verify()?;
+    drop(transaction_directory);
     file_ops.remove_dir_all(transaction)?;
     file_ops.sync_directory(parent)?;
     Ok(())
@@ -1370,11 +1371,19 @@ fn commit_prepared_directory_with(
                         state: Box::new(state_error.into()),
                     });
                 }
-                transaction.cleanup_now(parent, file_ops)?;
+                // The original destination and the RolledBack journal are
+                // already durable. Cleanup cannot turn this into an uncertain
+                // destination state, but its error must preserve the rename failure.
                 output_changed = false;
+                return Err(rollback_cleanup_result(
+                    commit_error,
+                    transaction.cleanup_now(parent, file_ops),
+                ));
             }
-            file_ops.sync_directory(parent)?;
-            return Err(DistributionError::Io(commit_error));
+            return Err(rollback_cleanup_result(
+                commit_error,
+                file_ops.sync_directory(parent),
+            ));
         }
         output_changed = true;
         output_was_changed = true;
@@ -1612,6 +1621,18 @@ where
     // Keep the typed distribution error behind the standard I/O error rather
     // than flattening it to a display string.
     io::Error::other(IoErrorSource(error.into()))
+}
+
+fn rollback_cleanup_result(commit_error: io::Error, cleanup: io::Result<()>) -> DistributionError {
+    let primary = DistributionError::Io(commit_error);
+    match cleanup {
+        Ok(()) => primary,
+        Err(cleanup) => DistributionError::CleanupFailure {
+            phase: "distribution commit rollback",
+            primary: Box::new(primary),
+            cleanup: Box::new(cleanup.into()),
+        },
+    }
 }
 
 fn distribution_recovery_error(
@@ -2164,6 +2185,7 @@ fn recover_distribution_transaction(
         }
         commit_guard.ensure_held()?;
         transaction_directory.verify()?;
+        drop(transaction_directory);
         file_ops.remove_dir_all(transaction)?;
         file_ops.sync_directory(parent)?;
         Ok(())

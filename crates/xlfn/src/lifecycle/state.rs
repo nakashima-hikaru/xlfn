@@ -1396,6 +1396,9 @@ struct LifecycleCore<A: crate::Addin> {
     next_removal_attempt: RemovalAttemptId,
     last_committed_generation: Option<RuntimeGeneration>,
     removal_epoch: u64,
+    // A live quarantine recovery may own the epoch outside the canonical
+    // lock while draining exports or closing callbacks.
+    quarantine_cleanup_active: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1419,6 +1422,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
             next_removal_attempt: RemovalAttemptId::ONE,
             last_committed_generation: None,
             removal_epoch: 0,
+            quarantine_cleanup_active: false,
         }
     }
 
@@ -1787,6 +1791,9 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(in crate::lifecycle) fn take_module_cleanup_for_quarantine(&self) -> ModuleCleanupClaim {
         let mut access = self.access();
         access.transition(|core| {
+            if core.quarantine_cleanup_active {
+                return (ModuleCleanupClaim::DeferredOwner, TransitionEffect::Keep);
+            }
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
             let (authority, state) = match state {
                 state @ LifecycleState::Closing(ClosingState::OpeningActive {
@@ -1812,7 +1819,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 other => (CleanupSelection::None, other),
             };
             let authority = match authority {
-                CleanupSelection::Ready(authority) => ModuleCleanupClaim::Ready(authority),
+                CleanupSelection::Ready(authority) => {
+                    core.quarantine_cleanup_active = true;
+                    ModuleCleanupClaim::Ready(authority)
+                }
                 CleanupSelection::RetainedUndrained(epoch) => {
                     ModuleCleanupClaim::RetainedUndrained(epoch)
                 }
@@ -1835,6 +1845,13 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             core.state = state;
             (authority, TransitionEffect::Keep)
         })
+    }
+
+    pub(in crate::lifecycle) fn finish_module_cleanup_for_quarantine(&self) {
+        self.access().transition(|core| {
+            core.quarantine_cleanup_active = false;
+            ((), TransitionEffect::Keep)
+        });
     }
 
     pub(in crate::lifecycle) fn retain_failed_module_cleanup(

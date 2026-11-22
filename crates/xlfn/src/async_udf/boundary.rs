@@ -177,18 +177,22 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
         concurrent_calls,
     };
     let layers = if instrumentation.has_layers() {
-        match crate::execution::enter_layers(guard.layers(), &metadata) {
-            Ok(layers) => Some(layers),
-            Err(error) => {
-                // SAFETY: forwarded from this function's raw-handle contract.
-                let delivery = unsafe { return_error(raw_handle, &error) };
-                let completion = AsyncCompletion {
+        match crate::execution::enter_layers(guard.layers(), &metadata, |error| {
+            // SAFETY: forwarded from this function's raw-handle contract.
+            let delivery = unsafe { return_error(raw_handle, &error) };
+            (
+                AsyncCompletion {
                     completion: OwnedCompletionOutcome::Error(error),
                     delivery,
-                };
+                },
+                timer.elapsed(),
+            )
+        }) {
+            Ok(layers) => Some(layers),
+            Err((completion, elapsed)) => {
                 report_completion(udf_id, &completion);
                 if instrumentation.trace_enabled() {
-                    super::instrumentation::trace_rejected_launch(&metadata, timer, &completion);
+                    super::instrumentation::trace_rejected_launch(&metadata, elapsed, &completion);
                 }
                 return;
             }
@@ -394,18 +398,22 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
         concurrent_calls,
     };
     let layers = if instrumentation.has_layers() {
-        match crate::execution::enter_layers(guard.layers(), &metadata) {
-            Ok(layers) => Some(layers),
-            Err(error) => {
-                // SAFETY: forwarded from this function's raw-handle contract.
-                let delivery = unsafe { return_error(raw_handle, &error) };
-                let completion = AsyncCompletion {
+        match crate::execution::enter_layers(guard.layers(), &metadata, |error| {
+            // SAFETY: forwarded from this function's raw-handle contract.
+            let delivery = unsafe { return_error(raw_handle, &error) };
+            (
+                AsyncCompletion {
                     completion: OwnedCompletionOutcome::Error(error),
                     delivery,
-                };
+                },
+                timer.elapsed(),
+            )
+        }) {
+            Ok(layers) => Some(layers),
+            Err((completion, elapsed)) => {
                 report_completion(udf_id, &completion);
                 if instrumentation.trace_enabled() {
-                    super::instrumentation::trace_rejected_launch(&metadata, timer, &completion);
+                    super::instrumentation::trace_rejected_launch(&metadata, elapsed, &completion);
                 }
                 return;
             }

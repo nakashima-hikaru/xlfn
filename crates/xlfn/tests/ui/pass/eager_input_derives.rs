@@ -1,4 +1,4 @@
-#![deny(unused_variables)]
+#![deny(unused_variables, private_bounds)]
 
 use xlfn::prelude::*;
 use xlfn::value::{FromExcel};
@@ -47,5 +47,12 @@ impl<'call, T: FromExcel<'call>> FromExcel<'call> for Generic<T> {
 
 #[excel_function(name = "TEST.EAGER")]
 fn eager(value: Positive) -> f64 { value.0 }
+#[derive(ExcelInputIdentity)]
+pub struct Tree(Vec<Self>);
+#[derive(ExcelInputIdentity)]
+struct Private(f64);
+#[derive(ExcelInputIdentity)]
+pub struct Public<T>(Private, T);
+fn require_identity<T: xlfn::value::ExcelInputIdentity>() {}
 fn require_preparation<'call, T: xlfn::value::PrepareExcel<'call>>() {}
-fn main() { require_preparation::<Positive>(); require_preparation::<Generic<f64>>(); }
+fn main() { require_preparation::<Positive>(); require_preparation::<Generic<f64>>(); require_identity::<Tree>(); require_identity::<Public<f64>>(); }

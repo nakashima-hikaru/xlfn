@@ -617,14 +617,27 @@ impl FormulaHandleServiceSealed {
     }
 
     pub(crate) fn finish(self) -> XllResult<crate::shutdown::HandlesQuiescent> {
-        // `stop_producers` closes and drains the async manager before this
-        // service box can be consumed. Raw object pin guards therefore never
-        // outlive the arena reached by this teardown path.
-        match self.service {
+        // Only certify teardown after the registry has no live objects or
+        // pins. Drop retains an uncertified service instead of reclaiming it.
+        match &self.service {
             Some(service) => service.store.seal()?.quiescent(self.generation),
             None => Ok(HandlesQuiescent {
                 generation: self.generation,
             }),
+        }
+    }
+}
+
+impl Drop for FormulaHandleServiceSealed {
+    fn drop(&mut self) {
+        let Some(service) = self.service.take() else {
+            return;
+        };
+        if service.store.registry.objects.finish_quiescence().is_err() {
+            // Outstanding object capabilities require this exact owner to
+            // remain allocated for the rest of the process lifetime.
+            #[allow(clippy::mem_forget, reason = "cannot reclaim a pinned handle arena")]
+            std::mem::forget(service);
         }
     }
 }
@@ -669,8 +682,19 @@ impl FormulaHandleServiceSlot {
     /// open boundary makes a published generation a usable handle generation;
     /// the generic slot remains lazy for services whose construction is truly
     /// demand-driven.
+    #[cfg(test)]
     pub(crate) fn initialize(&self) -> XllResult<()> {
-        let _read = self.read()?;
+        self.initialize_prepared(None)
+    }
+
+    pub(crate) fn initialize_prepared(
+        &self,
+        prepared: Option<Box<FormulaHandleService>>,
+    ) -> XllResult<()> {
+        let _read = self.read_initialized(|config| match prepared {
+            Some(service) => Ok(service),
+            None => FormulaHandleService::try_new(config.maximum_bindings()).map(Box::new),
+        })?;
         Ok(())
     }
 
@@ -701,16 +725,22 @@ impl FormulaHandleServiceSlot {
     /// The warm path performs one admission increment and one pointer load.
     #[inline]
     pub(crate) fn read(&self) -> XllResult<FormulaHandleServiceRead<'_>> {
+        self.read_initialized(|config| {
+            FormulaHandleService::try_new(config.maximum_bindings()).map(Box::new)
+        })
+    }
+
+    fn read_initialized(
+        &self,
+        initialize: impl FnOnce(crate::addin_impl::HandleConfig) -> XllResult<Box<FormulaHandleService>>,
+    ) -> XllResult<FormulaHandleServiceRead<'_>> {
         self.service
-            .read(
-                |config| FormulaHandleService::try_new(config.maximum_bindings()).map(Box::new),
-                |_runtime| {
-                    #[cfg(any(test, feature = "refinement"))]
-                    if let Some(trace) = self.trace.get() {
-                        _runtime.set_trace_sink(triomphe::Arc::clone(trace));
-                    }
-                },
-            )
+            .read(initialize, |_runtime| {
+                #[cfg(any(test, feature = "refinement"))]
+                if let Some(trace) = self.trace.get() {
+                    _runtime.set_trace_sink(triomphe::Arc::clone(trace));
+                }
+            })
             .map_err(crate::error::map_service_slot_error)
     }
 

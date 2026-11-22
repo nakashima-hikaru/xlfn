@@ -193,6 +193,12 @@ impl DiagnosticRouter {
             return Err(DiagnosticInitError::AlreadyInstalled);
         }
         let sink = make_sink()?;
+        // Rejection drops the candidate and joins its worker while this
+        // transition is still locked. Its user sink destructor must see
+        // the same re-entry guard as an already-published worker.
+        let candidate_worker = sink.worker_thread_id();
+        self.mark_retiring(&sink);
+        let candidate = std::mem::DropGuard::new(candidate_worker, |id| self.unmark_retiring(id));
         let previous = self
             .sink
             .replace_with_guard(sink, |had_previous, old_service| {
@@ -208,6 +214,7 @@ impl DiagnosticRouter {
                 }
                 Ok(linearization)
             })?;
+        drop(candidate);
 
         let Some(previous) = previous else {
             return Ok(());
@@ -987,6 +994,45 @@ mod tests {
         // Clearing from the main thread succeeds since the original sink was preserved
         assert!(clear_diagnostic_sink().is_ok());
         assert_eq!(replacement_reports.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rejected_candidate_worker_is_recognized_during_sink_drop() {
+        struct DropProbe {
+            router: Arc<DiagnosticRouter>,
+            recognized: std::sync::mpsc::Sender<bool>,
+        }
+        impl DiagnosticSink for DropProbe {
+            fn report(&self, _: &DiagnosticEvent<'_>) {}
+        }
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                let _ = self.recognized.send(self.router.caller_is_worker());
+            }
+        }
+        let router = Arc::new(DiagnosticRouter {
+            sink: ReplaceableServiceSlot::new(),
+            transition: Mutex::new(DiagnosticPhase::Open),
+            retiring_workers: Mutex::new(Vec::new()),
+            observer: DiagnosticObserver::new(),
+        });
+        let (recognized, observed) = std::sync::mpsc::channel();
+        assert!(matches!(
+            router.install_with(
+                || {
+                    AsyncDiagnosticSink::new(DropProbe {
+                        router: Arc::clone(&router),
+                        recognized,
+                    })
+                    .map(Box::new)
+                },
+                |_| Err(DiagnosticInitError::RouterClosed)
+            ),
+            Err(DiagnosticInitError::RouterClosed)
+        ));
+        assert_eq!(observed.try_recv(), Ok(true));
+        assert!(router.retiring_workers.lock().is_empty());
+        assert!(!router.sink.is_active());
     }
 
     #[test]

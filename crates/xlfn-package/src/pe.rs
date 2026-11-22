@@ -702,6 +702,7 @@ fn validate_mapped_sections<Pe: ImageNtHeaders>(
         || alignment < file_alignment
         || (alignment < 4096 && alignment != file_alignment)
         || image_size % alignment != 0
+        || headers_size == 0
         || headers_size > image_size
     {
         return Err("PE image has inconsistent section alignment or image bounds".into());
@@ -897,11 +898,15 @@ where
             })?;
             for part in data.split(|&b| b == 0) {
                 if !part.is_empty() {
-                    let export_name = std::str::from_utf8(part).map_err(|error| {
-                        PackageError::Message(format!(
-                            "invalid UTF-8 in .xllexp export manifest: {error}"
-                        ))
-                    })?;
+                    charge_item()?;
+                    let export_name = checked_pe_name(part, &mut remaining_text).map_err(
+                        |error| match error {
+                            PackageError::Utf8(error) => PackageError::Message(format!(
+                                "invalid UTF-8 in .xllexp export manifest: {error}"
+                            )),
+                            error => error,
+                        },
+                    )?;
                     let trimmed = export_name.trim();
                     if !trimmed.is_empty() {
                         expected_exports.insert(trimmed.to_owned());

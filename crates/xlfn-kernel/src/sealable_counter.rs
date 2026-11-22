@@ -155,11 +155,18 @@ impl SealableCounter {
 
     /// Registers drain notification in the same atomic state as admission and
     /// release, and returns the active count observed by that RMW. The bit is
-    /// sticky until a serialized reopen; no independent waiter counter exists.
+    /// cleared only by an exclusive gate controller after an idle observation,
+    /// or by a serialized reopen; no independent waiter counter exists.
     ///
     /// Linearization Point: atomic fetch_or setting WAITING_BIT.
     pub(crate) fn mark_waiting(&self) -> usize {
         transitions::mark_waiting!(self.state, WAITING_BIT, ACTIVE_COUNT_MASK)
+    }
+
+    /// Deregisters the sole idle observer. The gate controller serializes
+    /// registration; already-committed notification tails may still run.
+    pub(crate) fn clear_waiting(&self) {
+        self.state.fetch_and(!WAITING_BIT, Ordering::Relaxed);
     }
 
     /// Linearization Point: atomic fetch_or setting SEALED_BIT.

@@ -61,7 +61,7 @@ impl DirectoryIdentity {
 /// symlink or reparse point.
 pub fn directory_identity(path: &Path) -> PackageResult<DirectoryIdentity> {
     validate_path_components(path)?;
-    let directory = open_staged_directory_no_follow(path).map_err(|error| {
+    let directory = open_directory_for_identity(path).map_err(|error| {
         PackageError::Message(format!(
             "failed to open directory without following links {}: {error}",
             path.display()
@@ -74,6 +74,29 @@ pub fn directory_identity(path: &Path) -> PackageResult<DirectoryIdentity> {
     Ok(DirectoryIdentity::from_file_identity(
         file_snapshot_state(&directory)?.identity,
     ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_directory_for_identity(path: &Path) -> io::Result<std::fs::File> {
+    open_staged_directory_no_follow(path)
+}
+
+#[cfg(target_os = "windows")]
+fn open_directory_for_identity(path: &Path) -> io::Result<std::fs::File> {
+    use crate::win32::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // FILE_READ_ATTRIBUTES does not require permission to list the directory.
+    // Retain all no-follow checks and fail closed if identity cannot be read.
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT) as u32)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE) as u32)
+        .open(path)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

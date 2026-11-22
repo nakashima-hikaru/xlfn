@@ -207,9 +207,9 @@ fn abandon_open<A: crate::Addin, I>(
     // opening responsibility until it finishes, and contain its panic even
     // when abandonment itself is running during an unwind.
     discard_open_inputs(service_inputs);
-    return_open_module(deps, module_opening.rollback(|| {}));
     let control_api = deps.lifecycle_control();
     let mut control = control_api.access();
+    return_open_module_locked(*deps, &mut control, module_opening.rollback(|| {}));
     control_api.record_open_failure(&mut control);
     control_api.quarantine_state(&mut control);
     drop(control);
@@ -942,6 +942,19 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initialized<A>> {
 }
 
 impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
+    #[cfg(feature = "handles")]
+    pub(crate) fn prepare_handles(
+        &mut self,
+        config: crate::addin_impl::HandleConfig,
+    ) -> XllResult<()> {
+        self.pending
+            .get_mut()
+            .state
+            .core
+            .service_inputs
+            .prepare_handles(config)
+    }
+
     pub(crate) fn install_lifecycle(
         self,
         access: &AddinLifecycleAccess<'_, A>,
@@ -1109,8 +1122,8 @@ impl<'runtime, A: crate::Addin> PreparingServices<'runtime, A> {
             drop(control);
             // Keep this opening attempt responsible until destruction has
             // completed. The close waiter cannot advance to module teardown.
-            {
-                let _discarded = service_inputs;
+            if !discard_open_inputs(service_inputs) {
+                return Err(XllError::Panic);
             }
             let UncommittedModule { context, module } = self.0.complete();
             context.reject(|| module.rollback(|| {}));
@@ -1179,7 +1192,7 @@ impl<A: crate::Addin> Rollback for UnpublishedEpoch<'_, A> {
 }
 
 impl<'runtime, A: crate::Addin> ReadyForPublication<'runtime, A> {
-    fn dispose_services(self) -> RollbackGuard<UnpublishedEpoch<'runtime, A>> {
+    fn dispose_services(self) -> (RollbackGuard<UnpublishedEpoch<'runtime, A>>, bool) {
         let Self { context, bundle } = self;
         let UnpublishedGeneration {
             services,
@@ -1191,8 +1204,8 @@ impl<'runtime, A: crate::Addin> ReadyForPublication<'runtime, A> {
         });
         // Keep the epoch recoverable as service destructors run outside the
         // locks. No close waiter may claim or unload this opening yet.
-        drop(services);
-        epoch
+        let disposed = discard_open_inputs(services);
+        (epoch, disposed)
     }
 }
 
@@ -1211,10 +1224,14 @@ impl<'runtime, A: crate::Addin> PublicationReady<'runtime, A> {
         let mut control = deps.lifecycle().access();
         if control.phase() != LifecyclePhase::Opening {
             drop(control);
+            let (epoch, disposed) = self.0.complete().dispose_services();
+            if !disposed {
+                return Err(XllError::Panic);
+            }
             let UnpublishedEpoch {
                 context,
                 module_epoch,
-            } = self.0.complete().dispose_services().complete();
+            } = epoch.complete();
             context.reject(|| module_epoch.begin_close(|| {}));
             return Err(XllError::Closing);
         }

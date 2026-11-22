@@ -263,6 +263,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 });
             }
 
+            let epoch = entry.preparation_epoch();
             catalog
                 .with_entry(existing_id, SubscriptionEntry::add_reservation)
                 .ok_or(XllError::Internal {
@@ -273,18 +274,20 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 self,
                 existing_id,
                 existing_key,
+                epoch,
             ));
         }
 
         let (id, key) = catalog.insert_pending(self.runtime_id, source.id, topic, self.limits)?;
 
-        Ok(PreparedSubscription::reserved(self, id, key))
+        Ok(PreparedSubscription::reserved(self, id, key, 0))
     }
 
-    fn finish_preparation(&self, id: SubscriptionId, committed: bool) {
+    fn finish_preparation(&self, id: SubscriptionId, epoch: u64, committed: bool) {
         {
             let mut catalog = self.catalog.lock();
-            let Some(finish) = catalog.with_entry(id, |entry| entry.finish_preparation(committed))
+            let Some(finish) =
+                catalog.with_entry(id, |entry| entry.finish_preparation(epoch, committed))
             else {
                 return;
             };
@@ -754,13 +757,14 @@ struct PendingPreparation<
 > {
     runtime: &'runtime SubscriptionRuntime<H, E, C>,
     id: SubscriptionId,
+    epoch: u64,
 }
 
 impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Rollback
     for PendingPreparation<'_, H, E, C>
 {
     fn rollback(self) {
-        self.runtime.finish_preparation(self.id, false);
+        self.runtime.finish_preparation(self.id, self.epoch, false);
     }
 }
 
@@ -783,6 +787,7 @@ impl<'runtime, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatal
         runtime: &'runtime SubscriptionRuntime<H, E, C>,
         id: SubscriptionId,
         key: SubscriptionKey,
+        epoch: u64,
     ) -> Self {
         Self {
             #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
@@ -791,6 +796,7 @@ impl<'runtime, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatal
             obligation: PreparationObligation::Reserved(RollbackGuard::new(PendingPreparation {
                 runtime,
                 id,
+                epoch,
             })),
         }
     }
@@ -808,8 +814,8 @@ impl<'runtime, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatal
 
     pub(crate) fn commit(self) {
         if let PreparationObligation::Reserved(reservation) = self.obligation {
-            let PendingPreparation { runtime, id } = reservation.complete();
-            runtime.finish_preparation(id, true);
+            let PendingPreparation { runtime, id, epoch } = reservation.complete();
+            runtime.finish_preparation(id, epoch, true);
         }
     }
 
