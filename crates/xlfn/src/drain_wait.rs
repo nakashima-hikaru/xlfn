@@ -37,7 +37,10 @@ impl<W> UnstartedDrain<W> {
         Self(work)
     }
 
-    #[cfg(any(test, windows))]
+    #[cfg(any(
+        test,
+        all(windows, any(feature = "async", feature = "rtd", feature = "handles"))
+    ))]
     pub(crate) fn into_work(self) -> W {
         self.0
     }

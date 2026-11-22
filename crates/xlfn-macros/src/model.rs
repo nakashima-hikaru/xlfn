@@ -410,7 +410,7 @@ pub(super) fn parse_udf(
     mut function: UdfFunction,
 ) -> syn::Result<ParsedUdf> {
     let options = parse_function_options(attributes)?;
-    let gating = extract_gating_attributes(&function.attrs);
+    let gating = extract_gating_attributes(&function.attrs)?;
     let mut context = None;
     let mut arguments = Vec::new();
 
@@ -425,7 +425,7 @@ pub(super) fn parse_udf(
         let mut excel_arg_attribute = None;
         let mut argument_options = ParsedArgumentOptions::default();
         for attribute in std::mem::take(&mut argument.attrs) {
-            if !extract_gating_attributes(std::slice::from_ref(&attribute)).is_empty() {
+            if !extract_gating_attributes(std::slice::from_ref(&attribute))?.is_empty() {
                 return Err(syn::Error::new_spanned(
                     attribute,
                     "Excel function parameters cannot be conditionally compiled; gate the entire function instead",
@@ -439,7 +439,7 @@ pub(super) fn parse_udf(
                     ));
                 }
                 let mode: syn::Ident = attribute.parse_args_with(syn::Ident::parse_any)?;
-                explicit_context = Some(match mode.to_string().as_str() {
+                explicit_context = Some(match mode.unraw().to_string().as_str() {
                     "main_thread" => ContextKind::MainThread,
                     "thread_safe" => ContextKind::ThreadSafe,
                     "macro_sheet" => ContextKind::MacroSheet,
@@ -1127,7 +1127,7 @@ fn parse_handle_lease_type(ty: &Type) -> syn::Result<Option<Type>> {
     let Some(segment) = path.path.segments.last() else {
         return Ok(None);
     };
-    if segment.ident != "HandleLease" {
+    if segment.ident.unraw() != "HandleLease" {
         return Ok(None);
     }
     if !is_context_value_path(ty) {
@@ -1186,7 +1186,7 @@ fn parse_numeric_matrix_type(ty: &Type) -> syn::Result<bool> {
     let Some(segment) = path.path.segments.last() else {
         return Ok(false);
     };
-    if segment.ident != "NumericMatrixRef" {
+    if segment.ident.unraw() != "NumericMatrixRef" {
         return Ok(false);
     }
     if !is_context_value_path(ty) {

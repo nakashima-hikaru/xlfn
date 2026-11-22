@@ -78,7 +78,7 @@ mod composition_refinement;
 mod crt;
 /// Bounded diagnostic delivery, events, and add-in diagnostic identities.
 pub mod diagnostics;
-#[cfg(any(feature = "rtd", feature = "handles", all(windows, feature = "async")))]
+#[cfg(any(windows, feature = "rtd", feature = "handles"))]
 pub(crate) mod drain_wait;
 /// Worksheet errors and structured failures from add-ins and the framework.
 pub mod error;

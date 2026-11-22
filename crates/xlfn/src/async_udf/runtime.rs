@@ -184,7 +184,7 @@ impl<E: AsyncExecutor> RuntimeReservation<'_, E> {
         // reenter cancellation/calculation rotation.
         self.commit(
             async move {
-                let brand = crate::handle::GenerationLeaseBrand;
+                let brand = crate::handle::GenerationLeaseBrand::new();
                 let scope = super::task_scope::AsyncTaskScope::new(generation, &brand);
                 let (future, delivery) = build.build_task(scope);
                 // The inner future borrows this task's brand until delivery and

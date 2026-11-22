@@ -45,6 +45,8 @@ pub(crate) struct GenerationServiceInputs<
     C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
 > {
     marker: std::marker::PhantomData<fn() -> (E, C)>,
+    #[cfg(feature = "handles")]
+    prepared_handles: Option<Box<crate::handle::FormulaHandleService>>,
     #[cfg(feature = "rtd")]
     rtd_sources: crate::subscription::SourceArena<E, C>,
 }
@@ -54,6 +56,8 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServiceInputs<
     pub(crate) const fn empty() -> Self {
         Self {
             marker: std::marker::PhantomData,
+            #[cfg(feature = "handles")]
+            prepared_handles: None,
         }
     }
 
@@ -61,8 +65,21 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServiceInputs<
     pub(crate) const fn with_rtd_sources(sources: crate::subscription::SourceArena<E, C>) -> Self {
         Self {
             marker: std::marker::PhantomData,
+            #[cfg(feature = "handles")]
+            prepared_handles: None,
             rtd_sources: sources,
         }
+    }
+
+    #[cfg(feature = "handles")]
+    pub(crate) fn prepare_handles(
+        &mut self,
+        config: crate::addin_impl::HandleConfig,
+    ) -> crate::XllResult<()> {
+        self.prepared_handles = Some(Box::new(crate::handle::FormulaHandleService::try_new(
+            config.maximum_bindings(),
+        )?));
+        Ok(())
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
@@ -139,8 +156,8 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
         #[cfg(feature = "rtd")] subscription_host: crate::excel_rtd::RtdSubscriptionHost,
         inputs: GenerationServiceInputs<E, C>,
     ) -> crate::XllResult<ArmedServices<E, C>> {
-        #[cfg(not(feature = "rtd"))]
-        let _ = (generation, inputs);
+        #[cfg(not(any(feature = "rtd", feature = "handles")))]
+        let _ = inputs;
         let services = Self {
             generation,
             marker: std::marker::PhantomData,
@@ -160,7 +177,9 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
             .subscriptions
             .arm(generation, _config.rtd_limits(), inputs.rtd_sources)?;
         #[cfg(feature = "handles")]
-        services.formula_handles.initialize()?;
+        services
+            .formula_handles
+            .initialize_prepared(inputs.prepared_handles)?;
         Ok(ArmedServices { services })
     }
 

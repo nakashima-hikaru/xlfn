@@ -1612,6 +1612,22 @@ fn async_boundary_records_delivery_rejection_as_failure() {
     struct Recorder(std::sync::mpsc::Sender<(Option<UdfErrorKind>, Option<i32>, bool)>);
     struct RecorderGuard(std::sync::mpsc::Sender<(Option<UdfErrorKind>, Option<i32>, bool)>);
 
+    struct RejectSpecificCall;
+    impl crate::execution::UdfLayer for RejectSpecificCall {
+        type Guard = ();
+        fn enter(&self, metadata: &CallMetadata) -> XllResult<()> {
+            if metadata.udf_id == "test_async_layer_rejection" {
+                // Give the call clock a predictable, positive elapsed value.
+                std::thread::sleep(Duration::from_millis(1));
+                return Err(XllError::Native {
+                    code: 75,
+                    message: "injected layer admission failure".to_owned(),
+                });
+            }
+            Ok(())
+        }
+    }
+
     impl crate::execution::UdfLayer for Recorder {
         type Guard = RecorderGuard;
         fn enter(&self, _: &crate::execution::CallMetadata) -> XllResult<Self::Guard> {
@@ -1634,6 +1650,10 @@ fn async_boundary_records_delivery_rejection_as_failure() {
                     panic!("expected non-cancelled async completion")
                 }
             };
+            if vendor_code == Some(75) {
+                assert!(outcome.duration >= Duration::from_millis(1));
+                assert_eq!(crate::test_callback::async_return_calls(), 3);
+            }
             self.0
                 .send((
                     kind,
@@ -1653,7 +1673,7 @@ fn async_boundary_records_delivery_rejection_as_failure() {
         type SharedState = u32;
         type LifecycleState = ();
         type Error = XllError;
-        type Layers = (Recorder,);
+        type Layers = (Recorder, RejectSpecificCall);
         type AsyncExecutor = BuiltinAsyncExecutor;
         fn open(
             _: &OpenContext<Self>,
@@ -1674,7 +1694,11 @@ fn async_boundary_records_delivery_rejection_as_failure() {
     let _guard = test_lock_for_runtime(runtime);
     let (event_sender, event_receiver) = std::sync::mpsc::channel();
     let open_attempt = runtime.begin_open().unwrap();
-    let open_attempt = runtime.publish(open_attempt, 7_u32, (Recorder(event_sender),));
+    let open_attempt = runtime.publish(
+        open_attempt,
+        7_u32,
+        (Recorder(event_sender), RejectSpecificCall),
+    );
     runtime.finish_open(open_attempt, Vec::new()).unwrap();
     runtime
         .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
@@ -1746,6 +1770,24 @@ fn async_boundary_records_delivery_rejection_as_failure() {
         (Some(UdfErrorKind::Vendor), Some(73), true)
     );
     assert_eq!(crate::test_callback::async_return_calls(), 2);
+
+    // SAFETY: the handle and its backing allocation remain live for this call.
+    unsafe {
+        async_udf_boundary_named(
+            runtime,
+            "test_async_layer_rejection",
+            "TEST.ASYNC.LAYER.REJECTION",
+            &mut handle,
+            |_, _, _| -> XllResult<std::future::Ready<XllResult<f64>>> {
+                panic!("rejected layer admission must not prepare the UDF")
+            },
+        );
+    }
+    assert_eq!(
+        event_receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+        (Some(UdfErrorKind::Vendor), Some(75), true)
+    );
+    assert_eq!(crate::test_callback::async_return_calls(), 3);
     wait_for_executor_idle(runtime.async_runtime());
     for rejected in [false, true] {
         crate::test_callback::set_async_rejected(rejected);

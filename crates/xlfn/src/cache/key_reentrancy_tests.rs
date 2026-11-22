@@ -262,3 +262,55 @@ fn miri_never_published_value_drop_waits_for_outer_key_callback() {
     );
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
+
+#[test]
+fn resident_policy_does_not_rehash_stored_user_keys() {
+    #[derive(Clone)]
+    struct CountedKey(u32, StdArc<AtomicUsize>);
+
+    impl PartialEq for CountedKey {
+        fn eq(&self, other: &Self) -> bool {
+            self.0 == other.0
+        }
+    }
+    impl Eq for CountedKey {}
+    impl Hash for CountedKey {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.1.fetch_add(1, Ordering::Relaxed);
+            self.0.hash(state);
+        }
+    }
+
+    let cache = CalculationCache::new(CacheBudget::weight_units(4));
+    let hashes: Vec<_> = (0..8).map(|_| StdArc::new(AtomicUsize::new(0))).collect();
+    for (i, count) in (0..).zip(&hashes) {
+        // Observe previously resident keys, not the current input, whose
+        // user Hash implementation must still be called before lookup.
+        let previous = hashes[..i as usize]
+            .iter()
+            .map(|count| count.load(Ordering::Relaxed))
+            .collect::<Vec<_>>();
+        drop(
+            cache
+                .get_or_try_insert_weighted(CountedKey(i, StdArc::clone(count)), |_| 1, || Ok(i))
+                .unwrap(),
+        );
+        assert_eq!(
+            hashes[..i as usize]
+                .iter()
+                .map(|count| count.load(Ordering::Relaxed))
+                .collect::<Vec<_>>(),
+            previous,
+        );
+    }
+    let before_clear: usize = hashes
+        .iter()
+        .map(|count| count.load(Ordering::Relaxed))
+        .sum();
+    cache.clear();
+    let after_clear: usize = hashes
+        .iter()
+        .map(|count| count.load(Ordering::Relaxed))
+        .sum();
+    assert_eq!(after_clear, before_clear);
+}

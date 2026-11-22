@@ -437,7 +437,7 @@ pub(crate) fn ensure_exact_entry_set(
     Ok(())
 }
 
-pub(crate) fn prepare_directory_entry(
+fn prepare_directory_entry(
     name_key: &str,
     name: &str,
     path: &Path,
@@ -493,7 +493,27 @@ pub(crate) fn prepare_directory_entry(
             bytes,
         })
     } else if metadata.is_dir() {
+        // This bounds both preparation and later recursive walks of the
+        // captured tree. Every level is one normal, validated component.
+        const MAX_PREPARED_DIRECTORY_DEPTH: usize = 64;
+        if relative.components().count() > MAX_PREPARED_DIRECTORY_DEPTH {
+            return Err(format!(
+                "prepared directory depth exceeds {MAX_PREPARED_DIRECTORY_DEPTH}: {}",
+                path.display()
+            )
+            .into());
+        }
+        let identity =
+            DirectoryIdentity::from_file_identity(file_snapshot_state(&handle)?.identity);
+        drop(handle);
         let contents = prepare_directory_contents(path, relative, shared, budget)?;
+        if contents.identity != identity {
+            return Err(format!(
+                "directory identity changed during preparation: {}",
+                path.display()
+            )
+            .into());
+        }
         Ok(PreparedDirectoryEntry::Directory {
             name: name.to_owned(),
             contents,
@@ -503,7 +523,7 @@ pub(crate) fn prepare_directory_entry(
     }
 }
 
-pub(crate) fn prepare_directory_contents(
+fn prepare_directory_contents(
     path: &Path,
     relative_prefix: &Path,
     shared: &BTreeMap<PathBuf, SharedBytes>,

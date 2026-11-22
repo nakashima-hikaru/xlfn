@@ -1,19 +1,18 @@
 use crate::generation::RuntimeGeneration;
 use crate::handle::GenerationLeaseBrand;
 use std::future::Future;
-use std::marker::PhantomData;
 
 /// Narrow lifetime brand for the generated async handle path.
 ///
-/// The scope carries no runtime borrow. Its lifetime is a compile-time token
-/// borrowed from a brand owned by the enclosing executor task. The generated
-/// future keeps that lifetime until it is destroyed inside the same task.
+/// The scope borrows the raw-pin owner from the enclosing executor task, not
+/// from the runtime. The generated future retains the brand's lifetime until
+/// it is destroyed inside the same task.
 #[cfg(feature = "handles")]
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct AsyncTaskScope<'generation> {
     generation: RuntimeGeneration,
-    _brand: PhantomData<&'generation GenerationLeaseBrand>,
+    brand: &'generation GenerationLeaseBrand,
 }
 
 /// Generated-user-code builder for the narrow async handle path.
@@ -54,11 +53,15 @@ pub(crate) trait HandleScopedTaskBuilder {
 
 #[cfg(feature = "handles")]
 impl<'generation> AsyncTaskScope<'generation> {
-    pub(crate) fn new(generation: RuntimeGeneration, _: &'generation GenerationLeaseBrand) -> Self {
-        Self {
-            generation,
-            _brand: PhantomData,
-        }
+    pub(crate) fn new(
+        generation: RuntimeGeneration,
+        brand: &'generation GenerationLeaseBrand,
+    ) -> Self {
+        Self { generation, brand }
+    }
+
+    pub(crate) const fn brand(self) -> &'generation GenerationLeaseBrand {
+        self.brand
     }
 
     pub(crate) const fn generation(self) -> RuntimeGeneration {

@@ -18,9 +18,7 @@ use quick_cache::unsync::{Cache, DefaultLifecycle};
 use quick_cache::{OptionsBuilder, Weighter};
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
-use std::hash::Hash;
-#[cfg(target_os = "linux")]
-use std::hash::{BuildHasher, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 
 #[derive(Clone)]
 struct EntryWeight;
@@ -31,39 +29,31 @@ impl<K, V> Weighter<K, ResidentEntry<V>> for EntryWeight {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-type PolicyCache<K, V> = Cache<ResidentKey<K>, ResidentEntry<V>, EntryWeight, RandomState>;
-#[cfg(target_os = "linux")]
 type PolicyCache<K, V> =
     Cache<HashedKey<ResidentKey<K>>, ResidentEntry<V>, EntryWeight, RandomState>;
 
-/// Preserve the concurrent backend's hash-before-lock behavior. User Hash
-/// callbacks may reenter this cache; all hashing inside the mutex uses only
-/// this precomputed scalar, including backend rehashing during growth.
-#[cfg(target_os = "linux")]
+/// Only invoke user Hash before taking policy locks. Both backends rehash
+/// stored keys under a lock during operations such as growth and eviction;
+/// those paths must hash only this precomputed scalar.
 struct HashedKey<K> {
     hash: u64,
     key: K,
 }
 
-#[cfg(target_os = "linux")]
 impl<K> Hash for HashedKey<K> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.hash.hash(state);
     }
 }
 
-#[cfg(target_os = "linux")]
 impl<K: PartialEq> PartialEq for HashedKey<K> {
     fn eq(&self, other: &Self) -> bool {
         self.hash == other.hash && self.key == other.key
     }
 }
 
-#[cfg(target_os = "linux")]
 impl<K: Eq> Eq for HashedKey<K> {}
 
-#[cfg(target_os = "linux")]
 impl<K, Q> quick_cache::Equivalent<HashedKey<ResidentKey<K>>> for HashedKey<&VersionedKeyRef<'_, Q>>
 where
     K: Borrow<Q>,
@@ -74,7 +64,6 @@ where
     }
 }
 
-#[cfg(target_os = "linux")]
 impl<K: Eq> quick_cache::Equivalent<HashedKey<ResidentKey<K>>> for HashedKey<&VersionedKey<K>> {
     fn equivalent(&self, owned: &HashedKey<ResidentKey<K>>) -> bool {
         self.hash == owned.hash && self.key == owned.key.get()
@@ -89,7 +78,6 @@ pub(super) struct QuickResidentIndex<K, V> {
     // Own synchronization with the same non-poisoning lock as the rest of xlfn.
     #[cfg(target_os = "linux")]
     cache: crate::sync::Mutex<PolicyCache<K, V>>,
-    #[cfg(target_os = "linux")]
     hash_builder: RandomState,
 }
 
@@ -124,7 +112,6 @@ where
             cache,
             #[cfg(target_os = "linux")]
             cache: crate::sync::Mutex::new(cache),
-            #[cfg(target_os = "linux")]
             hash_builder: RandomState::new(),
         }
     }
@@ -144,7 +131,6 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        #[cfg(target_os = "linux")]
         let key = &HashedKey {
             hash: self.hash_builder.hash_one(key),
             key,
@@ -153,7 +139,6 @@ where
     }
 
     pub(super) fn insert_resident(&self, key: ResidentKey<K>, entry: ResidentEntry<V>) {
-        #[cfg(target_os = "linux")]
         let key = HashedKey {
             hash: self.hash_builder.hash_one(&key),
             key,
@@ -162,7 +147,6 @@ where
     }
 
     pub(super) fn invalidate(&self, key: &VersionedKey<K>) {
-        #[cfg(target_os = "linux")]
         let key = &HashedKey {
             hash: self.hash_builder.hash_one(key),
             key,
@@ -172,11 +156,7 @@ where
 
     pub(super) fn invalidate_before(&self, epoch: u64) {
         self.with_cache(|cache| {
-            cache.retain(|key, _| {
-                #[cfg(target_os = "linux")]
-                let key = &key.key;
-                key.get().epoch >= epoch
-            });
+            cache.retain(|key, _| key.key.get().epoch >= epoch);
         });
     }
 

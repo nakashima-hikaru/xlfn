@@ -408,13 +408,22 @@ pub struct CacheBudget(usize);
 impl CacheBudget {
     /// Selects the maximum resident weight for each cache. The budget is
     /// capped at `u64::MAX / 2` to allow safe addition of incoming weight.
+    /// If the resident policy rounds a large budget down, returns that
+    /// effective budget so an entry of exactly that weight is still eligible.
     pub const fn weight_units(units: usize) -> Self {
-        // Every 32-bit budget already fits this limit.
+        // Every 32-bit budget already fits this limit. Quick Cache computes
+        // its hot quota as `((budget as f64) as u64).min(budget)` at 100%.
         const MAX_WEIGHT: u64 = u64::MAX / 2;
-        if units as u64 > MAX_WEIGHT {
-            Self(MAX_WEIGHT as usize)
+        let capped = if units as u64 > MAX_WEIGHT {
+            MAX_WEIGHT
         } else {
-            Self(units)
+            units as u64
+        };
+        let policy_weight = capped as f64 as u64;
+        if policy_weight < capped {
+            Self(policy_weight as usize)
+        } else {
+            Self(capped as usize)
         }
     }
     /// Returns the effective weight budget.
@@ -3821,6 +3830,26 @@ mod tests {
         }
         assert!(cache.get(&1).is_none());
         assert_eq!(*cache.get(&2).unwrap(), 2);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn large_cache_budget_matches_the_resident_policy() {
+        // Binary64 rounds one request down and the other up. The resident
+        // policy clamps rounding up to its original weight capacity.
+        let exact = 1_usize << 53;
+        for (requested, expected) in [(exact + 1, exact), (exact + 3, exact + 3)] {
+            let budget = CacheBudget::weight_units(requested);
+            assert_eq!(budget.get(), expected);
+            let cache = CalculationCache::new(budget);
+            assert_eq!(
+                *cache
+                    .get_or_try_insert_weighted(1, |_| expected, || Ok(7))
+                    .unwrap(),
+                7
+            );
+            assert_eq!(*cache.get(&1).unwrap(), 7);
+        }
     }
 
     #[test]

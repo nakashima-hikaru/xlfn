@@ -213,7 +213,7 @@ impl<A: crate::Addin, B, O: CompletionObserver + Send + 'static>
         let (Scoped { build, generation }, delivery) = self.capture.into_parts();
         let task = UnbuiltScopedTask::<B, O, T>::with_delivery(build, delivery);
         let future = async move {
-            let brand = crate::handle::GenerationLeaseBrand;
+            let brand = crate::handle::GenerationLeaseBrand::new();
             let scope = AsyncTaskScope::new(generation, &brand);
             let (future, delivery) = task.build_task(scope);
             UnbuiltScopedTask::<B, O, T>::deliver(delivery, future).await;

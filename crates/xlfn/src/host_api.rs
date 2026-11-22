@@ -308,7 +308,14 @@ impl<'call> ExcelHost<'call> {
                                     // SAFETY: XLTYPE_REF selects the MRef
                                     // member, whose sheet_id is the stable
                                     // worksheet identity returned by Excel.
-                                    Ok(unsafe { value.raw().value.mref.sheet_id })
+                                    let sheet_id = unsafe { value.raw().value.mref.sheet_id };
+                                    if sheet_id == 0 {
+                                        return Err(XllError::ExcelApi {
+                                            function: ExcelApiFunction::SheetId,
+                                            failure: ExcelApiFailure::UnexpectedResult,
+                                        });
+                                    }
+                                    Ok(sheet_id)
                                 },
                             )
                         },
@@ -388,7 +395,8 @@ fn caller_location(value: XlValueRef<'_>) -> XllResult<CallerLocation> {
     // Validated worksheet coordinates fit i32 on every supported target.
     let row = area.first_row() as i32;
     let column = area.first_column() as i32;
-    Ok(match reference.sheet_id() {
+    // Excel treats a zero id like an internal reference to the current sheet.
+    Ok(match reference.sheet_id().filter(|id| id.get() != 0) {
         Some(sheet_id) => CallerLocation::Direct {
             sheet_id: sheet_id.get(),
             row,
@@ -810,6 +818,73 @@ mod date_tests {
 mod tests {
     use super::*;
     use xlfn_sys::{XLMREF12, XLOPER12MRef, XLOPER12SRef, XLOPER12Value, XLREF12};
+
+    #[test]
+    fn caller_resolves_implicit_sheet_and_rejects_an_unresolved_identifier() {
+        use crate::registration::host::test_support::{CallbackScript, Reply};
+        let mut cells = XLMREF12 {
+            count: 1,
+            reftbl: [XLREF12 {
+                rw_first: 4,
+                rw_last: 4,
+                col_first: 5,
+                col_last: 5,
+            }],
+        };
+        let caller = XLOPER12 {
+            value: XLOPER12Value {
+                mref: XLOPER12MRef {
+                    references: &mut cells,
+                    sheet_id: 0,
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_REF,
+        };
+        for id in [42, 0] {
+            let mut sheet = crate::utf16::encode_counted("[Book]Data", "test", 32767).unwrap();
+            let name = XLOPER12 {
+                value: XLOPER12Value {
+                    string: sheet.as_mut_ptr(),
+                },
+                xltype: xlfn_sys::XLTYPE_STR,
+            };
+            let resolved = XLOPER12 {
+                value: XLOPER12Value {
+                    mref: XLOPER12MRef {
+                        references: std::ptr::null_mut(),
+                        sheet_id: id,
+                    },
+                },
+                xltype: xlfn_sys::XLTYPE_REF,
+            };
+            let script = CallbackScript::install([
+                Reply::success(XLF_CALLER, caller),
+                Reply::success(XL_SHEET_NM, name),
+                Reply::success(XL_SHEET_ID, resolved),
+            ]);
+            let callbacks = HostCallbackSession::new();
+            let result = ExcelHost::new(&callbacks).caller();
+            if id == 0 {
+                assert!(matches!(
+                    result,
+                    Err(XllError::ExcelApi {
+                        function: ExcelApiFunction::SheetId,
+                        failure: ExcelApiFailure::UnexpectedResult,
+                    })
+                ));
+            } else {
+                assert_eq!(
+                    result.unwrap(),
+                    HostCaller {
+                        sheet_id: id,
+                        row: 4,
+                        column: 5
+                    }
+                );
+            }
+            script.assert_calls(&[XLF_CALLER, XL_SHEET_NM, XL_SHEET_ID]);
+        }
+    }
 
     #[test]
     fn caller_reference_validation_checks_sheet_bounds_for_both_reference_kinds() {

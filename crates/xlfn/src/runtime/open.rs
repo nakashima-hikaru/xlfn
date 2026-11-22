@@ -139,8 +139,11 @@ where
     } = request;
     std::hint::black_box(crate::crt::effective_crt_policy());
     let removal_epoch = runtime.removal_epoch();
+    let mut rebound = None;
     let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-        if runtime.phase() == crate::lifecycle::LifecyclePhase::OpenRollbackPending {
+        let recover_pending =
+            runtime.phase() == crate::lifecycle::LifecyclePhase::OpenRollbackPending;
+        if recover_pending {
             let outcome = rollback_open::<A>(
                 runtime,
                 lifecycle,
@@ -173,6 +176,14 @@ where
             });
         }
 
+        if recover_pending {
+            rebound = Some(
+                runtime
+                    .bind_addin_lifecycle()
+                    .map_err(crate::lifecycle::lifecycle_access_error)?,
+            );
+        }
+        let lifecycle = rebound.as_ref().unwrap_or(lifecycle);
         let transaction = runtime.begin_open_if_epoch(removal_epoch)?;
         *attempted = Some(transaction.attempt_id());
         let mut transaction = transaction.attach_host(callbacks);
@@ -208,7 +219,7 @@ where
         transaction.stage_host_mutations(registrations).commit()
     }));
 
-    match result {
+    let opened = match result {
         Ok(Ok(())) => {
             write_startup_log(addin_id, "xlAutoOpen succeeded");
             1
@@ -225,5 +236,19 @@ where
             runtime.lifecycle_orchestrator().quarantine();
             0
         }
+    };
+    if opened == 0
+        && attempted.is_none()
+        && runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
+    {
+        // No transaction owns the binding if open was rejected before issue.
+        // A successful pending rollback may already have released the old one.
+        let _ = runtime.release_empty_addin_lifecycle(rebound.as_ref().unwrap_or(lifecycle));
     }
+    // All affine opening/rollback owners have resolved before we claim the
+    // quarantined module. Claims still in flight are deferred by recovery.
+    if runtime.phase() == crate::lifecycle::LifecyclePhase::Quarantined {
+        crate::runtime::recovery::quarantine_runtime_resources(runtime);
+    }
+    opened
 }

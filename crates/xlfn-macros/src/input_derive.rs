@@ -1,8 +1,9 @@
 //! Eager custom-input conveniences; all identity encoding stays trait based.
 
 use crate::support::resolve_crate_path;
-use proc_macro2::TokenStream;
-use quote::quote;
+use proc_macro2::{Ident, TokenStream, TokenTree};
+use quote::{ToTokens, quote};
+use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Fields};
 
 fn crate_path(attributes: &[syn::Attribute]) -> syn::Result<syn::Path> {
@@ -24,6 +25,14 @@ fn crate_path(attributes: &[syn::Attribute]) -> syn::Result<syn::Path> {
         })?;
     }
     Ok(resolve_crate_path(explicit.as_ref()))
+}
+
+fn mentions_generic(tokens: TokenStream, parameters: &[Ident]) -> bool {
+    tokens.into_iter().any(|token| match token {
+        TokenTree::Ident(ident) => parameters.contains(&ident.unraw()),
+        TokenTree::Group(group) => mentions_generic(group.stream(), parameters),
+        _ => false,
+    })
 }
 
 pub(super) fn identity(input: DeriveInput) -> syn::Result<TokenStream> {
@@ -76,7 +85,22 @@ pub(super) fn identity(input: DeriveInput) -> syn::Result<TokenStream> {
             ));
         }
     };
+    let parameters: Vec<_> = generics
+        .params
+        .iter()
+        .map(|parameter| match parameter {
+            syn::GenericParam::Type(parameter) => parameter.ident.unraw(),
+            syn::GenericParam::Lifetime(parameter) => parameter.lifetime.ident.unraw(),
+            syn::GenericParam::Const(parameter) => parameter.ident.unraw(),
+        })
+        .collect();
     for ty in field_types {
+        // The body already checks concrete fields without imposing a public
+        // bound. An explicit bound on a recursive concrete field also makes
+        // proving the derived impl depend on itself.
+        if !mentions_generic(ty.to_token_stream(), &parameters) {
+            continue;
+        }
         generics
             .make_where_clause()
             .predicates

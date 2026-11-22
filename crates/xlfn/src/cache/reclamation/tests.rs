@@ -103,3 +103,41 @@ fn loom_saturated_debt_resets_only_after_all_entries_are_accounted() {
         assert_eq!(debt.weight(), 9);
     });
 }
+
+#[test]
+fn nonblocking_drain_does_not_wait_for_detached_debt_owner() {
+    let domain = CacheLookupDomain::<()>::new();
+    ReclaimEntry::sentinel(&domain, 1).enqueue();
+    // Model a blocking drain that has released the rotation lock but has not
+    // yet accounted for its own batch.
+    let detached = domain.domain.quiesce().unwrap();
+    assert_eq!(domain.stats().pending_nodes, 1);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let completed = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            tx.send(domain.try_quiesce_and_drain().len()).unwrap();
+        });
+        let completed = rx.recv_timeout(std::time::Duration::from_secs(5));
+        // Account even if the check timed out, so a failing test does not
+        // strand the polling thread.
+        for batch in detached.into_iter().flatten() {
+            let _ = ReclaimEntries::account(&domain, batch.into_inner());
+        }
+        completed
+    });
+    assert_eq!(completed.unwrap(), 0);
+    assert_eq!(domain.stats().pending_nodes, 0);
+}
+
+#[test]
+fn nonblocking_drain_checks_next_generation_after_empty_rotation() {
+    let domain = CacheLookupDomain::<()>::new();
+    let reader = domain.domain.enter(0).unwrap();
+    assert!(domain.poll_and_drain().is_none());
+    ReclaimEntry::sentinel(&domain, 1).enqueue();
+    drop(reader);
+
+    let entries = domain.try_quiesce_and_drain();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(domain.stats().pending_nodes, 0);
+}

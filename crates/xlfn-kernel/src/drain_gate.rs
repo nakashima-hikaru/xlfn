@@ -654,6 +654,27 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn idle_snapshot_deregisters_the_last_release_notification() {
+        let gate = DrainGate::new_open();
+        drop(gate.control().wait_idle());
+        gate.counter.try_acquire().unwrap();
+        assert_eq!(
+            gate.counter.try_release_without_notification(),
+            Some(ReleaseOutcome::BecameIdle)
+        );
+
+        let gate = StripedDrainGate::<4>::new_open();
+        drop(gate.control().wait_idle());
+        for counter in &gate.counters {
+            counter.try_acquire().unwrap();
+            assert_eq!(
+                counter.try_release_without_notification(),
+                Some(ReleaseOutcome::BecameIdle)
+            );
+        }
+    }
+
+    #[test]
     fn miri_management_claim_is_exclusive_and_reopen_requires_drained_admission() {
         let gate = DrainGate::new_open();
         let control = gate.control();

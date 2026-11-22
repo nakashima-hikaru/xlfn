@@ -240,7 +240,9 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                     return Err(AddinQuiesceFailure::Quiesce(error));
                 }
                 let addin = Self::shared(deps, generation_id, generation.shared_state);
-                drop(generation.layers);
+                if catch_no_unwind(AssertUnwindSafe(|| drop(generation.layers))).is_err() {
+                    return Err(AddinQuiesceFailure::Quiesce(crate::XllError::Panic));
+                }
                 Ok(addin)
             }
             crate::generation::ShutdownGeneration::Opening(opening) => {
@@ -269,7 +271,9 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                     return Err(AddinQuiesceFailure::Quiesce(error));
                 }
                 let addin = Self::shared(deps, generation_id, shared_state);
-                drop(layers);
+                if catch_no_unwind(AssertUnwindSafe(|| drop(layers))).is_err() {
+                    return Err(AddinQuiesceFailure::Quiesce(crate::XllError::Panic));
+                }
                 Ok(addin)
             }
         }

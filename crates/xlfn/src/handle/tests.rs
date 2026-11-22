@@ -887,7 +887,7 @@ fn handle_lease_as_ref_and_identity_match_the_synchronous_handle() {
             .unwrap();
         (identity, pending)
     });
-    let brand = GenerationLeaseBrand;
+    let brand = GenerationLeaseBrand::new();
     let scope = crate::async_udf::AsyncTaskScope::new(
         crate::generation::RuntimeGeneration::new(1).unwrap(),
         &brand,
@@ -4237,7 +4237,7 @@ fn miri_pending_handle_lease_rejects_foreign_generation_before_exposing_value() 
         .unwrap();
         handles.terminate_all_topics();
         assert_eq!(drops.load(Ordering::Acquire), 0);
-        let brand = GenerationLeaseBrand;
+        let brand = GenerationLeaseBrand::new();
         let scope = AsyncTaskScope::new(RuntimeGeneration::new(scope_generation).unwrap(), &brand);
         let mut accesses = 0;
         let outcome = pending.bind(scope).map(|lease| {

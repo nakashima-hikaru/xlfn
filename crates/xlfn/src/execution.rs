@@ -287,14 +287,37 @@ pub trait UdfLayer: Send + Sync + 'static {
 }
 
 mod private {
-    use super::{CallMetadata, UdfLayerGuard};
-    use crate::XllResult;
+    use super::{CallMetadata, CallOutcome, UdfLayerGuard};
+    use crate::{XllError, XllResult};
+    use std::time::Duration;
+
+    pub trait LayerRejection {
+        fn outcome(&self) -> CallOutcome<'_>;
+    }
 
     pub trait UdfLayersImpl: Send + Sync + 'static {
         type Guards: UdfLayerGuard;
         const HAS_LAYERS: bool;
 
-        fn enter_layers(&self, metadata: &CallMetadata) -> XllResult<Self::Guards>;
+        fn enter_layers(&self, metadata: &CallMetadata) -> XllResult<Self::Guards> {
+            self.enter_layers_with_rejection(metadata, |error| (error, Duration::ZERO))
+                .map_err(|(error, _)| error)
+        }
+
+        #[doc(hidden)]
+        fn enter_layers_with_rejection<R: LayerRejection>(
+            &self,
+            metadata: &CallMetadata,
+            reject: impl FnOnce(XllError) -> R,
+        ) -> Result<Self::Guards, R>;
+    }
+}
+
+pub(crate) use private::LayerRejection;
+
+impl LayerRejection for (XllError, Duration) {
+    fn outcome(&self) -> CallOutcome<'_> {
+        CallOutcome::from_error(&self.0, self.1)
     }
 }
 
@@ -321,11 +344,12 @@ pub(crate) fn layers_enabled<L: UdfLayers>() -> bool {
     private_interfaces,
     reason = "The execution facade exposes only the sealed layer composition"
 )]
-pub(crate) fn enter_layers<L: UdfLayers>(
+pub(crate) fn enter_layers<L: UdfLayers, R: LayerRejection>(
     layers: &L,
     metadata: &CallMetadata,
-) -> XllResult<<L as private::UdfLayersImpl>::Guards> {
-    <L as private::UdfLayersImpl>::enter_layers(layers, metadata)
+    reject: impl FnOnce(XllError) -> R,
+) -> Result<<L as private::UdfLayersImpl>::Guards, R> {
+    <L as private::UdfLayersImpl>::enter_layers_with_rejection(layers, metadata, reject)
 }
 
 pub(crate) fn exit_layers<G: UdfLayerGuard>(guards: G, outcome: &CallOutcome<'_>) {
@@ -344,7 +368,11 @@ impl private::UdfLayersImpl for () {
     type Guards = ();
     const HAS_LAYERS: bool = false;
 
-    fn enter_layers(&self, _metadata: &CallMetadata) -> XllResult<()> {
+    fn enter_layers_with_rejection<R: LayerRejection>(
+        &self,
+        _metadata: &CallMetadata,
+        _reject: impl FnOnce(XllError) -> R,
+    ) -> Result<(), R> {
         Ok(())
     }
 }
@@ -363,8 +391,12 @@ macro_rules! impl_udf_layers {
                 non_snake_case,
                 reason = "Tuple guard bindings match generic type names"
             )]
-            fn enter_layers(&self, metadata: &CallMetadata) -> XllResult<Self::Guards> {
-                impl_udf_layers_enter!(@step self, metadata; $($T, $idx);+)
+            fn enter_layers_with_rejection<R: LayerRejection>(
+                &self,
+                metadata: &CallMetadata,
+                reject: impl FnOnce(XllError) -> R,
+            ) -> Result<Self::Guards, R> {
+                impl_udf_layers_enter!(@step self, metadata, reject; $($T, $idx);+)
             }
         }
 
@@ -379,42 +411,47 @@ macro_rules! impl_udf_layers {
 }
 
 macro_rules! impl_udf_layers_enter {
-    (@step $self:expr, $metadata:expr; $T0:ident, 0) => {
+    (@step $self:expr, $metadata:expr, $reject:expr; $T0:ident, 0) => {
         {
-            let $T0 = safe_enter(&$self.0, $metadata)?;
+            let $T0 = safe_enter(&$self.0, $metadata).map_err($reject)?;
             Ok(($T0,))
         }
     };
-    (@step $self:expr, $metadata:expr; $T0:ident, 0; $($T:ident, $idx:tt);+) => {
+    (@step $self:expr, $metadata:expr, $reject:expr; $T0:ident, 0; $($T:ident, $idx:tt);+) => {
         {
-            let $T0 = safe_enter(&$self.0, $metadata)?;
-            impl_udf_layers_enter!(@chain $self, $metadata; ($T0); $($T, $idx);+)
+            let $T0 = match safe_enter(&$self.0, $metadata) {
+                Ok(guard) => guard,
+                Err(error) => return Err($reject(error)),
+            };
+            impl_udf_layers_enter!(@chain $self, $metadata, $reject; ($T0); $($T, $idx);+)
         }
     };
-    (@chain $self:expr, $metadata:expr; ($($prev:ident),+); $curr:ident, $idx:tt) => {
+    (@chain $self:expr, $metadata:expr, $reject:expr; ($($prev:ident),+); $curr:ident, $idx:tt) => {
         {
             let $curr = match safe_enter(&$self.$idx, $metadata) {
                 Ok(guard) => guard,
                 Err(error) => {
-                    let outcome = CallOutcome::from_error(&error, Duration::ZERO);
+                    let rejection = $reject(error);
+                    let outcome = rejection.outcome();
                     impl_udf_layers_exit!(&outcome; $($prev),+);
-                    return Err(error);
+                    return Err(rejection);
                 }
             };
             Ok(($($prev,)+ $curr,))
         }
     };
-    (@chain $self:expr, $metadata:expr; ($($prev:ident),+); $curr:ident, $idx:tt; $($rest_T:ident, $rest_idx:tt);+) => {
+    (@chain $self:expr, $metadata:expr, $reject:expr; ($($prev:ident),+); $curr:ident, $idx:tt; $($rest_T:ident, $rest_idx:tt);+) => {
         {
             let $curr = match safe_enter(&$self.$idx, $metadata) {
                 Ok(guard) => guard,
                 Err(error) => {
-                    let outcome = CallOutcome::from_error(&error, Duration::ZERO);
+                    let rejection = $reject(error);
+                    let outcome = rejection.outcome();
                     impl_udf_layers_exit!(&outcome; $($prev),+);
-                    return Err(error);
+                    return Err(rejection);
                 }
             };
-            impl_udf_layers_enter!(@chain $self, $metadata; ($($prev,)+ $curr); $($rest_T, $rest_idx);+)
+            impl_udf_layers_enter!(@chain $self, $metadata, $reject; ($($prev,)+ $curr); $($rest_T, $rest_idx);+)
         }
     };
 }
@@ -651,7 +688,9 @@ mod tests {
                 reject: false,
             },
         );
-        let guards = crate::execution::enter_layers(&layers, &metadata()).unwrap();
+        let guards =
+            crate::execution::enter_layers(&layers, &metadata(), |err| (err, Duration::ZERO))
+                .unwrap();
         crate::execution::exit_layers(
             guards,
             &CallOutcome {
@@ -682,8 +721,8 @@ mod tests {
             },
         );
         assert!(matches!(
-            crate::execution::enter_layers(&layers, &metadata()),
-            Err(XllError::Overloaded)
+            crate::execution::enter_layers(&layers, &metadata(), |err| (err, Duration::ZERO)),
+            Err((XllError::Overloaded, _))
         ));
         assert_eq!(order.lock().as_slice(), ["enter-a", "reject", "exit-a"]);
     }
@@ -703,7 +742,9 @@ mod tests {
                 panic_on_exit: true,
             },
         );
-        let guards = crate::execution::enter_layers(&layers, &metadata()).unwrap();
+        let guards =
+            crate::execution::enter_layers(&layers, &metadata(), |err| (err, Duration::ZERO))
+                .unwrap();
         let result = catch_unwind(AssertUnwindSafe(|| {
             crate::execution::exit_layers(
                 guards,

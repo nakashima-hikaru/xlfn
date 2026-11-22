@@ -227,7 +227,7 @@ fn expand_excel_addin_impl(
     if path
         .segments
         .last()
-        .is_none_or(|segment| segment.ident != "Addin")
+        .is_none_or(|segment| segment.ident.unraw() != "Addin")
     {
         return Err(syn::Error::new_spanned(
             path,
@@ -264,7 +264,7 @@ fn expand_excel_addin_impl(
     let mut ordinary_items = Vec::with_capacity(implementation.items.len());
     for item in implementation.items {
         if let syn::ImplItem::Type(associated) = &item {
-            let slot = match associated.ident.to_string().as_str() {
+            let slot = match associated.ident.unraw().to_string().as_str() {
                 "RtdSubscription" => Some(&mut subscription),
                 "RtdSources" => Some(&mut sources),
                 "AsyncExecutor" => Some(&mut executor),
@@ -341,7 +341,7 @@ fn expand_excel_addin_impl(
     ] {
         if !ordinary_items
             .iter()
-            .any(|item| matches!(item, syn::ImplItem::Type(associated) if associated.ident == name))
+            .any(|item| matches!(item, syn::ImplItem::Type(associated) if associated.ident.unraw() == name))
         {
             let name = syn::Ident::new(name, proc_macro2::Span::call_site());
             ordinary_items.push(syn::parse_quote!(type #name = #default;));
@@ -358,7 +358,7 @@ fn emit_addin_exports(
     options: ParsedAddinOptions,
     krate: &syn::Path,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let gating = extract_gating_attributes(&implementation.attrs);
+    let gating = extract_gating_attributes(&implementation.attrs)?;
     let display_name = options.name.unwrap_or_else(|| ident.unraw().to_string());
     let id = options
         .id
@@ -1996,6 +1996,8 @@ mod tests {
         for attribute in [
             quote!(#[cfg(any())]),
             quote!(#[cfg_attr(feature = "optional", cfg(any()))]),
+            quote!(#[cfg_attr(true, cfg(any()))]),
+            quote!(#[cfg_attr(false, cfg(any()))]),
             quote!(#[cfg_attr(all(), cfg_attr(any(), cfg(all())))]),
         ] {
             for ty in [quote!(f64), quote!(MainThreadContext<'_, State>)] {
@@ -2028,7 +2030,7 @@ mod tests {
             #[cfg_attr(feature = "gated", cfg(any()), allow(dead_code))]
             fn gated() -> f64 { 1.0 }
         });
-        let gating_attributes = extract_gating_attributes(&item.attrs);
+        let gating_attributes = extract_gating_attributes(&item.attrs).unwrap();
         let gating = quote!(#(#gating_attributes)*).to_string();
         assert!(gating.contains("cfg_attr"));
         assert!(gating.contains("cfg (any ())"));
@@ -2315,7 +2317,7 @@ mod tests {
         let implementation = syn::parse_quote! {
             impl Addin for BasicAddin {
                 type SharedState = ();
-                type AsyncExecutor = MyExecutor;
+                type r#AsyncExecutor = MyExecutor;
             }
         };
         let text = expand_excel_addin_impl(quote!(), implementation)

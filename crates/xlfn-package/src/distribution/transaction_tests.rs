@@ -523,6 +523,33 @@ fn distribution_commit_failure_rolls_previous_distribution_back() {
 }
 
 #[test]
+fn restored_distribution_preserves_rename_and_cleanup_errors() {
+    let (directory, destination, staging) = distribution_fixture();
+    let file_ops = InjectedFileOps {
+        failed_renames: [2].into(),
+        failed_removes: [1].into(),
+        ..InjectedFileOps::default()
+    };
+    let prepared = prepared_test_directory(&staging);
+
+    let error = commit_test_directory_with(&prepared, &destination, &file_ops).unwrap_err();
+    let DistributionError::CleanupFailure {
+        primary, cleanup, ..
+    } = error
+    else {
+        panic!("a completed rollback should preserve both errors without marking output uncertain");
+    };
+    assert!(
+        matches!(*primary, DistributionError::Io(error) if error.to_string().contains("rename failure #2"))
+    );
+    assert!(
+        matches!(*cleanup, DistributionError::Io(error) if error.to_string().contains("removal failure #1"))
+    );
+    assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+    assert_eq!(transaction_directories(directory.path()).len(), 1);
+}
+
+#[test]
 fn post_commit_verification_failure_restores_previous_distribution() {
     let (directory, destination, staging) = distribution_fixture();
     let file_ops = InjectedFileOps::default();

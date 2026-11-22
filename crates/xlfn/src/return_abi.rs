@@ -657,11 +657,13 @@ where
             started_at: std::time::SystemTime::now(),
             concurrent_calls,
         };
-        match crate::execution::enter_layers(guard.layers(), &metadata) {
+        match crate::execution::enter_layers(guard.layers(), &metadata, |err| {
+            (err, timer.elapsed())
+        }) {
             Ok(layers) => Some(layers),
-            Err(error) => {
+            Err((error, elapsed)) => {
                 report_sync_failure::<A, B>(runtime, udf_id, Some(call_id), calculation_id, &error);
-                let outcome = CallOutcome::from_error(&error, timer.elapsed());
+                let outcome = CallOutcome::from_error(&error, elapsed);
                 if instrumentation.trace_enabled() {
                     crate::execution::trace(&trace_metadata, &outcome);
                 }

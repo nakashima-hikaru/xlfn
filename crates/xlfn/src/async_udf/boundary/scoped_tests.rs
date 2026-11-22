@@ -26,6 +26,7 @@ use xlfn_sys::{XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Ready,
+    ForgetReady,
     Error,
     PollPanic,
     DropPanic,
@@ -109,6 +110,11 @@ impl Future for Inner<'_> {
             started.send(()).unwrap();
         }
         match this.mode {
+            Mode::ForgetReady => {
+                #[allow(clippy::mem_forget, reason = "exercise task-owned pin cleanup")]
+                std::mem::forget(this.lease.take().unwrap());
+                Poll::Ready(Ok(42.0))
+            }
             Mode::Ready | Mode::DropPanic => Poll::Ready(Ok(42.0)),
             Mode::Error => Poll::Ready(Err(XllError::Overloaded)),
             Mode::PollPanic => panic!("injected scoped poll panic"),
@@ -301,7 +307,7 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
                         token,
                         Arc::clone(&events),
                         Arc::clone(&payload_drops),
-                        true,
+                        mode != Mode::ForgetReady,
                         reenter.then(|| Arc::downgrade(&lifecycle)),
                     ),
                 ),
@@ -351,7 +357,7 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
             (Completion::Cancelled, Delivery::Delivered)
         } else {
             match mode {
-                Mode::Ready => (Completion::Success, Delivery::Delivered),
+                Mode::Ready | Mode::ForgetReady => (Completion::Success, Delivery::Delivered),
                 Mode::Error => (
                     Completion::Error(UdfErrorKind::Internal),
                     Delivery::Delivered,
@@ -376,6 +382,13 @@ fn miri_scoped_delivery_completion_disposes_inner_before_reporting() {
         }
     }
 }
+#[test]
+fn miri_scoped_delivery_releases_pins_when_user_forgets_lease() {
+    for instrumented in [false, true] {
+        run(Mode::ForgetReady, instrumented, false, false);
+    }
+}
+
 #[test]
 fn miri_scoped_delivery_builder_panic_releases_reservation_and_raw_pin() {
     for instrumented in [false, true] {

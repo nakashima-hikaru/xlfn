@@ -203,6 +203,10 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         self.coordinator.take_module_cleanup_for_quarantine()
     }
 
+    pub(crate) fn finish_module_cleanup_for_quarantine(&self) {
+        self.coordinator.finish_module_cleanup_for_quarantine();
+    }
+
     pub(crate) fn retain_failed_module_cleanup(
         &self,
         authority: ModuleCleanupAuthority,
