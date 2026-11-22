@@ -168,9 +168,9 @@ impl CacheRegistry {
 /// UDF invocations. Eviction is based on abstract caller-reported weights rather
 /// than physical allocations.
 ///
-/// Keys must keep their equality and hash stable while stored. `Hash` and `Eq`
-/// on owned or borrowed keys must not reenter this cache, directly or through a registry: they
-/// may run while cache locks or read admission are held. `K::Clone` must
+/// Keys must keep their equality and hash stable while stored. `Hash`, `Eq`,
+/// and `Borrow` on owned or borrowed keys must not reenter this cache, directly
+/// or through a registry: they may run while cache locks or read admission are held. `K::Clone` must
 /// preserve key identity and must not depend on starting another cache
 /// initialization on the same thread, because cloning may occur during
 /// publication of an initialized entry.
@@ -345,9 +345,9 @@ where
     #[inline]
     /// Returns or initializes a value, owning the key only after a resident miss.
     ///
-    /// Resident hits do not call [`ToOwned::to_owned`]. On a miss, the owned key
-    /// enters the existing single-flight path, which rechecks residency before
-    /// enrolling. Joining an in-progress computation can still own the key.
+    /// Resident hits and requests joining an already registered computation do
+    /// not call [`ToOwned::to_owned`]. If no flight exists, the caller owns the
+    /// key outside the coordination lock and rechecks before registering.
     /// The initial lookup and initialization share one generation snapshot, so
     /// `clear()` during `to_owned()` cannot promote this request to a new generation.
     /// Panics and reentry follow [`Self::get_or_try_insert_with`]; `to_owned()`

@@ -1,9 +1,36 @@
 //! Registration validation before the first Excel callback.
 
+use super::RegistrationDescriptor;
 use super::schema::{ExecutionKind, MAX_REGISTER_ARGUMENT_HELP_ENTRIES, ValidatedSignature};
-use super::{ExcelNameKey, RegistrationDescriptor};
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashSet;
+use std::hash::{Hash, Hasher};
+
+/// Preflight only borrows descriptor names. Match the retained ledger's
+/// ASCII-only host identity without building a canonical heap string.
+#[derive(Clone, Copy)]
+struct BorrowedExcelName(&'static str);
+
+impl PartialEq for BorrowedExcelName {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq_ignore_ascii_case(other.0)
+    }
+}
+
+impl Eq for BorrowedExcelName {}
+
+impl Hash for BorrowedExcelName {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_usize(self.0.len());
+        let mut normalized = [0; 64];
+        for bytes in self.0.as_bytes().chunks(normalized.len()) {
+            let chunk = &mut normalized[..bytes.len()];
+            chunk.copy_from_slice(bytes);
+            chunk.make_ascii_uppercase();
+            state.write(chunk);
+        }
+    }
+}
 
 /// Checked metadata and the layout of its generated Excel strings.
 /// A registration call materializes or borrows the counted text it needs.
@@ -91,8 +118,8 @@ pub(crate) fn preflight_registration(
                 descriptor.arguments.iter().map(|argument| argument.name),
             )
             .map_err(|_| registry_error())?;
-            if !exports.insert(ExcelNameKey::new(descriptor.export_name))
-                || !excel_names.insert(ExcelNameKey::new(descriptor.excel_name))
+            if !exports.insert(BorrowedExcelName(descriptor.export_name))
+                || !excel_names.insert(BorrowedExcelName(descriptor.excel_name))
                 || descriptor.signature.arguments.len() != descriptor.arguments.len()
             {
                 return Err(registry_error());
@@ -208,6 +235,35 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn borrowed_duplicate_names_match_retained_identity_across_chunks() {
+        use crate::registration::ExcelNameKey;
+        use std::hash::{BuildHasher, RandomState};
+
+        let samples = [
+            "",
+            "alPHA",
+            "ALpha",
+            "Älpha",
+            "älpha",
+            "αaあ",
+            "αAあ",
+            "ThisFixtureNameCrossesTheCanonicalizationScratchChunkBoundary0000éSecondChunk",
+            "THISFIXTURENAMECROSSESTHECANONICALIZATIONSCRATCHCHUNKBOUNDARY0000éSECONDCHUNK",
+        ];
+        let builder = RandomState::new();
+        for left in samples {
+            for right in samples {
+                let a = BorrowedExcelName(left);
+                let b = BorrowedExcelName(right);
+                assert_eq!(a == b, ExcelNameKey::new(left) == ExcelNameKey::new(right));
+                if a == b {
+                    assert_eq!(builder.hash_one(a), builder.hash_one(b));
+                }
+            }
+        }
     }
 
     #[test]

@@ -115,7 +115,8 @@ fn descriptors() -> &'static [RegistrationDescriptor] {
 
 /// Measures production Rust registration paths with a deterministic Excel
 /// callback. Host name lookup, actual Excel registration, DLL loading and
-/// user startup work are excluded. Fixtures keep one argument per function.
+/// user startup work are excluded. The default fixture uses one argument;
+/// the metadata fixture exposes varying arity and changing counted strings.
 pub struct RegistrationBenchmark {
     descriptors: &'static [RegistrationDescriptor],
     prepared: ValidatedRegistrationSet,
@@ -124,7 +125,50 @@ pub struct RegistrationBenchmark {
 impl RegistrationBenchmark {
     pub fn new(count: usize) -> Self {
         assert!((1..=5_000).contains(&count));
-        let descriptors = &descriptors()[..count];
+        Self::from_descriptors(&descriptors()[..count])
+    }
+
+    pub fn with_metadata(count: usize, arity: usize, text_units: usize) -> Self {
+        assert!((1..=5_000).contains(&count));
+        assert!((1..=16).contains(&arity));
+        assert!(text_units >= 4);
+        static ABI: [crate::registration::ArgumentAbi; 16] =
+            [crate::registration::ArgumentAbi::Float64; 16];
+        static NAMES: [&str; 16] = [
+            "arg_01", "arg_02", "arg_03", "arg_04", "arg_05", "arg_06", "arg_07", "arg_08",
+            "arg_09", "arg_10", "arg_11", "arg_12", "arg_13", "arg_14", "arg_15", "arg_16",
+        ];
+        let descriptors = (0..count)
+            .map(|index| {
+                let description: &'static str = Box::leak(
+                    format!("{}{:04}", "説".repeat(text_units - 4), index).into_boxed_str(),
+                );
+                let arguments = NAMES[..arity]
+                    .iter()
+                    .map(|name| ArgumentDescriptor { name, description })
+                    .collect::<Vec<_>>();
+                RegistrationDescriptor {
+                    export_name: Box::leak(
+                        format!("benchmark_extra_metadata_fixture_{index:04}").into_boxed_str(),
+                    ),
+                    excel_name: Box::leak(
+                        format!("BENCH.EXTRA.METADATA.FIXTURE.{index:04}").into_boxed_str(),
+                    ),
+                    signature: RegistrationSignature {
+                        arguments: &ABI[..arity],
+                        ..descriptors()[index].signature
+                    },
+                    description,
+                    arguments: Box::leak(arguments.into_boxed_slice()),
+                    ..descriptors()[index]
+                }
+            })
+            .collect::<Vec<_>>();
+        Self::from_descriptors(Box::leak(descriptors.into_boxed_slice()))
+    }
+
+    fn from_descriptors(descriptors: &'static [RegistrationDescriptor]) -> Self {
+        let count = descriptors.len();
         let prepared = preflight_registration(descriptors).expect("valid registration fixture");
         module_name();
         super::get_benchmark_runtime();

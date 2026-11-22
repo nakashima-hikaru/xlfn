@@ -31,6 +31,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32};
 
 mod automation;
 pub(crate) use automation::WindowsRefreshArrayApi;
+#[cfg(all(feature = "bench-internals", feature = "rtd"))]
+pub use automation::benchmark_rtd_bstr;
 mod class_factory;
 mod com_abi;
 mod event;

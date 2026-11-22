@@ -648,6 +648,19 @@ unsafe fn wide_name_eq_ascii(name: *const u16, expected: &[u8]) -> bool {
 }
 pub(super) use xlfn_host::com_transport::automation::write_bstr_variant;
 
+/// Bench the actual Windows BSTR writer, including allocation and release
+/// but not the separate SAFEARRAY and transport stages.
+#[cfg(all(feature = "bench-internals", feature = "rtd"))]
+pub fn benchmark_rtd_bstr(value: &str) {
+    let mut variant = VARIANT::default();
+    // SAFETY: variant is live writable storage; success transfers its BSTR
+    // ownership to the initialized variant.
+    assert_eq!(unsafe { write_bstr_variant(&mut variant, value) }, S_OK);
+    std::hint::black_box(&variant);
+    // SAFETY: this local variant has sole ownership and is cleared exactly once.
+    assert_eq!(unsafe { VariantClear(&mut variant) }, S_OK);
+}
+
 pub(super) unsafe fn write_value_variant(result: *mut VARIANT, value: &StoredRtdValue) -> i32 {
     let value = match value {
         StoredRtdValue::Number(value) => VariantValue::Number(*value),

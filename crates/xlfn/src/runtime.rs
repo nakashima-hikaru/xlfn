@@ -665,11 +665,6 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         self.return_protocol.next_call_id()
     }
 
-    #[cfg(test)]
-    pub(crate) fn peek_next_call_id(&self) -> u64 {
-        self.return_protocol.peek_next_call_id()
-    }
-
     pub(crate) fn calculation_id(&self) -> crate::execution::CalculationId {
         #[cfg(feature = "async")]
         {

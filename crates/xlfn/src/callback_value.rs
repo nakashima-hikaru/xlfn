@@ -7,8 +7,13 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use xlfn_host::{RawCallback, dispatch, excel_free};
+use xlfn_host::{RawCallback, dispatch, dispatch_with_scratch, excel_free};
 use xlfn_sys::XLOPER12;
+
+pub(crate) enum CallbackArguments<'call> {
+    Borrowed(&'call [NonNull<XLOPER12>]),
+    Scratch(&'call mut [*mut XLOPER12]),
+}
 
 const CALLBACK_CLEANUP_AUDIT_CAPACITY: usize = 64;
 
@@ -207,14 +212,22 @@ impl<'session> ExcelCallbackValue<'session> {
 
     pub(crate) unsafe fn call_with_session(
         function: i32,
-        arguments: &[NonNull<XLOPER12>],
+        arguments: CallbackArguments<'_>,
         session: &'session HostCallbackSession,
     ) -> Result<(i32, CallbackResult<'session>), crate::callback_gate::CallbackAdmissionSuppressed>
     {
         let callback_admission = crate::callback_gate::enter_callback()?;
-        // SAFETY: the caller supplies live operands and the call holds
-        // callback admission until result ownership is transferred below.
-        let invocation = unsafe { dispatch(function, arguments) };
+        // Callback admission remains held through transfer to the typed
+        // cleanup owner below.
+        let invocation = match arguments {
+            // SAFETY: the caller guarantees the borrowed operands remain live.
+            CallbackArguments::Borrowed(arguments) => unsafe { dispatch(function, arguments) },
+            // SAFETY: the caller's live operands and exclusive scratch are
+            // valid for the synchronous native callback.
+            CallbackArguments::Scratch(arguments) => unsafe {
+                dispatch_with_scratch(function, arguments)
+            },
+        };
         let (status, raw) = match invocation {
             RawCallback::NotInvoked(status) => {
                 drop(callback_admission);

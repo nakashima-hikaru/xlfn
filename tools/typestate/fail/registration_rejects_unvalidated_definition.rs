@@ -4,6 +4,6 @@ fn invalid(
     module: &super::host::CountedModuleName,
     descriptor: &super::RegistrationDescriptor,
 ) {
-    let mut text = super::host::RegistrationTextCache::default();
-    let _ = host.register(module, descriptor, &mut text); // error: E0308
+    let mut scratch = super::host::RegistrationScratch::default();
+    let _ = host.register(module, descriptor, &mut scratch); // error: E0308
 }

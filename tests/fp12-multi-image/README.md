@@ -28,3 +28,6 @@ This verifies the **host process accounting protocol**, not Excel's use of an
 FP12 result pointer or Excel's add-in unload behavior. It does not launch
 Excel or open a workbook. Actual 32/64-bit Excel qualification remains a
 separate gate.
+
+For the separate Excel gates, see the
+[Windows desktop Excel qualification runbook](../excel-qualification/README.md).

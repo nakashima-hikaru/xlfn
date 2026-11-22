@@ -6,8 +6,6 @@
 //! recovery journals remain in `registrar.rs` and `recovery.rs`.
 
 use crate::callback_value::ExcelCallbackValue;
-#[cfg(not(target_os = "windows"))]
-use crate::error::InputError;
 use crate::error::{ExcelApiFailure, ExcelApiFunction};
 use crate::host_api::{ExcelHost, HostInvocation};
 use crate::host_callback::HostCallbackSession;
@@ -25,14 +23,33 @@ use std::ptr::NonNull;
 use super::RegistrationId;
 use super::preflight::ValidatedRegistration;
 use super::schema::FunctionVisibility;
-pub(crate) use xlfn_host::registration::{CountedModuleName, RegistrationTextCache};
-use xlfn_host::registration::{RegistrationArgs, RegistrationScratch, TemporaryString};
+pub(crate) use xlfn_host::registration::{CountedModuleName, RegistrationScratch};
+use xlfn_host::registration::{CountedString, RegistrationArgs, TemporaryString};
 use xlfn_sys::{
     XL_EVENT_REGISTER, XL_GET_NAME, XLERR_NAME, XLF_EVALUATE, XLF_REGISTER, XLF_SET_NAME,
     XLF_UNREGISTER, XLOPER12,
 };
 
-pub(crate) type RegistrationMutation<T> = xlfn_host::HostMutation<T, ExcelCallbackStatus, XllError>;
+/// The result of a host-side registration mutation.
+///
+/// `Applied` means the host-side mutation is known to have taken effect.  The
+/// returned value remains useful even when releasing Excel's result fails,
+/// because the mutation must not be repeated.  `Rejected` means the operation
+/// was not accepted as a mutation.  `Indeterminate` means the callback may
+/// have changed host state but the result cannot establish what happened.
+pub(crate) enum RegistrationMutation<T> {
+    Applied {
+        value: T,
+        cleanup: XllResult<()>,
+    },
+    Rejected {
+        error: XllError,
+    },
+    Indeterminate {
+        status: ExcelCallbackStatus,
+        error: XllError,
+    },
+}
 
 /// Registration operations available to the transaction layer.
 #[derive(Clone, Copy)]
@@ -68,7 +85,7 @@ impl<'call> RegistrationHost<'call> {
         &self,
         module: &CountedModuleName,
         registration: &ValidatedRegistration,
-        text: &mut RegistrationTextCache,
+        scratch: &mut RegistrationScratch,
     ) -> RegistrationMutation<RegistrationId> {
         let descriptor = registration.descriptor();
         let args = RegistrationArgs {
@@ -85,12 +102,20 @@ impl<'call> RegistrationHost<'call> {
                 .iter()
                 .map(|argument| argument.description),
         };
-        match RegistrationScratch::new(module, args, text, encode_registration) {
-            Ok(call) => call.with_arguments(|pointers| {
-                let operation = Register {
-                    excel_name: descriptor.excel_name,
+        match scratch.prepare(args, encode_registration_into) {
+            Ok(prepared) => prepared.with_arguments(module, |pointers| {
+                // SAFETY: the prepared frame owns and pins each operand through
+                // the synchronous invocation and typed result release.
+                let invocation = unsafe {
+                    invoke_operation_with_scratch(
+                        self.excel,
+                        Register {
+                            excel_name: descriptor.excel_name,
+                        },
+                        pointers,
+                    )
                 };
-                mutation_from_invocation(invoke_operation(self.excel, operation, pointers))
+                mutation_from_invocation(invocation)
             }),
             Err(error) => RegistrationMutation::Rejected { error },
         }
@@ -269,6 +294,25 @@ fn invoke_operation<O: RegistrationOperation>(
     }
 }
 
+/// The pointer array is writable and may be overwritten by Excel. Its
+/// operands must remain live, stationary and read-only through release.
+unsafe fn invoke_operation_with_scratch<O: RegistrationOperation>(
+    host: ExcelHost<'_>,
+    operation: O,
+    arguments: &mut [*mut XLOPER12],
+) -> RegistrationInvocation<O> {
+    // SAFETY: forwarded from this operation's caller.
+    let evidence = unsafe {
+        host.invoke_protocol_with_scratch(O::FUNCTION_ID, arguments, |result| {
+            operation.decode(result)
+        })
+    };
+    RegistrationInvocation {
+        evidence,
+        operation: std::marker::PhantomData,
+    }
+}
+
 fn mutation_from_invocation<O: RegistrationOperation>(
     invocation: RegistrationInvocation<O>,
 ) -> RegistrationMutation<O::Output> {
@@ -416,8 +460,6 @@ pub(crate) fn valid_registration_id(id: f64) -> bool {
     id.is_finite() && id != 0.0
 }
 
-/// A counted Excel module name owned once by the registration transaction.
-/// Every xlfRegister invocation borrows its unchanged UTF-16 buffer.
 const fn macro_type(visibility: FunctionVisibility) -> f64 {
     match visibility {
         FunctionVisibility::Public => 1.0,
@@ -425,12 +467,18 @@ const fn macro_type(visibility: FunctionVisibility) -> f64 {
     }
 }
 
-fn encode_registration(text: &str) -> XllResult<xlfn_host::registration::CountedString> {
-    crate::utf16::encode_counted(text, "registration", crate::utf16::EXCEL_STRING_LIMIT)
+fn encode_registration_into(units: &mut CountedString, text: &str) -> XllResult<()> {
+    crate::utf16::encode_counted_into(
+        text,
+        "registration",
+        crate::utf16::EXCEL_STRING_LIMIT,
+        units,
+    )
 }
 
 fn temporary_string(text: &str) -> XllResult<TemporaryString> {
-    encode_registration(text).map(TemporaryString::from_counted)
+    crate::utf16::encode_counted(text, "registration", crate::utf16::EXCEL_STRING_LIMIT)
+        .map(TemporaryString::from_counted)
 }
 
 pub(crate) struct ModuleName {
@@ -497,7 +545,7 @@ impl ModuleName {
         #[cfg(not(target_os = "windows"))]
         let path = PathBuf::from(
             String::from_utf16(&units)
-                .map_err(|_| XllError::input(argument, InputError::InvalidUtf16))?,
+                .map_err(|_| XllError::input(argument, crate::error::InputError::InvalidUtf16))?,
         );
         Ok(Self { path, units })
     }
@@ -591,6 +639,7 @@ pub(crate) mod test_support {
         registration_arguments_at_release: Vec<RegisterArgument>,
         registration_pointers: Vec<*mut XLOPER12>,
         registration_hook: Option<RegisterHook>,
+        overwrite_registration_array: bool,
         call_hook: Option<(i32, Box<dyn FnOnce()>)>,
         argument_hooks: VecDeque<(i32, RegisterHook)>,
     }
@@ -655,6 +704,10 @@ pub(crate) mod test_support {
                 assert_eq!(script.registration_arguments, expected);
                 assert_eq!(script.registration_arguments_at_release, expected);
             });
+        }
+
+        pub(super) fn overwrite_registration_array(&self) {
+            SCRIPT.with_borrow_mut(|script| script.overwrite_registration_array = true);
         }
 
         pub(super) fn on_register(&self, hook: impl FnOnce(&[*mut XLOPER12]) + 'static) {
@@ -767,11 +820,17 @@ pub(crate) mod test_support {
                 // SAFETY: Excel's callback contract supplies this many live
                 // operand pointers for the invocation. Copy their contents
                 // before registration drops the temporary UTF-16 owners.
-                let arguments =
+                let operands =
                     unsafe { std::slice::from_raw_parts(arguments, argument_count as usize) };
                 // SAFETY: the callback retains each operand through XL_FREE.
-                script.registration_arguments = unsafe { read_registration_arguments(arguments) };
-                script.registration_pointers = arguments.to_vec();
+                script.registration_arguments = unsafe { read_registration_arguments(operands) };
+                script.registration_pointers = operands.to_vec();
+                if script.overwrite_registration_array {
+                    // SAFETY: the callback owns mutable pointer-array storage;
+                    // clearing it does not mutate or invalidate the operands.
+                    unsafe { std::slice::from_raw_parts_mut(arguments, argument_count as usize) }
+                        .fill(std::ptr::null_mut());
+                }
             }
             // SAFETY: the callback supplies writable result storage for this
             // invocation. The test retains any payload referenced in a reply.
@@ -841,12 +900,12 @@ mod tests {
         let module = "C:\\test\\addin.xll";
         let module_units = module.encode_utf16().collect::<Vec<_>>();
         let prepared_module = CountedModuleName::from_units(&module_units).unwrap();
-        let mut cached_text = RegistrationTextCache::default();
+        let mut cached_text = RegistrationScratch::default();
 
         // Ten fixed operands plus n help strings and their blank trailer
         // exercise empty, inline-full, and spilled help and pointer storage,
-        // then shrink the cached help list.
-        for count in [0, 1, 3, 4, 5, 6, 1, 0] {
+        // then shrink the active help list and reuse the spilled frame.
+        for count in [0, 1, 3, 4, 5, 6, 1, 0, 6] {
             let description = if count % 2 == 0 {
                 "機能の説明"
             } else {
@@ -870,6 +929,7 @@ mod tests {
             let prepared = super::super::preflight_registration(&[descriptor]).unwrap();
             let script =
                 CallbackScript::install([Reply::success(XLF_REGISTER, XLOPER12::number(42.0))]);
+            script.overwrite_registration_array();
             let expected_module_pointer = prepared_module.as_counted().as_ptr().addr();
             script.on_arguments(XLF_REGISTER, move |arguments| {
                 // SAFETY: the registration call retains its immutable module
@@ -938,7 +998,9 @@ mod tests {
     #[test]
     fn registration_spills_survive_nested_registration_and_result_release() {
         use super::test_support::{CallbackScript, Reply, read_registration_arguments};
-        use crate::registration::{RegistrationDescriptor, RegistrationSignature};
+        use crate::registration::{
+            ArgumentAbi, ArgumentDescriptor, RegistrationDescriptor, RegistrationSignature,
+        };
         use std::cell::Cell;
         use std::rc::Rc;
 
@@ -948,14 +1010,17 @@ mod tests {
             signature: RegistrationSignature {
                 return_abi: crate::registration::ReturnAbi::Value12,
                 execution: xlfn_common::ExecutionKind::MainThread,
-                arguments: &[],
+                arguments: &[ArgumentAbi::Value12; 6],
                 volatile: false,
             },
             category: "Test",
             description: "A long help description spills UTF-16 storage and must remain readable after a nested registration has released its independent storage.",
             help_topic: "https://example.invalid/documentation/registration/lifetime/nested/very-long-help-topic",
             visibility: FunctionVisibility::Public,
-            arguments: &[],
+            arguments: &[ArgumentDescriptor {
+                name: "a",
+                description: "This nested argument description spills its own retained text buffer for the many-argument frame.",
+            }; 6],
         };
         let prepared = super::super::preflight_registration(&[descriptor]).unwrap();
         let inner = prepared.clone();
@@ -976,7 +1041,7 @@ mod tests {
             let before = unsafe { read_registration_arguments(outer_pointers) };
             let callbacks = HostCallbackSession::new();
             succeeded.set(matches!(
-                RegistrationHost::new(&callbacks).register(&inner_module, &inner.as_slice()[0], &mut RegistrationTextCache::default()),
+                RegistrationHost::new(&callbacks).register(&inner_module, &inner.as_slice()[0], &mut RegistrationScratch::default()),
                 RegistrationMutation::Applied { value, cleanup: Ok(()) } if value.id == 11.0
             ));
             // SAFETY: nested result release must not reclaim outer operands.
@@ -987,7 +1052,7 @@ mod tests {
         let outcome = RegistrationHost::new(&callbacks).register(
             &outer_module,
             &prepared.as_slice()[0],
-            &mut RegistrationTextCache::default(),
+            &mut RegistrationScratch::default(),
         );
         assert!(
             matches!(outcome, RegistrationMutation::Applied { value, cleanup: Ok(()) } if value.id == 42.0)

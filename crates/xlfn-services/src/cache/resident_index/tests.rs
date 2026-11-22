@@ -1,5 +1,6 @@
 use super::*;
 use std::cell::Cell;
+use std::hash::Hasher;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
@@ -278,7 +279,9 @@ fn miri_fixed_key_owner_preserves_retirement_after_key_callback_panics() {
         );
         index.maintenance();
         drop(index);
-        let expected = if fault == 1 { vec![1] } else { vec![1, 2] };
+        // Preparing the hash now precedes cloning a key. Hash or Clone
+        // panics cannot create an owned resident copy; Eq still can.
+        let expected = if fault == 3 { vec![1, 2] } else { vec![1] };
         let mut actual = drops.ids.lock().clone();
         actual.sort_unstable();
         assert_eq!(actual, expected);

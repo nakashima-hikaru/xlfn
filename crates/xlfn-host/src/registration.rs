@@ -53,169 +53,176 @@ impl LastRegistrationText {
     fn prepare(
         &mut self,
         text: &'static str,
-        encode: &impl Fn(&str) -> XllResult<CountedString>,
+        encode: &impl Fn(&mut CountedString, &str) -> XllResult<()>,
     ) -> XllResult<()> {
         if !std::ptr::eq(self.text, text) && self.text != text {
-            self.units = if text.is_empty() {
-                SmallVec::new()
+            if text.is_empty() {
+                self.units.clear();
             } else {
-                encode(text)?
-            };
+                encode(&mut self.units, text)?;
+            }
             self.text = text;
         }
         Ok(())
     }
 
-    fn borrow(&self) -> BorrowedRegistrationString<'_> {
-        let units = if self.text.is_empty() {
+    fn units(&self) -> &[u16] {
+        if self.text.is_empty() {
             &EMPTY_COUNTED
         } else {
             self.units.as_slice()
-        };
-        BorrowedRegistrationString::new(units)
+        }
     }
 }
 
-/// Scratch storage owned by one registration batch. A nested batch receives
-/// its own cache, and an active RegistrationScratch borrows its cached strings
-/// until the synchronous callback and result release both return.
+fn store_validated_units(
+    storage: &mut SmallVec<[u16; 64]>,
+    length: usize,
+    units: impl Iterator<Item = u16>,
+) {
+    if length > EXCEL_STRING_LIMIT {
+        xlfn_kernel::invariant::fail_stop();
+    }
+    storage.clear();
+    storage.reserve(length + 1);
+    storage.push(length as u16);
+    storage.extend(units);
+    if storage.len() != length + 1 {
+        xlfn_kernel::invariant::fail_stop();
+    }
+}
+
+fn string_operand(units: &[u16]) -> XLOPER12 {
+    debug_assert_eq!(units.len(), usize::from(units[0]) + 1);
+    XLOPER12 {
+        value: XLOPER12Value {
+            // The xlfRegister input is read-only despite the ABI's *mut.
+            string: units.as_ptr().cast_mut(),
+        },
+        xltype: XLTYPE_STR,
+    }
+}
+
+/// Storage owned by one registration batch, never shared with a nested one.
+/// UTF-16, operand and pointer allocations survive successive callbacks.
+/// Form pointers only after their respective backing stores stop growing.
 #[derive(Default)]
-pub struct RegistrationTextCache {
+pub struct RegistrationScratch {
+    procedure: SmallVec<[u16; 64]>,
+    signature: SmallVec<[u16; 64]>,
+    function: SmallVec<[u16; 64]>,
+    arguments: SmallVec<[u16; 64]>,
     category: LastRegistrationText,
     help_topic: LastRegistrationText,
     function_help: LastRegistrationText,
     argument_help: SmallVec<[LastRegistrationText; 4]>,
+    frame: RegistrationFrame,
 }
 
-impl RegistrationTextCache {
-    fn prepare(
+impl RegistrationScratch {
+    pub fn prepare(
         &mut self,
-        category: &'static str,
-        help_topic: &'static str,
-        function_help: &'static str,
-        argument_help: impl ExactSizeIterator<Item = &'static str>,
-        encode: &impl Fn(&str) -> XllResult<CountedString>,
-    ) -> XllResult<()> {
-        self.category.prepare(category, encode)?;
-        self.help_topic.prepare(help_topic, encode)?;
-        self.function_help.prepare(function_help, encode)?;
-        self.argument_help
-            .resize_with(argument_help.len(), LastRegistrationText::default);
-        for (cached, description) in self.argument_help.iter_mut().zip(argument_help) {
-            cached.prepare(description, encode)?;
-        }
-        Ok(())
-    }
-}
-
-struct BorrowedRegistrationString<'call> {
-    units: &'call [u16],
-    oper: XLOPER12,
-}
-
-impl<'call> BorrowedRegistrationString<'call> {
-    fn new(units: &'call [u16]) -> Self {
-        Self {
-            units,
-            oper: XLOPER12::nil(),
-        }
-    }
-
-    fn pointer(&mut self) -> NonNull<XLOPER12> {
-        self.oper = XLOPER12 {
-            value: XLOPER12Value {
-                // The xlfRegister input is read-only despite the ABI's *mut.
-                string: self.units.as_ptr().cast_mut(),
-            },
-            xltype: XLTYPE_STR,
-        };
-        NonNull::from_mut(&mut self.oper)
-    }
-}
-
-/// Owns the scratch operands for one synchronous xlfRegister call and borrows
-/// retained UTF-16 for repeated metadata. Pointers are formed only in invoke.
-pub struct RegistrationScratch<'call> {
-    module: BorrowedRegistrationString<'call>,
-    procedure: TemporaryString,
-    type_text: TemporaryString,
-    function_text: TemporaryString,
-    arguments: TemporaryString,
-    macro_type: XLOPER12,
-    category: BorrowedRegistrationString<'call>,
-    shortcut: BorrowedRegistrationString<'static>,
-    help_topic: BorrowedRegistrationString<'call>,
-    function_help: BorrowedRegistrationString<'call>,
-    argument_help: SmallVec<[BorrowedRegistrationString<'call>; 4]>,
-}
-
-impl<'call> RegistrationScratch<'call> {
-    pub fn new(
-        module: &'call CountedModuleName,
         registration: RegistrationArgs<
             impl Iterator<Item = u16>,
             impl Iterator<Item = u16>,
             impl ExactSizeIterator<Item = &'static str>,
         >,
-        text: &'call mut RegistrationTextCache,
-        encode: impl Fn(&str) -> XllResult<CountedString>,
-    ) -> XllResult<Self> {
-        text.prepare(
-            registration.category,
-            registration.help_topic,
-            registration.function_help,
-            registration.argument_help,
-            &encode,
-        )?;
-        let help_count = text.argument_help.len();
-        let mut argument_help = SmallVec::with_capacity(help_count + usize::from(help_count != 0));
-        if help_count != 0 {
-            argument_help.extend(text.argument_help.iter().map(LastRegistrationText::borrow));
-            argument_help.push(BorrowedRegistrationString::new(&EMPTY_COUNTED));
+        encode: impl Fn(&mut CountedString, &str) -> XllResult<()>,
+    ) -> XllResult<PreparedRegistration<'_>> {
+        encode(&mut self.procedure, registration.export_name)?;
+        store_validated_units(
+            &mut self.signature,
+            registration.signature.0,
+            registration.signature.1,
+        );
+        encode(&mut self.function, registration.excel_name)?;
+        store_validated_units(
+            &mut self.arguments,
+            registration.argument_names.0,
+            registration.argument_names.1,
+        );
+        self.category.prepare(registration.category, &encode)?;
+        self.help_topic.prepare(registration.help_topic, &encode)?;
+        self.function_help
+            .prepare(registration.function_help, &encode)?;
+        let help_count = registration.argument_help.len();
+        if self.argument_help.len() < help_count {
+            self.argument_help
+                .resize_with(help_count, LastRegistrationText::default);
         }
-        Ok(Self {
-            module: BorrowedRegistrationString::new(&module.units),
-            procedure: TemporaryString::from_counted(encode(registration.export_name)?),
-            type_text: TemporaryString::from_validated_units(
-                registration.signature.0,
-                registration.signature.1,
-            ),
-            function_text: TemporaryString::from_counted(encode(registration.excel_name)?),
-            arguments: TemporaryString::from_validated_units(
-                registration.argument_names.0,
-                registration.argument_names.1,
-            ),
-            macro_type: XLOPER12::number(registration.macro_type),
-            category: text.category.borrow(),
-            shortcut: BorrowedRegistrationString::new(&EMPTY_COUNTED),
-            help_topic: text.help_topic.borrow(),
-            function_help: text.function_help.borrow(),
-            argument_help,
+        for (cached, description) in self
+            .argument_help
+            .iter_mut()
+            .zip(registration.argument_help)
+        {
+            cached.prepare(description, &encode)?;
+        }
+        Ok(PreparedRegistration {
+            scratch: self,
+            help_count,
+            macro_type: registration.macro_type,
         })
     }
+}
 
-    /// Borrows immobile operands through the caller's synchronous callback
-    /// and result-release closure. This does not authorize an Excel call.
-    pub fn with_arguments<T>(mut self, invoke: impl FnOnce(&[NonNull<XLOPER12>]) -> T) -> T {
-        let mut pointers: SmallVec<[NonNull<XLOPER12>; 16]> = smallvec::smallvec![
-            self.module.pointer(),
-            self.procedure.pointer(),
-            self.type_text.pointer(),
-            self.function_text.pointer(),
-            self.arguments.pointer(),
-            NonNull::from_mut(&mut self.macro_type),
-            self.category.pointer(),
-            self.shortcut.pointer(),
-            self.help_topic.pointer(),
-            self.function_help.pointer(),
-        ];
-        pointers.extend(
-            self.argument_help
-                .iter_mut()
-                .map(BorrowedRegistrationString::pointer),
+/// Exclusive loan of the prepared batch scratch until callback and release end.
+pub struct PreparedRegistration<'batch> {
+    scratch: &'batch mut RegistrationScratch,
+    help_count: usize,
+    macro_type: f64,
+}
+
+impl PreparedRegistration<'_> {
+    pub fn with_arguments<T>(
+        self,
+        module: &CountedModuleName,
+        invoke: impl FnOnce(&mut [*mut XLOPER12]) -> T,
+    ) -> T {
+        let scratch = self.scratch;
+        let argument_help = &scratch.argument_help[..self.help_count];
+        let call = RegistrationCall(&mut scratch.frame);
+        call.0.operands.extend([
+            string_operand(&module.units),
+            string_operand(&scratch.procedure),
+            string_operand(&scratch.signature),
+            string_operand(&scratch.function),
+            string_operand(&scratch.arguments),
+            XLOPER12::number(self.macro_type),
+            string_operand(scratch.category.units()),
+            string_operand(&EMPTY_COUNTED),
+            string_operand(scratch.help_topic.units()),
+            string_operand(scratch.function_help.units()),
+        ]);
+        call.0.operands.extend(
+            argument_help
+                .iter()
+                .map(|help| string_operand(help.units())),
         );
+        if !argument_help.is_empty() {
+            call.0.operands.push(string_operand(&EMPTY_COUNTED));
+        }
+        call.0
+            .pointers
+            .extend(call.0.operands.iter_mut().map(std::ptr::from_mut));
+        invoke(&mut call.0.pointers)
+    }
+}
 
-        invoke(&pointers)
+#[derive(Default)]
+struct RegistrationFrame {
+    operands: SmallVec<[XLOPER12; 16]>,
+    pointers: SmallVec<[*mut XLOPER12; 16]>,
+}
+
+/// Clears the frame on ordinary return and unwind without releasing capacity.
+/// Its exclusive loan keeps the freshly formed pointers private until the
+/// registration callback and its result release have both finished.
+struct RegistrationCall<'frame>(&'frame mut RegistrationFrame);
+
+impl Drop for RegistrationCall<'_> {
+    fn drop(&mut self) {
+        self.0.pointers.clear();
+        self.0.operands.clear();
     }
 }
 
@@ -251,22 +258,6 @@ impl TemporaryString {
         }
     }
 
-    fn from_validated_units(length: usize, units: impl Iterator<Item = u16>) -> Self {
-        if length > EXCEL_STRING_LIMIT {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let mut storage = SmallVec::with_capacity(length + 1);
-        storage.push(length as u16);
-        storage.extend(units);
-        if storage.len() != length + 1 {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        Self {
-            storage,
-            oper: XLOPER12::nil(),
-        }
-    }
-
     pub fn pointer(&mut self) -> NonNull<XLOPER12> {
         debug_assert_eq!(self.storage.len(), self.storage[0] as usize + 1);
         self.oper = XLOPER12 {
@@ -284,6 +275,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_frame_reuses_spilled_allocations_after_overwrite_and_shorter_calls() {
+        let encode = |units: &mut CountedString, text: &str| {
+            units.clear();
+            units.push(text.encode_utf16().count() as u16);
+            units.extend(text.encode_utf16());
+            Ok(())
+        };
+        let help = ["A long help string whose encoding spills out of the inline buffer to prove retained allocation.";
+            6];
+        let module = CountedModuleName::from_units(&[65]).unwrap();
+        let mut scratch = RegistrationScratch::default();
+        let mut spilled = None;
+        for count in [0, 5, 6, 1, 0, 6] {
+            let prepared = scratch
+                .prepare(
+                    RegistrationArgs {
+                        export_name: "entry",
+                        excel_name: "ENTRY",
+                        signature: (1, [66].into_iter()),
+                        argument_names: (0, std::iter::empty()),
+                        macro_type: 1.0,
+                        category: "",
+                        help_topic: "",
+                        function_help: "",
+                        argument_help: help[..count].iter().copied(),
+                    },
+                    encode,
+                )
+                .unwrap();
+            prepared.with_arguments(&module, |pointers| {
+                assert_eq!(pointers.len(), 10 + count + usize::from(count != 0));
+                assert!(pointers.iter().all(|pointer| !pointer.is_null()));
+                pointers.fill(std::ptr::null_mut());
+            });
+            assert!(scratch.frame.operands.is_empty());
+            assert!(scratch.frame.pointers.is_empty());
+            if count <= 5 && spilled.is_none() {
+                assert!(!scratch.frame.operands.spilled());
+                assert!(!scratch.frame.pointers.spilled());
+            }
+            if count == 6 {
+                assert!(scratch.frame.operands.spilled());
+                assert!(scratch.frame.pointers.spilled());
+                assert!(scratch.argument_help[1].units.spilled());
+                let retained = (
+                    scratch.frame.operands.as_ptr(),
+                    scratch.frame.pointers.as_ptr(),
+                    scratch.argument_help[1].units.as_ptr(),
+                );
+                if let Some(previous) = spilled {
+                    assert_eq!(retained, previous);
+                }
+                spilled = Some(retained);
+            }
+        }
+    }
+
+    #[test]
     fn registration_metadata_reuses_equal_counted_text_and_replaces_changed_text() {
         static LONG: [u8; 96] = [b'x'; 96];
         static ALTERNATE: [u8; 96] = [b'x'; 96];
@@ -292,21 +341,27 @@ mod tests {
         assert!(!std::ptr::eq(long, alternate));
         assert_eq!(long, alternate);
 
-        let encode = |value: &str| {
-            let count = value.encode_utf16().count() as u16;
-            Ok(std::iter::once(count).chain(value.encode_utf16()).collect())
+        let encode = |units: &mut CountedString, text: &str| {
+            units.clear();
+            units.push(text.encode_utf16().count() as u16);
+            units.extend(text.encode_utf16());
+            Ok(())
         };
         let mut text = LastRegistrationText::default();
-        assert!(std::ptr::eq(text.borrow().units, &EMPTY_COUNTED));
+        assert!(std::ptr::eq(text.units(), &EMPTY_COUNTED));
         text.prepare(long, &encode).unwrap();
-        let counted = text.borrow().units.as_ptr();
+        let counted = text.units().as_ptr();
         text.prepare(alternate, &encode).unwrap();
-        assert_eq!(text.borrow().units.as_ptr(), counted);
+        assert_eq!(text.units().as_ptr(), counted);
 
         text.prepare("価格💡", &encode).unwrap();
+        assert_eq!(text.units.as_ptr(), counted);
         let expected: Vec<_> = std::iter::once(4).chain("価格💡".encode_utf16()).collect();
-        assert_eq!(text.borrow().units, expected);
+        assert_eq!(text.units(), expected);
         text.prepare("", &encode).unwrap();
-        assert!(std::ptr::eq(text.borrow().units, &EMPTY_COUNTED));
+        assert!(std::ptr::eq(text.units(), &EMPTY_COUNTED));
+        assert_eq!(text.units.as_ptr(), counted);
+        text.prepare(long, &encode).unwrap();
+        assert_eq!(text.units.as_ptr(), counted);
     }
 }

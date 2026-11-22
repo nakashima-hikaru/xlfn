@@ -59,6 +59,8 @@ pub(crate) use windows::ComApartmentGuard;
 pub(crate) use windows::RtdNotifier;
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
 pub(crate) use windows::WindowsRefreshArrayApi;
+#[cfg(all(windows, feature = "rtd", feature = "bench-internals"))]
+pub use windows::benchmark_rtd_bstr;
 
 #[cfg(all(
     not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))),

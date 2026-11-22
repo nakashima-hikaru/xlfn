@@ -227,10 +227,15 @@ deny:
 semver:
     # Derive compatibility requirements from each crate's actual version.
     # A workspace-wide major override would skip checks even for crates
-    # whose compatibility line has not changed.
+    # whose compatibility line has not changed. Each implementation-only
+    # crate omitted here lacks a 0.1.0 tag baseline; the facade snapshots also
+    # track the definitions it re-exports from those crates.
     cargo semver-checks \
         --workspace \
         --exclude xlfn-kernel \
+        --exclude xlfn-engine \
+        --exclude xlfn-host \
+        --exclude xlfn-services \
         --baseline-rev 0.1.0
 
 # Assemble and build registry-ready archives without invoking publication.

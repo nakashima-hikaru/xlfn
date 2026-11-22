@@ -534,9 +534,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         *deliverable_count = (*deliverable_count)
             .checked_sub(count)
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-        for _ in 0..count {
-            let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.deliverable_pending);
-        }
+        let _ = xlfn_kernel::invariant::checked_atomic_sub(&self.deliverable_pending, count);
         if *deliverable_count == 0 {
             self.ready_shards
                 .fetch_and(!(1_u32 << shard_index), Ordering::Release);
@@ -560,36 +558,6 @@ impl<H: SubscriptionHost> PublishCore<H> {
             .is_some_and(|active| active.committed);
         self.record_pending_removal(&mut shard.deliverable_count, shard_index, deliverable);
         true
-    }
-
-    fn retire_pending_through(
-        &self,
-        shard: &mut TopicShard,
-        shard_index: usize,
-        topic_id: TopicId,
-        generation: ConnectionGeneration,
-        delivered_sequence: u64,
-    ) {
-        for buffer in BufferIndex::ALL {
-            self.remove_pending_if(shard, shard_index, buffer, topic_id, |queued| {
-                queued.connection_generation == generation && queued.sequence <= delivered_sequence
-            });
-        }
-
-        if let Some(active) = shard.active_by_topic.get_mut(&topic_id) {
-            for buffer in BufferIndex::ALL {
-                if let ValueSlot::Resident(versioned) = &active.values[buffer.index()]
-                    && versioned.generation == generation
-                    && versioned.sequence <= delivered_sequence
-                {
-                    let is_latest = active.latest_slot == Some(buffer);
-                    let has_pending = shard.pending[buffer.index()].contains_key(&topic_id);
-                    if !is_latest && !has_pending {
-                        active.values[buffer.index()] = ValueSlot::Empty;
-                    }
-                }
-            }
-        }
     }
 
     pub(crate) fn enter_operation(&self) -> XllResult<ScopedPublishOperation<'_, H>> {

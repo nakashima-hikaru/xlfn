@@ -251,28 +251,59 @@ const fn fold_ascii(unit: u16) -> u16 {
     }
 }
 
-#[allow(
-    unsafe_code,
-    reason = "initializes checked-capacity UTF-16 storage before publishing its length"
-)]
 pub(crate) fn encode_counted(
     text: &str,
     argument: &'static str,
     limit: usize,
 ) -> XllResult<SmallVec<[u16; INLINE_UTF16_CAPACITY]>> {
+    let (capacity, ascii) = counted_capacity(text, argument, limit)?;
+    let mut units = SmallVec::with_capacity(capacity);
+    write_counted(text, capacity, ascii, &mut units);
+    Ok(units)
+}
+
+/// Re-encodes a counted string into caller-owned scratch. Invalid input leaves
+/// the previous payload unchanged; successful shorter input retains capacity.
+pub(crate) fn encode_counted_into(
+    text: &str,
+    argument: &'static str,
+    limit: usize,
+    units: &mut SmallVec<[u16; INLINE_UTF16_CAPACITY]>,
+) -> XllResult<()> {
+    let (capacity, ascii) = counted_capacity(text, argument, limit)?;
+    units.clear();
+    units.reserve(capacity);
+    write_counted(text, capacity, ascii, units);
+    Ok(())
+}
+
+#[inline]
+fn counted_capacity(text: &str, argument: &'static str, limit: usize) -> XllResult<(usize, bool)> {
     let limit = limit.min(usize::from(u16::MAX));
-    let (capacity, ascii) = if text.len() < INLINE_UTF16_CAPACITY && text.len() <= limit {
+    if text.len() < INLINE_UTF16_CAPACITY && text.len() <= limit {
         // UTF-16 length never exceeds UTF-8 length. A short input already
         // proves both limits without decoding Unicode just to count it.
-        (text.len() + 1, text.is_ascii())
+        Ok((text.len() + 1, text.is_ascii()))
     } else {
+        // Exact code-unit capacity avoids spilling a Unicode string that fits
+        // inline. Neither scratch nor fresh output is changed on rejection.
         let length = checked_utf16_len(text, argument, limit)?;
-        (length + 1, text.len() == length)
-    };
-    // Reserve by code-unit length, so Unicode text that fits inline does not
-    // spill merely because its UTF-8 representation is larger. Long strings
-    // get their final buffer immediately; rejected strings allocate nothing.
-    let mut units = SmallVec::<[u16; INLINE_UTF16_CAPACITY]>::with_capacity(capacity);
+        Ok((length + 1, text.len() == length))
+    }
+}
+
+#[allow(
+    unsafe_code,
+    reason = "initializes checked-capacity UTF-16 storage before publishing its length"
+)]
+#[inline]
+fn write_counted(
+    text: &str,
+    capacity: usize,
+    ascii: bool,
+    units: &mut SmallVec<[u16; INLINE_UTF16_CAPACITY]>,
+) {
+    debug_assert!(units.is_empty() && units.capacity() >= capacity);
     if ascii {
         units.push(text.len() as u16);
         units.extend(text.as_bytes().iter().map(|&byte| u16::from(byte)));
@@ -281,17 +312,7 @@ pub(crate) fn encode_counted(
         // Three UTF-8 bytes per UTF-16 unit is the maximum; equality means
         // every scalar is a three-byte BMP scalar, never a surrogate pair.
         units.push((capacity - 1) as u16);
-        units.extend(
-            text.as_bytes()
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .map(|&[first, second, third]| {
-                    (u16::from(first & 0x0f) << 12)
-                        | (u16::from(second & 0x3f) << 6)
-                        | u16::from(third & 0x3f)
-                }),
-        );
+        units.extend(xlfn_common::fixed_bmp_units(text));
     } else {
         let pointer = units.as_mut_ptr();
         let mut initialized = 1;
@@ -310,7 +331,6 @@ pub(crate) fn encode_counted(
         // final length is within the capacity bound established above.
         unsafe { units.set_len(initialized) };
     }
-    Ok(units)
 }
 
 #[cfg(test)]
@@ -351,6 +371,26 @@ mod tests {
             proptest::prop_assert_eq!(usize::from(actual[0]), expected.len());
             proptest::prop_assert_eq!(&actual[1..], expected);
             proptest::prop_assert_eq!(decode_owned(&actual[1..], "test").unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn counted_encoder_reuses_capacity_and_keeps_previous_value_on_error() {
+        let mut units = SmallVec::new();
+        let long = "説".repeat(100);
+        encode_counted_into(&long, "test", EXCEL_STRING_LIMIT, &mut units).unwrap();
+        let allocation = units.as_ptr();
+        let saved = units.clone();
+        assert!(units.spilled());
+        assert!(encode_counted_into("long", "test", 3, &mut units).is_err());
+        assert_eq!(units, saved);
+        for text in ["", "試", "💡Ａ", "ASCII", &long] {
+            encode_counted_into(text, "test", EXCEL_STRING_LIMIT, &mut units).unwrap();
+            assert_eq!(
+                units,
+                encode_counted(text, "test", EXCEL_STRING_LIMIT).unwrap()
+            );
+            assert_eq!(units.as_ptr(), allocation);
         }
     }
 

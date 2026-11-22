@@ -29,7 +29,7 @@ mod singleflight_tests;
 use crate::sync::{Condvar, Mutex};
 use crossbeam_utils::CachePadded;
 use indexmap::map::{RawEntryApiV1, raw_entry_v1::RawEntryMut};
-use resident_index::{ResidentEntry, ResidentIndex};
+use resident_index::{PreparedResident, ResidentEntry, ResidentIndex};
 use rustc_hash::{FxBuildHasher, FxHasher};
 use smallvec::SmallVec;
 use std::any::{Any, TypeId};
@@ -456,6 +456,10 @@ pub struct CacheRegistry {
     // Serialize first publication and clear snapshots so initialization is
     // unique and iteration sees a fixed endpoint set.
     insertions: Mutex<()>,
+    #[cfg(all(test, not(miri)))]
+    before_endpoint_insertions_lock: Option<Box<dyn Fn() + Send + Sync>>,
+    #[cfg(all(test, not(miri)))]
+    constructed_endpoint_caches: AtomicUsize,
 }
 
 impl CacheRegistry {
@@ -477,6 +481,10 @@ impl CacheRegistry {
             report,
             caches: CacheMap::with_hasher(FxBuildHasher),
             insertions: Mutex::new(()),
+            #[cfg(all(test, not(miri)))]
+            before_endpoint_insertions_lock: None,
+            #[cfg(all(test, not(miri)))]
+            constructed_endpoint_caches: AtomicUsize::new(0),
         }
     }
 
@@ -548,11 +556,22 @@ impl CacheRegistry {
                 return Self::downcast_cache::<Marker, K, V>(entry);
             }
         }
+        #[cfg(all(test, not(miri)))]
+        if let Some(hook) = &self.before_endpoint_insertions_lock {
+            hook();
+        }
         let _insertions = self.insertions.lock();
         let caches = self.caches.pin();
+        if let Some(entry) = caches.get(&cache_key) {
+            // Another thread may have filled this endpoint while we waited.
+            return Self::downcast_cache::<Marker, K, V>(entry);
+        }
         // One operation owns vacancy selection and publication. Eager insertion
         // also helps Papaya's incremental resize; lazy compute insertion can
         // leave read-only endpoint traffic walking a chain of older tables.
+        #[cfg(all(test, not(miri)))]
+        self.constructed_endpoint_caches
+            .fetch_add(1, Ordering::Relaxed);
         let cache = Box::new(StoredCache::<Marker, K, V> {
             cache: CalculationCache::with_weigher_and_reporter(
                 crate::cache::CacheBudget::weight_units(self.weight_budget_per_endpoint),
@@ -738,6 +757,16 @@ struct VersionedKey<K> {
     key: K,
 }
 
+#[cfg(test)]
+impl<K> VersionedKey<K> {
+    fn as_ref(&self) -> VersionedKeyRef<'_, K> {
+        VersionedKeyRef {
+            epoch: self.epoch,
+            key: &self.key,
+        }
+    }
+}
+
 struct VersionedKeyRef<'a, Q: ?Sized> {
     epoch: u64,
     key: &'a Q,
@@ -747,6 +776,37 @@ impl<Q: Hash + ?Sized> Hash for VersionedKeyRef<'_, Q> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.epoch.hash(state);
         self.key.hash(state);
+    }
+}
+
+// The borrowed form still has a way to acquire ownership if no resident
+// or running computation can serve it. An owned key is moved only under
+// successful admission; ToOwned (including reentrant user code) runs outside.
+enum RequestKey<'q, K, Q: ?Sized> {
+    Borrowed(&'q Q, fn(&Q) -> K),
+    Owned(Option<K>),
+}
+
+impl<K: std::borrow::Borrow<Q>, Q: ?Sized> RequestKey<'_, K, Q> {
+    fn get(&self) -> &Q {
+        match self {
+            Self::Borrowed(key, _) => key,
+            Self::Owned(key) => key.as_ref().expect("request still owns its key").borrow(),
+        }
+    }
+
+    fn take_owned(&mut self) -> Option<K> {
+        match self {
+            Self::Borrowed(..) => None,
+            Self::Owned(key) => Some(key.take().expect("leader consumes its key once")),
+        }
+    }
+
+    fn make_owned(&mut self) {
+        let Self::Borrowed(key, to_owned) = self else {
+            unreachable!("only a borrowed request needs to acquire ownership");
+        };
+        *self = Self::Owned(Some(to_owned(key)));
     }
 }
 
@@ -844,10 +904,15 @@ impl<K, V> Flight<K, V> {
     }
 }
 
-fn flight_hash<K: Hash>(key: &VersionedKey<K>) -> u64 {
+fn flight_hash_for<Q: Hash + ?Sized>(key: &VersionedKeyRef<'_, Q>) -> u64 {
     let mut hasher = FxHasher::default();
     key.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+fn flight_hash<K: Hash>(key: &VersionedKey<K>) -> u64 {
+    flight_hash_for(&key.as_ref())
 }
 
 /// Key equality is needed only while admitting a caller. Once registered,
@@ -867,14 +932,25 @@ impl<K, V> Default for FlightSet<K, V> {
 }
 
 impl<K, V> FlightSet<K, V> {
+    fn get_borrowed<Q>(&self, hash: u64, key: &VersionedKeyRef<'_, Q>) -> Option<&Arc<Flight<K, V>>>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
+        self.entries
+            .raw_entry_v1()
+            .from_hash(hash, |flight| {
+                quick_cache::Equivalent::equivalent(key, &flight.key)
+            })
+            .map(|(flight, ())| flight)
+    }
+
+    #[cfg(test)]
     fn get(&self, hash: u64, key: &VersionedKey<K>) -> Option<&Arc<Flight<K, V>>>
     where
         K: Eq,
     {
-        self.entries
-            .raw_entry_v1()
-            .from_hash(hash, |flight| flight.key == *key)
-            .map(|(flight, ())| flight)
+        self.get_borrowed(hash, &key.as_ref())
     }
 
     /// The caller already established absence while holding the table lock.
@@ -1365,9 +1441,9 @@ pub struct CacheResidentStats {
 /// UDF invocations. Eviction is based on abstract caller-reported weights rather
 /// than physical allocations.
 ///
-/// Keys must keep their equality and hash stable while stored. `Hash` and `Eq`
-/// on owned or borrowed keys must not reenter this cache, directly or through a registry: they
-/// may run while cache locks or read admission are held. `K::Clone` must
+/// Keys must keep their equality and hash stable while stored. `Hash`, `Eq`,
+/// and `Borrow` on owned or borrowed keys must not reenter this cache, directly
+/// or through a registry: they may run while cache locks or read admission are held. `K::Clone` must
 /// preserve key identity and must not depend on starting another cache
 /// initialization on the same thread, because cloning may occur during
 /// publication of an initialized entry.
@@ -1603,19 +1679,43 @@ where
     {
         let _operation = CacheOperationGuard::enter();
         let epoch = self.generation.snapshot();
-        let lease = self.get_at_epoch(key, epoch);
+        let lease = self.domain.enter().ok().and_then(|permit| {
+            let resident = self.index.prepare(&VersionedKeyRef { epoch, key });
+            self.get_prepared(key, epoch, &resident, permit)
+        });
         self.maintain(false);
         lease
     }
 
-    fn get_at_epoch<'a, Q>(&'a self, key: &Q, epoch: u64) -> Option<CacheLease<'a, V>>
+    #[inline]
+    fn first_lookup<'a, Q>(
+        &'a self,
+        key: &Q,
+        epoch: u64,
+    ) -> (PreparedResident<'a, K, V>, Option<CacheLease<'a, V>>)
     where
         K: std::borrow::Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let permit = self.domain.enter().ok()?;
-        let lookup = VersionedKeyRef { epoch, key };
-        let (node_ptr, _) = self.index.get(&lookup)?;
+        let permit = self.domain.enter().ok();
+        let resident = self.index.prepare(&VersionedKeyRef { epoch, key });
+        let lease = permit.and_then(|permit| self.get_prepared(key, epoch, &resident, permit));
+        (resident, lease)
+    }
+
+    #[inline]
+    fn get_prepared<'a, Q>(
+        &'a self,
+        key: &Q,
+        epoch: u64,
+        resident: &PreparedResident<'_, K, V>,
+        permit: CacheDomainPermit<'_, V>,
+    ) -> Option<CacheLease<'a, V>>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
+        let (node_ptr, _) = resident.get(key)?;
         // SAFETY: [TR-OBSERVE-POINTER] node_ptr is observed only while holding a valid lookup admission domain permit.
         let node = unsafe { node_ptr.0.as_ref() };
         pin_transitions::lookup_after_observation!(
@@ -1665,14 +1765,19 @@ where
         F: FnOnce() -> XllResult<V>,
     {
         let epoch = self.generation.snapshot();
-        self.get_or_try_insert_at_epoch(key, self.weigher, compute, epoch)
+        self.get_or_try_insert_at_epoch::<K, _, _>(
+            RequestKey::Owned(Some(key)),
+            self.weigher,
+            compute,
+            epoch,
+        )
     }
 
     /// Returns or initializes a value, owning the key only after a resident miss.
     ///
-    /// Resident hits do not call [`ToOwned::to_owned`]. On a miss, the owned key
-    /// enters the existing single-flight path, which rechecks residency before
-    /// enrolling. Joining an in-progress computation can still own the key.
+    /// Resident hits and requests joining an already registered computation do
+    /// not call [`ToOwned::to_owned`]. If no flight exists, the caller owns the
+    /// key outside the coordination lock and rechecks before registering.
     /// The initial lookup and initialization share one generation snapshot, so
     /// `clear()` during `to_owned()` cannot promote this request to a new generation.
     /// Panics and reentry follow [`Self::get_or_try_insert_with`]; `to_owned()`
@@ -1687,13 +1792,13 @@ where
         Q: ToOwned<Owned = K> + Hash + Eq + ?Sized,
         F: FnOnce() -> XllResult<V>,
     {
-        let _operation = CacheOperationGuard::enter();
         let epoch = self.generation.snapshot();
-        if let Some(lease) = self.get_at_epoch(key, epoch) {
-            self.maintain(false);
-            return Ok(lease);
-        }
-        self.get_or_try_insert_at_epoch(key.to_owned(), self.weigher, compute, epoch)
+        self.get_or_try_insert_at_epoch(
+            RequestKey::Borrowed(key, Q::to_owned),
+            self.weigher,
+            compute,
+            epoch,
+        )
     }
 
     // Unit tests exercise callback/unwind interleavings independently of the
@@ -1709,17 +1814,24 @@ where
         F: FnOnce() -> XllResult<V>,
         W: FnOnce(&V) -> usize,
     {
-        self.get_or_try_insert_at_epoch(key, weight, compute, self.generation.snapshot())
+        self.get_or_try_insert_at_epoch::<K, _, _>(
+            RequestKey::Owned(Some(key)),
+            weight,
+            compute,
+            self.generation.snapshot(),
+        )
     }
 
-    fn get_or_try_insert_at_epoch<'a, F, W>(
+    fn get_or_try_insert_at_epoch<'a, Q, F, W>(
         &'a self,
-        key: K,
+        key: RequestKey<'_, K, Q>,
         weight: W,
         compute: F,
         epoch: u64,
     ) -> XllResult<CacheLease<'a, V>>
     where
+        K: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
         F: FnOnce() -> XllResult<V>,
         W: FnOnce(&V) -> usize,
     {
@@ -1739,41 +1851,49 @@ where
         });
 
         let _operation = CacheOperationGuard::enter();
+        let mut key = key;
         let mut compute_opt = Some(compute);
         let mut weight_opt = Some(weight);
-        let mut vkey_opt = Some(VersionedKey { epoch, key });
+        let (resident_request, hit) = self.first_lookup(key.get(), epoch);
+        if let Some(lease) = hit {
+            self.maintain(false);
+            return Ok(lease);
+        }
 
+        if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 {
+            return Err(internal(CACHE_REENTRANT));
+        }
+
+        // Distinct from the index-specific keyed hash. Compute only on a miss,
+        // outside the coordination lock, and keep across ownership and retries.
+        let hash = flight_hash_for(&VersionedKeyRef {
+            epoch,
+            key: key.get(),
+        });
         'outer: loop {
-            let current_lookup_epoch = vkey_opt.as_ref().unwrap().epoch;
-            if let Some(lease) =
-                self.get_at_epoch(&vkey_opt.as_ref().unwrap().key, current_lookup_epoch)
-            {
-                self.maintain(false);
-                return Ok(lease);
-            }
-
-            if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 {
-                return Err(internal(CACHE_REENTRANT));
-            }
-
-            // User hashing happens before acquiring the coordination lock.
-            // Retain this hash for callback-free insertion and removal.
-            let hash = flight_hash(vkey_opt.as_ref().unwrap());
             let (flight, is_leader) = {
+                let lookup = key.get();
                 let mut flights = self.flights.shard(hash).lock();
-                let vkey_ref = vkey_opt.as_ref().unwrap();
-                if let Some(lease) = self.get_at_epoch(&vkey_ref.key, current_lookup_epoch) {
+                if let Some(lease) =
+                    self.domain.enter().ok().and_then(|permit| {
+                        self.get_prepared(lookup, epoch, &resident_request, permit)
+                    })
+                {
                     drop(flights);
                     self.maintain(false);
                     return Ok(lease);
                 }
-                if let Some(flight) = flights.get(hash, vkey_ref) {
+                let query = VersionedKeyRef { epoch, key: lookup };
+                if let Some(flight) = flights.get_borrowed(hash, &query) {
                     (Arc::clone(flight), false)
-                } else {
-                    let vkey = vkey_opt.take().unwrap();
-                    let flight = Arc::new(Flight::new(vkey, hash));
+                } else if let Some(owned) = key.take_owned() {
+                    let flight = Arc::new(Flight::new(VersionedKey { epoch, key: owned }, hash));
                     flights.insert_unique(Arc::clone(&flight));
                     (flight, true)
+                } else {
+                    drop(flights);
+                    key.make_owned();
+                    continue 'outer;
                 }
             };
 
@@ -1863,11 +1983,10 @@ where
                     if publish {
                         // SAFETY: creator_guard retains the new allocation.
                         let resident = ResidentPin::acquire(&creator_guard);
-                        self.index
-                            .insert_resident(&flight.key, ResidentEntry::new(resident, w));
+                        resident_request.insert(&flight.key, ResidentEntry::new(resident, w));
 
                         self.generation.discard_if_stale(flight.key.epoch, || {
-                            self.index.invalidate(&flight.key);
+                            resident_request.invalidate(&flight.key);
                         });
                     }
 
@@ -1987,6 +2106,38 @@ mod tests {
         assert_eq!(REPORTS.load(Ordering::Relaxed), 0);
         drop(lease);
         assert_eq!(REPORTS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn contending_initial_endpoints_construct_only_one_cache() {
+        const CONTENDERS: usize = 8;
+        let barrier = std::sync::Barrier::new(CONTENDERS);
+        let mut registry = CacheRegistry::new(CacheBudget::weight_units(32));
+        registry.before_endpoint_insertions_lock = Some(Box::new(move || {
+            barrier.wait();
+        }));
+        let endpoint = CacheEndpoint::<u32, u32>::new("initial-endpoint");
+        std::thread::scope(|scope| {
+            let workers = (0..CONTENDERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        registry
+                            .resolve_cache_uncached(&endpoint)
+                            .unwrap()
+                            .addr()
+                            .get()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut workers = workers.into_iter();
+            let first = workers.next().unwrap().join().unwrap();
+            assert!(workers.all(|worker| worker.join().unwrap() == first));
+        });
+        assert_eq!(
+            registry.constructed_endpoint_caches.load(Ordering::Relaxed),
+            1
+        );
     }
 
     struct CloneCountedKey {
@@ -2422,7 +2573,12 @@ mod tests {
 
         assert_eq!(
             *cache
-                .get_or_try_insert_at_epoch(1, |_| 4, || Ok(7), old_epoch)
+                .get_or_try_insert_at_epoch::<u32, _, _>(
+                    RequestKey::Owned(Some(1)),
+                    |_| 4,
+                    || Ok(7),
+                    old_epoch,
+                )
                 .unwrap(),
             7
         );

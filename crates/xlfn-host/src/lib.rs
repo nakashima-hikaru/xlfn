@@ -140,6 +140,29 @@ pub unsafe fn dispatch(
     // SAFETY: the caller owns host admission and the synchronous arguments.
     let (status, value, invoked) =
         unsafe { xlfn_sys::excel12_with_invocation(function, arguments) };
+    callback_outcome(status, value, invoked)
+}
+
+/// Dispatch with a reusable raw Excel pointer array.
+///
+/// # Safety
+/// The session, admission and result-ownership requirements of [dispatch]
+/// apply. Excel may overwrite the writable array; its entries are not used
+/// after dispatch. The stationary, read-only operands must remain live.
+#[doc(hidden)]
+#[inline]
+pub unsafe fn dispatch_with_scratch(
+    function: i32,
+    arguments: &mut [*mut xlfn_sys::XLOPER12],
+) -> RawCallback {
+    // SAFETY: session, admission and arguments are proved by the caller.
+    let (status, value, invoked) =
+        unsafe { xlfn_sys::excel12_with_invocation_scratch(function, arguments) };
+    callback_outcome(status, value, invoked)
+}
+
+#[inline]
+fn callback_outcome(status: i32, value: xlfn_sys::XLOPER12, invoked: bool) -> RawCallback {
     if invoked {
         RawCallback::Invoked { status, value }
     } else {

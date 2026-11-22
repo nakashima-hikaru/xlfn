@@ -142,6 +142,18 @@ fn non_ascii_utf16_len(text: &str) -> usize {
         .sum()
 }
 
+/// Converts fixed UTF-8 triples; caller must prove all scalars are three-byte
+/// BMP (byte count is exactly three times the exact UTF-16 length).
+#[doc(hidden)]
+#[inline]
+pub fn fixed_bmp_units(text: &str) -> impl ExactSizeIterator<Item = u16> + '_ {
+    let (triples, tail) = text.as_bytes().as_chunks::<3>();
+    debug_assert!(tail.is_empty());
+    triples.iter().map(|&[first, second, third]| {
+        (u16::from(first & 0x0f) << 12) | (u16::from(second & 0x3f) << 6) | u16::from(third & 0x3f)
+    })
+}
+
 /// Maximum length of an Excel function name, measured in UTF-16 code units.
 pub const EXCEL_FUNCTION_NAME_LIMIT: usize = 255;
 

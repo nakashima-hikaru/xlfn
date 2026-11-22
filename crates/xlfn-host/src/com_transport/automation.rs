@@ -47,6 +47,14 @@ pub unsafe fn write_bstr_variant(result: *mut VARIANT, value: &str) -> i32 {
             // Write directly without borrowing uninitialized BSTR contents.
             unsafe { bstr.as_ptr().wrapping_add(index).write(u16::from(byte)) };
         }
+    } else if value.len() == length * 3 {
+        // Equality with three UTF-8 bytes per UTF-16 unit proves that every
+        // scalar is one three-byte BMP code point.
+        for (index, unit) in xlfn_common::fixed_bmp_units(value).enumerate() {
+            // SAFETY: this iterator yields the exact allocated unit count,
+            // leaving the allocator's trailing terminator untouched.
+            unsafe { bstr.as_ptr().wrapping_add(index).write(unit) };
+        }
     } else {
         for (index, unit) in value.encode_utf16().enumerate() {
             // SAFETY: checked_utf16_len counted this same immutable string, so

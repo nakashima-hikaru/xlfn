@@ -1,4 +1,4 @@
-use crate::callback_value::{CallbackResult, ExcelCallbackValue};
+use crate::callback_value::{CallbackArguments, CallbackResult, ExcelCallbackValue};
 use crate::return_abi::ExcelCallbackStatus;
 use std::cell::Cell;
 use std::marker::PhantomData;
@@ -65,6 +65,15 @@ impl HostCallbackSession {
         &'session self,
         function: i32,
         arguments: &[NonNull<XLOPER12>],
+    ) -> Result<(ExcelCallbackStatus, CallbackResult<'session>), HostCallbackSuppressed> {
+        // SAFETY: forwarded from this method's caller.
+        unsafe { self.call_with_arguments(function, CallbackArguments::Borrowed(arguments)) }
+    }
+
+    pub(crate) unsafe fn call_with_arguments<'session>(
+        &'session self,
+        function: i32,
+        arguments: CallbackArguments<'_>,
     ) -> Result<(ExcelCallbackStatus, CallbackResult<'session>), HostCallbackSuppressed> {
         if let Some(status) = self.state.get().blocked_status() {
             return Err(HostCallbackSuppressed { status });
