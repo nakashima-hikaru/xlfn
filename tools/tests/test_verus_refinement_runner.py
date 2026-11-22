@@ -11,6 +11,7 @@ from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
 from xlfn_tools import verus_mutations as gate
+from xlfn_tools.check_verus_refinement import build_plan
 from xlfn_tools.check_verus_reports import check_reports
 
 GOOD = "verification results:: 3 verified, 0 errors"
@@ -213,19 +214,6 @@ class RunnerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 gate.MutationRunner(jobs, threads)
 
-    def test_shards_cover_every_case_once_and_keep_baselines(self):
-        plan = gate.MutationPlan()
-        self.group(plan, {str(i): ("alpha", str(i)) for i in range(11)})
-        for count in (1, 2, 4, 12):
-            shards = [plan.shard(index, count) for index in range(count)]
-            cases = [mutation for shard in shards for mutation in shard.mutations]
-            self.assertCountEqual(cases, plan.mutations)
-            self.assertEqual(len(cases), len(set(cases)))
-            self.assertTrue(all(shard.snapshots == plan.snapshots for shard in shards))
-        for index, count in ((0, 0), (-1, 4), (4, 4)):
-            with self.assertRaises(ValueError):
-                plan.shard(index, count)
-
     def test_snapshot_includes_linked_modules_and_rejects_parent_paths(self):
         (self.root / "linked").mkdir()
         (self.root / "linked/module.rs").write_text("linked module")
@@ -238,17 +226,16 @@ class RunnerTests(unittest.TestCase):
     def test_ci_reports_require_complete_exact_inputs(self):
         plan = gate.MutationPlan()
         self.group(plan, {str(i): ("alpha", str(i)) for i in range(7)})
-        snapshots = [
-            {"proof": str(s.proof), "sha256": s.digest, "verified": 3}
-            for s in plan.snapshots.values()
-        ]
         reports = [
             {
                 "shard_index": i,
                 "shard_count": 4,
                 "total_mutations": 7,
                 "verus_version": "test-version",
-                "baselines": snapshots,
+                "baselines": [
+                    {"proof": str(s.proof), "sha256": s.digest, "verified": 3}
+                    for s in plan.shard(i, 4).snapshots.values()
+                ],
                 "mutations": [{**m.describe(), "seconds": 1.0} for m in plan.shard(i, 4).mutations],
             }
             for i in range(4)
@@ -263,6 +250,10 @@ class RunnerTests(unittest.TestCase):
             (lambda r: r[0].update(verus_version="different-version"), "same Verus version"),
             (lambda r: r[0]["baselines"][0].update(sha256="wrong"), "baseline inputs"),
             (lambda r: r[0]["baselines"][0].update(verified=0), "baseline inputs"),
+            (lambda r: r[0]["baselines"][0].update(verified=True), "baseline inputs"),
+            (lambda r: r[0]["baselines"].pop(), "baseline inputs"),
+            (lambda r: r[1]["baselines"].append(r[0]["baselines"][0]), "baseline inputs"),
+            (lambda r: r[1]["mutations"].append(r[0]["mutations"].pop()), "mutation inputs"),
             (lambda r: r[0]["mutations"].pop(), "mutation inputs"),
             (lambda r: r[0]["mutations"].append(r[0]["mutations"][0]), "mutation inputs"),
             (lambda r: r[0]["mutations"][0].update(rejection="compiler-error"), "mutation inputs"),
@@ -277,3 +268,25 @@ class RunnerTests(unittest.TestCase):
                 change(changed)
                 with self.assertRaisesRegex(ValueError, message):
                     check_reports(plan, changed, 4)
+
+
+class RepositoryPlanTests(unittest.TestCase):
+    def test_shards_cover_every_case_and_its_baseline_once(self):
+        plan = build_plan()
+        self.assertEqual(len(plan.snapshots), 8)
+        self.assertEqual(len(plan.mutations), 423)
+        for count in (1, 2, 4, 12):
+            shards = [plan.shard(index, count) for index in range(count)]
+            cases = [mutation for shard in shards for mutation in shard.mutations]
+            snapshots = [key for shard in shards for key in shard.snapshots]
+            self.assertCountEqual(cases, plan.mutations)
+            self.assertEqual(len(cases), len(set(cases)))
+            self.assertCountEqual(snapshots, plan.snapshots.keys())
+            for shard in shards:
+                self.assertTrue(all(m.snapshot.key in shard.snapshots for m in shard.mutations))
+            self.assertEqual(
+                sum(sum(shard.groups.values()) for shard in shards), sum(plan.groups.values())
+            )
+        for index, count in ((0, 0), (-1, 4), (4, 4)):
+            with self.assertRaises(ValueError):
+                plan.shard(index, count)

@@ -74,10 +74,13 @@ def main() -> None:
         "--list", action="store_true", help="list exact mutation inputs without running Verus"
     )
     parser.add_argument(
-        "--shard-index", type=int, default=0, help="zero-based mutation shard (default: 0)"
+        "--shard-index", type=int, default=0, help="zero-based proof shard (default: 0)"
     )
     parser.add_argument(
-        "--shard-count", type=int, default=1, help="number of disjoint mutation shards (default: 1)"
+        "--shard-count",
+        type=int,
+        default=1,
+        help="number of disjoint proof-affine shards (default: 1)",
     )
     args = parser.parse_args()
     if args.jobs < 1 or (args.threads is not None and args.threads < 1):
