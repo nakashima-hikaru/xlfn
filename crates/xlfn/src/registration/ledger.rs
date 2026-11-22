@@ -19,8 +19,8 @@ pub(crate) enum RegistrationCleanupState {
     NameDeleted,
 }
 
-/// The single host-name identity rule used by descriptor validation and
-/// cleanup debt retention.
+/// Owned host-name identity for cleanup debt. Descriptor validation uses
+/// the same ASCII-only case fold on borrowed names.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ExcelNameKey(SmolStr);
 

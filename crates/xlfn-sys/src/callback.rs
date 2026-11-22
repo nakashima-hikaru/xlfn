@@ -165,22 +165,55 @@ pub unsafe fn excel12_with_invocation(
     let Some(callback) = resolve_callback() else {
         return (XLRET_FAILED, XLOPER12::nil(), false);
     };
-    // Keep a valid value for failure/abort returns as well. The Excel API
-    // permits a callback to return an error without populating the result.
-    let mut result = XLOPER12::nil();
     let mut raw_arguments: SmallVec<[*mut XLOPER12; 16]> =
         arguments.iter().map(|argument| argument.as_ptr()).collect();
-    // SAFETY: the private pointer array supplies exactly the reported number
-    // of live, read-only XLOPER12 pointers and may be mutated by the callback.
-    // Result is writable for the duration of the call.
-    let status = unsafe {
-        callback(
+    // SAFETY: the private array is writable and contains live read-only operands.
+    unsafe {
+        excel12_resolved(
+            callback,
             function,
             argument_count,
             raw_arguments.as_mut_ptr(),
-            &mut result,
         )
+    }
+}
+
+/// Calls Excel with caller-owned mutable pointer-array scratch.
+///
+/// # Safety
+///
+/// Each pointer must reference a live, stationary, read-only XLOPER12 until
+/// the callback returns. Excel must have transferred control to the caller.
+/// Excel may overwrite entries of the array; no output entry is guaranteed
+/// to remain valid or non-null afterwards.
+#[doc(hidden)]
+#[must_use]
+pub unsafe fn excel12_with_invocation_scratch(
+    function: i32,
+    arguments: &mut [*mut XLOPER12],
+) -> (i32, XLOPER12, bool) {
+    let Ok(argument_count) = i32::try_from(arguments.len()) else {
+        return (XLRET_FAILED, XLOPER12::nil(), false);
     };
+    let Some(callback) = resolve_callback() else {
+        return (XLRET_FAILED, XLOPER12::nil(), false);
+    };
+    // SAFETY: the caller owns valid operands and this slice is writable.
+    unsafe { excel12_resolved(callback, function, argument_count, arguments.as_mut_ptr()) }
+}
+
+unsafe fn excel12_resolved(
+    callback: Excel12Callback,
+    function: i32,
+    argument_count: i32,
+    arguments: *mut *mut XLOPER12,
+) -> (i32, XLOPER12, bool) {
+    // Keep a valid value for failure/abort returns as well. The Excel API
+    // permits a callback to return an error without populating the result.
+    let mut result = XLOPER12::nil();
+    // SAFETY: the caller provides a writable array of exactly argument_count
+    // live operand pointers; result is writable for the duration of the call.
+    let status = unsafe { callback(function, argument_count, arguments, &mut result) };
     (status, result, true)
 }
 

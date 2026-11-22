@@ -58,6 +58,8 @@ mod registration;
 mod rtd;
 #[cfg(all(feature = "handles", feature = "rtd"))]
 pub use crate::excel_rtd::RtdObservationArgumentsBenchmark;
+#[cfg(all(windows, feature = "rtd"))]
+pub use crate::excel_rtd::benchmark_rtd_bstr;
 mod sync_boundary;
 
 #[cfg(feature = "async")]

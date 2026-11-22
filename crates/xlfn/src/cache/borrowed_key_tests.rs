@@ -10,6 +10,7 @@ use std::time::Duration;
 #[derive(Default)]
 struct QueryControl {
     owned: AtomicUsize,
+    hashed: AtomicUsize,
     fault: AtomicU8,
     on_own: Option<Box<dyn Fn() + Send + Sync>>,
 }
@@ -37,6 +38,7 @@ impl Query {
 
 impl Hash for Query {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.control.hashed.fetch_add(1, Ordering::Relaxed);
         assert_ne!(self.control.fault.load(Ordering::Relaxed), 1, "hash panic");
         // Collisions ensure that a resident also exercises borrowed equality.
         0_u8.hash(state);
@@ -348,4 +350,77 @@ fn borrowed_and_owned_misses_share_singleflight_even_without_residency() {
         assert_eq!(cache.get("key").is_some(), budget != 0);
         assert!(cache.flights.is_empty());
     }
+}
+
+#[test]
+fn each_initialization_hashes_once_per_domain_and_hits_only_hash_the_resident_domain() {
+    for borrowed in [false, true] {
+        let control = StdArc::new(QueryControl::default());
+        let query = Query::new(&"long-key".repeat(128), StdArc::clone(&control));
+        let cache = CalculationCache::<OwnedKey, u8>::new(CacheBudget::weight_units(8));
+        let compute = || {
+            assert_eq!(control.hashed.load(Ordering::Relaxed), 2);
+            // Publication must not call user Hash after computation.
+            control.fault.store(1, Ordering::Relaxed);
+            Ok(9)
+        };
+        let lease = if borrowed {
+            cache.get_or_try_insert_borrowed(&query, compute).unwrap()
+        } else {
+            cache
+                .get_or_try_insert_with(query.owned(), compute)
+                .unwrap()
+        };
+        assert_eq!(*lease, 9);
+        assert_eq!(control.hashed.load(Ordering::Relaxed), 2);
+        assert_eq!(control.owned.load(Ordering::Relaxed), usize::from(borrowed));
+        control.fault.store(0, Ordering::Relaxed);
+        assert_eq!(*cache.get(&query).unwrap(), 9);
+        assert_eq!(control.hashed.load(Ordering::Relaxed), 3);
+    }
+}
+
+#[test]
+#[cfg(not(miri))]
+fn registered_borrowed_followers_do_not_acquire_owned_keys() {
+    let control = StdArc::new(QueryControl::default());
+    let query = Query::new(&"long-key".repeat(128), StdArc::clone(&control));
+    let cache = CalculationCache::<OwnedKey, u8>::new(CacheBudget::weight_units(0));
+    std::thread::scope(|scope| {
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let leader_key = query.owned();
+        let cache_ref = &cache;
+        let leader = scope.spawn(move || {
+            *cache_ref
+                .get_or_try_insert_with(leader_key, || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(7)
+                })
+                .unwrap()
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let flight = observe_pending_flight(&cache, query.owned());
+        let followers = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    *cache
+                        .get_or_try_insert_borrowed(&query, || {
+                            panic!("must join the active flight")
+                        })
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let enrolled = followers_enrolled(&flight, followers.len());
+        release_tx.send(()).unwrap();
+        assert_eq!(leader.join().unwrap(), 7);
+        for follower in followers {
+            assert_eq!(follower.join().unwrap(), 7);
+        }
+        assert!(enrolled);
+    });
+    assert_eq!(control.owned.load(Ordering::Relaxed), 0);
+    assert!(cache.flights.is_empty());
 }

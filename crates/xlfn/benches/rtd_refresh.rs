@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use xlfn::benchmark_support::{
-    RTD_REFRESH_SCALING_CASES, RtdRefreshScalingBenchmark, RtdRefreshValueKind,
-    benchmark_measurement_time,
+    RTD_REFRESH_SCALING_CASES, RtdRefreshScalingBenchmark, RtdRefreshScalingCase,
+    RtdRefreshValueKind, benchmark_measurement_time,
 };
 
 fn rtd_refresh_benchmarks(c: &mut Criterion) {
@@ -31,8 +31,28 @@ fn rtd_refresh_benchmarks(c: &mut Criterion) {
         b.iter_custom(|iterations| num_dense.measure_refresh_completion(iterations));
     });
 
+    // Leave room for both buffers even if the producer gets ahead of
+    // completion. The standard queue allows 4096 outstanding entries.
+    let concurrent_case = RtdRefreshScalingCase {
+        updated_topics: case_dense.updated_topics / 2,
+        ..case_dense
+    };
+    let concurrent = RtdRefreshScalingBenchmark::new(concurrent_case, RtdRefreshValueKind::Number);
+    group.throughput(Throughput::Elements(concurrent_case.updated_topics as u64));
+    group.bench_function(
+        BenchmarkId::new("number/completion_with_publisher", "half_dense"),
+        |b| {
+            b.iter_custom(|iterations| {
+                concurrent.measure_number_completion_with_publisher(iterations)
+            })
+        },
+    );
+
     let num_sparse = RtdRefreshScalingBenchmark::new(case_sparse, RtdRefreshValueKind::Number);
     group.throughput(Throughput::Elements(case_sparse.updated_topics as u64));
+    group.bench_function(BenchmarkId::new("number/completion", "sparse"), |b| {
+        b.iter_custom(|iterations| num_sparse.measure_refresh_completion(iterations));
+    });
     group.bench_function(BenchmarkId::new("number/end_to_end", "sparse"), |b| {
         b.iter(|| num_sparse.run_end_to_end_cycle());
     });
@@ -86,6 +106,27 @@ fn rtd_refresh_benchmarks(c: &mut Criterion) {
         }
     }
     group.finish();
+
+    #[cfg(windows)]
+    {
+        let mut bstr = c.benchmark_group("rtd_refresh_bstr");
+        bstr.measurement_time(benchmark_measurement_time());
+        for units in [64, 1024] {
+            for (kind, sample) in [
+                ("ascii", "a".repeat(units)),
+                ("bmp", "日".repeat(units)),
+                ("mixed", "A日😀".repeat(units / 4)),
+            ] {
+                bstr.throughput(Throughput::Elements(units as u64));
+                bstr.bench_function(BenchmarkId::new(kind, units), |b| {
+                    b.iter(|| {
+                        xlfn::benchmark_support::benchmark_rtd_bstr(std::hint::black_box(&sample))
+                    });
+                });
+            }
+        }
+        bstr.finish();
+    }
 }
 
 criterion_group!(benches, rtd_refresh_benchmarks);

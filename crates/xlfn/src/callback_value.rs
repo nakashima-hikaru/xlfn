@@ -7,7 +7,12 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use xlfn_sys::{XLOPER12, excel_free, excel12_with_invocation};
+use xlfn_sys::{XLOPER12, excel_free, excel12_with_invocation, excel12_with_invocation_scratch};
+
+pub(crate) enum CallbackArguments<'call> {
+    Borrowed(&'call [NonNull<XLOPER12>]),
+    Scratch(&'call mut [*mut XLOPER12]),
+}
 
 const CALLBACK_CLEANUP_AUDIT_CAPACITY: usize = 64;
 
@@ -206,14 +211,23 @@ impl<'session> ExcelCallbackValue<'session> {
 
     pub(crate) unsafe fn call_with_session(
         function: i32,
-        arguments: &[NonNull<XLOPER12>],
+        arguments: CallbackArguments<'_>,
         session: &'session HostCallbackSession,
     ) -> Result<(i32, CallbackResult<'session>), crate::callback_gate::CallbackAdmissionSuppressed>
     {
         let callback_admission = crate::callback_gate::enter_callback()?;
-        // SAFETY: The caller supplies live callback arguments.
-        let (status, raw, callback_invoked) =
-            unsafe { excel12_with_invocation(function, arguments) };
+        // SAFETY: The caller supplies live callback arguments. The Scratch
+        // slice is writable and has no non-null invariant to invalidate.
+        let (status, raw, callback_invoked) = unsafe {
+            match arguments {
+                CallbackArguments::Borrowed(arguments) => {
+                    excel12_with_invocation(function, arguments)
+                }
+                CallbackArguments::Scratch(arguments) => {
+                    excel12_with_invocation_scratch(function, arguments)
+                }
+            }
+        };
         let callback_status = ExcelCallbackStatus::from_raw(status);
         if !callback_invoked {
             drop(callback_admission);

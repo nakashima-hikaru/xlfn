@@ -1,4 +1,4 @@
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use xlfn::benchmark_support::{RegistryCacheBenchmark, benchmark_measurement_time};
 use xlfn::cache::{CacheEndpoint, CacheRegistry, CalculationCache};
@@ -123,6 +123,55 @@ fn cache_registry_benchmarks(c: &mut Criterion) {
                 });
             },
         );
+    }
+    group.finish();
+
+    // Input construction and cache clearing are outside the timed batch.
+    // Each iteration starts from an empty resident generation and installs
+    // 128 distinct strings, exercising a real resident + single-flight miss.
+    const KEYS_PER_BATCH: usize = 128;
+    let mut group = c.benchmark_group("cache_key_cold_miss");
+    group.measurement_time(benchmark_measurement_time());
+    group.throughput(Throughput::Elements(KEYS_PER_BATCH as u64));
+    for length in [16, 1024] {
+        let prefix = "k".repeat(length - 8);
+        let keys = (0..KEYS_PER_BATCH)
+            .map(|id| format!("{prefix}{id:08}"))
+            .collect::<Vec<_>>();
+        let cache = CalculationCache::<String, u64>::new(xlfn::cache::CacheBudget::weight_units(
+            KEYS_PER_BATCH,
+        ));
+        group.bench_function(BenchmarkId::new("owned", length), |b| {
+            b.iter_batched(
+                || {
+                    cache.clear();
+                    keys.clone()
+                },
+                |keys| {
+                    for key in keys {
+                        let lease = cache
+                            .get_or_try_insert_with(black_box(key), || Ok(7))
+                            .unwrap();
+                        black_box(*lease);
+                    }
+                },
+                BatchSize::PerIteration,
+            );
+        });
+        group.bench_function(BenchmarkId::new("borrowed", length), |b| {
+            b.iter_batched(
+                || cache.clear(),
+                |()| {
+                    for key in &keys {
+                        let lease = cache
+                            .get_or_try_insert_borrowed(black_box(key.as_str()), || Ok(7))
+                            .unwrap();
+                        black_box(*lease);
+                    }
+                },
+                BatchSize::PerIteration,
+            );
+        });
     }
     group.finish();
 }

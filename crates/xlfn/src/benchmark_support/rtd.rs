@@ -780,6 +780,49 @@ impl RtdRefreshScalingBenchmark {
         measured
     }
 
+    /// Completes the collected batch while another thread publishes into
+    /// the new epoch on the same topics. Startup, collection, and waiting
+    /// for the peer to finish are excluded from the reported completion time.
+    pub fn measure_number_completion_with_publisher(&self, iterations: u64) -> Duration {
+        let RtdRefreshSinks::Number(sinks) = &self.sinks else {
+            panic!("concurrent publisher requires a numeric refresh fixture");
+        };
+        let updated_indices = &self.updated_indices;
+        let measured = std::thread::scope(|scope| {
+            let (start, before_publish) = std::sync::mpsc::sync_channel(0);
+            let (finished, after_publish) = std::sync::mpsc::sync_channel(0);
+            scope.spawn(move || {
+                while let Ok(()) = before_publish.recv() {
+                    for &index in updated_indices {
+                        sinks[index]
+                            .publish(14.5)
+                            .expect("concurrent publish must succeed");
+                    }
+                    finished.send(()).expect("benchmark driver remains active");
+                }
+            });
+
+            let mut measured = Duration::ZERO;
+            for _ in 0..iterations {
+                self.publish_updates();
+                let batch = self
+                    .server
+                    .begin_refresh()
+                    .expect("begin_refresh must succeed");
+                start.send(()).expect("publisher remains active");
+                let started = Instant::now();
+                batch
+                    .complete(crate::subscription::RefreshOutcome::Delivered)
+                    .expect("refresh completion must succeed");
+                measured += started.elapsed();
+                after_publish.recv().expect("concurrent publish completes");
+            }
+            measured
+        });
+        self.drain_pending_refresh();
+        measured
+    }
+
     #[inline]
     pub fn run_end_to_end_cycle(&self) {
         self.publish_updates();

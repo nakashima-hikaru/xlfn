@@ -2690,6 +2690,8 @@ fn direct_bstr_encoding_preserves_exact_utf16_and_terminator() {
         "ASCII\0text".to_owned(),
         "A\0B😀漢".to_owned(),
         "漢😀".repeat(1024),
+        "\u{0800}日本語\u{d7ff}\u{e000}\u{ffff}".repeat(147),
+        "漢".repeat(crate::utf16::EXCEL_STRING_LIMIT),
     ] {
         let mut variant = VARIANT::default();
         // SAFETY: the output is initialized writable storage, owned by this test.

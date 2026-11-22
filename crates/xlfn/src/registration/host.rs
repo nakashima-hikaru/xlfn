@@ -84,10 +84,10 @@ impl<'call> RegistrationHost<'call> {
         &self,
         module: &CountedModuleName,
         registration: &ValidatedRegistration,
-        text: &mut RegistrationTextCache,
+        scratch: &mut RegistrationScratch,
     ) -> RegistrationMutation<RegistrationId> {
-        match RegistrationCall::new(module, registration, text) {
-            Ok(call) => call.invoke(self.excel),
+        match scratch.prepare(registration) {
+            Ok(()) => scratch.invoke(self.excel, module, registration),
             Err(error) => RegistrationMutation::Rejected { error },
         }
     }
@@ -261,6 +261,25 @@ fn invoke_operation<O: RegistrationOperation>(
     RegistrationInvocation {
         evidence: host
             .invoke_protocol(O::FUNCTION_ID, arguments, |result| operation.decode(result)),
+        operation: std::marker::PhantomData,
+    }
+}
+
+/// The pointer array is writable and may be overwritten by Excel. Its
+/// operands must remain live, stationary and read-only through release.
+unsafe fn invoke_operation_with_scratch<O: RegistrationOperation>(
+    host: ExcelHost<'_>,
+    operation: O,
+    arguments: &mut [*mut XLOPER12],
+) -> RegistrationInvocation<O> {
+    // SAFETY: forwarded from this operation's caller.
+    let evidence = unsafe {
+        host.invoke_protocol_with_scratch(O::FUNCTION_ID, arguments, |result| {
+            operation.decode(result)
+        })
+    };
+    RegistrationInvocation {
+        evidence,
         operation: std::marker::PhantomData,
     }
 }
@@ -455,158 +474,171 @@ struct LastRegistrationText {
 impl LastRegistrationText {
     fn prepare(&mut self, text: &'static str) -> XllResult<()> {
         if !std::ptr::eq(self.text, text) && self.text != text {
-            self.units = if text.is_empty() {
-                SmallVec::new()
+            if text.is_empty() {
+                self.units.clear();
             } else {
-                crate::utf16::encode_counted(
-                    text,
-                    "registration",
-                    crate::utf16::EXCEL_STRING_LIMIT,
-                )?
-            };
+                encode_registration_text(&mut self.units, text)?;
+            }
             self.text = text;
         }
         Ok(())
     }
 
-    fn borrow(&self) -> BorrowedRegistrationString<'_> {
-        let units = if self.text.is_empty() {
+    fn units(&self) -> &[u16] {
+        if self.text.is_empty() {
             &EMPTY_COUNTED
         } else {
             self.units.as_slice()
-        };
-        BorrowedRegistrationString::new(units)
+        }
     }
 }
 
-/// Scratch storage owned by one registration batch. A nested batch receives
-/// its own cache, and an active RegistrationCall borrows its cached strings
-/// until the synchronous callback and result release both return.
+fn encode_registration_text(units: &mut SmallVec<[u16; 64]>, text: &str) -> XllResult<()> {
+    crate::utf16::encode_counted_into(
+        text,
+        "registration",
+        crate::utf16::EXCEL_STRING_LIMIT,
+        units,
+    )
+}
+
+fn store_validated_units(
+    storage: &mut SmallVec<[u16; 64]>,
+    length: usize,
+    units: impl Iterator<Item = u16>,
+) {
+    if length > crate::utf16::EXCEL_STRING_LIMIT {
+        xlfn_kernel::invariant::fail_stop();
+    }
+    storage.clear();
+    storage.reserve(length + 1);
+    storage.push(length as u16);
+    storage.extend(units);
+    if storage.len() != length + 1 {
+        xlfn_kernel::invariant::fail_stop();
+    }
+}
+
+fn string_operand(units: &[u16]) -> XLOPER12 {
+    debug_assert_eq!(units.len(), usize::from(units[0]) + 1);
+    XLOPER12 {
+        value: XLOPER12Value {
+            // The xlfRegister input is read-only despite the ABI's *mut.
+            string: units.as_ptr().cast_mut(),
+        },
+        xltype: XLTYPE_STR,
+    }
+}
+
+/// Storage owned by one registration batch, never shared with a nested one.
+/// UTF-16, operand and pointer allocations survive successive callbacks.
+/// Form pointers only after their respective backing stores stop growing.
 #[derive(Default)]
-pub(super) struct RegistrationTextCache {
+pub(super) struct RegistrationScratch {
+    procedure: SmallVec<[u16; 64]>,
+    signature: SmallVec<[u16; 64]>,
+    function: SmallVec<[u16; 64]>,
+    arguments: SmallVec<[u16; 64]>,
     category: LastRegistrationText,
     help_topic: LastRegistrationText,
     function_help: LastRegistrationText,
     argument_help: SmallVec<[LastRegistrationText; 4]>,
+    frame: RegistrationFrame,
 }
 
-impl RegistrationTextCache {
+impl RegistrationScratch {
     fn prepare(&mut self, registration: &ValidatedRegistration) -> XllResult<()> {
         let descriptor = registration.descriptor();
+        encode_registration_text(&mut self.procedure, descriptor.export_name)?;
+        let (signature_length, signature) = registration.signature_text();
+        store_validated_units(&mut self.signature, signature_length, signature);
+        encode_registration_text(&mut self.function, descriptor.excel_name)?;
+        let (argument_length, argument_names) = registration.argument_names();
+        store_validated_units(&mut self.arguments, argument_length, argument_names);
         self.category.prepare(descriptor.category)?;
         self.help_topic.prepare(descriptor.help_topic)?;
         self.function_help.prepare(descriptor.description)?;
         let arguments = registration.argument_help();
-        self.argument_help
-            .resize_with(arguments.len(), LastRegistrationText::default);
+        // Keep inactive slots so a shorter intervening signature does not
+        // free retained text buffers that the next long signature can reuse.
+        if self.argument_help.len() < arguments.len() {
+            self.argument_help
+                .resize_with(arguments.len(), LastRegistrationText::default);
+        }
         for (cached, argument) in self.argument_help.iter_mut().zip(arguments) {
             cached.prepare(argument.description)?;
         }
         Ok(())
     }
-}
 
-struct BorrowedRegistrationString<'call> {
-    units: &'call [u16],
-    oper: XLOPER12,
-}
-
-impl<'call> BorrowedRegistrationString<'call> {
-    fn new(units: &'call [u16]) -> Self {
-        Self {
-            units,
-            oper: XLOPER12::nil(),
-        }
-    }
-
-    fn pointer(&mut self) -> NonNull<XLOPER12> {
-        self.oper = XLOPER12 {
-            value: XLOPER12Value {
-                // The xlfRegister input is read-only despite the ABI's *mut.
-                string: self.units.as_ptr().cast_mut(),
-            },
-            xltype: XLTYPE_STR,
-        };
-        NonNull::from_mut(&mut self.oper)
-    }
-}
-
-/// Owns the scratch operands for one synchronous xlfRegister call and borrows
-/// retained UTF-16 for repeated metadata. Pointers are formed only in invoke.
-struct RegistrationCall<'call> {
-    excel_name: &'static str,
-    module: BorrowedRegistrationString<'call>,
-    procedure: TemporaryString,
-    type_text: TemporaryString,
-    function_text: TemporaryString,
-    arguments: TemporaryString,
-    macro_type: XLOPER12,
-    category: BorrowedRegistrationString<'call>,
-    shortcut: BorrowedRegistrationString<'static>,
-    help_topic: BorrowedRegistrationString<'call>,
-    function_help: BorrowedRegistrationString<'call>,
-    argument_help: SmallVec<[BorrowedRegistrationString<'call>; 4]>,
-}
-
-impl<'call> RegistrationCall<'call> {
-    fn new(
-        module: &'call CountedModuleName,
+    fn invoke(
+        &mut self,
+        excel: ExcelHost<'_>,
+        module: &CountedModuleName,
         registration: &ValidatedRegistration,
-        text: &'call mut RegistrationTextCache,
-    ) -> XllResult<Self> {
+    ) -> RegistrationMutation<RegistrationId> {
         let descriptor = registration.descriptor();
-        let (signature_length, signature) = registration.signature_text();
-        let (argument_length, argument_names) = registration.argument_names();
-        text.prepare(registration)?;
-        let help_count = text.argument_help.len();
-        let mut argument_help = SmallVec::with_capacity(help_count + usize::from(help_count != 0));
-        if help_count != 0 {
-            argument_help.extend(text.argument_help.iter().map(LastRegistrationText::borrow));
-            argument_help.push(BorrowedRegistrationString::new(&EMPTY_COUNTED));
+        let argument_help = &self.argument_help[..registration.argument_help().len()];
+        let mut call = RegistrationCall(&mut self.frame);
+        call.0.operands.extend([
+            string_operand(&module.units),
+            string_operand(&self.procedure),
+            string_operand(&self.signature),
+            string_operand(&self.function),
+            string_operand(&self.arguments),
+            XLOPER12::number(macro_type(descriptor.visibility)),
+            string_operand(self.category.units()),
+            string_operand(&EMPTY_COUNTED),
+            string_operand(self.help_topic.units()),
+            string_operand(self.function_help.units()),
+        ]);
+        call.0.operands.extend(
+            argument_help
+                .iter()
+                .map(|help| string_operand(help.units())),
+        );
+        if !argument_help.is_empty() {
+            call.0.operands.push(string_operand(&EMPTY_COUNTED));
         }
-        Ok(Self {
-            excel_name: descriptor.excel_name,
-            module: BorrowedRegistrationString::new(&module.units),
-            procedure: TemporaryString::new(descriptor.export_name)?,
-            type_text: TemporaryString::from_validated_units(signature_length, signature),
-            function_text: TemporaryString::new(descriptor.excel_name)?,
-            arguments: TemporaryString::from_validated_units(argument_length, argument_names),
-            macro_type: XLOPER12::number(macro_type(descriptor.visibility)),
-            category: text.category.borrow(),
-            shortcut: BorrowedRegistrationString::new(&EMPTY_COUNTED),
-            help_topic: text.help_topic.borrow(),
-            function_help: text.function_help.borrow(),
-            argument_help,
-        })
+        call.invoke(excel, descriptor.excel_name)
     }
+}
 
-    fn invoke(mut self, excel: ExcelHost<'_>) -> RegistrationMutation<RegistrationId> {
-        let mut pointers: SmallVec<[NonNull<XLOPER12>; 16]> = smallvec::smallvec![
-            self.module.pointer(),
-            self.procedure.pointer(),
-            self.type_text.pointer(),
-            self.function_text.pointer(),
-            self.arguments.pointer(),
-            NonNull::from_mut(&mut self.macro_type),
-            self.category.pointer(),
-            self.shortcut.pointer(),
-            self.help_topic.pointer(),
-            self.function_help.pointer(),
-        ];
-        pointers.extend(
-            self.argument_help
-                .iter_mut()
-                .map(BorrowedRegistrationString::pointer),
-        );
+#[derive(Default)]
+struct RegistrationFrame {
+    operands: SmallVec<[XLOPER12; 16]>,
+    pointers: SmallVec<[*mut XLOPER12; 16]>,
+}
 
-        let invocation = invoke_operation(
-            excel,
-            Register {
-                excel_name: self.excel_name,
-            },
-            &pointers,
-        );
+/// Clears the frame on ordinary return and unwind without releasing capacity.
+/// Its exclusive loan keeps the freshly formed pointers private until the
+/// registration callback and its result release have both finished.
+struct RegistrationCall<'frame>(&'frame mut RegistrationFrame);
+
+impl RegistrationCall<'_> {
+    fn invoke(
+        &mut self,
+        excel: ExcelHost<'_>,
+        excel_name: &'static str,
+    ) -> RegistrationMutation<RegistrationId> {
+        self.0
+            .pointers
+            .extend(self.0.operands.iter_mut().map(std::ptr::from_mut));
+        // SAFETY: operands and counted text have all finished growing and
+        // belong to this batch alone. Reentry receives a different batch.
+        // Excel may rewrite the raw pointer array but not the operands it
+        // points to. The frame guard only clears it after result release.
+        let invocation = unsafe {
+            invoke_operation_with_scratch(excel, Register { excel_name }, &mut self.0.pointers)
+        };
         mutation_from_invocation(invocation)
+    }
+}
+
+impl Drop for RegistrationCall<'_> {
+    fn drop(&mut self) {
+        self.0.pointers.clear();
+        self.0.operands.clear();
     }
 }
 
@@ -630,22 +662,6 @@ impl TemporaryString {
             storage,
             oper: XLOPER12::nil(),
         })
-    }
-
-    fn from_validated_units(length: usize, units: impl Iterator<Item = u16>) -> Self {
-        if length > crate::utf16::EXCEL_STRING_LIMIT {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let mut storage = SmallVec::with_capacity(length + 1);
-        storage.push(length as u16);
-        storage.extend(units);
-        if storage.len() != length + 1 {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        Self {
-            storage,
-            oper: XLOPER12::nil(),
-        }
     }
 
     pub(crate) fn pointer(&mut self) -> NonNull<XLOPER12> {
@@ -818,6 +834,7 @@ pub(crate) mod test_support {
         registration_arguments_at_release: Vec<RegisterArgument>,
         registration_pointers: Vec<*mut XLOPER12>,
         registration_hook: Option<RegisterHook>,
+        overwrite_registration_array: bool,
         call_hook: Option<(i32, Box<dyn FnOnce()>)>,
         argument_hooks: VecDeque<(i32, RegisterHook)>,
     }
@@ -882,6 +899,10 @@ pub(crate) mod test_support {
                 assert_eq!(script.registration_arguments, expected);
                 assert_eq!(script.registration_arguments_at_release, expected);
             });
+        }
+
+        pub(super) fn overwrite_registration_array(&self) {
+            SCRIPT.with_borrow_mut(|script| script.overwrite_registration_array = true);
         }
 
         pub(super) fn on_register(&self, hook: impl FnOnce(&[*mut XLOPER12]) + 'static) {
@@ -994,11 +1015,17 @@ pub(crate) mod test_support {
                 // SAFETY: Excel's callback contract supplies this many live
                 // operand pointers for the invocation. Copy their contents
                 // before registration drops the temporary UTF-16 owners.
-                let arguments =
+                let operands =
                     unsafe { std::slice::from_raw_parts(arguments, argument_count as usize) };
                 // SAFETY: the callback retains each operand through XL_FREE.
-                script.registration_arguments = unsafe { read_registration_arguments(arguments) };
-                script.registration_pointers = arguments.to_vec();
+                script.registration_arguments = unsafe { read_registration_arguments(operands) };
+                script.registration_pointers = operands.to_vec();
+                if script.overwrite_registration_array {
+                    // SAFETY: the callback owns mutable pointer-array storage;
+                    // clearing it does not mutate or invalidate the operands.
+                    unsafe { std::slice::from_raw_parts_mut(arguments, argument_count as usize) }
+                        .fill(std::ptr::null_mut());
+                }
             }
             // SAFETY: the callback supplies writable result storage for this
             // invocation. The test retains any payload referenced in a reply.
@@ -1068,12 +1095,13 @@ mod tests {
         let module = "C:\\test\\addin.xll";
         let module_units = module.encode_utf16().collect::<Vec<_>>();
         let prepared_module = CountedModuleName::from_units(&module_units).unwrap();
-        let mut cached_text = RegistrationTextCache::default();
+        let mut cached_text = RegistrationScratch::default();
 
         // Ten fixed operands plus n help strings and their blank trailer
         // exercise empty, inline-full, and spilled help and pointer storage,
-        // then shrink the cached help list.
-        for count in [0, 1, 3, 4, 5, 6, 1, 0] {
+        // then shrink the active help list and reuse the spilled frame.
+        let mut spilled = None;
+        for count in [0, 1, 3, 4, 5, 6, 1, 0, 6] {
             let description = if count % 2 == 0 {
                 "機能の説明"
             } else {
@@ -1097,6 +1125,7 @@ mod tests {
             let prepared = super::super::preflight_registration(&[descriptor]).unwrap();
             let script =
                 CallbackScript::install([Reply::success(XLF_REGISTER, XLOPER12::number(42.0))]);
+            script.overwrite_registration_array();
             let expected_module_pointer = prepared_module.units.as_ptr().addr();
             script.on_arguments(XLF_REGISTER, move |arguments| {
                 // SAFETY: the registration call retains its immutable module
@@ -1146,6 +1175,26 @@ mod tests {
             }
             script.assert_registration_arguments(&expected);
             script.assert_calls(&[XLF_REGISTER]);
+            assert!(cached_text.frame.operands.is_empty());
+            assert!(cached_text.frame.pointers.is_empty());
+            if (1..=5).contains(&count) && spilled.is_none() {
+                assert!(!cached_text.frame.operands.spilled());
+                assert!(!cached_text.frame.pointers.spilled());
+            }
+            if count == 6 {
+                assert!(cached_text.frame.operands.spilled());
+                assert!(cached_text.frame.pointers.spilled());
+                assert!(cached_text.argument_help[1].units.spilled());
+                let retained = (
+                    cached_text.frame.operands.as_ptr(),
+                    cached_text.frame.pointers.as_ptr(),
+                    cached_text.argument_help[1].units.as_ptr(),
+                );
+                if let Some(previous) = spilled {
+                    assert_eq!(retained, previous);
+                }
+                spilled = Some(retained);
+            }
         }
     }
 
@@ -1159,17 +1208,21 @@ mod tests {
         assert_eq!(long, alternate);
 
         let mut text = LastRegistrationText::default();
-        assert!(std::ptr::eq(text.borrow().units, &EMPTY_COUNTED));
+        assert!(std::ptr::eq(text.units(), &EMPTY_COUNTED));
         text.prepare(long).unwrap();
-        let counted = text.borrow().units.as_ptr();
+        let counted = text.units().as_ptr();
         text.prepare(alternate).unwrap();
-        assert_eq!(text.borrow().units.as_ptr(), counted);
+        assert_eq!(text.units().as_ptr(), counted);
 
         text.prepare("価格💡").unwrap();
+        assert_eq!(text.units.as_ptr(), counted);
         let expected: Vec<_> = std::iter::once(4).chain("価格💡".encode_utf16()).collect();
-        assert_eq!(text.borrow().units, expected);
+        assert_eq!(text.units(), expected);
         text.prepare("").unwrap();
-        assert!(std::ptr::eq(text.borrow().units, &EMPTY_COUNTED));
+        assert!(std::ptr::eq(text.units(), &EMPTY_COUNTED));
+        assert_eq!(text.units.as_ptr(), counted);
+        text.prepare(long).unwrap();
+        assert_eq!(text.units.as_ptr(), counted);
     }
 
     #[test]
@@ -1188,7 +1241,9 @@ mod tests {
     #[test]
     fn registration_spills_survive_nested_registration_and_result_release() {
         use super::test_support::{CallbackScript, Reply, read_registration_arguments};
-        use crate::registration::{RegistrationDescriptor, RegistrationSignature};
+        use crate::registration::{
+            ArgumentAbi, ArgumentDescriptor, RegistrationDescriptor, RegistrationSignature,
+        };
         use std::cell::Cell;
         use std::rc::Rc;
 
@@ -1198,14 +1253,17 @@ mod tests {
             signature: RegistrationSignature {
                 return_abi: crate::registration::ReturnAbi::Value12,
                 execution: xlfn_common::ExecutionKind::MainThread,
-                arguments: &[],
+                arguments: &[ArgumentAbi::Value12; 6],
                 volatile: false,
             },
             category: "Test",
             description: "A long help description spills UTF-16 storage and must remain readable after a nested registration has released its independent storage.",
             help_topic: "https://example.invalid/documentation/registration/lifetime/nested/very-long-help-topic",
             visibility: FunctionVisibility::Public,
-            arguments: &[],
+            arguments: &[ArgumentDescriptor {
+                name: "a",
+                description: "This nested argument description spills its own retained text buffer for the many-argument frame.",
+            }; 6],
         };
         let prepared = super::super::preflight_registration(&[descriptor]).unwrap();
         let inner = prepared.clone();
@@ -1226,7 +1284,7 @@ mod tests {
             let before = unsafe { read_registration_arguments(outer_pointers) };
             let callbacks = HostCallbackSession::new();
             succeeded.set(matches!(
-                RegistrationHost::new(&callbacks).register(&inner_module, &inner.as_slice()[0], &mut RegistrationTextCache::default()),
+                RegistrationHost::new(&callbacks).register(&inner_module, &inner.as_slice()[0], &mut RegistrationScratch::default()),
                 RegistrationMutation::Applied { value, cleanup: Ok(()) } if value.id == 11.0
             ));
             // SAFETY: nested result release must not reclaim outer operands.
@@ -1237,7 +1295,7 @@ mod tests {
         let outcome = RegistrationHost::new(&callbacks).register(
             &outer_module,
             &prepared.as_slice()[0],
-            &mut RegistrationTextCache::default(),
+            &mut RegistrationScratch::default(),
         );
         assert!(
             matches!(outcome, RegistrationMutation::Applied { value, cleanup: Ok(()) } if value.id == 42.0)

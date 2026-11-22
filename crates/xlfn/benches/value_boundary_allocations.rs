@@ -488,4 +488,28 @@ fn main() {
             );
         }
     }
+
+    // The fake host still performs evaluate, register, and result release for
+    // every descriptor. No fixture allocation is inside the measured region.
+    // A retained batch frame pays for large operands and changed text at
+    // capacity growth, not once per function or once per help slot use.
+    for (arity, text_units) in [(1, 32), (4, 64), (6, 128), (16, 128)] {
+        const BATCHES: usize = 10;
+        let [small, large] = [32, 1_000].map(|count| {
+            let registration = RegistrationBenchmark::with_metadata(count, arity, text_units);
+            measure_calls(
+                &format!("registration_metadata/host/{arity}_args/{text_units}_units/{count}"),
+                BATCHES,
+                || registration.run_registration(),
+            )
+        });
+        if !cfg!(feature = "refinement") && std::env::var_os("XLFN_BENCH_REPORT_ONLY").is_none() {
+            assert_eq!(large.allocations, large.deallocations);
+            assert!(
+                large.allocations + large.reallocations
+                    <= small.allocations + small.reallocations + BATCHES * 3,
+                "large registration batches should not allocate callback scratch per descriptor"
+            );
+        }
+    }
 }

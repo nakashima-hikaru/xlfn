@@ -3,6 +3,7 @@ use super::*;
 use crate::sync::MutexGuard;
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use xlfn_kernel::published_owner::PublishedOwner;
 use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
@@ -27,6 +28,22 @@ enum State {
 pub(in crate::async_udf) struct RegistryControl {
     state: State,
     pub(super) calculations: FxHashMap<CalculationEpoch, PublishedOwner<CalculationState>>,
+}
+
+type RetiredCalculations = SmallVec<[PublishedOwner<CalculationState>; 1]>;
+
+fn take_retired_calculations(
+    calculations: &mut FxHashMap<CalculationEpoch, PublishedOwner<CalculationState>>,
+    current: CalculationEpoch,
+) -> RetiredCalculations {
+    // After publication, new snapshots can pin only the successor. Holding
+    // control still excludes other acquisitions of retired allocations;
+    // an existing pin can only release its reservation. Thus an Acquire
+    // zero observation is terminal for any non-current owner.
+    calculations
+        .extract_if(|id, state| *id != current && state.pin_count() == 0)
+        .map(|(_, state)| state)
+        .collect()
 }
 
 pub(super) struct StoppedControl<'guard>(&'guard mut RegistryControl);
@@ -67,6 +84,10 @@ impl RegistryControl {
     }
 }
 impl StoppedControl<'_> {
+    pub(super) fn take_retired(&mut self, current: CalculationEpoch) -> RetiredCalculations {
+        take_retired_calculations(&mut self.0.calculations, current)
+    }
+
     pub(super) fn calculations(
         &mut self,
     ) -> &mut FxHashMap<CalculationEpoch, PublishedOwner<CalculationState>> {
@@ -79,6 +100,10 @@ impl RunningControl<'_> {
     }
 }
 impl AdvancingControl<'_> {
+    pub(super) fn take_retired(&mut self, current: CalculationEpoch) -> RetiredCalculations {
+        take_retired_calculations(&mut self.0.calculations, current)
+    }
+
     pub(super) fn calculations(
         &mut self,
     ) -> &mut FxHashMap<CalculationEpoch, PublishedOwner<CalculationState>> {
@@ -187,18 +212,17 @@ impl RegistryPreparedStart<'_> {
         // The same publication guard covers the zero-pin check and the
         // replacement. A concurrent snapshot can only pin the new allocation.
         let previous = control.calculations.insert(epoch, candidate);
-        control
-            .calculations
-            .retain(|id, state| *id == epoch || state.pin_count() != 0);
         registry.publish_current(pointer, epoch);
         registry.limit.store(limit.get(), Ordering::Relaxed);
         registry.closing.store(false, Ordering::Release);
         control.state = State::Running;
         drop(activity.reopen());
         drop(publication);
+        let retired = take_retired_calculations(&mut control.calculations, epoch);
         drop(control);
         drop(transition);
         drop(previous);
+        drop(retired);
     }
 }
 
@@ -212,13 +236,19 @@ impl TaskRegistry {
         if !matches!(control.state, State::Stopped) {
             return Err(XllError::Closing);
         }
+        // Control excludes a concurrent change of the published epoch, but
+        // snapshots need only publication and can proceed during allocation.
+        let candidate = PublishedOwner::new(CalculationState::new(self.current_epoch()));
         let publication = self.publication.lock();
         // SAFETY: publication retains the exact old allocation through this read.
         let current = unsafe { &*self.current.load(Ordering::Acquire) };
         if current.pin_count() != 0 {
+            drop(publication);
+            drop(control);
+            drop(transition);
+            drop(candidate);
             return Err(XllError::Closing);
         }
-        let candidate = PublishedOwner::new(CalculationState::new(current.epoch));
         let activity = self.activity.control().seal().wait();
         Ok(RegistryPreparedStart {
             publication,

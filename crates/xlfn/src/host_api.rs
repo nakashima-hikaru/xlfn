@@ -6,11 +6,11 @@
 //! once.  Subsystems should use these capabilities for common host operations
 //! instead of repeating raw status and cleanup handling.
 
-use crate::callback_value::ExcelCallbackValue;
+use crate::callback_value::{CallbackArguments, CallbackResult, ExcelCallbackValue};
 #[cfg(feature = "handles")]
 use crate::error::InputError;
 use crate::error::{ExcelApiFailure, ExcelApiFunction};
-use crate::host_callback::HostCallbackSession;
+use crate::host_callback::{HostCallbackSession, HostCallbackSuppressed};
 use crate::reference::ExcelReference;
 #[cfg(feature = "handles")]
 use crate::reference::FromExcelReference;
@@ -69,6 +69,32 @@ impl HostFailureStatus {
     }
 }
 
+fn finish_invocation<T>(
+    call: Result<(ExcelCallbackStatus, CallbackResult<'_>), HostCallbackSuppressed>,
+    decode: impl FnOnce(&mut ExcelCallbackValue<'_>) -> XllResult<T>,
+) -> HostInvocation<T> {
+    let (status, mut result) = match call {
+        Ok(call) => call,
+        Err(suppressed) => {
+            return HostInvocation::Suppressed {
+                status: suppressed.status,
+            };
+        }
+    };
+
+    if status == ExcelCallbackStatus::Success {
+        let decoded = result.readable().and_then(decode);
+        let cleanup = result.release();
+        HostInvocation::Decoded { decoded, cleanup }
+    } else {
+        let cleanup = result.release();
+        HostInvocation::Failed {
+            status: HostFailureStatus(status),
+            cleanup,
+        }
+    }
+}
+
 impl<'call> ExcelHost<'call> {
     pub(crate) const fn new(callbacks: &'call HostCallbackSession) -> Self {
         Self { callbacks }
@@ -93,26 +119,31 @@ impl<'call> ExcelHost<'call> {
     ) -> HostInvocation<T> {
         // SAFETY: callers provide argument pointers that remain live and
         // stationary for the duration of this callback.
-        let (status, mut result) = match unsafe { self.callbacks.call(function_id, arguments) } {
-            Ok(call) => call,
-            Err(suppressed) => {
-                return HostInvocation::Suppressed {
-                    status: suppressed.status,
-                };
-            }
-        };
+        finish_invocation(
+            unsafe { self.callbacks.call(function_id, arguments) },
+            decode,
+        )
+    }
 
-        if status == ExcelCallbackStatus::Success {
-            let decoded = result.readable().and_then(decode);
-            let cleanup = result.release();
-            HostInvocation::Decoded { decoded, cleanup }
-        } else {
-            let cleanup = result.release();
-            HostInvocation::Failed {
-                status: HostFailureStatus(status),
-                cleanup,
-            }
-        }
+    /// Like invoke_protocol, but the caller lends Excel its own mutable
+    /// pointer array instead of copying it at the host boundary.
+    ///
+    /// # Safety
+    ///
+    /// Operands must be live, stationary and read-only until the callback and
+    /// result release finish. Excel may overwrite the scratch pointers.
+    pub(crate) unsafe fn invoke_protocol_with_scratch<T>(
+        &self,
+        function_id: i32,
+        scratch: &mut [*mut XLOPER12],
+        decode: impl FnOnce(&mut ExcelCallbackValue<'_>) -> XllResult<T>,
+    ) -> HostInvocation<T> {
+        // SAFETY: this method's caller supplies the live, stationary operands.
+        let call = unsafe {
+            self.callbacks
+                .call_with_arguments(function_id, CallbackArguments::Scratch(scratch))
+        };
+        finish_invocation(call, decode)
     }
 
     /// Runs one callback and applies the common status/release protocol.
