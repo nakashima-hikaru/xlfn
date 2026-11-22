@@ -144,7 +144,9 @@ impl std::error::Error for ExcelStringError {}
 
 /// Validates an Excel counted string independently of the host ABI.
 pub fn validate_excel_string(value: &str) -> Result<(), ExcelStringError> {
-    if value.encode_utf16().count() > EXCEL_STRING_LIMIT {
+    // Valid UTF-8 never uses fewer bytes than the corresponding UTF-16
+    // code-unit count. Most registration strings fit without decoding.
+    if value.len() > EXCEL_STRING_LIMIT && value.encode_utf16().count() > EXCEL_STRING_LIMIT {
         return Err(ExcelStringError::TooLong);
     }
     if value.contains('\0') {
@@ -562,6 +564,29 @@ mod tests {
             "R999999999999999999999999999999999C1",
         ] {
             assert_eq!(validate_function_name(name), Ok(()), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn byte_upper_bound_preserves_utf16_limit_and_nul_precedence() {
+        let ascii = "a".repeat(EXCEL_STRING_LIMIT);
+        let bmp = "東".repeat(EXCEL_STRING_LIMIT);
+        let astral = "🦀".repeat(EXCEL_STRING_LIMIT / 2);
+        for value in [&ascii, &bmp, &format!("{astral}東")] {
+            assert_eq!(validate_excel_string(value), Ok(()));
+        }
+        for value in [
+            format!("{ascii}\0"),
+            format!("{bmp}🦀"),
+            format!("{astral}🦀"),
+        ] {
+            assert_eq!(
+                validate_excel_string(&value),
+                Err(ExcelStringError::TooLong)
+            );
+        }
+        for value in ["abc\0".to_owned(), format!("{astral}\0")] {
+            assert_eq!(validate_excel_string(&value), Err(ExcelStringError::Nul));
         }
     }
 
