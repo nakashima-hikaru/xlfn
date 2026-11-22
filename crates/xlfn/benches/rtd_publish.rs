@@ -1,4 +1,4 @@
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use xlfn::benchmark_support::{
     RtdPublishNumberBenchmark, RtdPublishStringBenchmark, benchmark_measurement_time,
 };
@@ -94,6 +94,51 @@ fn rtd_publish_benchmarks(c: &mut Criterion) {
                     b.iter(|| pipeline.run_cycle(10_000));
                 },
             );
+        }
+    }
+    group.finish();
+
+    const MIXED_ITERATIONS: usize = 1_000;
+    let mut group = c.benchmark_group("rtd_publish_string_mix");
+    group.measurement_time(benchmark_measurement_time());
+    group.throughput(Throughput::Elements(MIXED_ITERATIONS as u64));
+    for (length, bench) in [
+        ("short", RtdPublishStringBenchmark::new()),
+        ("8k", RtdPublishStringBenchmark::with_payload_len(8 * 1024)),
+    ] {
+        for duplicate_percent in [0, 50, 99, 100] {
+            let payloads = bench.mixed_payloads(duplicate_percent, MIXED_ITERATIONS);
+            let case = format!("{length}/{duplicate_percent}%_duplicate");
+
+            group.bench_function(BenchmarkId::new("moved", &case), |b| {
+                b.iter_batched(
+                    || {
+                        bench.run_borrowed_repeated_same(1);
+                        payloads
+                            .iter()
+                            .map(|text| (*text).to_owned())
+                            .collect::<Vec<_>>()
+                    },
+                    |owned| bench.run_owned_payloads(owned),
+                    BatchSize::PerIteration,
+                );
+            });
+
+            group.bench_function(BenchmarkId::new("cloned", &case), |b| {
+                b.iter_batched(
+                    || bench.run_borrowed_repeated_same(1),
+                    |()| bench.run_owned_payloads(payloads.iter().map(|text| (*text).to_owned())),
+                    BatchSize::PerIteration,
+                );
+            });
+
+            group.bench_function(BenchmarkId::new("borrowed", &case), |b| {
+                b.iter_batched(
+                    || bench.run_borrowed_repeated_same(1),
+                    |()| bench.run_borrowed_payloads(&payloads),
+                    BatchSize::PerIteration,
+                );
+            });
         }
     }
     group.finish();

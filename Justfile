@@ -327,6 +327,7 @@ bench-full:
     just bench-one rtd_prepare "bench-internals rtd"
     just bench-one rtd_prepare_allocations "bench-internals rtd"
     just bench-one rtd_connection_allocations "bench-internals rtd"
+    just bench-one rtd_publish_allocations "bench-internals rtd"
     just bench-one rtd_publish "bench-internals rtd"
     just bench-one rtd_refresh "bench-internals rtd"
     just bench-one handle_call_resolution
