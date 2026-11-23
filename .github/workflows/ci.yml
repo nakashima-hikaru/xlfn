@@ -52,7 +52,7 @@ jobs:
             - name: Install pinned extraction toolchain and targets
               run: rustup toolchain install nightly-2026-09-28 --profile minimal --target aarch64-apple-darwin,x86_64-pc-windows-msvc
             - name: Cache Cargo dependencies for API extraction
-              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   key: nightly-2026-09-28-api
                   cache-targets: false
@@ -97,7 +97,7 @@ jobs:
                   fallback: none
 
             - name: Restore Cargo cache
-              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   key: portable-quality
                   cache-bin: false
@@ -178,7 +178,7 @@ jobs:
                   cache-dependency-glob: tools/uv.lock
 
             - name: Restore Cargo cache
-              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   key: windows-quality-${{ matrix.check }}
                   cache-bin: false
@@ -240,7 +240,7 @@ jobs:
                   fallback: none
 
             - name: Restore Cargo cache
-              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   key: windows-nextest
                   cache-bin: false
@@ -324,7 +324,7 @@ jobs:
                   cache-dependency-glob: tools/uv.lock
 
             - name: Restore Cargo cache
-              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   key: windows-features-${{ matrix.mode }}-${{ matrix.shard }}
                   cache-targets: false
@@ -369,7 +369,7 @@ jobs:
                 persist-credentials: false
 
             - name: Restore Cargo cache
-              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   key: standalone-windows
                   cache-targets: false
@@ -413,7 +413,7 @@ jobs:
               run: just miri-setup
 
             - name: Restore Cargo cache
-              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   key: miri-${{ matrix.lane }}
                   cache-targets: false
@@ -450,7 +450,7 @@ jobs:
                 persist-credentials: false
 
             - name: Restore Cargo cache
-              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   key: windows-artifact-${{ matrix.target }}
                   cache-bin: false
@@ -596,7 +596,7 @@ jobs:
                 persist-credentials: false
 
             - name: Restore Cargo cache
-              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   key: excel-sdk-probe-${{ matrix.target }}
                   cache-targets: false
@@ -717,7 +717,7 @@ jobs:
               run: just verus-audit
 
             - name: Restore Cargo cache
-              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   key: verus-support
                   cache-bin: false
@@ -993,7 +993,7 @@ jobs:
                   tar -xf "${RUNNER_TEMP}/lean-checkers/lean-checkers.tar" -C formal/.lake/build/bin
 
             - name: Restore Cargo cache
-              uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+              uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   key: lean-rust-replay
                   cache-bin: false
