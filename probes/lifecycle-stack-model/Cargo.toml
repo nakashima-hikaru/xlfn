@@ -8,4 +8,4 @@ rust-version = "1.100.0"
 [workspace]
 
 [dev-dependencies]
-smallvec = { version = "=1.16.5", features = ["const_new"] }
+smallvec = { version = "=1.16.6", features = ["const_new"] }
