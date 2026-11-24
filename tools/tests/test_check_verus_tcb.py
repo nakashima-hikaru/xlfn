@@ -348,6 +348,51 @@ class TestCheckVerusTcb(unittest.TestCase):
                 _, external = audit_verus_files([root], {"first/same.rs:2"})
                 self.assertEqual(len(external), 2)
 
+    def test_multi_attribute_groups_and_unqualified_assume_aliases_are_caught(self):
+        for source in [
+            "#[verifier(inline, external_body)] fn f() {}",
+            "#[verus::internal(inline, external_body)] fn f() {}",
+        ]:
+            with self.subTest(source=source):
+                assumptions, external = self.audit_source(source)
+                self.assertEqual(assumptions, [])
+                self.assertEqual(len(external), 1)
+
+        for source in [
+            "#[verifier(inline, assume)] fn f() {}",
+            "fn f() { (assume)(false); }",
+            "fn f() { (admit)(); }",
+            "fn f() { let p = assume; p(false); }",
+            "fn take(_: fn()) {} fn f() { take(admit); }",
+        ]:
+            with self.subTest(source=source):
+                assumptions, _ = self.audit_source(source)
+                self.assertEqual(len(assumptions), 1)
+
+    def test_cli_fails_on_stale_allowlist_entries_and_audits_core_crates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sources = root / "crates" / "xlfn-services" / "src"
+            sources.mkdir(parents=True)
+            (sources / "lib.rs").write_text("#[verifier::external_body]\nfn hidden() {}\n")
+            allowlist_file = root / "allowlist.json"
+            allowlist_file.write_text(
+                '{"external_bodies": ["crates/xlfn-services/src/lib.rs:999"]}\n'
+            )
+            output, errors = io.StringIO(), io.StringIO()
+            with (
+                patch.object(check_verus_tcb, "ROOT", root),
+                patch(
+                    "sys.argv",
+                    ["check_verus_tcb.py", "--allowlist", str(allowlist_file)],
+                ),
+                redirect_stdout(output),
+                redirect_stderr(errors),
+            ):
+                self.assertEqual(check_verus_tcb.main(), 1)
+            self.assertIn("crates/xlfn-services/src/lib.rs:1", errors.getvalue())
+            self.assertIn("crates/xlfn-services/src/lib.rs:999", errors.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

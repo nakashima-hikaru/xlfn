@@ -1,9 +1,7 @@
 use crate::host_callback::HostCallbackSession;
-use crate::return_abi::{CallbackCleanupDebt, ExcelCallbackStatus};
-use crate::sync::Mutex;
+use crate::return_abi::ExcelCallbackStatus;
 use crate::value::{XlValueRef, XlValueType};
 use crate::{XllError, XllResult};
-use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -15,34 +13,12 @@ pub(crate) enum CallbackArguments<'call> {
     Scratch(&'call mut [*mut XLOPER12]),
 }
 
-const CALLBACK_CLEANUP_AUDIT_CAPACITY: usize = 64;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CallbackValueReleaseState {
     Live,
     Released,
     CleanupOnly,
     Indeterminate { status: ExcelCallbackStatus },
-}
-
-#[derive(Debug, Default)]
-struct CallbackCleanupAudit {
-    debts: VecDeque<CallbackCleanupDebt>,
-    dropped_records: usize,
-}
-
-static CALLBACK_CLEANUP_AUDIT: Mutex<CallbackCleanupAudit> = Mutex::new(CallbackCleanupAudit {
-    debts: VecDeque::new(),
-    dropped_records: 0,
-});
-
-fn record_callback_value_debt(debt: CallbackCleanupDebt) {
-    let mut audit = CALLBACK_CLEANUP_AUDIT.lock();
-    if audit.debts.len() == CALLBACK_CLEANUP_AUDIT_CAPACITY {
-        audit.debts.pop_front();
-        audit.dropped_records = audit.dropped_records.saturating_add(1);
-    }
-    audit.debts.push_back(debt);
 }
 
 #[cfg(test)]
@@ -65,8 +41,6 @@ fn state_after_callback(status: ExcelCallbackStatus) -> CallbackValueReleaseStat
 struct CallbackOwner<'session> {
     raw: XLOPER12,
     release_required: bool,
-    #[cfg(test)]
-    audit_failures: bool,
     #[cfg(test)]
     release_callback: ReleaseCallback,
     state: CallbackValueReleaseState,
@@ -133,7 +107,6 @@ impl CallbackOwner<'static> {
         Self {
             raw,
             release_required: false,
-            audit_failures: false,
             release_callback: excel_free,
             state: CallbackValueReleaseState::Live,
             session: None,
@@ -151,7 +124,6 @@ impl CallbackOwner<'static> {
         Self {
             raw,
             release_required: true,
-            audit_failures: false,
             release_callback,
             state: state_after_callback(status),
             session: None,
@@ -172,7 +144,6 @@ impl<'session> CallbackOwner<'session> {
         Self {
             raw,
             release_required: true,
-            audit_failures: false,
             release_callback,
             state: state_after_callback(status),
             session: Some(session),
@@ -192,7 +163,6 @@ impl<'session> CallbackOwner<'session> {
         Self {
             raw,
             release_required: true,
-            audit_failures: false,
             release_callback,
             state: state_after_callback(status),
             session: Some(session),
@@ -241,8 +211,6 @@ impl<'session> ExcelCallbackValue<'session> {
         let make_owner = |state| CallbackOwner {
             raw,
             release_required: true,
-            #[cfg(test)]
-            audit_failures: true,
             #[cfg(test)]
             release_callback: excel_free,
             state,
@@ -350,13 +318,6 @@ impl CallbackOwner<'_> {
             Ok(())
         } else {
             self.state = CallbackValueReleaseState::Indeterminate { status };
-            #[cfg(test)]
-            let audit_failures = self.audit_failures;
-            #[cfg(not(test))]
-            let audit_failures = true;
-            if audit_failures {
-                record_callback_value_debt(CallbackCleanupDebt { status });
-            }
             Err(crate::error::construct::excel_api(
                 crate::error::ExcelApiFunction::Free,
                 crate::error::ExcelApiFailure::Status(status),

@@ -6,6 +6,8 @@ name: Generated UDF size experiment
       - .github/workflows/udf-size.yml
       - benchmarks/excel-comparison/measure-udf-size.ps1
       - crates/xlfn/src/return_abi.rs
+      - crates/xlfn/src/return_abi/**
+      - crates/xlfn-macros/**
   workflow_dispatch:
 
 permissions:

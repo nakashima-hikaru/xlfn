@@ -40,20 +40,10 @@ pub(super) fn extract_gating_attributes(attributes: &[Attribute]) -> syn::Result
     Ok(gating)
 }
 
-fn gating_meta(meta: &Meta) -> syn::Result<Option<Meta>> {
-    if meta.path().is_ident("cfg") {
-        return Ok(Some(meta.clone()));
-    }
-    if !meta.path().is_ident("cfg_attr") {
-        return Ok(None);
-    }
-    let Meta::List(list) = meta else {
-        return Err(syn::Error::new_spanned(
-            meta,
-            "expected cfg_attr(predicate, attributes...)",
-        ));
-    };
-    let (predicate, entries) = list.parse_args_with(|input: syn::parse::ParseStream<'_>| {
+fn parse_cfg_attr_entries(
+    list: &syn::MetaList,
+) -> syn::Result<(proc_macro2::TokenStream, Punctuated<Meta, syn::Token![,]>)> {
+    list.parse_args_with(|input: syn::parse::ParseStream<'_>| {
         // Rust cfg predicates accept boolean literals as well as meta items.
         let predicate = if input.peek(syn::LitBool) {
             let literal: syn::LitBool = input.parse()?;
@@ -68,7 +58,23 @@ fn gating_meta(meta: &Meta) -> syn::Result<Option<Meta>> {
         input.parse::<syn::Token![,]>()?;
         let entries = Punctuated::<Meta, syn::Token![,]>::parse_terminated(input)?;
         Ok((predicate, entries))
-    })?;
+    })
+}
+
+fn gating_meta(meta: &Meta) -> syn::Result<Option<Meta>> {
+    if meta.path().is_ident("cfg") {
+        return Ok(Some(meta.clone()));
+    }
+    if !meta.path().is_ident("cfg_attr") {
+        return Ok(None);
+    }
+    let Meta::List(list) = meta else {
+        return Err(syn::Error::new_spanned(
+            meta,
+            "expected cfg_attr(predicate, attributes...)",
+        ));
+    };
+    let (predicate, entries) = parse_cfg_attr_entries(list)?;
     let mut nested = Vec::new();
     for entry in entries {
         if let Some(meta) = gating_meta(&entry)? {
@@ -81,27 +87,87 @@ fn gating_meta(meta: &Meta) -> syn::Result<Option<Meta>> {
     Ok(Some(syn::parse_quote!(cfg_attr(#predicate, #(#nested),*))))
 }
 
+pub(super) fn contains_conditional_xlfn_param_attr(meta: &Meta) -> syn::Result<bool> {
+    if !meta.path().is_ident("cfg_attr") {
+        return Ok(false);
+    }
+    let Meta::List(list) = meta else {
+        return Err(syn::Error::new_spanned(
+            meta,
+            "expected cfg_attr(predicate, attributes...)",
+        ));
+    };
+    let (_, entries) = parse_cfg_attr_entries(list)?;
+    for entry in entries {
+        if entry.path().is_ident("excel_arg")
+            || entry.path().is_ident("excel_context")
+            || contains_conditional_xlfn_param_attr(&entry)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(super) fn doc_comment(attributes: &[Attribute]) -> String {
-    let lines = attributes
-        .iter()
-        .filter_map(|attribute| {
-            if !attribute.path().is_ident("doc") {
-                return None;
+    let mut lines = Vec::new();
+    let mut in_fence = false;
+    for attribute in attributes {
+        if !attribute.path().is_ident("doc") {
+            continue;
+        }
+        let Meta::NameValue(value) = &attribute.meta else {
+            continue;
+        };
+        let Expr::Lit(ExprLit {
+            lit: Lit::Str(value),
+            ..
+        }) = &value.value
+        else {
+            continue;
+        };
+        let raw = value.value();
+        if raw.trim().is_empty() {
+            if !lines.is_empty() {
+                break;
             }
-            let Meta::NameValue(value) = &attribute.meta else {
-                return None;
-            };
-            let Expr::Lit(ExprLit {
-                lit: Lit::Str(value),
-                ..
-            }) = &value.value
-            else {
-                return None;
-            };
-            Some(value.value().trim().to_owned())
-        })
-        .collect::<Vec<_>>();
-    lines.join("\n").trim().to_owned()
+            continue;
+        }
+        let mut stop = false;
+        for raw_line in raw.lines() {
+            let trimmed = raw_line.trim();
+            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                if lines.is_empty() {
+                    in_fence = !in_fence;
+                    continue;
+                }
+                stop = true;
+                break;
+            }
+            if in_fence {
+                continue;
+            }
+            if trimmed.is_empty() {
+                if !lines.is_empty() {
+                    stop = true;
+                    break;
+                }
+                continue;
+            }
+            if trimmed.starts_with('#') {
+                if !lines.is_empty() {
+                    stop = true;
+                    break;
+                }
+                continue;
+            }
+            lines.push(trimmed.to_owned());
+        }
+        if stop {
+            break;
+        }
+    }
+    lines.join(" ").trim().to_owned()
 }
 
 #[cfg(test)]

@@ -88,10 +88,10 @@ pub(super) fn identity(input: DeriveInput) -> syn::Result<TokenStream> {
     let parameters: Vec<_> = generics
         .params
         .iter()
-        .map(|parameter| match parameter {
-            syn::GenericParam::Type(parameter) => parameter.ident.unraw(),
-            syn::GenericParam::Lifetime(parameter) => parameter.lifetime.ident.unraw(),
-            syn::GenericParam::Const(parameter) => parameter.ident.unraw(),
+        .filter_map(|parameter| match parameter {
+            syn::GenericParam::Type(parameter) => Some(parameter.ident.unraw()),
+            syn::GenericParam::Const(parameter) => Some(parameter.ident.unraw()),
+            syn::GenericParam::Lifetime(_) => None,
         })
         .collect();
     for ty in field_types {
@@ -194,5 +194,16 @@ mod tests {
                     .contains("expected")
             );
         }
+    }
+
+    #[test]
+    fn lifetime_parameter_name_does_not_force_where_bound_on_matching_type() {
+        let input = syn::parse_quote!(
+            struct WithLifetime<'A> {
+                concrete: A,
+            }
+        );
+        let tokens = identity(input).unwrap().to_string();
+        assert!(!tokens.contains("where"));
     }
 }

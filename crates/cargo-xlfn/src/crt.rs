@@ -283,6 +283,19 @@ impl CrtObservation {
                 observed_dynamic_crt_imports.join(", ")
             );
         }
+        if requested.policy == CrtPolicy::Dynamic {
+            let debug_crts: Vec<_> = observed_dynamic_crt_imports
+                .iter()
+                .filter(|name| is_debug_crt_import(name))
+                .cloned()
+                .collect();
+            if !debug_crts.is_empty() {
+                bail!(
+                    "--crt dynamic cannot package debug MSVC runtime libraries: {}. Build with release CRT linkage instead",
+                    debug_crts.join(", ")
+                );
+            }
+        }
         let consistency = if requested.policy == CrtPolicy::Inherit
             && effective_rust == EffectiveCrtPolicy::Static
             && !observed_dynamic_crt_imports.is_empty()
@@ -307,6 +320,14 @@ impl CrtObservation {
         }
     }
 
+    pub(crate) fn auto_admitted_external_imports(&self) -> Vec<String> {
+        self.observed_dynamic_crt_imports
+            .iter()
+            .filter(|name| is_redistributable_dynamic_crt_import(name))
+            .cloned()
+            .collect()
+    }
+
     pub(crate) fn manifest(self, requested: ResolvedCrtPolicy) -> xlfn_package::CrtManifest {
         xlfn_package::CrtManifest {
             requested: requested.policy.name().to_owned(),
@@ -319,61 +340,21 @@ impl CrtObservation {
     }
 }
 
-fn is_dynamic_crt_import(name: &str) -> bool {
+fn is_redistributable_dynamic_crt_import(name: &str) -> bool {
     // This observation also feeds the external-import allowlist. Keep exact
-    // known DLL names: accepting arbitrary msvcp/vcruntime prefixes would let
-    // unrelated dependencies bypass closed-world package verification.
-    const DYNAMIC_CRT_IMPORTS: &[&str] = &[
+    // known redistributable DLL names: accepting arbitrary msvcp/vcruntime
+    // prefixes or debug CRTs would let non-redistributable or unrelated
+    // dependencies bypass closed-world package verification.
+    const REDISTRIBUTABLE_CRT_IMPORTS: &[&str] = &[
         "ucrtbase.dll",
-        "ucrtbased.dll",
-        "msvcrt.dll",
-        "msvcrtd.dll",
-        "msvcr70.dll",
-        "msvcr70d.dll",
-        "msvcr71.dll",
-        "msvcr71d.dll",
-        "msvcr80.dll",
-        "msvcr80d.dll",
-        "msvcr90.dll",
-        "msvcr90d.dll",
-        "msvcr100.dll",
-        "msvcr100d.dll",
-        "msvcr110.dll",
-        "msvcr110d.dll",
-        "msvcr120.dll",
-        "msvcr120d.dll",
-        "msvcp60.dll",
-        "msvcp60d.dll",
-        "msvcp70.dll",
-        "msvcp70d.dll",
-        "msvcp71.dll",
-        "msvcp71d.dll",
-        "msvcp80.dll",
-        "msvcp80d.dll",
-        "msvcp90.dll",
-        "msvcp90d.dll",
-        "msvcp100.dll",
-        "msvcp100d.dll",
-        "msvcp110.dll",
-        "msvcp110d.dll",
-        "msvcp120.dll",
-        "msvcp120d.dll",
         "vcruntime140.dll",
-        "vcruntime140d.dll",
         "vcruntime140_1.dll",
-        "vcruntime140_1d.dll",
         "msvcp140.dll",
-        "msvcp140d.dll",
         "msvcp140_1.dll",
-        "msvcp140_1d.dll",
         "msvcp140_2.dll",
-        "msvcp140_2d.dll",
         "msvcp140_atomic_wait.dll",
-        "msvcp140d_atomic_wait.dll",
         "msvcp140_codecvt_ids.dll",
-        "msvcp140d_codecvt_ids.dll",
         "concrt140.dll",
-        "concrt140d.dll",
         "api-ms-win-crt-conio-l1-1-0.dll",
         "api-ms-win-crt-convert-l1-1-0.dll",
         "api-ms-win-crt-environment-l1-1-0.dll",
@@ -390,9 +371,68 @@ fn is_dynamic_crt_import(name: &str) -> bool {
         "api-ms-win-crt-time-l1-1-0.dll",
         "api-ms-win-crt-utility-l1-1-0.dll",
     ];
-    DYNAMIC_CRT_IMPORTS
+    REDISTRIBUTABLE_CRT_IMPORTS
         .iter()
         .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+fn is_debug_crt_import(name: &str) -> bool {
+    const DEBUG_CRT_IMPORTS: &[&str] = &[
+        "ucrtbased.dll",
+        "msvcrtd.dll",
+        "msvcr70d.dll",
+        "msvcr71d.dll",
+        "msvcr80d.dll",
+        "msvcr90d.dll",
+        "msvcr100d.dll",
+        "msvcr110d.dll",
+        "msvcr120d.dll",
+        "msvcp60d.dll",
+        "msvcp70d.dll",
+        "msvcp71d.dll",
+        "msvcp80d.dll",
+        "msvcp90d.dll",
+        "msvcp100d.dll",
+        "msvcp110d.dll",
+        "msvcp120d.dll",
+        "vcruntime140d.dll",
+        "vcruntime140_1d.dll",
+        "msvcp140d.dll",
+        "msvcp140_1d.dll",
+        "msvcp140_2d.dll",
+        "msvcp140d_atomic_wait.dll",
+        "msvcp140d_codecvt_ids.dll",
+        "concrt140d.dll",
+    ];
+    DEBUG_CRT_IMPORTS
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+fn is_dynamic_crt_import(name: &str) -> bool {
+    const LEGACY_DYNAMIC_CRT_IMPORTS: &[&str] = &[
+        "msvcrt.dll",
+        "msvcr70.dll",
+        "msvcr71.dll",
+        "msvcr80.dll",
+        "msvcr90.dll",
+        "msvcr100.dll",
+        "msvcr110.dll",
+        "msvcr120.dll",
+        "msvcp60.dll",
+        "msvcp70.dll",
+        "msvcp71.dll",
+        "msvcp80.dll",
+        "msvcp90.dll",
+        "msvcp100.dll",
+        "msvcp110.dll",
+        "msvcp120.dll",
+    ];
+    is_redistributable_dynamic_crt_import(name)
+        || is_debug_crt_import(name)
+        || LEGACY_DYNAMIC_CRT_IMPORTS
+            .iter()
+            .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
 #[cfg(test)]
@@ -589,5 +629,39 @@ mod tests {
         assert!(!is_dynamic_crt_import("msvcp999.dll"));
         assert!(!is_dynamic_crt_import("api-ms-win-crt-untrusted.dll"));
         assert!(is_dynamic_crt_import("ucrtbased.dll"));
+    }
+
+    #[test]
+    fn dynamic_policy_rejects_debug_crt_and_auto_admission_excludes_debug_and_legacy() {
+        let mut debug_info = PeInfo {
+            crt_policy: Some(EffectiveCrtPolicy::Dynamic),
+            ..PeInfo::default()
+        };
+        debug_info.imports.insert("vcruntime140d.dll".to_owned());
+        debug_info.imports.insert("ucrtbased.dll".to_owned());
+        assert!(
+            CrtObservation::inspect(
+                &debug_info,
+                ResolvedCrtPolicy::resolve(Some(CrtPolicy::Dynamic), None),
+            )
+            .is_err()
+        );
+
+        let mut inherit_info = PeInfo {
+            crt_policy: Some(EffectiveCrtPolicy::Dynamic),
+            ..PeInfo::default()
+        };
+        inherit_info.imports.insert("vcruntime140.dll".to_owned());
+        inherit_info.imports.insert("vcruntime140d.dll".to_owned());
+        inherit_info.imports.insert("msvcr120.dll".to_owned());
+        let observation = CrtObservation::inspect(
+            &inherit_info,
+            ResolvedCrtPolicy::resolve(Some(CrtPolicy::Inherit), None),
+        )
+        .unwrap();
+        assert_eq!(
+            observation.auto_admitted_external_imports(),
+            vec!["vcruntime140.dll"]
+        );
     }
 }

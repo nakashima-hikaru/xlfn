@@ -30,7 +30,6 @@
     Windows.Win32.TokenUser
     Windows.Win32.ConvertStringSecurityDescriptorToSecurityDescriptorW
     Windows.Win32.ConvertStringSidToSidW
-    Windows.Win32.GetNamedSecurityInfoW
     Windows.Win32.SDDL_REVISION_1
     Windows.Win32.SE_FILE_OBJECT
     Windows.Win32.BY_HANDLE_FILE_INFORMATION

@@ -64,8 +64,8 @@ cargo test --workspace --all-features --lib --locked -- --test-threads=1
 cargo test -p xlfn --all-features --test compile --locked
 just typestate
 cargo clippy --workspace --all-targets --all-features --locked
-cargo +nightly-2026-09-02 miri test -p xlfn --no-default-features --features handles --lib --locked -- miri_
-MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly-2026-09-02 miri test -p xlfn --no-default-features --features handles --lib --locked -- miri_ghostcell
+cargo +nightly-2026-09-28 miri test -p xlfn --no-default-features --features handles --lib --locked -- miri_
+MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly-2026-09-28 miri test -p xlfn --no-default-features --features handles --lib --locked -- miri_ghostcell
 cargo bench -p xlfn --features bench-internals --bench handle_call_resolution --locked -- '^handle_call_resolution/handles/(1|2|8|32)$' --warm-up-time 1 --sample-size 50
 ```
 

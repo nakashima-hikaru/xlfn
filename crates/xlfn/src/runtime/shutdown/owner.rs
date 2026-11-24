@@ -184,8 +184,17 @@ impl<'runtime, A: crate::Addin> RemovalAcquisition<'runtime, A> {
                         return None;
                     }
                     drop(self.access);
-                    self.deps.returns().wait_for_returns();
+                    let quiesced = self.deps.returns().wait_for_returns_timeout();
                     self.access = self.deps.lifecycle().access();
+                    if !quiesced && !self.deps.returns().returns_are_quiescent() {
+                        let lifecycle =
+                            crate::lifecycle::LifecycleControl::new(self.deps.lifecycle());
+                        lifecycle.quarantine_state(&mut self.access);
+                        self.deps.observer().quarantine(
+                            crate::shutdown_trace::ShutdownFailure::ReturnShutdownFailed,
+                        );
+                        return None;
+                    }
                     continue;
                 }
                 FinalCloseDecision::Quarantined => return None,

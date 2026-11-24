@@ -1,8 +1,18 @@
 //! Host-independent service backends used by xlfn.
 
+#![deny(unsafe_code)]
+
+#[allow(
+    unsafe_code,
+    reason = "handle table manages type-erased pinned storage and lease provenance"
+)]
 pub mod handle_objects;
 
 #[cfg(feature = "cache")]
+#[allow(
+    unsafe_code,
+    reason = "cache implements zero-copy slab residency, endpoint pinning, and reclamation"
+)]
 pub mod cache;
 #[cfg(feature = "rtd")]
 pub mod rtd;
@@ -113,16 +123,22 @@ impl Accounting {
     #[inline]
     pub fn release_buffered(&self, values: usize, bytes: usize) {
         let mut state = self.state.lock();
-        state.used.values -= values;
-        state.used.bytes -= bytes;
+        state.used.values = xlfn_kernel::invariant::checked_sub_or_abort(state.used.values, values);
+        state.used.bytes = xlfn_kernel::invariant::checked_sub_or_abort(state.used.bytes, bytes);
     }
 
     pub fn release(&self, amount: Usage) {
         let mut state = self.state.lock();
-        state.used.subscriptions -= amount.subscriptions;
-        state.used.values -= amount.values;
-        state.used.bytes -= amount.bytes;
-        state.used.workers -= amount.workers;
+        state.used.subscriptions = xlfn_kernel::invariant::checked_sub_or_abort(
+            state.used.subscriptions,
+            amount.subscriptions,
+        );
+        state.used.values =
+            xlfn_kernel::invariant::checked_sub_or_abort(state.used.values, amount.values);
+        state.used.bytes =
+            xlfn_kernel::invariant::checked_sub_or_abort(state.used.bytes, amount.bytes);
+        state.used.workers =
+            xlfn_kernel::invariant::checked_sub_or_abort(state.used.workers, amount.workers);
     }
 }
 

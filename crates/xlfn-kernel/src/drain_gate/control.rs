@@ -160,6 +160,14 @@ impl<'a, const N: usize> StripedGateControl<'a, GateUnknown, N> {
         self
     }
 
+    /// Bounded counterpart to [`Self::wait_idle`]. Returns whether all stripes
+    /// were observed idle before `timeout` elapsed.
+    #[cfg(not(miri))]
+    pub fn wait_idle_timeout(self, timeout: std::time::Duration) -> (Self, bool) {
+        let idle = self.gate.wait_until_idle_timeout(&self.claim, timeout);
+        (self, idle)
+    }
+
     pub fn wait_if_sealed(self) -> Result<StripedGateControl<'a, GateDrained, N>, Self> {
         if !self.gate.is_sealed() {
             return Err(self);

@@ -93,6 +93,7 @@ fn with_metadata_entry(
     ingress: &ExportIngress,
     operation: impl FnOnce() -> *mut XLOPER12,
 ) -> *mut XLOPER12 {
+    let _thread_export = crate::ingress::ThreadExportGuard::enter();
     // Opening/closing entries still own a reservation and must keep it until
     // the metadata read finishes. Closed entries own no generation resources;
     // their static reads rely on Excel's existing loaded-module call contract.

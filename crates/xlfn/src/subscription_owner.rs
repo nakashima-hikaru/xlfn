@@ -149,6 +149,11 @@ unsafe impl<T: RtdSubscription> IntoRtdSubscription<T> for T {
 /// Every concrete type must occur only once. Gate the macro invocation itself
 /// when declaring a feature-dependent subscription set.
 ///
+/// Because the expansion generates `unsafe impl` blocks for `RtdSubscription`
+/// and `IntoRtdSubscription`, consumer crates using this macro should use
+/// `#![deny(unsafe_code)]` (with `#[allow(unsafe_code)]` if needed) rather than
+/// `#![forbid(unsafe_code)]`.
+///
 /// ```
 /// xlfn::rtd_subscriptions! {
 ///     /// Subscription owners accepted by this add-in.
@@ -163,13 +168,17 @@ macro_rules! rtd_subscriptions {
     (
         $(#[$attribute:meta])*
         $visibility:vis enum $name:ident {
-            $($variant:ident($subscription:ty)),+ $(,)?
+            $(
+                $(#[$variant_attr:meta])*
+                $variant:ident($subscription:ty)
+            ),+ $(,)?
         }
     ) => {
         $(#[$attribute])*
         $visibility enum $name {
             $(
-                #[doc = concat!("Owns a `", stringify!($subscription), "` subscription.")]
+                $(#[$variant_attr])*
+                #[doc = ::core::concat!("Owns a `", ::core::stringify!($subscription), "` subscription.")]
                 $variant($subscription),
             )+
         }

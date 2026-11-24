@@ -118,11 +118,28 @@ pub(crate) struct VerifiedHandleToken {
 pub(crate) struct TokenCodec {
     pub(crate) session: u64,
     pub(crate) secret: [u8; 32],
+    codec_id: u64,
+}
+
+static NEXT_CODEC_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_codec_id() -> u64 {
+    NEXT_CODEC_ID
+        .try_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |id| id.checked_add(1),
+        )
+        .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
 }
 
 impl TokenCodec {
-    pub(crate) const fn new(session: u64, secret: [u8; 32]) -> Self {
-        Self { session, secret }
+    pub(crate) fn new(session: u64, secret: [u8; 32]) -> Self {
+        Self {
+            session,
+            secret,
+            codec_id: next_codec_id(),
+        }
     }
 
     pub(crate) fn format(&self, id: HandleId) -> String {
@@ -147,7 +164,7 @@ impl TokenCodec {
         if let Some(id) = verified_token_cache_lookup(
             registry_address,
             self.session,
-            &self.secret,
+            self.codec_id,
             token.as_str(),
         ) {
             return Ok(VerifiedHandleToken { id });
@@ -158,7 +175,7 @@ impl TokenCodec {
         verified_token_cache_store(
             registry_address,
             self.session,
-            &self.secret,
+            self.codec_id,
             token.as_str(),
             verified.id,
         );
@@ -261,7 +278,7 @@ impl VerifiedTokenCache {
 struct VerifiedTokenCacheEntry {
     registry_address: usize,
     session: u64,
-    secret: [u8; 32],
+    codec_id: u64,
     token: [u8; HANDLE_TOKEN_LENGTH],
     // Keep the verified pair in flat storage: embedding an aligned HandleId
     // would retain its padding beside the 82-byte wire token. Construction and
@@ -283,7 +300,7 @@ fn verified_token_cache_index(bytes: &[u8]) -> Option<usize> {
     // The final token byte is one hex nibble of the authenticated tag. It
     // selects one of 16 sets. Keeping all 16 sets avoids introducing conflicts
     // between previously distinct tag nibbles when adding associativity. The
-    // complete token, registry identity and secret are checked on every hit.
+    // complete token, registry identity and codec identity are checked on every hit.
     let nibble = hex_nibble(bytes[HANDLE_TOKEN_LENGTH - 1])?;
     Some(usize::from(nibble))
 }
@@ -291,7 +308,7 @@ fn verified_token_cache_index(bytes: &[u8]) -> Option<usize> {
 pub(crate) fn verified_token_cache_lookup(
     registry_address: usize,
     session: u64,
-    secret: &[u8; 32],
+    codec_id: u64,
     token: &str,
 ) -> Option<HandleId> {
     let bytes = token.as_bytes();
@@ -302,8 +319,8 @@ pub(crate) fn verified_token_cache_lookup(
             let entry = entry.as_ref()?;
             (entry.registry_address == registry_address
                 && entry.session == session
-                && entry.token.as_slice() == bytes
-                && entry.secret == *secret)
+                && entry.codec_id == codec_id
+                && entry.token.as_slice() == bytes)
                 .then_some(HandleId {
                     slot: entry.slot,
                     generation: entry.generation,
@@ -315,7 +332,7 @@ pub(crate) fn verified_token_cache_lookup(
 pub(crate) fn verified_token_cache_store(
     registry_address: usize,
     session: u64,
-    secret: &[u8; 32],
+    codec_id: u64,
     token: &str,
     id: HandleId,
 ) {
@@ -332,7 +349,7 @@ pub(crate) fn verified_token_cache_store(
         cache.sets[index][victim] = Some(VerifiedTokenCacheEntry {
             registry_address,
             session,
-            secret: *secret,
+            codec_id,
             token: token_bytes,
             slot: id.slot,
             generation: id.generation,
@@ -522,7 +539,7 @@ mod tests {
                 verified_token_cache_lookup(
                     std::ptr::from_ref(codec).addr(),
                     codec.session,
-                    &codec.secret,
+                    codec.codec_id,
                     token
                 ),
                 Some(id)
@@ -554,7 +571,7 @@ mod tests {
         }
         for (token, id) in &colliding[..4] {
             assert_eq!(
-                verified_token_cache_lookup(address, codec.session, &codec.secret, token),
+                verified_token_cache_lookup(address, codec.session, codec.codec_id, token),
                 Some(*id)
             );
         }
@@ -562,12 +579,12 @@ mod tests {
             .parse(address, HandleToken::new(&colliding[4].0))
             .unwrap();
         assert_eq!(
-            verified_token_cache_lookup(address, codec.session, &codec.secret, &colliding[0].0),
+            verified_token_cache_lookup(address, codec.session, codec.codec_id, &colliding[0].0),
             None
         );
         for (token, id) in &colliding[1..] {
             assert_eq!(
-                verified_token_cache_lookup(address, codec.session, &codec.secret, token),
+                verified_token_cache_lookup(address, codec.session, codec.codec_id, token),
                 Some(*id)
             );
         }
@@ -577,6 +594,7 @@ mod tests {
     fn cached_verification_checks_entire_token_and_registry_identity() {
         clear_cache();
         let codec = TokenCodec::new(7, [19; 32]);
+        let other = TokenCodec::new(7, [20; 32]);
         let address = std::ptr::from_ref(&codec).addr();
         let id = HandleId {
             slot: 17,
@@ -585,20 +603,22 @@ mod tests {
         let token = codec.format(id);
         codec.parse(address, HandleToken::new(&token)).unwrap();
         assert!(
-            verified_token_cache_lookup(address + 1, codec.session, &codec.secret, &token)
+            verified_token_cache_lookup(address + 1, codec.session, codec.codec_id, &token)
                 .is_none()
         );
         assert!(
-            verified_token_cache_lookup(address, codec.session + 1, &codec.secret, &token)
+            verified_token_cache_lookup(address, codec.session + 1, codec.codec_id, &token)
                 .is_none()
         );
-        assert!(verified_token_cache_lookup(address, codec.session, &[20; 32], &token).is_none());
+        assert!(
+            verified_token_cache_lookup(address, codec.session, other.codec_id, &token).is_none()
+        );
         for index in 0..HANDLE_TOKEN_LENGTH - 1 {
             let mut tampered = token.clone().into_bytes();
             tampered[index] = if tampered[index] == b'0' { b'1' } else { b'0' };
             let tampered = String::from_utf8(tampered).unwrap();
             assert!(
-                verified_token_cache_lookup(address, codec.session, &codec.secret, &tampered)
+                verified_token_cache_lookup(address, codec.session, codec.codec_id, &tampered)
                     .is_none()
             );
             assert!(

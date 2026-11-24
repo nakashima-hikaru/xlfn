@@ -9,6 +9,20 @@ pub(super) fn validate_registration_string(
         .map_err(|error| syn::Error::new_spanned(span, format!("invalid {field}: {error}")))
 }
 
+pub(super) fn validate_registration_category(
+    value: &str,
+    span: &impl quote::ToTokens,
+) -> syn::Result<()> {
+    validate_registration_string("Excel function category", value, span)?;
+    if value.encode_utf16().count() > 255 {
+        return Err(syn::Error::new_spanned(
+            span,
+            "invalid Excel function category: category must contain at most 255 UTF-16 code units",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) struct ValidatedAddinMetadata {
     name_units: Vec<u16>,
     name_length: u8,

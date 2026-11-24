@@ -95,8 +95,10 @@ callbacks. A function that performs asynchronous work uses `async fn` and the
 
 ## Function metadata
 
-Rust doc comments on `#[excel_function]` automatically populate Excel's
-Function Wizard description. You can also specify metadata explicitly via attributes:
+The first summary paragraph of a Rust doc comment on `#[excel_function]`
+automatically populates Excel's Function Wizard description (separated by a
+blank line from extended doc details). You can also specify metadata explicitly
+via attributes:
 
 ```rust
 {{#include ../fixtures/addin.md}}

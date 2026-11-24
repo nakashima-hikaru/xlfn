@@ -14,6 +14,7 @@ use xlfn_kernel::published_owner::PublishedOwner;
 
 mod key_retirement;
 use key_retirement::RetiredKeys;
+pub(super) use key_retirement::retire_single_key;
 
 mod quick;
 use quick::QuickResidentIndex;

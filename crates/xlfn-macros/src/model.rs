@@ -8,8 +8,13 @@ use crate::function::UdfFunction;
 use crate::options::{
     ParsedArgumentOptions, ParsedFunctionOptions, parse_argument_options, parse_function_options,
 };
-use crate::support::{doc_comment, extract_gating_attributes, resolve_crate_path};
-use crate::validation::{validate_export_id, validate_registration_string};
+use crate::support::{
+    contains_conditional_xlfn_param_attr, doc_comment, extract_gating_attributes,
+    resolve_crate_path,
+};
+use crate::validation::{
+    validate_export_id, validate_registration_category, validate_registration_string,
+};
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident};
 use syn::ext::IdentExt;
@@ -148,6 +153,7 @@ fn normalize_async_context_lifetime(ty: &mut Type) {
 
 pub(super) struct ParsedArgument {
     pub(super) rust_name: Ident,
+    pub(super) is_wild: bool,
     pub(super) ty: Type,
     pub(super) options: ParsedArgumentOptions,
 }
@@ -425,10 +431,18 @@ pub(super) fn parse_udf(
         let mut excel_arg_attribute = None;
         let mut argument_options = ParsedArgumentOptions::default();
         for attribute in std::mem::take(&mut argument.attrs) {
-            if !extract_gating_attributes(std::slice::from_ref(&attribute))?.is_empty() {
+            if attribute.path().is_ident("cfg")
+                || !extract_gating_attributes(std::slice::from_ref(&attribute))?.is_empty()
+            {
                 return Err(syn::Error::new_spanned(
                     attribute,
                     "Excel function parameters cannot be conditionally compiled; gate the entire function instead",
+                ));
+            }
+            if contains_conditional_xlfn_param_attr(&attribute.meta)? {
+                return Err(syn::Error::new_spanned(
+                    attribute,
+                    "Excel function parameters cannot conditionally apply excel_arg or excel_context; gate the entire function instead",
                 ));
             }
             if attribute.path().is_ident("excel_context") {
@@ -507,14 +521,27 @@ pub(super) fn parse_udf(
                 },
             });
         } else {
-            let Pat::Ident(pattern) = argument.pat.as_ref() else {
-                return Err(syn::Error::new_spanned(
-                    &argument.pat,
-                    "Excel function arguments must use simple identifier patterns",
-                ));
+            let (rust_name, is_wild) = match argument.pat.as_ref() {
+                Pat::Ident(pattern) if pattern.by_ref.is_none() && pattern.subpat.is_none() => {
+                    (pattern.ident.clone(), false)
+                }
+                Pat::Wild(wild) => (
+                    syn::Ident::new(
+                        &format!("__xlfn_arg_{}", arguments.len()),
+                        wild.underscore_token.span,
+                    ),
+                    true,
+                ),
+                other => {
+                    return Err(syn::Error::new_spanned(
+                        other,
+                        "Excel function arguments must use simple identifier patterns",
+                    ));
+                }
             };
             arguments.push(ParsedArgument {
-                rust_name: pattern.ident.clone(),
+                rust_name,
+                is_wild,
                 ty: argument.ty.as_ref().clone(),
                 options: argument_options,
             });
@@ -664,8 +691,8 @@ pub(super) fn analyze(parsed: ParsedUdf) -> syn::Result<UdfSpec> {
             .unwrap_or_else(|| doc_comment(&function.attrs)),
         help_topic: options.help_topic.clone().unwrap_or_default(),
     };
+    validate_registration_category(metadata.category.as_str(), &function_ident)?;
     for (field, value) in [
-        ("Excel function category", metadata.category.as_str()),
         ("Excel function description", metadata.description.as_str()),
         ("Excel function help topic", metadata.help_topic.as_str()),
     ] {
@@ -856,18 +883,20 @@ fn analyze_arguments(
     }
 
     let mut analyzed = Vec::with_capacity(arguments.len());
-    for argument in arguments {
+    for (argument_position, argument) in arguments.into_iter().enumerate() {
         if execution.is_async() && is_borrowed_string(&argument.ty) {
             return Err(syn::Error::new_spanned(
                 &argument.ty,
                 "&str borrows the current Excel call and is only supported by synchronous functions; use String for async arguments",
             ));
         }
-        let excel_name = argument
-            .options
-            .name
-            .clone()
-            .unwrap_or_else(|| argument.rust_name.unraw().to_string());
+        let excel_name = argument.options.name.clone().unwrap_or_else(|| {
+            if argument.is_wild {
+                format!("arg{}", argument_position + 1)
+            } else {
+                argument.rust_name.unraw().to_string()
+            }
+        });
         if xlfn_common::validate_argument_name(&excel_name).is_err() {
             return Err(syn::Error::new_spanned(
                 &function.sig.inputs,

@@ -103,6 +103,9 @@ fn call_outcome(completion: &AsyncCompletion, duration: std::time::Duration) -> 
     let completion_outcome = match &completion.completion {
         OwnedCompletionOutcome::Success => UdfCompletionOutcome::Success,
         OwnedCompletionOutcome::Error(error) => UdfCompletionOutcome::from_error(error),
+        OwnedCompletionOutcome::Panic(_) => {
+            UdfCompletionOutcome::from_error(&crate::XllError::Panic)
+        }
         OwnedCompletionOutcome::Cancelled => UdfCompletionOutcome::Cancelled,
     };
     let delivery_outcome = match &completion.delivery {

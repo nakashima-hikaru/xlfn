@@ -34,7 +34,7 @@ pub unsafe fn write_bstr_variant(result: *mut VARIANT, value: &str) -> i32 {
     // The generated BSTR alias is const-qualified, but this allocation is new
     // writable storage exclusively owned by this function.
     let Some(bstr) = NonNull::new(bstr.cast_mut()) else {
-        return E_FAIL;
+        return E_OUTOFMEMORY;
     };
     let owner = std::mem::DropGuard::new(bstr, |bstr| {
         // SAFETY: this guard owns the allocation until the completed VARIANT

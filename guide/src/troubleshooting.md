@@ -89,10 +89,12 @@ Typical causes:
 - a failed Excel callback or coercion;
 - an internal or application-adapter error.
 
-Check the argument named in diagnostics. Native scalar inputs are converted
-by Excel before the function is called; Excel may return a worksheet error
-without entering Rust or producing an xlfn diagnostic. Use `excel_arg(strict)`
-to check the original value type through xlfn.
+Check the argument named in diagnostics. Scalar inputs are strict by default;
+for parameters that explicitly opt into Excel pre-conversion with
+`#[excel_arg(native)]` or `native = ...`, Excel may return a worksheet error
+before entering Rust or producing an xlfn diagnostic. Keep default strict
+conversion or add `input_semantics = strict` to reject native opt-ins across
+the function.
 
 ## A cell shows `#NUM!`
 

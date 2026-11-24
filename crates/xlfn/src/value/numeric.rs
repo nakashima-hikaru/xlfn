@@ -121,24 +121,42 @@ impl<'call> NumericMatrixRef<'call> {
                 InputError::Malformed("invalid numeric matrix dimensions"),
             )
         })?;
-        let length = super::matrix::matrix_element_count(rows, columns, argument)?;
-        let bytes = length
-            .checked_mul(std::mem::size_of::<f64>())
-            .ok_or_else(|| {
-                XllError::input(
-                    argument,
-                    InputError::Malformed("invalid numeric matrix dimensions"),
-                )
-            })?;
-        if bytes > super::MAX_ARRAY_BYTES {
+        if rows == 0 || columns == 0 {
+            return Err(XllError::input(
+                argument,
+                InputError::Malformed("matrix dimensions must be non-zero"),
+            ));
+        }
+        if rows > super::EXCEL_MAX_ROWS {
+            return Err(XllError::input(
+                argument,
+                InputError::TooLarge {
+                    limit: super::EXCEL_MAX_ROWS,
+                    actual: rows,
+                },
+            ));
+        }
+        if columns > super::EXCEL_MAX_COLUMNS {
+            return Err(XllError::input(
+                argument,
+                InputError::TooLarge {
+                    limit: super::EXCEL_MAX_COLUMNS,
+                    actual: columns,
+                },
+            ));
+        }
+        // Both axes fit Excel's limits, so their element and byte counts fit u64 even on 32-bit.
+        let bytes = (rows as u64) * (columns as u64) * (std::mem::size_of::<f64>() as u64);
+        if bytes > super::MAX_ARRAY_BYTES as u64 {
             return Err(XllError::input(
                 argument,
                 InputError::TooLarge {
                     limit: super::MAX_ARRAY_BYTES,
-                    actual: bytes,
+                    actual: usize::try_from(bytes).unwrap_or(usize::MAX),
                 },
             ));
         }
+        let length = rows * columns;
         // SAFETY: the FP12 payload starts at its flexible array member; the
         // caller guarantees all validated `length` doubles are readable and
         // remain immutable for 'call. Bounds also fit Rust's slice byte limit.
@@ -266,10 +284,30 @@ mod tests {
         assert!(matches!(error, XllError::Input {
             argument: "observations",
             reason: InputError::TooLarge {
-                limit: super::super::MAX_ARRAY_ELEMENTS,
+                limit: super::super::MAX_ARRAY_BYTES,
                 actual,
             },
-        } if actual == usize::try_from(1_u64 << 32).unwrap_or(usize::MAX)));
+        } if actual == usize::try_from((1_u64 << 32) * 8).unwrap_or(usize::MAX)));
+
+        let over_byte_cap_columns = (super::super::MAX_ARRAY_BYTES / (8192 * 8)) + 1;
+        let over_bytes = xlfn_sys::FP12 {
+            rows: 8192,
+            columns: over_byte_cap_columns as i32,
+            array: [0.0],
+        };
+        // SAFETY: the live header is rejected before its payload is read.
+        let byte_error =
+            unsafe { NumericMatrixRef::from_raw(&over_bytes, "observations") }.unwrap_err();
+        assert!(matches!(
+            byte_error,
+            XllError::Input {
+                argument: "observations",
+                reason: InputError::TooLarge {
+                    limit: super::super::MAX_ARRAY_BYTES,
+                    actual,
+                },
+            } if actual == 8192 * over_byte_cap_columns * 8
+        ));
     }
 
     #[test]

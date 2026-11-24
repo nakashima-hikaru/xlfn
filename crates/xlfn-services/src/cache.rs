@@ -886,20 +886,39 @@ enum FlightState<V> {
     Retry,
 }
 
-struct Flight<K, V> {
-    key: VersionedKey<K>,
+struct Flight<K: 'static, V> {
+    key: Option<VersionedKey<K>>,
     hash: u64,
+    report: CachePanicReporter,
     state: Mutex<FlightState<V>>,
     changed: Condvar,
 }
 
-impl<K, V> Flight<K, V> {
+impl<K: 'static, V> Flight<K, V> {
+    #[cfg(test)]
     fn new(key: VersionedKey<K>, hash: u64) -> Self {
+        Self::with_reporter(key, hash, ignore_cache_panic)
+    }
+
+    fn with_reporter(key: VersionedKey<K>, hash: u64, report: CachePanicReporter) -> Self {
         Self {
-            key,
+            key: Some(key),
             hash,
+            report,
             state: Mutex::new(FlightState::Pending),
             changed: Condvar::new(),
+        }
+    }
+
+    fn key(&self) -> &VersionedKey<K> {
+        self.key.as_ref().expect("flight owns its key until Drop")
+    }
+}
+
+impl<K: 'static, V> Drop for Flight<K, V> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            resident_index::retire_single_key(key, self.report);
         }
     }
 }
@@ -908,11 +927,11 @@ impl<K, V> Flight<K, V> {
 /// the leader owns an allocation identity and its already-computed hash.
 /// Cleanup must not invoke user Hash/Eq, including while unwinding from one
 /// of those callbacks. The unit hasher restricts this table to its raw API.
-struct FlightSet<K, V> {
+struct FlightSet<K: 'static, V> {
     entries: indexmap::IndexMap<Arc<Flight<K, V>>, (), ()>,
 }
 
-impl<K, V> Default for FlightSet<K, V> {
+impl<K: 'static, V> Default for FlightSet<K, V> {
     fn default() -> Self {
         Self {
             entries: indexmap::IndexMap::with_hasher(()),
@@ -920,7 +939,7 @@ impl<K, V> Default for FlightSet<K, V> {
     }
 }
 
-impl<K, V> FlightSet<K, V> {
+impl<K: 'static, V> FlightSet<K, V> {
     fn get_borrowed<Q>(&self, hash: u64, key: &VersionedKeyRef<'_, Q>) -> Option<&Arc<Flight<K, V>>>
     where
         K: std::borrow::Borrow<Q>,
@@ -929,7 +948,7 @@ impl<K, V> FlightSet<K, V> {
         self.entries
             .raw_entry_v1()
             .from_hash(hash, |flight| {
-                quick_cache::Equivalent::equivalent(key, &flight.key)
+                quick_cache::Equivalent::equivalent(key, flight.key())
             })
             .map(|(flight, ())| flight)
     }
@@ -971,11 +990,11 @@ impl<K, V> FlightSet<K, V> {
 const FLIGHT_COORDINATION_SHARDS: usize = 32;
 type FlightShard<K, V> = CachePadded<Mutex<FlightSet<K, V>>>;
 
-struct FlightRegistry<K, V> {
+struct FlightRegistry<K: 'static, V> {
     shards: Box<[FlightShard<K, V>]>,
 }
 
-impl<K, V> FlightRegistry<K, V> {
+impl<K: 'static, V> FlightRegistry<K, V> {
     fn new() -> Self {
         Self {
             shards: (0..FLIGHT_COORDINATION_SHARDS)
@@ -1453,6 +1472,7 @@ where
     domain: xlfn_kernel::published_owner::PublishedOwner<CacheLookupDomain<V>>,
     clear_lock: Mutex<()>,
     index: ResidentIndex<K, V>,
+    report: CachePanicReporter,
     #[cfg(test)]
     follower_hook: Option<Box<dyn Fn() + Send + Sync>>,
 }
@@ -1510,6 +1530,7 @@ where
             ),
             clear_lock: Mutex::new(()),
             index: ResidentIndex::with_reporter(capacity, report),
+            report,
             #[cfg(test)]
             follower_hook: None,
         }
@@ -1858,31 +1879,34 @@ where
         // the flight table still checks epoch and Eq after a fingerprint match.
         let hash = resident_request.fingerprint();
         'outer: loop {
-            let (flight, is_leader) = {
-                let lookup = key.get();
-                let mut flights = self.flights.shard(hash).lock();
-                if let Some(lease) =
-                    self.domain.enter().ok().and_then(|permit| {
-                        self.get_prepared(lookup, epoch, &resident_request, permit)
-                    })
+            let (flight, is_leader) =
                 {
-                    drop(flights);
-                    self.maintain(false);
-                    return Ok(lease);
-                }
-                let query = VersionedKeyRef { epoch, key: lookup };
-                if let Some(flight) = flights.get_borrowed(hash, &query) {
-                    (Arc::clone(flight), false)
-                } else if let Some(owned) = key.take_owned() {
-                    let flight = Arc::new(Flight::new(VersionedKey { epoch, key: owned }, hash));
-                    flights.insert_unique(Arc::clone(&flight));
-                    (flight, true)
-                } else {
-                    drop(flights);
-                    key.make_owned();
-                    continue 'outer;
-                }
-            };
+                    let lookup = key.get();
+                    let mut flights = self.flights.shard(hash).lock();
+                    if let Some(lease) = self.domain.enter().ok().and_then(|permit| {
+                        self.get_prepared(lookup, epoch, &resident_request, permit)
+                    }) {
+                        drop(flights);
+                        self.maintain(false);
+                        return Ok(lease);
+                    }
+                    let query = VersionedKeyRef { epoch, key: lookup };
+                    if let Some(flight) = flights.get_borrowed(hash, &query) {
+                        (Arc::clone(flight), false)
+                    } else if let Some(owned) = key.take_owned() {
+                        let flight = Arc::new(Flight::with_reporter(
+                            VersionedKey { epoch, key: owned },
+                            hash,
+                            self.report,
+                        ));
+                        flights.insert_unique(Arc::clone(&flight));
+                        (flight, true)
+                    } else {
+                        drop(flights);
+                        key.make_owned();
+                        continue 'outer;
+                    }
+                };
 
             if !is_leader {
                 let mut state = flight.state.lock();
@@ -1948,7 +1972,7 @@ where
                     let current_epoch = self.generation.snapshot();
                     let publish = self.weight_budget != 0
                         && measured <= self.weight_budget
-                        && current_epoch == flight.key.epoch;
+                        && current_epoch == flight.key().epoch;
 
                     let w = u64::try_from(measured).unwrap_or(u64::MAX).max(1);
                     // 1. Allocate node with 1 pin (for creator).
@@ -1959,7 +1983,7 @@ where
                         resident: AtomicBool::new(publish),
                         published: publish,
                         weight: w,
-                        generation: flight.key.epoch,
+                        generation: flight.key().epoch,
                         domain: NonNull::from(&*self.domain),
                     });
                     // Transfer allocation ownership to the pin/reclamation protocol.
@@ -1970,10 +1994,10 @@ where
                     if publish {
                         // SAFETY: creator_guard retains the new allocation.
                         let resident = ResidentPin::acquire(&creator_guard);
-                        resident_request.insert(&flight.key, ResidentEntry::new(resident, w));
+                        resident_request.insert(flight.key(), ResidentEntry::new(resident, w));
 
-                        self.generation.discard_if_stale(flight.key.epoch, || {
-                            resident_request.invalidate(&flight.key);
+                        self.generation.discard_if_stale(flight.key().epoch, || {
+                            resident_request.invalidate(flight.key());
                         });
                     }
 

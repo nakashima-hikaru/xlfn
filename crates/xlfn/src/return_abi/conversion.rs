@@ -16,11 +16,6 @@ pub(crate) struct RegistryKeyDebt {
     pub(crate) key_path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CallbackCleanupDebt {
-    pub(crate) status: ExcelCallbackStatus,
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct CleanupDebtSet {
     pub(crate) registrations: Vec<RegistrationDebt>,

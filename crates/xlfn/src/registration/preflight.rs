@@ -154,6 +154,11 @@ pub(crate) fn preflight_registration(
         ] {
             validate_excel_string(value)?;
         }
+        if descriptor.category.encode_utf16().count() > 255 {
+            return Err(crate::error::construct::internal(
+                crate::diagnostics::catalog::STRING_LENGTH,
+            ));
+        }
         // Also validate descriptions outside Excel's argument help limit.
         for arg in descriptor.arguments {
             validate_excel_string(arg.description)?;
@@ -347,6 +352,20 @@ mod tests {
         };
         assert!(matches!(
             preflight_registration(&[invalid]),
+            Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::catalog::STRING_LENGTH,
+                ..
+            })
+        ));
+
+        const LONG_CATEGORY_BYTES: [u8; 256] = [b'c'; 256];
+        let long_category = std::str::from_utf8(&LONG_CATEGORY_BYTES).unwrap();
+        let over_category = RegistrationDescriptor {
+            category: long_category,
+            ..self::descriptor()
+        };
+        assert!(matches!(
+            preflight_registration(&[over_category]),
             Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::catalog::STRING_LENGTH,
                 ..

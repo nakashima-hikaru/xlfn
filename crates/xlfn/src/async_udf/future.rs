@@ -1,4 +1,6 @@
-use crate::panic_boundary::{CaughtPanic, catch_no_unwind};
+#[cfg(test)]
+use crate::panic_boundary::CaughtPanic;
+use crate::panic_boundary::catch_udf_no_unwind;
 use std::future::Future;
 use std::mem::ManuallyDrop;
 use std::panic::AssertUnwindSafe;
@@ -43,18 +45,23 @@ impl<F, C: PanicContext> NoUnwindFuture<F, C> {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn finish(self: Pin<&mut Self>) -> Result<(), CaughtPanic> {
-        // SAFETY: destroy only drops the pinned field in place; it never moves it.
-        unsafe { self.get_unchecked_mut() }.destroy()
+        self.finish_with_message().map_err(|_| CaughtPanic)
     }
 
-    fn destroy(&mut self) -> Result<(), CaughtPanic> {
+    pub(super) fn finish_with_message(self: Pin<&mut Self>) -> Result<(), String> {
+        // SAFETY: destroy only drops the pinned field in place; it never moves it.
+        unsafe { self.get_unchecked_mut() }.destroy_with_message()
+    }
+
+    fn destroy_with_message(&mut self) -> Result<(), String> {
         if self.destroyed {
             return Ok(());
         }
         // Mark before entering user Drop so unwinding can never destroy it twice.
         self.destroyed = true;
-        catch_no_unwind(AssertUnwindSafe(|| {
+        catch_udf_no_unwind(AssertUnwindSafe(|| {
             // SAFETY: this is the unique destruction of the initialized field,
             // at the same address at which any preceding polls pinned it.
             unsafe { ManuallyDrop::drop(&mut self.future) };
@@ -82,7 +89,7 @@ impl<F: Future, C: PanicContext> Future for NoUnwindFuture<F, C> {
 
 impl<F, C: PanicContext> Drop for NoUnwindFuture<F, C> {
     fn drop(&mut self) {
-        if self.destroy().is_err() {
+        if self.destroy_with_message().is_err() {
             crate::diagnostics::report_no_unwind(self.context.udf_id(), &crate::XllError::Panic);
         }
     }

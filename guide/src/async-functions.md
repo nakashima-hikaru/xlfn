@@ -47,9 +47,11 @@ async fn normalize(value: String) -> String {
 }
 ```
 
-If an `async fn` needs a context, use `AsyncContext<'_, A>` directly as its
-first parameter, passed by value. Ordinary imports and qualified paths are
-supported; type aliases, renamed imports, and custom context types are not.
+If an `async fn` needs a context, pass `AsyncContext<'_, A>` as its
+first parameter by value. Ordinary imports and qualified paths are recognized
+automatically; renamed imports and generic type aliases require
+`#[excel_context(async)]`. Unannotated aliases or renamed imports and custom
+context types are not supported.
 Every async function must omit `thread_safe` and `macro_sheet` from
 `#[excel_function]`, whether or not it has a context. Synchronous context types
 cannot be used by an async function.

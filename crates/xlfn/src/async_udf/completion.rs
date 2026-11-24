@@ -3,7 +3,7 @@ use super::transport::ExcelAsyncResponder;
 use crate::call_return::{ExcelReturn, ReturnContext};
 use crate::cancellation::CancellationToken;
 use crate::error::ExcelCallbackStatus;
-use crate::panic_boundary::{CaughtPanic, catch_no_unwind};
+use crate::panic_boundary::{catch_no_unwind, catch_udf_no_unwind};
 use crate::return_abi::AsyncReturnValue;
 use crate::{XllError, XllResult};
 use futures_util::Future;
@@ -11,6 +11,14 @@ use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 use xlfn_sys::{XLOPER12, XLTYPE_BOOL};
+
+/// Diagnostic history metadata captured at async UDF boundary entry.
+#[derive(Clone, Copy)]
+pub(crate) struct AsyncDiagnosticContext {
+    pub(crate) history: &'static crate::diagnostics::DiagnosticHistory,
+    pub(crate) call_id: Option<crate::execution::CallId>,
+    pub(crate) calculation_id: Option<crate::execution::CalculationId>,
+}
 
 /// The owned semantic result of one asynchronous UDF execution.
 ///
@@ -25,6 +33,7 @@ pub(crate) struct AsyncCompletion {
 pub(crate) enum OwnedCompletionOutcome {
     Success,
     Error(XllError),
+    Panic(String),
     Cancelled,
 }
 
@@ -44,19 +53,31 @@ struct DeliveryParts<O: CompletionObserver> {
     responder: ExcelAsyncResponder,
     token: CancellationToken,
     observation: O,
+    diagnostics: Option<AsyncDiagnosticContext>,
 }
 
 impl<O: CompletionObserver> PendingDelivery<O> {
+    #[cfg(test)]
     pub(crate) fn new(
         responder: ExcelAsyncResponder,
         token: CancellationToken,
         observation: O,
+    ) -> Self {
+        Self::new_with_diagnostics(responder, token, observation, None)
+    }
+
+    pub(crate) fn new_with_diagnostics(
+        responder: ExcelAsyncResponder,
+        token: CancellationToken,
+        observation: O,
+        diagnostics: Option<AsyncDiagnosticContext>,
     ) -> Self {
         Self {
             owner: RollbackGuard::new(DeliveryParts {
                 responder,
                 token,
                 observation,
+                diagnostics,
             }),
         }
     }
@@ -78,11 +99,15 @@ impl<O: CompletionObserver> PendingDelivery<O> {
         self.owner.complete().fail(error);
     }
 
-    pub(super) fn fallback(self, panicked: bool) {
-        self.owner.complete().fallback(panicked);
+    pub(super) fn fail_panic(self, message: String) {
+        self.owner.complete().fail_panic(message);
     }
 
-    fn complete<T>(self, evaluated: Result<XllResult<T>, CaughtPanic>)
+    pub(super) fn fallback(self, panic_message: Option<String>) {
+        self.owner.complete().fallback(panic_message);
+    }
+
+    fn complete<T>(self, evaluated: Result<XllResult<T>, String>)
     where
         T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
     {
@@ -91,8 +116,13 @@ impl<O: CompletionObserver> PendingDelivery<O> {
 }
 
 impl<O: CompletionObserver> DeliveryParts<O> {
-    fn finish(observation: O, udf_id: &'static str, completion: AsyncCompletion) {
-        super::boundary::report_completion(udf_id, &completion);
+    fn finish(
+        diagnostics: Option<AsyncDiagnosticContext>,
+        observation: O,
+        udf_id: &'static str,
+        completion: AsyncCompletion,
+    ) {
+        super::boundary::report_completion(diagnostics, udf_id, &completion);
         observation.finish(&completion);
     }
 
@@ -100,11 +130,13 @@ impl<O: CompletionObserver> DeliveryParts<O> {
         let Self {
             responder,
             observation,
+            diagnostics,
             ..
         } = self;
         let udf_id = responder.udf_id();
         let delivery = deliver_error(responder, &error);
         Self::finish(
+            diagnostics,
             observation,
             udf_id,
             AsyncCompletion {
@@ -114,21 +146,43 @@ impl<O: CompletionObserver> DeliveryParts<O> {
         );
     }
 
-    fn fallback(self, panicked: bool) {
+    fn fail_panic(self, message: String) {
+        let Self {
+            responder,
+            observation,
+            diagnostics,
+            ..
+        } = self;
+        let udf_id = responder.udf_id();
+        let delivery = deliver_error(responder, &XllError::Panic);
+        Self::finish(
+            diagnostics,
+            observation,
+            udf_id,
+            AsyncCompletion {
+                completion: OwnedCompletionOutcome::Panic(message),
+                delivery,
+            },
+        );
+    }
+
+    fn fallback(self, panic_message: Option<String>) {
         let Self {
             responder,
             token,
             observation,
+            diagnostics,
         } = self;
         let udf_id = responder.udf_id();
         let cancelled = token.is_cancelled();
-        if cancelled && panicked {
-            crate::diagnostics::report_no_unwind(udf_id, &XllError::Panic);
+        if cancelled && let Some(message) = &panic_message {
+            super::boundary::report_panic(diagnostics, udf_id, message);
         }
+        let panicked = panic_message.is_some();
         let completion = if cancelled {
             OwnedCompletionOutcome::Cancelled
-        } else if panicked {
-            OwnedCompletionOutcome::Error(XllError::Panic)
+        } else if let Some(message) = panic_message {
+            OwnedCompletionOutcome::Panic(message)
         } else {
             OwnedCompletionOutcome::Error(crate::error::construct::internal(
                 crate::diagnostics::catalog::ASYNC_COMPLETION,
@@ -141,6 +195,7 @@ impl<O: CompletionObserver> DeliveryParts<O> {
         };
         let delivery = deliver_error(responder, &error);
         Self::finish(
+            diagnostics,
             observation,
             udf_id,
             AsyncCompletion {
@@ -150,7 +205,7 @@ impl<O: CompletionObserver> DeliveryParts<O> {
         );
     }
 
-    fn complete<T>(self, evaluated: Result<XllResult<T>, CaughtPanic>)
+    fn complete<T>(self, evaluated: Result<XllResult<T>, String>)
     where
         T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
     {
@@ -158,16 +213,17 @@ impl<O: CompletionObserver> DeliveryParts<O> {
             responder,
             token,
             observation,
+            diagnostics,
         } = self;
         let udf_id = responder.udf_id();
-        let completion = complete_evaluation(responder, token, evaluated);
-        Self::finish(observation, udf_id, completion);
+        let completion = complete_evaluation(responder, token, evaluated, diagnostics);
+        Self::finish(diagnostics, observation, udf_id, completion);
     }
 }
 
 impl<O: CompletionObserver> Rollback for DeliveryParts<O> {
     fn rollback(self) {
-        self.fallback(false);
+        self.fallback(None);
     }
 }
 
@@ -196,11 +252,11 @@ pub(crate) struct AsyncUdfTask<Fut, O: CompletionObserver> {
 impl<Fut, O: CompletionObserver> Drop for AsyncUdfTask<Fut, O> {
     fn drop(&mut self) {
         // SAFETY: the field is destroyed in place and never moved after polling.
-        let panicked = unsafe { std::pin::Pin::new_unchecked(&mut self.future) }
-            .finish()
-            .is_err();
+        let panic_message = unsafe { std::pin::Pin::new_unchecked(&mut self.future) }
+            .finish_with_message()
+            .err();
         if let Some(delivery) = self.delivery.take() {
-            delivery.fallback(panicked);
+            delivery.fallback(panic_message);
         }
     }
 }
@@ -223,12 +279,13 @@ where
         // SAFETY: the enclosing pin keeps this field fixed until in-place
         // destruction; the projection never moves or replaces it.
         let mut future = unsafe { std::pin::Pin::new_unchecked(&mut this.future) };
-        let evaluated = match catch_no_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
-            Ok(std::task::Poll::Pending) => return std::task::Poll::Pending,
-            Ok(std::task::Poll::Ready(value)) => Ok(value),
-            Err(panic) => Err(panic),
-        };
-        let finish = future.finish();
+        let evaluated =
+            match catch_udf_no_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
+                Ok(std::task::Poll::Pending) => return std::task::Poll::Pending,
+                Ok(std::task::Poll::Ready(value)) => Ok(value),
+                Err(panic) => Err(panic),
+            };
+        let finish = future.finish_with_message();
         let Some(delivery) = this.delivery.take() else {
             xlfn_kernel::invariant::fail_stop();
         };
@@ -256,10 +313,7 @@ fn deliver_error(responder: ExcelAsyncResponder, error: &XllError) -> OwnedDeliv
     }
 }
 
-fn drop_evaluation_no_unwind<T>(
-    udf_id: &'static str,
-    evaluated: Result<XllResult<T>, CaughtPanic>,
-) {
+fn drop_evaluation_no_unwind<T>(udf_id: &'static str, evaluated: Result<XllResult<T>, String>) {
     if catch_no_unwind(AssertUnwindSafe(|| drop(evaluated))).is_err() {
         crate::diagnostics::report_no_unwind(udf_id, &XllError::Panic);
     }
@@ -270,12 +324,13 @@ fn complete_evaluation<
 >(
     responder: ExcelAsyncResponder,
     token: CancellationToken,
-    evaluated: Result<XllResult<T>, CaughtPanic>,
+    evaluated: Result<XllResult<T>, String>,
+    diagnostics: Option<AsyncDiagnosticContext>,
 ) -> AsyncCompletion {
     if !token.try_start_delivery() {
         // Cancellation owns the worksheet outcome, not the panic diagnostic.
-        if evaluated.is_err() {
-            crate::diagnostics::report_no_unwind(responder.udf_id(), &XllError::Panic);
+        if let Err(message) = &evaluated {
+            super::boundary::report_panic(diagnostics, responder.udf_id(), message);
         }
         drop_evaluation_no_unwind(responder.udf_id(), evaluated);
         let cancel_error = XllError::ExcelValue(crate::ExcelError::NotAvailable);
@@ -286,17 +341,20 @@ fn complete_evaluation<
     }
     let (pointer, completion) = match evaluated {
         Ok(Ok(value)) => {
-            let result = catch_no_unwind(AssertUnwindSafe(|| {
+            let result = catch_udf_no_unwind(AssertUnwindSafe(|| {
                 let mut return_context = ReturnContext::new();
                 let value = T::invoke(&mut return_context, || Ok(value))?;
                 AsyncReturnValue::from_value(value)
-            }))
-            .unwrap_or(Err(XllError::Panic));
+            }));
             match result {
-                Ok(pointer) => (pointer, OwnedCompletionOutcome::Success),
-                Err(error) => (
+                Ok(Ok(pointer)) => (pointer, OwnedCompletionOutcome::Success),
+                Ok(Err(error)) => (
                     AsyncReturnValue::error(&error),
                     OwnedCompletionOutcome::Error(error),
+                ),
+                Err(message) => (
+                    AsyncReturnValue::error(&XllError::Panic),
+                    OwnedCompletionOutcome::Panic(message),
                 ),
             }
         }
@@ -304,13 +362,10 @@ fn complete_evaluation<
             AsyncReturnValue::error(&error),
             OwnedCompletionOutcome::Error(error),
         ),
-        Err(_) => {
-            let error = XllError::Panic;
-            (
-                AsyncReturnValue::error(&error),
-                OwnedCompletionOutcome::Error(error),
-            )
-        }
+        Err(message) => (
+            AsyncReturnValue::error(&XllError::Panic),
+            OwnedCompletionOutcome::Panic(message),
+        ),
     };
     // SAFETY: the responder owns the handle and marks the attempt before FFI.
     let delivery = unsafe { responder.deliver(pointer) };
@@ -496,10 +551,10 @@ mod tests {
         let responder = unsafe { ExcelAsyncResponder::from_raw("CANCEL.PANIC", &mut raw).unwrap() };
         let (source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
         let evaluated =
-            catch_no_unwind(|| -> XllResult<f64> { panic!("injected async evaluation panic") });
+            catch_udf_no_unwind(|| -> XllResult<f64> { panic!("injected async evaluation panic") });
         source.cancel();
         let completion = tracing::dispatcher::with_default(&dispatch, || {
-            complete_evaluation(responder, token, evaluated)
+            complete_evaluation(responder, token, evaluated, None)
         });
         assert_eq!(reports.load(Ordering::Relaxed), 1);
         assert!(matches!(

@@ -626,6 +626,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         Ok(AsyncCallGuard {
             async_runtime: &self.async_runtime,
             returns: &self.return_protocol,
+            diagnostics: &self.diagnostics,
             call: CallGuard {
                 diagnostics: &self.diagnostics,
                 admission,
@@ -913,10 +914,15 @@ pub(crate) struct AsyncCallGuard<'call, A: crate::Addin> {
     call: CallGuard<'call, A>,
     async_runtime: &'static crate::async_udf::AsyncRuntime<A::AsyncExecutor>,
     returns: &'static crate::runtime_components::ReturnProtocol,
+    diagnostics: &'static crate::diagnostics::DiagnosticHistory,
 }
 
 #[cfg(feature = "async")]
 impl<A: crate::Addin> AsyncCallGuard<'_, A> {
+    pub(crate) fn history(&self) -> &'static crate::diagnostics::DiagnosticHistory {
+        self.diagnostics
+    }
+
     /// Task registration/cancellation and generation admission share the issuer
     /// installed by enter_async; callers cannot substitute another registry.
     pub(crate) fn async_runtime(

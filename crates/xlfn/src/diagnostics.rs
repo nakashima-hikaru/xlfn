@@ -1645,11 +1645,11 @@ mod tests {
         let before = diagnostic_stats().file_write_failures;
         let tempdir = file::test_log_directory();
         let sink = FileDiagnosticSink {
-            log: Mutex::new(RotatingLog {
-                path: tempdir.path().join("missing-directory/unavailable.log"),
-                maximum_bytes: LOG_MAX_BYTES,
-                generations: LOG_GENERATIONS,
-            }),
+            log: Mutex::new(RotatingLog::for_missing_path_test(
+                tempdir.path().join("missing-directory/unavailable.log"),
+                LOG_MAX_BYTES,
+                LOG_GENERATIONS,
+            )),
         };
         let error = XllError::Panic;
         sink.report(&DiagnosticEvent {

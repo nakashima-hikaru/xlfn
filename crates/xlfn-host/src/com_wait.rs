@@ -51,6 +51,14 @@ impl Drop for ComApartmentGuard {
     }
 }
 
+const fn hresult_from_win32(code: u32) -> i32 {
+    if (code as i32) <= 0 {
+        code as i32
+    } else {
+        ((code & 0x0000_FFFF) | 0x8007_0000) as i32
+    }
+}
+
 pub fn wait_with_com_pumping(handle: BorrowedHandle<'_>, timeout_ms: u32) -> Result<(), i32> {
     // Server drains can originate on framework threads with no apartment.
     // Preserve an existing STA, and keep a new MTA initialized for the whole
@@ -158,7 +166,7 @@ impl ManualResetEvent {
             Ok(())
         } else if status == WAIT_FAILED {
             // SAFETY: WaitForSingleObject just reported failure on this thread.
-            Err(unsafe { GetLastError() } as i32)
+            Err(hresult_from_win32(unsafe { GetLastError() }))
         } else {
             Err(E_UNEXPECTED)
         }

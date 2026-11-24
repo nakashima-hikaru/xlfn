@@ -42,7 +42,9 @@ mode flags, whether or not a context is present.
 Use the standard type name directly, such as
 `ThreadSafeContext<'_, AppTools>` after an ordinary import, or a qualified
 path such as `xlfn::addin::ThreadSafeContext<'_, AppTools>`. The macro recognizes the
-path's final identifier. Type aliases, renamed imports, and custom context
+path's final identifier automatically. For renamed imports or generic type
+aliases, annotate the parameter explicitly with `#[excel_context(...)]` as
+shown above; unannotated aliases, unannotated renamed imports, and custom context
 types are not supported for injection.
 
 The examples below assume `use xlfn::prelude::*;` and an add-in named

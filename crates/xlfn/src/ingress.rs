@@ -56,6 +56,48 @@ fn current_ingress_stripe() -> usize {
     current_thread_stripe()
 }
 
+thread_local! {
+    static ACTIVE_EXPORTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn active_export_on_current_thread() -> bool {
+    ACTIVE_EXPORTS.with(|depth| depth.get() > 0)
+}
+
+fn enter_current_thread_export() {
+    ACTIVE_EXPORTS.with(|depth| {
+        let next = depth
+            .get()
+            .checked_add(1)
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+        depth.set(next);
+    });
+}
+
+fn leave_current_thread_export() {
+    ACTIVE_EXPORTS.with(|depth| {
+        let next = xlfn_kernel::invariant::checked_sub_or_abort(depth.get(), 1);
+        depth.set(next);
+    });
+}
+
+/// `!Send` scope guard recording that the calling thread is inside a
+/// synchronous FFI export boundary, even if it has no `Fp12CallGuard`.
+pub(crate) struct ThreadExportGuard(std::marker::PhantomData<*const ()>);
+
+impl ThreadExportGuard {
+    pub(crate) fn enter() -> Self {
+        enter_current_thread_export();
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl Drop for ThreadExportGuard {
+    fn drop(&mut self) {
+        leave_current_thread_export();
+    }
+}
+
 #[derive(Debug)]
 struct UdfStripe {
     // Instrumentation only; StripedDrainGate owns admission and drain ordering.
@@ -354,7 +396,9 @@ impl ExportIngress {
     pub(crate) fn opening_publication(
         &self,
     ) -> Result<OpeningPublication<'_>, OpeningPublicationLost> {
-        if crate::return_abi::numeric::Fp12CallGuard::on_current_thread() {
+        if crate::return_abi::numeric::Fp12CallGuard::on_current_thread()
+            || active_export_on_current_thread()
+        {
             return Err(OpeningPublicationLost);
         }
         let guard = self
@@ -539,7 +583,9 @@ impl ExportIngress {
                 message: "injected export drain preparation failure".into(),
             });
         }
-        if crate::return_abi::numeric::Fp12CallGuard::on_current_thread() {
+        if crate::return_abi::numeric::Fp12CallGuard::on_current_thread()
+            || active_export_on_current_thread()
+        {
             return Err(crate::XllError::Native {
                 code: -1,
                 message: "export drain would wait for the calling thread's active export".into(),
@@ -689,6 +735,12 @@ mod tests {
             assert!(ingress.opening_publication().is_err());
             drop(rejected);
         }
+        {
+            let _non_fp12_scope = ThreadExportGuard::enter();
+            let non_fp12 = ingress.enter_with(|| {});
+            assert!(ingress.opening_publication().is_err());
+            drop(non_fp12);
+        }
         ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
         let sta_udf = crate::return_abi::numeric::Fp12CallGuard::enter();
         let admitted = ingress.enter_with(|| {});
@@ -702,6 +754,20 @@ mod tests {
         drop(sta_udf);
         assert!(ingress.seal_and_drain().is_ok());
         assert_eq!(ingress.phase(), PHASE_CLOSED);
+
+        let second = ExportIngress::new();
+        second.begin_opening();
+        second.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
+        let non_fp12_scope = ThreadExportGuard::enter();
+        let non_fp12_admitted = second.enter_with(|| {});
+        second.begin_close_with(|| {});
+        assert!(matches!(
+            second.seal_and_drain(),
+            Err(crate::XllError::Native { .. })
+        ));
+        drop(non_fp12_admitted);
+        drop(non_fp12_scope);
+        assert!(second.seal_and_drain().is_ok());
     }
 
     #[test]

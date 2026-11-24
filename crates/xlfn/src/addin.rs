@@ -666,15 +666,17 @@ impl<S, L, U, E> Opened<S, L, U, E> {
 /// RTD or async associated types with consumer-side cfg attributes.
 ///
 /// Apply [`crate::excel_addin`] to the implementation to generate the exports
-/// and supply empty RTD configuration when these types are omitted. The RTD
-/// associated types exist only with the `rtd` feature; add-ins using sources
-/// specify both concrete types in that attributed implementation.
+/// and supply default configuration when associated types are omitted: with
+/// `rtd`, `RtdSubscription` and `RtdSources` default to `()`; with `async`,
+/// `AsyncExecutor` defaults to [`crate::task::NoAsyncExecutor`]. Add-ins using RTD
+/// sources or a custom executor specify those concrete types in that attributed
+/// implementation.
 pub trait Addin: Sized + Send + Sync + 'static {
     /// Concrete subscription owner, or `()` when this add-in has no RTD sources.
     /// Use [`crate::rtd_subscriptions!`] to combine multiple source subscription types.
     #[cfg(feature = "rtd")]
     type RtdSubscription: crate::RtdSubscription;
-    /// Concrete source catalog, or DynamicRtdSources for incremental registration.
+    /// Concrete source catalog, or `DynamicRtdSources` for incremental registration.
     #[cfg(feature = "rtd")]
     type RtdSources: crate::RtdSourceCatalog<Self::RtdSubscription>;
     /// State shared by worksheet calls in this open generation.
@@ -1253,7 +1255,7 @@ macro_rules! __xlfn_addin_rtd_types {
 macro_rules! __xlfn_addin_rtd_types {
     (@default) => {};
     (@configured subscription: $subscription:ty, sources: $sources:ty) => {
-        compile_error!("RTD configuration requires the xlfn `rtd` feature");
+        ::core::compile_error!("RTD configuration requires the xlfn `rtd` feature");
     };
 }
 
@@ -1276,7 +1278,7 @@ macro_rules! __xlfn_addin_async_type {
 macro_rules! __xlfn_addin_async_type {
     (@default) => {};
     (@configured $executor:ty) => {
-        compile_error!("async executor configuration requires the xlfn `async` feature");
+        ::core::compile_error!("async executor configuration requires the xlfn `async` feature");
     };
 }
 

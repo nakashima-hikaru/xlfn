@@ -10,7 +10,7 @@ fn prepare<A: crate::Addin>(
     Ok(std::future::ready(Ok(1)))
 }
 fn invalid<A: crate::Addin>(launch: LaunchOwner<'_, '_, A>, first: ExcelAsyncResponder, second: ExcelAsyncResponder) {
-    let child = launch.prepare(PlainStart(prepare::<A>), first, NoObservation);
+    let child = launch.prepare(PlainStart(prepare::<A>), first, NoObservation, None);
     drop(child.and_then(|prepared| prepared.reserve()));
-    let _ = launch.prepare(PlainStart(prepare::<A>), second, NoObservation); // error: E0382
+    let _ = launch.prepare(PlainStart(prepare::<A>), second, NoObservation, None); // error: E0382
 }

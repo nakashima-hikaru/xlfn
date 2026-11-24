@@ -131,6 +131,41 @@ pub(crate) struct ReturnsDrained {
     epoch: u64,
 }
 
+#[cfg(not(miri))]
+const RETURN_QUIESCENCE_TIMEOUT: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_secs(2)
+} else {
+    std::time::Duration::from_secs(10)
+};
+
+fn wait_for_returns_with_timeout(returns: &crate::return_abi::ReturnTracker) -> bool {
+    #[cfg(miri)]
+    {
+        returns.wait_for_quiescence();
+        true
+    }
+    #[cfg(not(miri))]
+    {
+        #[cfg(windows)]
+        {
+            use crate::drain_wait::{UnstartedDrain, drain_with_com_dispatch};
+            match drain_with_com_dispatch(UnstartedDrain::new(move || {
+                returns.wait_for_quiescence_timeout(RETURN_QUIESCENCE_TIMEOUT)
+            })) {
+                Ok(prepared) => match prepared.run() {
+                    Ok(joined) => joined.into_output(),
+                    Err((_error, unstarted)) => (unstarted.into_work())(),
+                },
+                Err((_error, unstarted)) => (unstarted.into_work())(),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            returns.wait_for_quiescence_timeout(RETURN_QUIESCENCE_TIMEOUT)
+        }
+    }
+}
+
 impl ClosedReturns<'_> {
     pub(crate) fn wait(self) -> crate::XllResult<ReturnsDrained> {
         self.wait_locked(|| {})
@@ -144,7 +179,9 @@ impl ClosedReturns<'_> {
         // This is management exclusion, not the gate's notification mutex.
         // Final release can still complete while this lock excludes reopen.
         on_locked();
-        self.protocol.returns.wait_for_quiescence();
+        if !wait_for_returns_with_timeout(&self.protocol.returns) {
+            return Err(return_quiescence_error());
+        }
         Ok(ReturnsDrained {
             issuer: std::ptr::from_ref(self.protocol).addr(),
             epoch: self.epoch,
@@ -211,8 +248,13 @@ impl ReturnProtocol {
         self.returns.try_enter_producer()
     }
 
+    #[cfg(test)]
     pub(crate) fn wait_for_returns(&self) {
         self.returns.wait_for_quiescence();
+    }
+
+    pub(crate) fn wait_for_returns_timeout(&self) -> bool {
+        wait_for_returns_with_timeout(&self.returns)
     }
 
     pub(crate) fn returns_are_quiescent(&self) -> bool {
@@ -397,5 +439,15 @@ mod tests {
                 .unwrap()
                 .matches(&protocol)
         );
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn close_admission_wait_times_out_when_return_obligation_is_held() {
+        let protocol = ReturnProtocol::new();
+        protocol.reopen_admission().unwrap();
+        let _leaked = protocol.test_enter_producer().unwrap();
+        let err = protocol.close_admission().wait().err().unwrap();
+        assert!(matches!(err, crate::XllError::Internal { .. }));
     }
 }

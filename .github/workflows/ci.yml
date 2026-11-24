@@ -18,6 +18,7 @@ jobs:
     panic-boundaries:
         name: Panic boundary inventory
         runs-on: ubuntu-latest
+        timeout-minutes: 10
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,11 +45,19 @@ jobs:
     public-api:
         name: Supported API snapshots
         runs-on: macos-latest
+        timeout-minutes: 25
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                 persist-credentials: false
+            - name: Set up uv and Python
+              uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+              with:
+                  version: "0.13.6"
+                  python-version: "3.15"
+                  enable-cache: true
+                  cache-dependency-glob: tools/uv.lock
             - name: Install pinned extraction toolchain and targets
               run: rustup toolchain install nightly-2026-09-28 --profile minimal --target aarch64-apple-darwin,x86_64-pc-windows-msvc
             - name: Cache Cargo dependencies for API extraction
@@ -70,11 +79,12 @@ jobs:
             - name: Add API extractor to PATH
               run: echo "$HOME/.cache/xlfn-api-extractor/bin" >> "$GITHUB_PATH"
             - name: Verify reviewed API surfaces
-              run: PYTHONPATH=tools/src python3 -m xlfn_tools.check_public_api
+              run: uv run --project tools --locked python -B -m xlfn_tools.check_public_api
 
     portable-quality:
         name: Portable quality and tooling
         runs-on: ubuntu-latest
+        timeout-minutes: 45
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -134,6 +144,9 @@ jobs:
             - name: Check GhostCell invocation lifetime model
               run: just ghostcell-model
 
+            - name: Check intrusive lifecycle stack model
+              run: cargo test --manifest-path probes/lifecycle-stack-model/Cargo.toml --locked
+
             - name: Check private lifecycle typestate contracts
               id: typestate
               run: uv run --project tools --locked python -B -m xlfn_tools.check_typestate --jobs 2 --report target/typestate-report.json
@@ -158,6 +171,7 @@ jobs:
     rust-quality-windows:
         name: Rust ${{ matrix.check }} (windows-latest)
         runs-on: windows-latest
+        timeout-minutes: 45
         strategy:
             fail-fast: false
             matrix:
@@ -221,6 +235,7 @@ jobs:
     windows-tests:
         name: Rust tests (windows-latest)
         runs-on: windows-latest
+        timeout-minutes: 45
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -282,6 +297,7 @@ jobs:
         # Keep the legacy status context without building and running Rust twice.
         name: Rust handle publication interleavings (windows-latest)
         runs-on: ubuntu-latest
+        timeout-minutes: 5
         needs: windows-tests
         if: always()
         steps:
@@ -293,6 +309,7 @@ jobs:
     feature-matrix:
         name: Rust ${{ matrix.label }} shard ${{ matrix.shard }}/${{ matrix.count }} (windows-latest)
         runs-on: windows-latest
+        timeout-minutes: 45
         strategy:
             fail-fast: false
             matrix:
@@ -339,6 +356,7 @@ jobs:
     features-required:
         name: Rust features (windows-latest)
         runs-on: ubuntu-latest
+        timeout-minutes: 5
         needs: feature-matrix
         if: always()
         steps:
@@ -351,6 +369,7 @@ jobs:
         # Preserve the prior required status context.
         name: Rust production feature tests (windows-latest)
         runs-on: ubuntu-latest
+        timeout-minutes: 5
         needs: feature-matrix
         if: always()
         steps:
@@ -362,6 +381,7 @@ jobs:
     standalone-consumers:
         name: Standalone consumers (windows-latest)
         runs-on: windows-latest
+        timeout-minutes: 30
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -393,6 +413,7 @@ jobs:
     miri-lane:
         name: Miri ${{ matrix.lane }}
         runs-on: ubuntu-latest
+        timeout-minutes: 45
         strategy:
             fail-fast: false
             matrix:
@@ -426,6 +447,7 @@ jobs:
     miri:
         name: Miri regression tests
         runs-on: ubuntu-latest
+        timeout-minutes: 5
         needs: miri-lane
         if: always()
         steps:
@@ -437,6 +459,7 @@ jobs:
     windows-artifact:
         name: Windows artifact (${{ matrix.target }})
         runs-on: windows-latest
+        timeout-minutes: 60
         strategy:
             fail-fast: false
             matrix:
@@ -583,6 +606,7 @@ jobs:
     excel-abi-probe:
         name: Excel SDK ABI probe (${{ matrix.target }})
         runs-on: windows-latest
+        timeout-minutes: 30
         strategy:
             fail-fast: false
             matrix:
@@ -645,6 +669,7 @@ jobs:
     verus-refinement:
         name: Verus refinement shard ${{ matrix.shard }}
         runs-on: ubuntu-latest
+        timeout-minutes: 45
         strategy:
             fail-fast: false
             matrix:
@@ -688,6 +713,7 @@ jobs:
     verus-support:
         name: Verus trust, borrowing and ordering checks
         runs-on: ubuntu-latest
+        timeout-minutes: 30
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -735,6 +761,7 @@ jobs:
     verus:
         name: Verus formal verification
         runs-on: ubuntu-latest
+        timeout-minutes: 10
         needs: [verus-refinement, verus-support]
         if: always()
         steps:
@@ -772,6 +799,7 @@ jobs:
     lean-static:
         name: Lean proofs and checked-in fixtures
         runs-on: ubuntu-latest
+        timeout-minutes: 30
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -875,6 +903,7 @@ jobs:
     lean-windows-replay:
         name: Lean Windows trace replay
         runs-on: ubuntu-latest
+        timeout-minutes: 15
         needs: [lean-static, windows-artifact]
         steps:
             - name: Check out repository
@@ -974,6 +1003,7 @@ jobs:
     lean-rust-replay:
         name: Lean Rust trace replay
         runs-on: ubuntu-latest
+        timeout-minutes: 30
         needs: lean-static
         steps:
             - name: Check out repository
@@ -1066,6 +1096,7 @@ jobs:
     lean:
         name: Lean formal models
         runs-on: ubuntu-latest
+        timeout-minutes: 5
         needs: [lean-static, lean-windows-replay, lean-rust-replay]
         if: always()
         steps:

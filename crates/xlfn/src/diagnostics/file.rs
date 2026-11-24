@@ -242,6 +242,8 @@ impl DiagnosticSink for FileDiagnosticSink {
 
 pub(crate) struct RotatingLog {
     pub(crate) path: PathBuf,
+    directory: Option<LogDirectory>,
+    file_name: OsString,
     pub(crate) maximum_bytes: u64,
     pub(crate) generations: usize,
 }
@@ -262,29 +264,44 @@ enum LogAccess {
     Rotate,
 }
 
+enum LogDirectoryRef<'a> {
+    Owned(LogDirectory),
+    Borrowed(&'a LogDirectory),
+}
+
+impl std::ops::Deref for LogDirectoryRef<'_> {
+    type Target = LogDirectory;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(directory) => directory,
+            Self::Borrowed(directory) => directory,
+        }
+    }
+}
+
 struct LogLock<'a> {
     file: fs::File,
-    directory: LogDirectory,
+    directory: LogDirectoryRef<'a>,
     name: &'a OsStr,
 }
 
 impl<'a> LogLock<'a> {
-    fn acquire(path: &'a Path) -> io::Result<Self> {
-        reject_parent_traversal(path)?;
-        let name = path.file_name().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "log path has no filename")
-        })?;
-        let parent = path.parent().filter(|path| !path.as_os_str().is_empty());
-        let directory = LogDirectory::open(parent.unwrap_or_else(|| Path::new(".")))?;
-        let mut lock_name = name.to_os_string();
-        lock_name.push(".lock");
-        let file = directory.open_file(&lock_name, LogAccess::Lock)?;
-        // Logging is best effort: contention must never stall the worker or
-        // startup. report() accounts this WouldBlock as a failed write.
-        file.try_lock().map_err(io::Error::from)?;
+    fn acquire_in(directory: &'a LogDirectory, name: &'a OsStr) -> io::Result<Self> {
+        let file = open_lock_file(directory, name)?;
         Ok(Self {
             file,
-            directory,
+            directory: LogDirectoryRef::Borrowed(directory),
+            name,
+        })
+    }
+
+    fn acquire(path: &'a Path) -> io::Result<Self> {
+        let (directory, name) = open_validated_directory(path)?;
+        let file = open_lock_file(&directory, name)?;
+        Ok(Self {
+            file,
+            directory: LogDirectoryRef::Owned(directory),
             name,
         })
     }
@@ -319,6 +336,26 @@ impl<'a> LogLock<'a> {
     }
 }
 
+fn open_validated_directory(path: &Path) -> io::Result<(LogDirectory, &OsStr)> {
+    reject_parent_traversal(path)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "log path has no filename"))?;
+    let parent = path.parent().filter(|path| !path.as_os_str().is_empty());
+    let directory = LogDirectory::open(parent.unwrap_or_else(|| Path::new(".")))?;
+    Ok((directory, name))
+}
+
+fn open_lock_file(directory: &LogDirectory, name: &OsStr) -> io::Result<fs::File> {
+    let mut lock_name = name.to_os_string();
+    lock_name.push(".lock");
+    let file = directory.open_file(&lock_name, LogAccess::Lock)?;
+    // Logging is best effort: contention must never stall the worker or
+    // startup. report() accounts this WouldBlock as a failed write.
+    file.try_lock().map_err(io::Error::from)?;
+    Ok(file)
+}
+
 impl Drop for LogLock<'_> {
     fn drop(&mut self) {
         let _ = self.file.unlock();
@@ -331,13 +368,30 @@ impl RotatingLog {
         Self::open_with_policy(path, LOG_MAX_BYTES, LOG_GENERATIONS)
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_missing_path_test(
+        path: PathBuf,
+        maximum_bytes: u64,
+        generations: usize,
+    ) -> Self {
+        Self {
+            path,
+            directory: None,
+            file_name: OsString::new(),
+            maximum_bytes,
+            generations,
+        }
+    }
+
     pub(crate) fn open_with_policy(
         path: PathBuf,
         maximum_bytes: u64,
         generations: usize,
     ) -> io::Result<Self> {
+        let (directory, name) = open_validated_directory(&path)?;
+        let file_name = name.to_os_string();
         {
-            let lock = LogLock::acquire(&path)?;
+            let lock = LogLock::acquire_in(&directory, &file_name)?;
             let file = lock.open_active()?;
             if file.metadata()?.len() >= maximum_bytes {
                 drop(file);
@@ -347,6 +401,8 @@ impl RotatingLog {
         }
         Ok(Self {
             path,
+            directory: Some(directory),
+            file_name,
             maximum_bytes,
             generations,
         })
@@ -360,7 +416,10 @@ impl RotatingLog {
                 "log record exceeds the maximum log size",
             ));
         }
-        let lock = LogLock::acquire(&self.path)?;
+        let lock = match &self.directory {
+            Some(directory) => LogLock::acquire_in(directory, &self.file_name)?,
+            None => LogLock::acquire(&self.path)?,
+        };
         // Another instance or process may have appended or rotated since the
         // previous write. Resolve both the active file and its size while the
         // shared lock is held; retaining a file handle would target an archive.

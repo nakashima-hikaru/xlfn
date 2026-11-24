@@ -10,5 +10,5 @@ fn fail(delivery: PendingDelivery<NoObservation>) {
 }
 
 fn fallback(delivery: PendingDelivery<NoObservation>) {
-    delivery.fallback(false);
+    delivery.fallback(None);
 }

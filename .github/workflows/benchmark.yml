@@ -26,6 +26,7 @@ jobs:
     name: Benchmark lint
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: windows-2025
+    timeout-minutes: 25
     permissions:
       contents: read
     steps:
@@ -50,6 +51,7 @@ jobs:
     permissions:
       contents: read
     runs-on: windows-2025
+    timeout-minutes: 60
     env:
       BENCHER_TESTBED: github-windows-2025
     steps:
@@ -86,6 +88,7 @@ jobs:
     needs: benchmark
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       checks: write
@@ -133,6 +136,7 @@ jobs:
       github.event.action == 'closed' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:

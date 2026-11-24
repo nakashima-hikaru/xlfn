@@ -1,4 +1,4 @@
-use crate::win32::{CLSCTX_INPROC_SERVER, CoCreateInstance, E_POINTER, GUID, S_OK};
+use crate::win32::{CLSCTX_INPROC_SERVER, CoCreateInstance, E_POINTER, GUID};
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 
@@ -65,12 +65,12 @@ pub unsafe fn get_git() -> Result<GlobalInterfaceTable, i32> {
         )
     };
 
-    if status == S_OK {
+    if status < 0 {
+        Err(status)
+    } else {
         NonNull::new(git.cast())
             .map(|pointer| GlobalInterfaceTable { pointer })
-            .ok_or(status)
-    } else {
-        Err(status)
+            .ok_or(E_POINTER)
     }
 }
 
@@ -132,7 +132,7 @@ impl GlobalInterfaceTable {
             )
         };
 
-        if status != S_OK {
+        if status < 0 {
             return Err(status);
         }
 

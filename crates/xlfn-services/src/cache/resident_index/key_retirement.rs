@@ -73,6 +73,13 @@ impl<K> Drop for RetiredKeys<K> {
     }
 }
 
+pub(in crate::cache) fn retire_single_key<K: 'static>(
+    key: VersionedKey<K>,
+    report: CachePanicReporter,
+) {
+    reclaim((std::iter::once(key), report));
+}
+
 // The two owned batch forms are a singleton iterator or a detached Vec.
 // Both are independent of the queue; the deferred callback consumes each key.
 fn reclaim<K, B: IntoIterator<Item = VersionedKey<K>>>((keys, report): (B, CachePanicReporter)) {

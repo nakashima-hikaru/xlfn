@@ -610,7 +610,7 @@ pub(crate) fn validate_private_windows_directory(directory: &std::fs::File) -> P
         if owner.is_null() || token_user.User.Sid.is_null() {
             return Err("private staging directory has an invalid owner SID".into());
         }
-        // SAFETY: `owner` is non-null and comes from `GetNamedSecurityInfoW`.
+        // SAFETY: `owner` is non-null and comes from `GetSecurityInfo`.
         let owner_valid = unsafe { IsValidSid(owner) != 0 };
         // SAFETY: the token SID is non-null and comes from `GetTokenInformation`.
         let token_user_valid = unsafe { IsValidSid(token_user.User.Sid) != 0 };
@@ -625,7 +625,7 @@ pub(crate) fn validate_private_windows_directory(directory: &std::fs::File) -> P
         let mut control = SECURITY_DESCRIPTOR_CONTROL::default();
         let mut revision = 0_u32;
         // SAFETY: `security_descriptor` was allocated and populated by
-        // `GetNamedSecurityInfoW` above; the output pointers are local.
+        // `GetSecurityInfo` above; the output pointers are local.
         let descriptor_ok = unsafe {
             GetSecurityDescriptorControl(security_descriptor, &mut control, &mut revision)
         };
@@ -758,7 +758,7 @@ pub(crate) fn validate_private_windows_directory(directory: &std::fs::File) -> P
     }
     if !security_descriptor.is_null() {
         // SAFETY: `security_descriptor` was allocated by
-        // `GetNamedSecurityInfoW`.
+        // `GetSecurityInfo`.
         let _ = unsafe { LocalFree(security_descriptor as HLOCAL) };
     }
     result

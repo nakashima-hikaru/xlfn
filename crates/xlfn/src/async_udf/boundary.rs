@@ -1,5 +1,6 @@
 use super::completion::{
-    AsyncCompletion, OwnedCompletionOutcome, OwnedDeliveryOutcome, PendingDelivery, return_error,
+    AsyncCompletion, AsyncDiagnosticContext, OwnedCompletionOutcome, OwnedDeliveryOutcome,
+    PendingDelivery, return_error,
 };
 use super::instrumentation::{AsyncObservation, CompletionObserver, NoObservation};
 #[cfg(feature = "handles")]
@@ -77,7 +78,9 @@ unsafe fn run_async_boundary<A: crate::Addin>(
         Err(error) => {
             // SAFETY: the caller keeps the raw handle live, and ingress is
             // retained until this rejected launch has finished its callback.
-            unsafe { reject_async_admission(&ingress, udf_id, raw_handle, error) };
+            unsafe {
+                reject_async_admission(&ingress, runtime.diagnostics(), udf_id, raw_handle, error)
+            };
             return;
         }
     };
@@ -101,6 +104,7 @@ unsafe fn run_async_boundary<A: crate::Addin>(
 /// responder exists to supply its usual fallback completion.
 unsafe fn reject_async_admission(
     ingress: &crate::ingress::AdmittedExport<'_>,
+    history: &'static crate::diagnostics::DiagnosticHistory,
     udf_id: &'static str,
     raw_handle: *mut XLOPER12,
     error: XllError,
@@ -112,6 +116,11 @@ unsafe fn reject_async_admission(
         // separately acquires callback admission before invoking Excel.
         let delivery = unsafe { return_error(raw_handle, &error) };
         report_completion(
+            Some(AsyncDiagnosticContext {
+                history,
+                call_id: None,
+                calculation_id: None,
+            }),
             udf_id,
             &AsyncCompletion {
                 completion: OwnedCompletionOutcome::Error(error),
@@ -155,8 +164,22 @@ unsafe fn run_admitted_async<A: crate::Addin>(
     let instrumentation = InstrumentationPlan::for_call(guard);
     if !instrumentation.enabled() {
         let launch = CapturedLaunch::capture(guard).into_launch();
+        let diagnostics = AsyncDiagnosticContext {
+            history: guard.history(),
+            call_id: None,
+            calculation_id: Some(launch.calculation_id()),
+        };
         // SAFETY: forwarded from this function's raw-handle contract.
-        unsafe { prepare_async_launch(launch, udf_id, raw_handle, start, NoObservation) };
+        unsafe {
+            prepare_async_launch(
+                launch,
+                udf_id,
+                raw_handle,
+                start,
+                NoObservation,
+                Some(diagnostics),
+            )
+        };
         return;
     }
     let call_id = CallId::new(guard.next_call_id());
@@ -164,6 +187,11 @@ unsafe fn run_admitted_async<A: crate::Addin>(
         let captured = CapturedLaunch::capture(guard);
         (captured.calculation_id(), captured)
     });
+    let diagnostics = AsyncDiagnosticContext {
+        history: guard.history(),
+        call_id: Some(call_id),
+        calculation_id: Some(captured.calculation_id()),
+    };
     let observed = match entry.enter(guard.layers(), |error, timer| {
         // SAFETY: forwarded from this function's raw-handle contract.
         let delivery = unsafe { return_error(raw_handle, &error) };
@@ -177,7 +205,9 @@ unsafe fn run_admitted_async<A: crate::Addin>(
     }) {
         Ok(observed) => observed,
         Err(rejection) => {
-            rejection.finish(|(completion, _)| report_completion(udf_id, completion));
+            rejection.finish(|(completion, _)| {
+                report_completion(Some(diagnostics), udf_id, completion);
+            });
             return;
         }
     };
@@ -187,7 +217,16 @@ unsafe fn run_admitted_async<A: crate::Addin>(
     let launch = captured.into_launch();
     let observation = AsyncObservation::from_call(observed, launch.token());
     // SAFETY: forwarded from this function's raw-handle contract.
-    unsafe { prepare_async_launch(launch, udf_id, raw_handle, start, observation) };
+    unsafe {
+        prepare_async_launch(
+            launch,
+            udf_id,
+            raw_handle,
+            start,
+            observation,
+            Some(diagnostics),
+        )
+    };
 }
 
 unsafe fn prepare_async_launch<A: crate::Addin, S: AsyncStart<A>>(
@@ -196,6 +235,7 @@ unsafe fn prepare_async_launch<A: crate::Addin, S: AsyncStart<A>>(
     raw_handle: *mut XLOPER12,
     start: S,
     observation: impl CompletionObserver + Send + 'static,
+    diagnostics: Option<AsyncDiagnosticContext>,
 ) {
     // SAFETY: forwarded from this function's raw-handle contract.
     let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
@@ -205,13 +245,13 @@ unsafe fn prepare_async_launch<A: crate::Addin, S: AsyncStart<A>>(
                 completion: OwnedCompletionOutcome::Error(error),
                 delivery: OwnedDeliveryOutcome::Unobserved,
             };
-            report_completion(udf_id, &completion);
+            report_completion(diagnostics, udf_id, &completion);
             observation.finish(&completion);
             return;
         }
     };
     if let Some(reservation) = launch
-        .prepare(start, responder, observation)
+        .prepare(start, responder, observation, diagnostics)
         .and_then(launch::PreparedLaunch::reserve)
     {
         S::commit(reservation);
@@ -251,12 +291,60 @@ pub(crate) unsafe fn async_udf_boundary_named_handle<A, Start, Build, T>(
     };
 }
 
-pub(super) fn report_completion(udf_id: &'static str, completion: &AsyncCompletion) {
-    if let OwnedCompletionOutcome::Error(error) = &completion.completion {
-        crate::diagnostics::report_udf_failure_no_unwind(udf_id, error);
+pub(super) fn report_panic(
+    diagnostics: Option<AsyncDiagnosticContext>,
+    udf_id: &'static str,
+    message: &str,
+) {
+    if let Some(context) = diagnostics {
+        crate::diagnostics::report_udf_panic_with_history_no_unwind(
+            context.history,
+            udf_id,
+            context.call_id,
+            context.calculation_id,
+            message,
+        );
+    } else {
+        crate::diagnostics::report_no_unwind(udf_id, &XllError::Panic);
+    }
+}
+
+pub(super) fn report_completion(
+    diagnostics: Option<AsyncDiagnosticContext>,
+    udf_id: &'static str,
+    completion: &AsyncCompletion,
+) {
+    match &completion.completion {
+        OwnedCompletionOutcome::Error(error) => {
+            if let Some(context) = diagnostics {
+                crate::diagnostics::report_udf_failure_with_history_no_unwind(
+                    context.history,
+                    udf_id,
+                    context.call_id,
+                    context.calculation_id,
+                    error,
+                    false,
+                );
+            } else {
+                crate::diagnostics::report_udf_failure_no_unwind(udf_id, error);
+            }
+        }
+        OwnedCompletionOutcome::Panic(message) => report_panic(diagnostics, udf_id, message),
+        OwnedCompletionOutcome::Success | OwnedCompletionOutcome::Cancelled => {}
     }
     if let OwnedDeliveryOutcome::Failed(error) = &completion.delivery {
-        crate::diagnostics::report_no_unwind(udf_id, error);
+        if let Some(context) = diagnostics {
+            crate::diagnostics::report_udf_failure_with_history_no_unwind(
+                context.history,
+                udf_id,
+                context.call_id,
+                context.calculation_id,
+                error,
+                true,
+            );
+        } else {
+            crate::diagnostics::report_no_unwind(udf_id, error);
+        }
     }
 }
 #[cfg(test)]

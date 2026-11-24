@@ -142,6 +142,13 @@ impl ReturnTracker {
         drop(self.gate.control().wait_idle());
     }
 
+    #[cfg(not(miri))]
+    pub(crate) fn wait_for_quiescence_timeout(&self, timeout: std::time::Duration) -> bool {
+        debug_assert!(self.admission_closed());
+        let (_control, idle) = self.gate.control().wait_idle_timeout(timeout);
+        idle
+    }
+
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn outstanding_obligations(&self) -> usize {
         self.gate.active()

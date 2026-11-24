@@ -123,7 +123,23 @@ impl RunningDiagnosticWorker {
         }
         #[cfg(test)]
         FAIL_JOIN.with(|fault| assert!(!fault.replace(false), "injected diagnostic join unwind"));
-        let result = handle.join();
+        let result = {
+            #[cfg(windows)]
+            {
+                use crate::drain_wait::{UnstartedDrain, drain_with_com_dispatch};
+                match drain_with_com_dispatch(UnstartedDrain::new(move || handle.join())) {
+                    Ok(prepared) => match prepared.run() {
+                        Ok(joined) => joined.into_output(),
+                        Err((_error, unstarted)) => (unstarted.into_work())(),
+                    },
+                    Err((_error, unstarted)) => (unstarted.into_work())(),
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                handle.join()
+            }
+        };
         DropGuard::dismiss(require_join);
         let panicked = contain_panic(result).is_err();
         JoinedDiagnosticWorker { observer, panicked }

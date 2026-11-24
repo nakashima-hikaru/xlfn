@@ -473,6 +473,9 @@ impl<const N: usize> StripedDrainGate<N> {
     /// The caller must serialize this operation with other seal/reopen calls.
     /// On failure, stripes sealed by this attempt are reopened before return.
     fn try_seal_if_idle(&self) -> bool {
+        if self.counters.iter().any(|counter| counter.active() != 0) {
+            return false;
+        }
         protocol::seal_stripes!(index, rollback;
             N, self.counters[index].try_seal_if_idle(),
             self.counters[rollback].undo_idle_seal()
@@ -504,6 +507,39 @@ impl<const N: usize> StripedDrainGate<N> {
                     .for_each(|counter| counter.clear_waiting())
             },
         );
+    }
+
+    #[cfg(not(miri))]
+    fn wait_until_idle_timeout(
+        &self,
+        _claim: &MutexGuard<'_, ()>,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let registration = WaitRegistration(Some(|| {
+            self.counters
+                .iter()
+                .for_each(|counter| counter.clear_waiting());
+        }));
+        let mut guard = self.idle.lock();
+        loop {
+            if self.register_stripes_and_observe_idle() {
+                drop(registration);
+                drop(guard);
+                return true;
+            }
+            if self
+                .idle
+                .changed
+                .wait_until(&mut guard, deadline)
+                .timed_out()
+            {
+                let idle = self.register_stripes_and_observe_idle();
+                drop(registration);
+                drop(guard);
+                return idle;
+            }
+        }
     }
 
     // Load-only poll: a failed call does not register future notification.

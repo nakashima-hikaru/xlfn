@@ -32,7 +32,7 @@ pub(crate) mod ownership;
 pub(crate) mod scalar;
 pub(crate) mod storage;
 
-pub(crate) use conversion::{CallbackCleanupDebt, ExcelCallbackStatus};
+pub(crate) use conversion::ExcelCallbackStatus;
 pub(crate) use ownership::ReturnFreeBoundaryGuard;
 use ownership::ReturnPublicationTxn;
 pub(crate) use ownership::{ReturnFreeGuard, ReturnObligation, ReturnProducerGuard, ReturnTracker};
@@ -329,6 +329,7 @@ where
     F: FnOnce() -> XllResult<T>,
     T: ExcelReturn<InputMode = crate::value::PlainInputMode>,
 {
+    let _thread_export = crate::ingress::ThreadExportGuard::enter();
     let ingress = match crate::module_runtime::ingress()
         .enter_with(|| {})
         .into_admitted()
@@ -367,6 +368,7 @@ pub(crate) fn ffi_boundary_void<A: crate::Addin>(
     runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     operation: impl FnOnce(),
 ) {
+    let _thread_export = crate::ingress::ThreadExportGuard::enter();
     let ingress = match crate::module_runtime::ingress()
         .enter_with(|| {})
         .into_admitted()

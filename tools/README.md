@@ -72,18 +72,21 @@ library suite with one test thread.
 To inspect a plan without building:
 
 ```sh
-uv run --project tools --locked python -B -m xlfn_tools.feature_matrix check --shard 1/8 --list
+uv run --project tools --locked python -B -m xlfn_tools.feature_matrix check --shard 1/4 --list
 uv run --project tools --locked python -B -m xlfn_tools.feature_matrix test --shard 1/8 --list
 ```
 
-With no shard option, the command runs the complete inventory. CI runs eight
-shards for each mode: 36 check or 12 test cases per job. The deterministic
-cost proxy starts at 10 per case, adds 3 for the RTD transport shared by
-`rtd` and `handles`, adds 2 each for `handles`, `cache`, and `async`, and
-adds 1 for each other enabled feature. The heaviest cases go to the lightest
-non-full shard first. Total proxy weights are 659–661 for check jobs and
-202–204 for test jobs. These are not measured Windows runtimes. Each case
-prints its elapsed time so Windows CI can be used to validate or tune the proxy.
+With no shard option, the command runs the complete inventory. CI runs four
+`check` shards (72 cases per job) and eight `test` shards (12 cases per job).
+For `check`, the deterministic cost proxy starts at 10 per case, adds 3 for the
+RTD transport shared by `rtd` and `handles`, adds 2 each for `handles`,
+`cache`, and `async`, adds 1 for each other enabled feature (including
+`async-builtin` and `bench-internals`), and assigns the heaviest cases to the
+lightest non-full shard first (total proxy weight 1320 per check shard). For
+`test`, scheduling balances shards using historical Windows durations from
+`tools/feature-test-costs.json` (834–835 s per shard, falling back to `4 * weight`
+for new combinations). Each case prints its elapsed time so Windows CI can be
+used to validate or tune the cost model.
 
 Verus shards assign each exact input snapshot and all of its mutations to one
 runner. A runner proves the unmodified snapshot before starting any local

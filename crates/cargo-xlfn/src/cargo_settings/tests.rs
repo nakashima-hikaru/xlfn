@@ -273,3 +273,19 @@ fn aliased_include_diamond_is_rejected_by_physical_identity() {
         .unwrap();
     assert!(error.to_string().contains("filesystem alias"));
 }
+
+#[test]
+fn rustc_wrapper_underscore_alias_is_accepted_in_cargo_config() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(directory.path()).unwrap();
+    write(
+        &root,
+        ".cargo/config.toml",
+        "[build]\nrustc_wrapper = './tools/underscore-wrapper'\n",
+    );
+    let settings = CargoSettings::load_with(&root, None, |_| None).unwrap();
+    assert_eq!(
+        settings.rustc_wrapper,
+        Some(root.join("./tools/underscore-wrapper"))
+    );
+}

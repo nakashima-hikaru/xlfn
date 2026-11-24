@@ -6,6 +6,7 @@ use crate::async_udf::runtime::RuntimeReservation;
 #[cfg(feature = "handles")]
 use crate::async_udf::task_scope::{AsyncTaskScope, HandleScopedTaskBuilder};
 use crate::cancellation::TaskCancellationOwner;
+use crate::panic_boundary::catch_udf_no_unwind;
 use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 
 // Capturing through the admitted guard fixes the issuer before layer callbacks
@@ -67,8 +68,8 @@ impl<B, O: CompletionObserver> Rollback for CaptureParts<B, O> {
     fn rollback(self) {
         let Self { body, delivery } = self;
         // User captures, including raw pins, release before delivery and layer exit.
-        let panicked = catch_no_unwind(AssertUnwindSafe(|| drop(body))).is_err();
-        delivery.fallback(panicked);
+        let panic_message = catch_udf_no_unwind(AssertUnwindSafe(|| drop(body))).err();
+        delivery.fallback(panic_message);
     }
 }
 
@@ -195,27 +196,36 @@ impl<'guard, 'call, A: crate::Addin> LaunchOwner<'guard, 'call, A> {
         self.token
     }
 
+    pub(super) fn calculation_id(&self) -> crate::execution::CalculationId {
+        self.calculation.epoch().into()
+    }
+
     pub(super) fn prepare<S: AsyncStart<A>, O: CompletionObserver>(
         self,
         start: S,
         responder: ExcelAsyncResponder,
         observation: O,
+        diagnostics: Option<AsyncDiagnosticContext>,
     ) -> Option<PreparedLaunch<'guard, 'call, A, S::Body, O>> {
         // Bind the copied responder before any user preparation can run.
-        let delivery = PendingDelivery::new(responder, self.token, observation);
-        let body = catch_no_unwind(AssertUnwindSafe(|| {
+        let delivery =
+            PendingDelivery::new_with_diagnostics(responder, self.token, observation, diagnostics);
+        let body = catch_udf_no_unwind(AssertUnwindSafe(|| {
             self.calculation.preflight()?;
             let lease = self.guard.try_execution_lease()?;
             start.start(self.guard, lease, self.token)
-        }))
-        .unwrap_or(Err(XllError::Panic));
+        }));
         match body {
-            Ok(body) => Some(PreparedLaunch {
+            Ok(Ok(body)) => Some(PreparedLaunch {
                 owner: self,
                 capture: CaptureOwner::new(body, delivery),
             }),
-            Err(error) => {
+            Ok(Err(error)) => {
                 delivery.fail(error);
+                None
+            }
+            Err(message) => {
+                delivery.fail_panic(message);
                 None
             }
         }
@@ -303,6 +313,25 @@ impl<B, O: CompletionObserver, T> UnbuiltScopedTask<B, O, T> {
 }
 
 #[cfg(feature = "handles")]
+struct PanicMessageFuture<T>(Option<String>, std::marker::PhantomData<fn() -> T>);
+
+#[cfg(feature = "handles")]
+impl<T> Future for PanicMessageFuture<T> {
+    type Output = XllResult<T>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let message = self
+            .0
+            .take()
+            .unwrap_or_else(|| "UDF panicked with a non-string payload".to_owned());
+        std::panic::panic_any(message);
+    }
+}
+
+#[cfg(feature = "handles")]
 impl<B, O, T> HandleScopedTaskBuilder for UnbuiltScopedTask<B, O, T>
 where
     B: HandleScopedBuilder<T> + 'static,
@@ -321,9 +350,12 @@ where
         Self::Delivery,
     ) {
         let (builder, delivery) = self.capture.into_parts();
-        let future = match catch_no_unwind(AssertUnwindSafe(|| builder.build(scope))) {
+        let future = match catch_udf_no_unwind(AssertUnwindSafe(|| builder.build(scope))) {
             Ok(future) => futures_util::future::Either::Left(future),
-            Err(_) => futures_util::future::Either::Right(std::future::ready(Err(XllError::Panic))),
+            Err(message) => futures_util::future::Either::Right(PanicMessageFuture(
+                Some(message),
+                std::marker::PhantomData,
+            )),
         };
         // SAFETY: the short-lived scope is created for this single builder.
         // Only the returned evaluation can access its projections. The
@@ -382,7 +414,11 @@ mod tests {
             ));
             match (&completion.completion, self.expected) {
                 (OwnedCompletionOutcome::Error(XllError::Internal { .. }), Failure::Internal)
-                | (OwnedCompletionOutcome::Error(XllError::Panic), Failure::Panic)
+                | (
+                    OwnedCompletionOutcome::Error(XllError::Panic)
+                    | OwnedCompletionOutcome::Panic(_),
+                    Failure::Panic,
+                )
                 | (OwnedCompletionOutcome::Error(XllError::Overloaded), Failure::Overloaded) => {}
                 _ => panic!("wrong launch completion cause"),
             }

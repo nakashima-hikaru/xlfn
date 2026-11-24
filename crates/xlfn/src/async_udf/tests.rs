@@ -1498,6 +1498,20 @@ fn async_boundary_future_destructor_panic_reports_error_and_preserves_worker() {
     wait_for_async_callback_count(2);
     assert_eq!(crate::test_callback::last_async_value(), 42);
     assert!(runtime.close_async().unwrap().issues.is_empty());
+
+    let page = runtime
+        .diagnostics()
+        .errors_since(crate::diagnostics::DiagnosticCursor::START, 16);
+    assert!(
+        page.errors.iter().any(|record| {
+            record.udf_id == "future_drop"
+                && record
+                    .message
+                    .contains("injected completed UDF future destructor panic")
+        }),
+        "expected async UDF panic message in DiagnosticHistory, got: {:?}",
+        page.errors
+    );
 }
 
 #[test]

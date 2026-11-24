@@ -209,6 +209,7 @@ enum ConfigInclude {
 #[derive(Default, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 struct BuildConfig {
+    #[serde(alias = "rustc_wrapper")]
     rustc_wrapper: Option<String>,
 }
 

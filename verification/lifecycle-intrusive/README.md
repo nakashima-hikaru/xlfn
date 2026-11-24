@@ -34,7 +34,7 @@ and separate dev-only SmallVec comparison. It tests nesting, deep cycles, panic
 restoration, `mem::forget` of the borrowed capability, thread isolation, and
 compile-fail escape/thread transfer. Use `cargo test --manifest-path
 probes/lifecycle-stack-model/Cargo.toml --locked` and the same command prefixed
-`cargo +nightly-2026-09-02 miri test`; repeat with
+`cargo +nightly-2026-09-28 miri test`; repeat with
 `MIRIFLAGS=-Zmiri-tree-borrows`. Actual library tests and typestate fixtures are
 also necessary: this bounded model does not prove the surrounding host protocol.
 

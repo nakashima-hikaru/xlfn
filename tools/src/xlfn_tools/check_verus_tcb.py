@@ -139,11 +139,32 @@ def trust_boundaries(sanitized: str) -> tuple[set[int], set[int]]:
                 and tokens[attribute_index + 1].value == "("
             ):
                 attribute_index += 2
-            attribute = tokens[attribute_index]
-            if attribute.value in EXTERNALS:
-                externals.add(token.offset)
-            elif attribute.value in ASSUMPTION_ATTRIBUTES:
-                assumptions.add(token.offset)
+            # Inspect every top-level token inside `#[verifier(...)]` or
+            # `#[verus::internal(...)]` (such as `#[verifier(inline, external_body)]`),
+            # not just the first attribute name after `(`.
+            if tokens[attribute_index - 1].value == "(":
+                paren_depth = 1
+                scan = attribute_index
+                while scan < len(tokens) and paren_depth > 0:
+                    scan_value = tokens[scan].value
+                    if scan_value == "(":
+                        paren_depth += 1
+                    elif scan_value == ")":
+                        paren_depth -= 1
+                        if paren_depth == 0:
+                            break
+                    elif paren_depth == 1:
+                        if scan_value in EXTERNALS:
+                            externals.add(tokens[scan].offset)
+                        elif scan_value in ASSUMPTION_ATTRIBUTES:
+                            assumptions.add(tokens[scan].offset)
+                    scan += 1
+            else:
+                attribute = tokens[attribute_index]
+                if attribute.value in EXTERNALS:
+                    externals.add(token.offset)
+                elif attribute.value in ASSUMPTION_ATTRIBUTES:
+                    assumptions.add(token.offset)
         if value not in ASSUMPTIONS or previous in {".", "fn"}:
             continue
         start = index
@@ -163,13 +184,25 @@ def trust_boundaries(sanitized: str) -> tuple[set[int], set[int]]:
             assumptions.add(tokens[start].offset)
         elif len(path) == 1 and (
             (value == "assume_specification" and following in {"[", "<"})
-            or (value != "assume_specification" and following == "(")
+            or (
+                value != "assume_specification"
+                and (
+                    following == "("
+                    or (previous == "(" and following == ")")
+                    or previous == "="
+                    or (previous in {"(", ",", "["} and following in {",", ")", "]"})
+                )
+            )
         ):
             assumptions.add(tokens[start].offset)
     return assumptions, externals
 
 
-def audit_verus_files(search_paths: list[Path], allowlist: set[str]) -> tuple[list[str], list[str]]:
+def audit_verus_files(
+    search_paths: list[Path],
+    allowlist: set[str],
+    matched_allowlist: set[str] | None = None,
+) -> tuple[list[str], list[str]]:
     assumes: list[str] = []
     unapproved_externals: list[str] = []
 
@@ -196,6 +229,8 @@ def audit_verus_files(search_paths: list[Path], allowlist: set[str]) -> tuple[li
                 # Only repository-relative file:line entries authorize a TCB
                 # boundary. A basename must never authorize another directory.
                 if file_path.is_relative_to(ROOT) and loc_id in allowlist:
+                    if matched_allowlist is not None:
+                        matched_allowlist.add(loc_id)
                     continue
                 else:
                     unapproved_externals.append(f"{loc_id}: {lines[line_no - 1].strip()}")
@@ -217,10 +252,18 @@ def main() -> int:
     search_dirs = [
         ROOT / "verification/verus",
         ROOT / "crates/xlfn-kernel",
+        ROOT / "crates/xlfn-services",
+        ROOT / "crates/xlfn-engine",
         ROOT / "crates/xlfn/src",
     ]
 
-    assumes, unapproved_externals = audit_verus_files(search_dirs, allowlist_items)
+    matched_allowlist: set[str] = set()
+    assumes, unapproved_externals = audit_verus_files(
+        search_dirs,
+        allowlist_items,
+        matched_allowlist=matched_allowlist,
+    )
+    stale_allowlist = sorted(allowlist_items - matched_allowlist)
 
     failed = False
     if assumes:
@@ -244,6 +287,15 @@ def main() -> int:
         failed = True
     else:
         print("PASS: All external body/type/function specifications are approved or 0 found.")
+
+    if stale_allowlist:
+        print(
+            "ERROR: Allowlist contains stale external entries with no matching annotation:",
+            file=sys.stderr,
+        )
+        for entry in stale_allowlist:
+            print(f"  {entry}", file=sys.stderr)
+        failed = True
 
     return 1 if failed else 0
 

@@ -222,6 +222,7 @@ impl ComModuleLifetime {
         (
             ComModuleCallGuard {
                 lifetime: self,
+                _thread_export: crate::ingress::ThreadExportGuard::enter(),
                 _ingress_guard: ingress_guard,
                 _observation: ComModuleCallObservation::begin(self, accepted),
             },
@@ -289,6 +290,8 @@ impl ComModuleLifetime {
         mut retry_git_revocation_debt: impl FnMut(),
         module_residency_held: bool,
     ) -> Result<(), ComModuleQuiescenceError> {
+        #[cfg(not(test))]
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         #[cfg(test)]
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
 
@@ -320,12 +323,13 @@ impl ComModuleLifetime {
             let event = std::mem::DropGuard::new(event, |_| {
                 self.inner.lock().quiescence_changed = None;
             });
-            #[cfg(not(test))]
-            let timeout_ms = crate::win32::INFINITE;
-            #[cfg(test)]
-            let timeout_ms = deadline
-                .saturating_duration_since(std::time::Instant::now())
-                .as_millis() as u32;
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(ComModuleQuiescenceError {
+                    state: self.inner.lock().state,
+                });
+            }
+            let timeout_ms = u32::try_from(remaining.as_millis()).unwrap_or(u32::MAX);
             // Preserve a caller's STA and dispatch synchronous COM calls
             // without the call-count lock. Initialize an MTA on other callers.
             let result = ComApartmentGuard::enter()
@@ -352,6 +356,7 @@ impl ComModuleLifetime {
 
 pub(super) struct ComModuleCallGuard {
     lifetime: &'static ComModuleLifetime,
+    _thread_export: crate::ingress::ThreadExportGuard,
     _ingress_guard: crate::ingress::ExportEntry<'static>,
     _observation: ComModuleCallObservation,
 }

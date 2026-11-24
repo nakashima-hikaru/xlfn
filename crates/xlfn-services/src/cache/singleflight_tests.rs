@@ -166,7 +166,7 @@ fn colliding_flights_remove_by_identity_after_table_growth() {
     }
     for flight in &owners {
         assert!(Arc::ptr_eq(
-            flights.get(flight.hash, &flight.key).unwrap(),
+            flights.get(flight.hash, flight.key()).unwrap(),
             flight,
         ));
     }
@@ -204,7 +204,7 @@ fn coordination_uses_both_hash_halves_without_changing_key_identity() {
             .lock()
             .insert_unique(Arc::clone(&flight));
         assert!(Arc::ptr_eq(
-            registry.shard(hash).lock().get(hash, &flight.key).unwrap(),
+            registry.shard(hash).lock().get(hash, flight.key()).unwrap(),
             &flight,
         ));
         assert!(registry.shard(hash).lock().remove(&flight).is_some());
@@ -387,4 +387,51 @@ fn unwind_cleanup_does_not_call_faulting_keys_again() {
             String::from_utf8_lossy(&output.stderr),
         );
     }
+}
+
+#[test]
+fn flight_drop_during_unwinding_contains_panicking_key_drop_and_reports() {
+    use std::sync::atomic::AtomicUsize;
+
+    static REPORTS: AtomicUsize = AtomicUsize::new(0);
+    fn count_report(context: &'static str, error: &XllError) {
+        if context == "calculation cache key final drop" && matches!(error, XllError::Panic) {
+            REPORTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    struct PanickingDropKey {
+        drops: StdArc<AtomicUsize>,
+    }
+    impl Drop for PanickingDropKey {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+            panic!("key destructor panic during flight unwind");
+        }
+    }
+
+    REPORTS.store(0, Ordering::Relaxed);
+    let drops = StdArc::new(AtomicUsize::new(0));
+    let key = VersionedKey {
+        epoch: 1,
+        key: PanickingDropKey {
+            drops: StdArc::clone(&drops),
+        },
+    };
+    let flight = Arc::new(Flight::<PanickingDropKey, u64>::with_reporter(
+        key,
+        7,
+        count_report,
+    ));
+    let follower = Arc::clone(&flight);
+
+    let outcome = catch_no_unwind(AssertUnwindSafe(move || {
+        let _held_across_unwind = flight;
+        let _follower_across_unwind = follower;
+        panic!("simulated leader failure before flight drop");
+    }));
+
+    assert!(outcome.is_err());
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(REPORTS.load(Ordering::Relaxed), 1);
 }

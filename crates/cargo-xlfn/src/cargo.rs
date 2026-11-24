@@ -29,10 +29,10 @@ pub(crate) fn run_cargo_build(
         let _ = child.kill();
     }
     let status = child.wait().context("could not wait for cargo build")?;
-    let built = output?;
     if !status.success() {
         bail!("cargo build failed for {}", metadata.package_name);
     }
+    let built = output?;
     Ok(built)
 }
 

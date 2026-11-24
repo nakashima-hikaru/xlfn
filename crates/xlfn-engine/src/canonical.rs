@@ -49,7 +49,8 @@ impl<Opening, Open, Stopping, Quarantined> LifecycleState<Opening, Open, Stoppin
                 return None;
             }
         };
-        match classify(payload) {
+        let fail_closed = std::mem::DropGuard::new((), |()| std::process::abort());
+        let outcome = match classify(payload) {
             Ok((bundle, effect)) => {
                 *self = Self::Open { bundle };
                 Some(effect)
@@ -58,7 +59,9 @@ impl<Opening, Open, Stopping, Quarantined> LifecycleState<Opening, Open, Stoppin
                 *self = Self::Opening { attempt, payload };
                 None
             }
-        }
+        };
+        std::mem::DropGuard::dismiss(fail_closed);
+        outcome
     }
 }
 

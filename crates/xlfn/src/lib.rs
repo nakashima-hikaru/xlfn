@@ -190,7 +190,7 @@ macro_rules! __xlfn_private_async_only {
 #[macro_export]
 macro_rules! __xlfn_private_async_only {
     ($($body:tt)*) => {
-        compile_error!("asynchronous Excel functions require the xlfn `async` feature");
+        ::core::compile_error!("asynchronous Excel functions require the xlfn `async` feature");
     };
 }
 
@@ -255,6 +255,7 @@ macro_rules! __xlfn_private_excel_rtd_exports {
             *b"DllGetClassObject\0DllCanUnloadNow\0";
 
         #[doc(hidden)]
+        #[deny(unsafe_op_in_unsafe_fn)]
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn DllGetClassObject(
             __class_id: *const ::core::ffi::c_void,

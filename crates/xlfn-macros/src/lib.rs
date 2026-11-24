@@ -15,7 +15,7 @@
 #![forbid(unsafe_code)]
 
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{quote, quote_spanned};
 #[cfg(test)]
 use syn::ItemFn;
 use syn::ext::IdentExt;
@@ -264,7 +264,18 @@ fn expand_excel_addin_impl(
     let mut ordinary_items = Vec::with_capacity(implementation.items.len());
     for item in implementation.items {
         if let syn::ImplItem::Type(associated) = &item {
-            let slot = match associated.ident.unraw().to_string().as_str() {
+            let assoc_name = associated.ident.unraw().to_string();
+            if matches!(assoc_name.as_str(), "LifecycleState" | "Error" | "Layers")
+                && associated.attrs.iter().any(|attribute| {
+                    attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr")
+                })
+            {
+                return Err(syn::Error::new_spanned(
+                    associated,
+                    "add-in associated types cannot be conditionally compiled",
+                ));
+            }
+            let slot = match assoc_name.as_str() {
                 "RtdSubscription" => Some(&mut subscription),
                 "RtdSources" => Some(&mut sources),
                 "AsyncExecutor" => Some(&mut executor),
@@ -377,6 +388,57 @@ fn emit_addin_exports(
     // The metadata options are on the attribute invocation.
     let metadata = validate_addin_metadata(&display_name, &id, &category, &quote!(excel_addin))?;
     let (name_length, name_units) = metadata.name();
+    let generated = proc_macro2::Span::mixed_site();
+    let open_body = quote_spanned! {generated=>
+        #krate::__private::v1::export_status_boundary(0, || {
+            // SAFETY: Excel invokes this lifecycle entrypoint with callback authority.
+            unsafe {
+                #krate::__private::v1::open_generated_addin::<#ident>(
+                    &crate::__XLFN_RUNTIME,
+                    #id,
+                    #category,
+                    ::core::env!("CARGO_PKG_VERSION"),
+                    #krate::__private::v1::BUILD_TARGET,
+                    xlAutoOpen as *const (),
+                )
+            }
+        })
+    };
+    let close_body = quote_spanned! {generated=>
+        #krate::__private::v1::export_status_boundary(0, || {
+            // SAFETY: Excel invokes this lifecycle entrypoint with callback authority.
+            unsafe {
+                #krate::__private::v1::auto_close_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+            }
+        })
+    };
+    let remove_body = quote_spanned! {generated=>
+        #krate::__private::v1::export_status_boundary(0, || {
+            // SAFETY: Excel invokes this lifecycle entrypoint with callback authority.
+            unsafe {
+                #krate::__private::v1::auto_remove_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+            }
+        })
+    };
+    let free_param = syn::Ident::new("__pointer", generated);
+    let free_body = quote_spanned! {generated=>
+        #krate::__private::v1::export_void_boundary(|| {
+            // SAFETY: Excel passes the live return pointer produced by this XLL.
+            unsafe { #krate::__private::v1::free_generated_return(#free_param) };
+        });
+    };
+    let info_param = syn::Ident::new("__action", generated);
+    let info_body = quote_spanned! {generated=>
+        #krate::__private::v1::export_metadata_boundary(|| {
+            // SAFETY: Excel supplies `__action` as a live XLOPER12 for this ABI call.
+            unsafe {
+                #krate::__private::v1::addin_manager_info(
+                    &crate::__XLFN_METADATA,
+                    #info_param,
+                )
+            }
+        })
+    };
     Ok(quote! {
         #implementation
 
@@ -414,21 +476,11 @@ fn emit_addin_exports(
         /// Excel must invoke this on its lifecycle thread while lifecycle
         /// callbacks are permitted; do not call it to renew UDF callback authority.
         #(#gating)*
+        #[doc(hidden)]
+        #[deny(unsafe_op_in_unsafe_fn)]
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn xlAutoOpen() -> ::core::primitive::i32 {
-            #krate::__private::v1::export_status_boundary(0, || {
-                // SAFETY: Excel invokes this lifecycle entrypoint with callback authority.
-                unsafe {
-                    #krate::__private::v1::open_generated_addin::<#ident>(
-                        &crate::__XLFN_RUNTIME,
-                        #id,
-                        #category,
-                        ::core::env!("CARGO_PKG_VERSION"),
-                        #krate::__private::v1::BUILD_TARGET,
-                        xlAutoOpen as *const (),
-                    )
-                }
-            })
+            #open_body
         }
 
         /// Deactivates the add-in from Excel's lifecycle entrypoint.
@@ -437,14 +489,11 @@ fn emit_addin_exports(
         /// Excel must invoke this on its lifecycle thread while lifecycle
         /// callbacks are permitted; do not call it to renew UDF callback authority.
         #(#gating)*
+        #[doc(hidden)]
+        #[deny(unsafe_op_in_unsafe_fn)]
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn xlAutoClose() -> ::core::primitive::i32 {
-            #krate::__private::v1::export_status_boundary(0, || {
-                // SAFETY: Excel invokes this lifecycle entrypoint with callback authority.
-                unsafe {
-                    #krate::__private::v1::auto_close_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
-                }
-            })
+            #close_body
         }
 
         /// Removes the add-in from Excel's lifecycle entrypoint.
@@ -453,14 +502,11 @@ fn emit_addin_exports(
         /// Excel must invoke this on its lifecycle thread while lifecycle
         /// callbacks are permitted; do not call it to renew UDF callback authority.
         #(#gating)*
+        #[doc(hidden)]
+        #[deny(unsafe_op_in_unsafe_fn)]
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn xlAutoRemove() -> ::core::primitive::i32 {
-            #krate::__private::v1::export_status_boundary(0, || {
-                // SAFETY: Excel invokes this lifecycle entrypoint with callback authority.
-                unsafe {
-                    #krate::__private::v1::auto_remove_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
-                }
-            })
+            #remove_body
         }
 
         /// Releases one return pointer supplied back by Excel.
@@ -468,14 +514,13 @@ fn emit_addin_exports(
         /// # Safety
         /// The pointer must be the live value returned by this XLL and used once.
         #(#gating)*
+        #[doc(hidden)]
+        #[deny(unsafe_op_in_unsafe_fn)]
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn xlAutoFree12(
-            __pointer: *mut #krate::__private::v1::XLOPER12,
+            #free_param: *mut #krate::__private::v1::XLOPER12,
         ) {
-            #krate::__private::v1::export_void_boundary(|| {
-                // SAFETY: Excel passes the live return pointer produced by this XLL.
-                unsafe { #krate::__private::v1::free_generated_return(__pointer) };
-            });
+            #free_body
         }
 
         /// Supplies Add-in metadata to Excel's Add-in Manager.
@@ -483,19 +528,13 @@ fn emit_addin_exports(
         /// # Safety
         /// `action` must be a live XLOPER12 supplied by Excel.
         #(#gating)*
+        #[doc(hidden)]
+        #[deny(unsafe_op_in_unsafe_fn)]
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn xlAddInManagerInfo12(
-            __action: *mut #krate::__private::v1::XLOPER12,
+            #info_param: *mut #krate::__private::v1::XLOPER12,
         ) -> *mut #krate::__private::v1::XLOPER12 {
-            #krate::__private::v1::export_metadata_boundary(|| {
-                // SAFETY: Excel supplies `__action` as a live XLOPER12 for this ABI call.
-                unsafe {
-                    #krate::__private::v1::addin_manager_info(
-                        &crate::__XLFN_METADATA,
-                        __action,
-                    )
-                }
-            })
+            #info_body
         }
 
     })
@@ -1326,6 +1365,115 @@ mod tests {
             )
             .is_ok()
         );
+
+        let category_too_long = "c".repeat(256);
+        let category_error = expand_excel_function(
+            quote!(category = #category_too_long),
+            function(quote!(
+                fn metadata() -> f64 {
+                    0.0
+                }
+            )),
+        )
+        .unwrap_err();
+        assert!(
+            category_error
+                .to_string()
+                .starts_with("invalid Excel function")
+        );
+
+        let category_max = "c".repeat(255);
+        assert!(
+            expand_excel_function(
+                quote!(category = #category_max),
+                function(quote!(
+                    fn metadata() -> f64 {
+                        0.0
+                    }
+                )),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn doc_comment_extracts_only_first_summary_paragraph() {
+        let parsed = model::parse_udf(
+            quote!(),
+            function(quote!(
+                ///
+                /// First line of summary
+                /// second line of summary.
+                ///
+                /// # Examples
+                /// ```
+                /// example()
+                /// ```
+                fn summarized() -> f64 {
+                    1.0
+                }
+            )),
+        )
+        .unwrap();
+        let spec = model::analyze(parsed).unwrap();
+        assert_eq!(
+            spec.metadata.description,
+            "First line of summary second line of summary."
+        );
+    }
+
+    #[test]
+    fn udf_parameter_patterns_and_cfg_attr_are_validated() {
+        assert!(
+            expand_excel_function(
+                quote!(),
+                function(quote!(
+                    fn wild(_: f64) -> f64 {
+                        1.0
+                    }
+                )),
+            )
+            .is_ok()
+        );
+        for bad in [
+            quote!(
+                fn by_ref(ref x: f64) -> f64 {
+                    *x
+                }
+            ),
+            quote!(
+                fn subpat(x @ _: f64) -> f64 {
+                    x
+                }
+            ),
+            quote!(
+                fn gated(#[cfg_attr(all(), excel_arg(strict))] x: f64) -> f64 {
+                    x
+                }
+            ),
+        ] {
+            assert!(expand_excel_function(quote!(), function(bad)).is_err());
+        }
+    }
+
+    #[test]
+    fn excel_addin_rejects_cfg_on_associated_types() {
+        for ty in ["LifecycleState", "Error", "Layers"] {
+            let ident = syn::Ident::new(ty, proc_macro2::Span::call_site());
+            for attr in [
+                quote!(#[cfg(all())]),
+                quote!(#[cfg_attr(all(), allow(dead_code))]),
+            ] {
+                let item = syn::parse2(quote! {
+                    impl Addin for GatedAssoc {
+                        #attr
+                        type #ident = ();
+                    }
+                })
+                .unwrap();
+                assert!(expand_excel_addin_impl(quote!(), item).is_err());
+            }
+        }
     }
 
     #[test]
@@ -2086,6 +2234,21 @@ mod tests {
                     "Excel function parameters cannot be conditionally compiled; gate the entire function instead",
                 );
             }
+        }
+        for attribute in [
+            quote!(#[cfg_attr(feature = "optional", excel_arg(strict))]),
+            quote!(#[cfg_attr(feature = "optional", excel_context(main_thread))]),
+            quote!(#[cfg_attr(all(), cfg_attr(true, excel_arg(strict)))]),
+        ] {
+            let error = expand_excel_function(
+                quote!(),
+                function(quote!(fn conditional_xlfn(#attribute value: f64) -> f64 { 1.0 })),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Excel function parameters cannot conditionally apply excel_arg or excel_context; gate the entire function instead",
+            );
         }
         // Attributes which do not change the signature remain valid.
         expand_excel_function(

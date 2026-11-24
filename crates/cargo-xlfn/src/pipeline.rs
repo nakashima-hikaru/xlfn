@@ -196,11 +196,33 @@ fn verify_target_snapshot(
     let observation = CrtObservation::inspect(snapshot.info(), metadata.crt)?;
     observation.warn_if_mixed();
     // A bundled runtime satisfies the normal DLL graph checks. Admit an
-    // external runtime only when this XLL imports it and it is absent locally.
-    staged_bundle.try_add_external_imports(&observation.observed_dynamic_crt_imports)?;
+    // external redistributable runtime only when this XLL imports it and it is
+    // absent locally.
+    staged_bundle.try_add_external_imports(observation.auto_admitted_external_imports())?;
     let verified =
         xlfn_package::verify_staged_package(&xll, target.triple(), snapshot, &[], staged_bundle)?;
     Ok((verified, observation))
+}
+
+fn effective_external_imports(
+    bundle: &ResolvedTargetBundle,
+    observation: &CrtObservation,
+) -> Vec<String> {
+    let bundled: std::collections::BTreeSet<String> = bundle
+        .bundle
+        .resolved_files()
+        .map(|file| file.staged_name.to_ascii_lowercase())
+        .collect();
+    let mut external_imports: std::collections::BTreeSet<String> =
+        bundle.declared_external_imports.iter().cloned().collect();
+    external_imports.extend(
+        observation
+            .auto_admitted_external_imports()
+            .into_iter()
+            .map(|name| name.to_ascii_lowercase())
+            .filter(|name| !bundled.contains(name)),
+    );
+    external_imports.into_iter().collect()
 }
 
 fn build_manifest_input(
@@ -212,6 +234,7 @@ fn build_manifest_input(
     observation: CrtObservation,
     built: BuiltLibrary,
 ) -> xlfn_package::BuildManifestInput {
+    let external_imports = effective_external_imports(bundle, &observation);
     xlfn_package::BuildManifestInput {
         package: metadata.package_name.clone(),
         package_version: metadata.package_version.clone(),
@@ -234,7 +257,7 @@ fn build_manifest_input(
         bundle_policy: xlfn_package::BundlePolicy {
             strict_paths: bundle.strict_paths,
             system_import_policy: xlfn_package::SYSTEM_IMPORT_POLICY_VERSION.to_owned(),
-            external_imports: bundle.declared_external_imports.clone(),
+            external_imports,
         },
         integrity: xlfn_package::IntegrityMetadata::default(),
     }
