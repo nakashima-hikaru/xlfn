@@ -1,6 +1,6 @@
 //! Compatibility imports for the engine's shared panic-containment policy.
 
-#[cfg(any(test, feature = "async", feature = "rtd", feature = "handles"))]
+#[cfg(any(test, feature = "rtd", feature = "handles"))]
 pub(crate) use xlfn_engine::panic_boundary::CaughtPanic;
 pub(crate) use xlfn_engine::panic_boundary::{catch_no_unwind, catch_udf_no_unwind, contain_panic};
 
