@@ -488,7 +488,7 @@ assert_eq!(date.to_ymd()?.year, 2026);
 
 The optional `jiff` feature provides `from_jiff` / `to_jiff` methods
 for [`jiff::civil::Date`](https://docs.rs/jiff/latest/jiff/civil/struct.Date.html).
-Enable it with `xlfn = { version = "0.2.0", features = ["jiff"] }`.
+Enable it with `xlfn = { version = "0.3.0", features = ["jiff"] }`.
 Importing a calendar date requires the date system as an
 argument. Exporting a calendar date discards the fractional day and keeps
 the same validation rules as `to_ymd()`.

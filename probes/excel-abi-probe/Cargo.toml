@@ -1,6 +1,6 @@
 [package]
 name = "excel-abi-probe"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.100.0"
 license = "MIT OR Apache-2.0"
@@ -12,7 +12,7 @@ publish = false
 sdk-bindgen = ["dep:bindgen", "dep:cc", "dep:xlfn-sys"]
 
 [dependencies]
-xlfn-sys = { version = "=0.2.0", path = "../../crates/xlfn-sys", features = ["abi-probe"], optional = true }
+xlfn-sys = { version = "=0.2.1", path = "../../crates/xlfn-sys", features = ["abi-probe"], optional = true }
 
 [build-dependencies]
 bindgen = { version = "0.73.2", optional = true }

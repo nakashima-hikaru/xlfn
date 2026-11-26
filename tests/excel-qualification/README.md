@@ -55,7 +55,7 @@ argument separator where needed. Record build, bitness, PID, formulas,
 observed results, elapsed times, and any Excel error values.
 
 1. **Registration and async.** `=FRAMEWORK.VERSION()` returns fixture version
-   `0.2.0`. Enter `=FRAMEWORK.ASYNC.ADD(2,3)`; after calculation settles it
+   `0.3.0`. Enter `=FRAMEWORK.ASYNC.ADD(2,3)`; after calculation settles it
    returns 5. Change it to `=FRAMEWORK.ASYNC.ADD(-2,9)`; it must settle to 7.
    Repeat after re-enabling the add-in. This fast fixture verifies native
    delivery but cannot reliably hold a calculation open to prove cancellation

@@ -83,7 +83,7 @@ For example:
 
 ```toml
 [dependencies]
-xlfn = { version = "0.2", features = ["async-builtin"] }
+xlfn = { version = "0.3", features = ["async-builtin"] }
 ```
 
 Continue with [Create your first add-in](quick-start.md).

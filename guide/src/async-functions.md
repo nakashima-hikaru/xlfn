@@ -8,7 +8,7 @@ or formula-owned objects, see [Choosing a pattern](choosing-pattern.md).
 
 ```toml
 [dependencies]
-xlfn = { version = "0.2", features = ["async-builtin"] }
+xlfn = { version = "0.3", features = ["async-builtin"] }
 ```
 
 `async` provides native Excel transport, task lifecycle, cancellation, and the

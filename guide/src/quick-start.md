@@ -26,7 +26,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-xlfn = "0.2"
+xlfn = "0.3"
 ```
 
 The `crate-type = ["cdylib"]` setting instructs Cargo to produce a dynamic library

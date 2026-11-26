@@ -519,7 +519,7 @@ dependencies = [
 
 [[package]]
 name = "xlfn"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-task",
  "blake3",
@@ -555,11 +555,11 @@ dependencies = [
 
 [[package]]
 name = "xlfn-common"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "xlfn-e2e-fixture"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "xlfn",
 ]
@@ -586,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "xlfn-kernel"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crossbeam-utils",
  "parking_lot",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "xlfn-macros"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "xlfn-sys"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "smallvec",
  "static_assertions",

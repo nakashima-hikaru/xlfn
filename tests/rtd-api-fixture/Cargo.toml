@@ -15,4 +15,4 @@ streaming = ["framework/rtd"]
 objects = ["framework/handles"]
 
 [dependencies]
-framework = { package = "xlfn", version = "=0.2.0", path = "../../crates/xlfn" }
+framework = { package = "xlfn", version = "=0.3.0", path = "../../crates/xlfn" }

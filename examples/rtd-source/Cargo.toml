@@ -1,6 +1,6 @@
 [package]
 name = "rtd-source"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.100.0"
 license = "MIT OR Apache-2.0"
@@ -16,7 +16,7 @@ async-builtin = ["async", "xlfn/async-builtin"]
 crate-type = ["cdylib"]
 
 [dependencies]
-xlfn = { version = "=0.2.0", path = "../../crates/xlfn", features = ["rtd"] }
+xlfn = { version = "=0.3.0", path = "../../crates/xlfn", features = ["rtd"] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

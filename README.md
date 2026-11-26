@@ -59,7 +59,7 @@ Add these settings to `Cargo.toml`, using its existing `[dependencies]` section:
 crate-type = ["cdylib"]
 
 [dependencies]
-xlfn = "0.2.0"
+xlfn = "0.3.0"
 ```
 
 Replace `src/lib.rs` with:
