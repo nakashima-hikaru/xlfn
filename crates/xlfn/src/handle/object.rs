@@ -1003,7 +1003,7 @@ mod tests {
         let trace = triomphe::Arc::new(crate::shutdown_trace::ShutdownTraceRecorder::new());
         trace
             .begin(
-                1,
+                std::num::NonZeroU64::MIN,
                 crate::shutdown_trace::ShutdownResources::opened(0, 0, false),
             )
             .unwrap();

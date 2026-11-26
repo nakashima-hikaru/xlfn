@@ -8,7 +8,6 @@
 use crate::XllError;
 use crate::addin_impl::Addin;
 use crate::boundary::{fail_stop_invariant, report_boundary_error};
-use crate::generation::RuntimeGeneration;
 use crate::panic_boundary::catch_no_unwind;
 use crate::runtime::Runtime;
 use crate::runtime::transactions::{RemovalControl, RemovalSuccess};
@@ -123,7 +122,7 @@ pub(crate) fn quarantine_runtime_resources<A: Addin>(
         let quarantined = runtime.quarantine_snapshot();
         if let Some((generation, reason)) = quarantined.last() {
             tracing::error!(
-                generation = generation.map_or(0, RuntimeGeneration::get),
+                generation = generation.map_or(0, |generation| generation.get().get()),
                 ?reason,
                 resource_count = quarantined.len(),
                 "runtime resources retained in quarantine vault"

@@ -190,7 +190,7 @@ mod tests {
     }
 
     fn published_receiver(drops: Arc<AtomicUsize>) -> LifecycleState<PayloadAddin> {
-        let generation = RuntimeGeneration::new(1).unwrap();
+        let generation = RuntimeGeneration::ONE;
         let root = PublishedOwner::new(ExecutionGeneration::<PayloadAddin> {
             id: generation,
             shared_state: DropProbe(drops),
@@ -351,7 +351,7 @@ mod tests {
         let epoch = original.id();
         let incoming = authority();
         let incoming_epoch = incoming.id();
-        let attempt = RemovalAttemptId::new(7).unwrap();
+        let attempt = const { RemovalAttemptId::try_new(7).unwrap() };
         let state = LifecycleState::<()>::Quarantined(CloseResources::Claimed(ClaimedClose {
             payload: ClosePayload::Empty,
             claim: RemovalClaimState::Outstanding(OutstandingModuleClaim {
@@ -387,7 +387,7 @@ mod tests {
     fn finalizing_and_foreign_access_rejection_preserve_the_target() {
         let issuer = LifecycleCoordinator::<()>::new();
         let other = LifecycleCoordinator::<()>::new();
-        let attempt = RemovalAttemptId::new(11).unwrap();
+        let attempt = const { RemovalAttemptId::try_new(11).unwrap() };
         {
             let mut access = issuer.access();
             access.transition(|core| {

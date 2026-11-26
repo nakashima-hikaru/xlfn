@@ -247,7 +247,7 @@ fn runtime_with_source<S: RtdSource>(
     source: S,
     limits: RtdLimits,
 ) -> (SubscriptionRuntime<S::Subscription>, RtdSourceHandle<S>) {
-    let generation = RuntimeGeneration::new(1).unwrap();
+    let generation = RuntimeGeneration::ONE;
     let registration = SourceRegistration::<S::Subscription>::new(generation);
     let handle = registration.register(source).unwrap();
     (
@@ -719,7 +719,7 @@ fn miri_sender_survives_runtime_drop_without_live_publication_capability() {
 
 #[test]
 fn runtime_worker_limit_is_shared_by_sources_and_released_only_after_join() {
-    let generation = RuntimeGeneration::new(1).unwrap();
+    let generation = RuntimeGeneration::ONE;
     let registration =
         SourceRegistration::<RtdMultiplexedSubscription<i32, RtdLatest>>::new(generation);
     let (first_events_tx, first_events_rx) = mpsc::channel();
@@ -849,7 +849,7 @@ fn close_racing_admitted_setup_prevents_late_worker_start_and_revokes_partial_ch
 
 #[test]
 fn blocking_and_multiplexed_adapters_share_the_runtime_worker_budget() {
-    let generation = RuntimeGeneration::new(1).unwrap();
+    let generation = RuntimeGeneration::ONE;
     let registration = SourceRegistration::<MixedAdapterSubscriptions>::new(generation);
     let (blocking_tx, blocking_rx) = mpsc::channel();
     let blocking = registration
@@ -945,7 +945,7 @@ fn first_registration_exists_before_an_immediately_completing_producer_runs() {
 
 #[test]
 fn initial_worker_budget_rejection_returns_the_only_source_slot_for_retry() {
-    let generation = RuntimeGeneration::new(1).unwrap();
+    let generation = RuntimeGeneration::ONE;
     let registration =
         SourceRegistration::<RtdMultiplexedSubscription<i32, RtdLatest>>::new(generation);
     let (first_events_tx, first_events_rx) = mpsc::channel();

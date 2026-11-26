@@ -46,7 +46,6 @@ pub(crate) const RTD_MULTI: DiagnosticId = from_ascii8(*b"RTDMULTI");
 pub(crate) const RTD_DISPATCH: DiagnosticId = from_ascii8(*b"RTDDISPT");
 pub(crate) const GIT_NULL: DiagnosticId = from_ascii8(*b"GIT_NULL");
 pub(crate) const ATTEMPT_OVERFLOW: DiagnosticId = from_ascii8(*b"ATTMOVFL");
-pub(crate) const ATTEMPT_ZERO: DiagnosticId = from_ascii8(*b"ATTMZERO");
 pub(crate) const CLOSE_LEASE_GATE: DiagnosticId = from_ascii8(*b"CLLOSEGE");
 pub(crate) const CLOSE_CERTIFICATE: DiagnosticId = from_ascii8(*b"CLOSECER");
 pub(crate) const CLOSE_RUNTIME: DiagnosticId = from_ascii8(*b"CLOSERUN");

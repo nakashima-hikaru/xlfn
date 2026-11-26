@@ -123,7 +123,7 @@ fn observed_runtime(
     RtdSourceHandle<ObservedSource>,
 ) {
     let (arena, source) = SourceArena::with_source(
-        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        crate::generation::RuntimeGeneration::ONE,
         ObservedSource {
             observation: Arc::clone(observation),
         },

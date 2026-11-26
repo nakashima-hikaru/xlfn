@@ -1378,7 +1378,7 @@ impl<A: crate::Addin> LifecycleCore<A> {
     }
 
     #[cfg(test)]
-    fn set_next_lifecycle_attempt_for_test(&mut self, value: u64) {
+    fn set_next_lifecycle_attempt_for_test(&mut self, value: std::num::NonZeroU64) {
         self.sequence = mem::take(&mut self.sequence).seeded_next_open_for_test(value);
     }
 }
@@ -1504,7 +1504,7 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
     }
 
     /// Monotonic identity boundary for residency held across an opening call.
-    pub(crate) fn next_open_sequence(&self) -> u64 {
+    pub(crate) fn next_open_sequence(&self) -> std::num::NonZeroU64 {
         self.core.sequence.next_open_sequence()
     }
 
@@ -1570,7 +1570,7 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_next_lifecycle_attempt_for_test(&mut self, value: u64) {
+    pub(crate) fn set_next_lifecycle_attempt_for_test(&mut self, value: std::num::NonZeroU64) {
         self.transition(|core| {
             core.set_next_lifecycle_attempt_for_test(value);
             ((), TransitionEffect::Keep)
@@ -2021,9 +2021,6 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     let diagnostic_id = match rejection {
                         OpenClaimError::Unavailable => crate::diagnostics::catalog::OPEN_PHASE,
                         OpenClaimError::Exhausted => crate::diagnostics::catalog::ATTEMPT_OVERFLOW,
-                        OpenClaimError::InvalidSequence => {
-                            crate::diagnostics::catalog::ATTEMPT_ZERO
-                        }
                     };
                     return (
                         Err(crate::error::construct::internal(diagnostic_id)),

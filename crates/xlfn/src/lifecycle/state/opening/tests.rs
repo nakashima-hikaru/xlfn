@@ -6,6 +6,7 @@ use super::OpenStart;
 use crate::XllError;
 use crate::generation::{RemovalAttemptId, RemovalEpoch};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
+use std::num::NonZeroU64;
 use std::sync::atomic::Ordering;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -13,7 +14,7 @@ struct Snapshot {
     canonical_phase: LifecyclePhase,
     projected_phase: LifecyclePhase,
     host_intent: HostLifecycleIntent,
-    next_open_sequence: u64,
+    next_open_sequence: NonZeroU64,
     removal_epoch: u64,
     removal_attempt: Option<RemovalAttemptId>,
     publication_empty: bool,
@@ -42,14 +43,14 @@ fn miri_idle_start_keeps_its_lock_and_abandonment_quarantines_only_its_issuer() 
         for _ in 0..9 {
             core.sequence.request_removal().unwrap();
         }
-        core.set_next_lifecycle_attempt_for_test(41);
+        core.set_next_lifecycle_attempt_for_test(NonZeroU64::new(41).unwrap());
         ((), TransitionEffect::Keep)
     });
 
     let start = OpenStart::acquire(&issuer, RemovalEpoch::new(9)).unwrap();
-    assert_eq!(start.attempt().get(), 41);
+    assert_eq!(start.attempt().get().get(), 41);
     assert_eq!(start.access().open_attempt(), Some(start.attempt()));
-    assert_eq!(start.access().next_open_sequence(), 42);
+    assert_eq!(start.access().next_open_sequence().get(), 42);
     assert_eq!(start.access().host_intent(), HostLifecycleIntent::None);
     assert_eq!(start.access().phase(), LifecyclePhase::Opening);
     assert_eq!(
@@ -63,7 +64,7 @@ fn miri_idle_start_keeps_its_lock_and_abandonment_quarantines_only_its_issuer() 
     let after = snapshot(&issuer);
     assert_eq!(after.canonical_phase, LifecyclePhase::Quarantined);
     assert_eq!(after.projected_phase, LifecyclePhase::Quarantined);
-    assert_eq!(after.next_open_sequence, 42);
+    assert_eq!(after.next_open_sequence.get(), 42);
     assert!(after.publication_empty);
     assert_eq!(snapshot(&other), other_before);
     assert!(OpenStart::acquire(&issuer, RemovalEpoch::new(9)).is_err());
@@ -72,7 +73,7 @@ fn miri_idle_start_keeps_its_lock_and_abandonment_quarantines_only_its_issuer() 
 #[test]
 fn miri_closed_finalization_cannot_be_mistaken_for_idle_before_start() {
     let coordinator = LifecycleCoordinator::<()>::new();
-    let removal = RemovalAttemptId::new(7).unwrap();
+    let removal = const { RemovalAttemptId::try_new(7).unwrap() };
     coordinator.access().transition(|core| {
         core.state = LifecycleState::Stopping(StoppingState::Finalizing(StopRecord::new(
             removal,
@@ -83,7 +84,7 @@ fn miri_closed_finalization_cannot_be_mistaken_for_idle_before_start() {
         for _ in 0..3 {
             core.sequence.request_removal().unwrap();
         }
-        core.set_next_lifecycle_attempt_for_test(17);
+        core.set_next_lifecycle_attempt_for_test(NonZeroU64::new(17).unwrap());
         ((), TransitionEffect::Keep)
     });
     let before = snapshot(&coordinator);
@@ -153,7 +154,7 @@ fn miri_stale_removal_epoch_is_rejected_without_starting_or_consuming_an_attempt
         for _ in 0..12 {
             core.sequence.request_removal().unwrap();
         }
-        core.set_next_lifecycle_attempt_for_test(23);
+        core.set_next_lifecycle_attempt_for_test(NonZeroU64::new(23).unwrap());
         ((), TransitionEffect::Keep)
     });
     let before = snapshot(&coordinator);
@@ -178,7 +179,7 @@ fn miri_attempt_exhaustion_preserves_closed_intent_and_canonical_state() {
         for _ in 0..5 {
             core.sequence.request_removal().unwrap();
         }
-        core.set_next_lifecycle_attempt_for_test(u64::MAX);
+        core.set_next_lifecycle_attempt_for_test(NonZeroU64::MAX);
         ((), TransitionEffect::Keep)
     });
     let before = snapshot(&coordinator);

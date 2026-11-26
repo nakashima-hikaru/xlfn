@@ -1525,7 +1525,7 @@ mod tests {
         server
             .attach_update_notifier(RtdNotifier::for_test(std::sync::Arc::clone(&notifier)))
             .unwrap();
-        let generation = ConnectionGeneration::new(1).unwrap();
+        let generation = ConnectionGeneration::ONE;
         for id in 1..=2 {
             let topic = TopicId(id);
             publish
@@ -1617,7 +1617,7 @@ mod tests {
                 .attach_update_notifier(RtdNotifier::for_test(std::sync::Arc::clone(&notifier)))
                 .unwrap();
             let topic = TopicId(1);
-            let generation = ConnectionGeneration::new(1).unwrap();
+            let generation = ConnectionGeneration::ONE;
             publish
                 .reserve_connection(topic, SubscriptionId(1), generation)
                 .unwrap();
@@ -1821,12 +1821,13 @@ mod tests {
 
         static INGRESS: ExportIngress = ExportIngress::new();
         INGRESS.begin_opening();
-        let generation = crate::generation::RuntimeGeneration::new(1).unwrap();
+        const GENERATION: crate::generation::RuntimeGeneration =
+            crate::generation::RuntimeGeneration::ONE;
         let runtime = SubscriptionRuntime::<RtdSubscriptionHost>::with_host(
-            generation,
+            GENERATION,
             RtdLimits::standard(),
             RtdSubscriptionHost::production(&INGRESS),
-            SourceArena::empty(generation),
+            SourceArena::empty(GENERATION),
         );
         let server = runtime.register_test_server(1);
         let publish = &server.test_server().publish;

@@ -227,8 +227,7 @@ impl RtdUpdate {
         Self {
             sequence: 0,
             topic_id,
-            connection_generation: ConnectionGeneration::new(1)
-                .expect("test connection generation is non-zero"),
+            connection_generation: ConnectionGeneration::ONE,
             buffer: BufferIndex::First,
             value: value.into_stored().expect("test RTD value is valid"),
         }
@@ -440,7 +439,7 @@ mod typed_sink_tests {
         let server = runtime.register_test_server(1);
         let core = server.test_server().publish.as_ref();
         let topic = TopicId(1);
-        let generation = ConnectionGeneration::new(1).unwrap();
+        let generation = ConnectionGeneration::ONE;
         core.reserve_connection(topic, SubscriptionId(1), generation)
             .unwrap();
         core.install_connection(topic, generation).unwrap();
@@ -479,8 +478,11 @@ mod typed_sink_tests {
         batch.complete(RefreshOutcome::Delivered).unwrap();
         assert!(notifier.calls.load(Ordering::Acquire) >= 2);
 
-        let stale =
-            RtdSubscriptionHost::publish_sink(core, topic, ConnectionGeneration::new(2).unwrap());
+        let stale = RtdSubscriptionHost::publish_sink(
+            core,
+            topic,
+            const { ConnectionGeneration::try_new(2).unwrap() },
+        );
         assert!(matches!(
             stale.publish_stored(StoredRtdValue::Integer(10)),
             Err(XllError::Closing)

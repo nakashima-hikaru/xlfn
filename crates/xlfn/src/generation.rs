@@ -58,20 +58,20 @@ pub(crate) struct BindingGeneration(NonZeroU64);
 impl BindingGeneration {
     pub(crate) const ONE: Self = Self(NonZeroU64::MIN);
 
-    pub(crate) const fn new(raw: u64) -> Option<Self> {
+    pub(crate) const fn try_new(raw: u64) -> Option<Self> {
         match NonZeroU64::new(raw) {
             Some(raw) => Some(Self(raw)),
             None => None,
         }
     }
 
-    pub(crate) const fn get(self) -> u64 {
-        self.0.get()
+    pub(crate) const fn get(self) -> NonZeroU64 {
+        self.0
     }
 
     pub(crate) const fn next(self) -> Option<Self> {
-        match self.0.get().checked_add(1) {
-            Some(raw) => Self::new(raw),
+        match self.0.checked_add(1) {
+            Some(raw) => Some(Self(raw)),
             None => None,
         }
     }
@@ -89,14 +89,7 @@ impl TopicGeneration {
     pub(crate) const ONE: Self = Self(NonZeroU64::MIN);
 
     pub(crate) const fn next(self) -> Option<Self> {
-        match self.0.get().checked_add(1) {
-            Some(raw) => Self::new(raw),
-            None => None,
-        }
-    }
-
-    const fn new(raw: u64) -> Option<Self> {
-        match NonZeroU64::new(raw) {
+        match self.0.checked_add(1) {
             Some(raw) => Some(Self(raw)),
             None => None,
         }

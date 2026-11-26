@@ -18,18 +18,23 @@ pub(crate) struct FormulaLifetimeGeneration(NonZeroU64);
 
 #[cfg(any(target_os = "windows", test))]
 impl FormulaLifetimeGeneration {
-    pub(crate) const fn new(raw: u64) -> Option<Self> {
+    pub(crate) const fn try_new(raw: u64) -> Option<Self> {
         match NonZeroU64::new(raw) {
             Some(raw) => Some(Self(raw)),
             None => None,
         }
     }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) const fn from_non_zero(raw: NonZeroU64) -> Self {
+        Self(raw)
+    }
 }
 
 #[cfg(all(feature = "handles", any(test, feature = "refinement")))]
 impl FormulaLifetimeGeneration {
-    pub(crate) const fn get(self) -> u64 {
-        self.0.get()
+    pub(crate) const fn get(self) -> NonZeroU64 {
+        self.0
     }
 }
 

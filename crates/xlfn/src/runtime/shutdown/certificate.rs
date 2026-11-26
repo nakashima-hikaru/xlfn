@@ -585,8 +585,8 @@ mod tests {
         let (mut owner, generation, epoch) = retired(&runtime);
         let lifecycle = runtime.lifecycle_control();
         let proof = QuiescenceProof::for_test(Some(generation), epoch);
-        let next_attempt = RemovalAttemptId::new(u64::MAX).unwrap();
-        let next_generation = RuntimeGeneration::new(generation.get() + 1).unwrap();
+        let next_attempt = const { RemovalAttemptId::try_new(u64::MAX).unwrap() };
+        let next_generation = generation.checked_next().unwrap();
         for mismatch in 0..3 {
             let mut authorization = retirement(&runtime, &owner, generation, epoch);
             match mismatch {

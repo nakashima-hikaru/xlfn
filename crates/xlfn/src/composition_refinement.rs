@@ -10,23 +10,23 @@ pub(crate) enum CompositionEvent {
     BeginOpen {
         #[serde(rename = "sampledEpoch")]
         sampled_epoch: u64,
-        attempt: u64,
+        attempt: std::num::NonZeroU64,
     },
     FinishOpenRejectedByClose {
-        attempt: u64,
+        attempt: std::num::NonZeroU64,
     },
     FailOpen {
-        attempt: u64,
+        attempt: std::num::NonZeroU64,
     },
     QuarantineOpen {
-        attempt: u64,
+        attempt: std::num::NonZeroU64,
         reason: ShutdownFailure,
     },
     RequestFinalClose,
     AcquireFinalCloseOwner,
     AcquireOpenRollbackOwner,
     CommitOpen {
-        attempt: u64,
+        attempt: std::num::NonZeroU64,
         resources: ShutdownResources,
     },
     LiftShutdown(CertificateEvent),
@@ -198,6 +198,10 @@ mod tests {
         document["outcome"].as_str().unwrap().to_owned()
     }
 
+    fn nz(value: u64) -> std::num::NonZeroU64 {
+        std::num::NonZeroU64::new(value).unwrap()
+    }
+
     #[test]
     fn owned_quarantine_stays_in_progress_until_the_observed_owner_releases() {
         let trace = CompositionTrace::new();
@@ -214,14 +218,14 @@ mod tests {
     fn success_observed_after_quarantine_is_not_hidden_from_the_checker() {
         let trace = CompositionTrace::new();
         trace.record(CompositionEvent::QuarantineOpen {
-            attempt: 1,
+            attempt: nz(1),
             reason: ShutdownFailure::AddinShutdownFailed,
         });
         trace.mark_return_pending();
         trace.finish_return();
         assert_eq!(outcome(&trace), "returned_success");
         trace.record(CompositionEvent::QuarantineOpen {
-            attempt: 1,
+            attempt: nz(1),
             reason: ShutdownFailure::AddinShutdownFailed,
         });
         assert_eq!(outcome(&trace), "returned_success");
@@ -248,7 +252,7 @@ mod tests {
         let trace = CompositionTrace::new();
         trace.mark_return_pending();
         trace.record(CompositionEvent::QuarantineOpen {
-            attempt: 1,
+            attempt: nz(1),
             reason: ShutdownFailure::AddinShutdownFailed,
         });
         trace.finish_return();
@@ -298,7 +302,7 @@ mod tests {
     fn success_observed_before_failure_is_not_hidden_from_the_checker() {
         for failure in [
             CompositionEvent::QuarantineOpen {
-                attempt: 1,
+                attempt: nz(1),
                 reason: ShutdownFailure::AddinShutdownFailed,
             },
             CompositionEvent::LiftShutdown(CertificateEvent::Quarantine(
@@ -324,7 +328,7 @@ mod tests {
         for (failure, expected) in [
             (
                 CompositionEvent::QuarantineOpen {
-                    attempt: 2,
+                    attempt: nz(2),
                     reason: ShutdownFailure::AddinShutdownFailed,
                 },
                 "quarantined",
@@ -347,7 +351,7 @@ mod tests {
             trace.finish_return();
             trace.record(CompositionEvent::BeginOpen {
                 sampled_epoch: 1,
-                attempt: 2,
+                attempt: nz(2),
             });
             assert_eq!(outcome(&trace), "in_progress");
             trace.record(failure);

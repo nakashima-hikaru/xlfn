@@ -148,14 +148,15 @@ where
     assert!((1..=4096).contains(&count));
     assert!(count <= max_active);
     assert_ne!(std::mem::size_of::<InlineBenchmarkSubscription>(), 0);
-    let generation = crate::generation::RuntimeGeneration::new(1).unwrap();
-    let registration = crate::subscription::SourceRegistration::<E>::new(generation);
+    const GENERATION: crate::generation::RuntimeGeneration =
+        crate::generation::RuntimeGeneration::ONE;
+    let registration = crate::subscription::SourceRegistration::<E>::new(GENERATION);
     let source_handle = registration.register(source).unwrap();
     let limits = crate::subscription::RtdLimits::standard().with_max_active(
         crate::subscription::RtdCapacity::disabled_if_zero(max_active),
     );
     let runtime = PublishedOwner::new(crate::subscription::SubscriptionRuntime::<E>::with_host(
-        generation,
+        GENERATION,
         limits,
         crate::excel_rtd::RtdSubscriptionHost::default(),
         registration.finish(),
@@ -164,7 +165,7 @@ where
     // after the callback, all subscriptions and the server handle are dropped.
     let server_handle = unsafe {
         runtime
-            .register_server(crate::subscription::ServerGeneration::new(1).unwrap())
+            .register_server(crate::subscription::ServerGeneration::ONE)
             .unwrap()
     };
     let topics: Vec<_> = (0..count)
@@ -174,12 +175,12 @@ where
     if adapter_only {
         let source = runtime.sources.resolve(source_handle.id).unwrap();
         let server = runtime
-            .resolve_server(crate::subscription::ServerGeneration::new(1).unwrap())
+            .resolve_server(crate::subscription::ServerGeneration::ONE)
             .unwrap();
         let sink = crate::excel_rtd::RtdSubscriptionHost::publish_sink(
             server.publish.as_ref(),
             crate::subscription::TopicId(1),
-            crate::generation::ConnectionGeneration::new(1).unwrap(),
+            crate::generation::ConnectionGeneration::ONE,
         );
         let mut subscriptions = Vec::with_capacity(count);
         let mut operation = || {
@@ -342,8 +343,7 @@ impl RtdPrepareBenchmark {
     }
 
     pub fn new(count: usize, parts: usize, existing: bool) -> Self {
-        let generation =
-            crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero");
+        let generation = crate::generation::RuntimeGeneration::ONE;
         let registration = crate::subscription::SourceRegistration::new(generation);
         let source = registration
             .register(BenchmarkRtdSource::<f64> {
@@ -447,8 +447,7 @@ impl Default for RtdPublishNumberBenchmark {
 
 impl RtdPublishNumberBenchmark {
     pub fn new() -> Self {
-        let generation =
-            crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero");
+        let generation = crate::generation::RuntimeGeneration::ONE;
         let registration = crate::subscription::SourceRegistration::new(generation);
         let sink_slot = Arc::new(crate::sync::Mutex::new(None));
         let source = registration
@@ -465,10 +464,7 @@ impl RtdPublishNumberBenchmark {
         // uses end before runtime teardown.
         let server = unsafe {
             runtime
-                .register_server(
-                    crate::subscription::ServerGeneration::new(1)
-                        .expect("non-zero test server generation"),
-                )
+                .register_server(crate::subscription::ServerGeneration::ONE)
                 .expect("server registration must succeed")
         };
         let topic = crate::subscription::RtdTopic::new(["BENCH", "NUMBER"])
@@ -538,8 +534,7 @@ impl RtdPublishStringBenchmark {
     }
 
     fn with_values(first_value: String, second_value: String) -> Self {
-        let generation =
-            crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero");
+        let generation = crate::generation::RuntimeGeneration::ONE;
         let registration = crate::subscription::SourceRegistration::new(generation);
         let sink_slot = Arc::new(crate::sync::Mutex::new(None));
         let source = registration
@@ -556,10 +551,7 @@ impl RtdPublishStringBenchmark {
         // uses end before runtime teardown.
         let server = unsafe {
             runtime
-                .register_server(
-                    crate::subscription::ServerGeneration::new(1)
-                        .expect("non-zero test server generation"),
-                )
+                .register_server(crate::subscription::ServerGeneration::ONE)
                 .expect("server registration must succeed")
         };
         let topic = crate::subscription::RtdTopic::new(["BENCH", "STRING"])
@@ -946,8 +938,7 @@ fn build_refresh_topics<T>(
 where
     T: crate::subscription::IntoRtdValue + Clone + Send + Sync + 'static,
 {
-    let generation =
-        crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero");
+    let generation = crate::generation::RuntimeGeneration::ONE;
     let registration = crate::subscription::SourceRegistration::new(generation);
     let registered = topic_ids
         .iter()
@@ -968,10 +959,7 @@ where
     // uses end before runtime teardown.
     let server = unsafe {
         runtime
-            .register_server(
-                crate::subscription::ServerGeneration::new(1)
-                    .expect("non-zero benchmark server generation"),
-            )
+            .register_server(crate::subscription::ServerGeneration::ONE)
             .expect("server registration must succeed")
     };
     let sinks = registered
@@ -1036,9 +1024,8 @@ pub struct RtdChannelPipelineBenchmark {
 impl RtdChannelPipelineBenchmark {
     pub fn new(capacity: usize, producers: usize) -> Self {
         assert!(producers > 0);
-        let registration = crate::subscription::SourceRegistration::new(
-            crate::generation::RuntimeGeneration::new(1).unwrap(),
-        );
+        let registration =
+            crate::subscription::SourceRegistration::new(crate::generation::RuntimeGeneration::ONE);
         let (sender_tx, sender_rx) = std::sync::mpsc::sync_channel(1);
         let source = registration
             .register(crate::subscription::RtdChannelSource::new(
@@ -1061,7 +1048,7 @@ impl RtdChannelPipelineBenchmark {
         // SAFETY: PublishedOwner keeps raw handles valid across fixture owner moves.
         let server = unsafe {
             runtime
-                .register_server(crate::subscription::ServerGeneration::new(1).unwrap())
+                .register_server(crate::subscription::ServerGeneration::ONE)
                 .unwrap()
         };
         let prepared = runtime
@@ -1199,7 +1186,7 @@ unsafe impl crate::subscription::RtdSource for CatalogAllocationSource {
 pub fn rtd_source_catalog_allocation_probe(static_catalog: bool, count: usize) {
     use crate::generation::RuntimeGeneration;
     use crate::subscription::SourceRegistration;
-    let generation = RuntimeGeneration::new(1).unwrap();
+    let generation = RuntimeGeneration::ONE;
     if !static_catalog {
         let registration = SourceRegistration::<()>::new(generation);
         for index in 0..count {

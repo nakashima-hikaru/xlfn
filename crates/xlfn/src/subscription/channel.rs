@@ -1692,7 +1692,7 @@ mod tests {
         let (arena, source, captured, _) =
             crate::subscription::tests::publishing_source::<i32>(None);
         let runtime = Arc::new(SubscriptionRuntime::with_host(
-            crate::generation::RuntimeGeneration::new(1).unwrap(),
+            crate::generation::RuntimeGeneration::ONE,
             limits,
             Default::default(),
             arena,
@@ -2788,7 +2788,7 @@ mod tests {
         });
         let (arena, source) =
             crate::subscription::SourceArena::<RtdChannelSubscription>::with_source(
-                crate::generation::RuntimeGeneration::new(1).unwrap(),
+                crate::generation::RuntimeGeneration::ONE,
                 source,
             )
             .unwrap();

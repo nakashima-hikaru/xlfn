@@ -55,7 +55,7 @@ impl<A: Addin> ResidencyRelease<'_, A> {
 pub(crate) struct OpenResidency<'a, A: Addin, P: UnloadPolicy<A>> {
     runtime: &'a Runtime<A, P>,
     acquisition: ResidencyAcquisition,
-    next_open_sequence: u64,
+    next_open_sequence: std::num::NonZeroU64,
 }
 
 impl<'a, A: Addin, P: UnloadPolicy<A>> OpenResidency<'a, A, P> {
@@ -108,7 +108,7 @@ impl<'a, A: Addin, P: UnloadPolicy<A>> OpenResidency<'a, A, P> {
         result
     }
 
-    fn release_failed(self, expected_sequence: u64) {
+    fn release_failed(self, expected_sequence: std::num::NonZeroU64) {
         let ResidencyAcquisition::NewlyAcquired(id) = self.acquisition else {
             return;
         };

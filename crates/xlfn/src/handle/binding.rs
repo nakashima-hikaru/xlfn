@@ -386,7 +386,7 @@ mod tests {
         let token = registry.insert_pending(&mut Some(1_usize)).unwrap();
         registry.remove::<usize>(&token).unwrap();
         registry.bindings.write_state().slots[0].next_generation =
-            BindingGeneration::new(u64::MAX).unwrap();
+            const { BindingGeneration::try_new(u64::MAX).unwrap() };
         let token = registry.insert_pending(&mut Some(2_usize)).unwrap();
         registry.remove::<usize>(&token).unwrap();
         assert!(matches!(

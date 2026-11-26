@@ -109,8 +109,7 @@ pub(super) static ACTIVE_SERVER: Mutex<Option<ActiveServer>> = Mutex::new(None);
 pub(super) static LAST_SERVER_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 fn lifetime_generation(generation: ServerGeneration) -> FormulaLifetimeGeneration {
-    FormulaLifetimeGeneration::new(generation.get())
-        .expect("an active Excel RTD server has a non-zero lifetime generation")
+    FormulaLifetimeGeneration::from_non_zero(generation.get())
 }
 
 fn allocate_server_generation(last_generation: &AtomicU64) -> Option<ServerGeneration> {
@@ -122,7 +121,7 @@ fn allocate_server_generation(last_generation: &AtomicU64) -> Option<ServerGener
         })
         .ok()
         .and_then(|last| last.checked_add(1))
-        .and_then(ServerGeneration::new)
+        .and_then(ServerGeneration::try_new)
 }
 
 #[cfg(test)]
@@ -1920,7 +1919,7 @@ mod tests {
 
         assert_eq!(
             allocate_server_generation(&counter),
-            ServerGeneration::new(u64::MAX)
+            ServerGeneration::try_new(u64::MAX)
         );
         assert_eq!(counter.load(Ordering::Acquire), u64::MAX);
 

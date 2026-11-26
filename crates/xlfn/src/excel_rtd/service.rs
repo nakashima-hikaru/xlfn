@@ -167,7 +167,7 @@ mod tests {
     use std::thread;
 
     fn generation() -> RuntimeGeneration {
-        RuntimeGeneration::new(1).expect("test generation is non-zero")
+        RuntimeGeneration::ONE
     }
 
     #[test]

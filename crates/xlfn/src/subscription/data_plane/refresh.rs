@@ -670,7 +670,10 @@ mod tests {
             .unwrap();
         let trace = triomphe::Arc::new(ShutdownTraceRecorder::new());
         trace
-            .begin(1, ShutdownResources::opened(0, 0, false))
+            .begin(
+                std::num::NonZeroU64::MIN,
+                ShutdownResources::opened(0, 0, false),
+            )
             .unwrap();
         runtime.set_trace_sink(triomphe::Arc::clone(&trace));
         let publish = &server.test_server().publish;

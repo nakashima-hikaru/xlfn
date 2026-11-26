@@ -181,7 +181,7 @@ mod tests {
         let attempt = state
             .begin_open(&mut sequence, RemovalEpoch::new(0), String::from("owner"))
             .unwrap();
-        let stale = OpenAttemptId::new(attempt.get() + 1).unwrap();
+        let stale = attempt.checked_next().unwrap();
         assert!(
             state
                 .commit_open::<()>(stale, |_| panic!("do not classify stale owner"))

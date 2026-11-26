@@ -533,7 +533,7 @@ impl TraceOutcome {
 #[cfg_attr(any(test, feature = "refinement"), serde(untagged))]
 pub(crate) enum ShutdownTrace {
     Committed {
-        generation: u64,
+        generation: std::num::NonZeroU64,
         initial: Box<ShutdownResources>,
         activities: Vec<ActivityEvent>,
         certificates: Vec<CertificateEvent>,
@@ -544,7 +544,7 @@ pub(crate) enum ShutdownTrace {
     /// available. This lifecycle terminal observation cannot certify unloading.
     OpenQuarantine {
         initial: &'static str,
-        attempt: u64,
+        attempt: std::num::NonZeroU64,
         reason: ShutdownFailure,
         outcome: &'static str,
     },
@@ -552,14 +552,12 @@ pub(crate) enum ShutdownTrace {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TraceError {
-    InvalidGeneration,
     SessionAlreadyActive,
 }
 
 impl fmt::Display for TraceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidGeneration => formatter.write_str("shutdown trace generation is zero"),
             Self::SessionAlreadyActive => {
                 formatter.write_str("shutdown trace session is already active")
             }
@@ -570,7 +568,7 @@ impl fmt::Display for TraceError {
 const MAX_TRACE_EVENTS: usize = 16_384;
 
 struct TraceSession {
-    generation: u64,
+    generation: std::num::NonZeroU64,
     initial: ShutdownResources,
     activities: Vec<ActivityEvent>,
     diagnostic_checkpoint: usize,
@@ -584,7 +582,7 @@ enum RecorderState {
     Recording(TraceSession),
     Terminal(TraceSession),
     OpenQuarantined {
-        attempt: u64,
+        attempt: std::num::NonZeroU64,
         reason: ShutdownFailure,
     },
 }
@@ -615,12 +613,9 @@ impl ShutdownTraceRecorder {
 
     pub(crate) fn begin(
         &self,
-        generation: u64,
+        generation: std::num::NonZeroU64,
         initial: ShutdownResources,
     ) -> Result<(), TraceError> {
-        if generation == 0 {
-            return Err(TraceError::InvalidGeneration);
-        }
         let mut state = self.state.lock();
         if matches!(*state, RecorderState::Recording(_)) {
             return Err(TraceError::SessionAlreadyActive);
@@ -638,7 +633,7 @@ impl ShutdownTraceRecorder {
     }
 
     #[cfg(any(test, feature = "refinement"))]
-    pub(crate) fn quarantine_open(&self, attempt: u64, reason: ShutdownFailure) {
+    pub(crate) fn quarantine_open(&self, attempt: std::num::NonZeroU64, reason: ShutdownFailure) {
         // Initialization never started a committed shutdown session. Replace a
         // previous generation's terminal trace with this attempt's actual
         // terminal observation, without inventing a resource snapshot.
@@ -813,11 +808,15 @@ mod tests {
         ShutdownTraceRecorder::new()
     }
 
+    fn nz(value: u64) -> std::num::NonZeroU64 {
+        std::num::NonZeroU64::new(value).unwrap()
+    }
+
     #[test]
     fn recorder_preserves_wire_events_without_replaying_semantics() {
         let recorder = recorder();
         recorder
-            .begin(42, ShutdownResources::opened(0, 0, false))
+            .begin(nz(42), ShutdownResources::opened(0, 0, false))
             .unwrap();
         recorder.record(ShutdownEvent::BeginClose);
         recorder.record(ShutdownEvent::FinishClose);
@@ -832,7 +831,7 @@ mod tests {
     fn terminal_observation_stops_recording() {
         let recorder = recorder();
         recorder
-            .begin(42, ShutdownResources::opened(0, 0, false))
+            .begin(nz(42), ShutdownResources::opened(0, 0, false))
             .unwrap();
         recorder.record(ShutdownEvent::Quarantine(ShutdownFailure::BoundaryPanic));
         recorder.record(ShutdownEvent::LeaveExternal {
@@ -851,7 +850,7 @@ mod tests {
         let recorder = recorder();
         for generation in 1..=32 {
             recorder
-                .begin(generation, ShutdownResources::opened(0, 0, false))
+                .begin(nz(generation), ShutdownResources::opened(0, 0, false))
                 .unwrap();
             let barrier = std::sync::Barrier::new(8);
             std::thread::scope(|scope| {
@@ -877,7 +876,7 @@ mod tests {
             else {
                 panic!("terminal observations must retain the completed trace");
             };
-            assert_eq!(recorded_generation, generation);
+            assert_eq!(recorded_generation, nz(generation));
             assert_eq!(certificates.len(), 1);
             let expected = match certificates[0] {
                 CertificateEvent::Quarantine(_) => "quarantined",
@@ -894,7 +893,7 @@ mod tests {
         let recorder = recorder();
         let id = ActivityId::fresh();
         recorder
-            .begin(42, ShutdownResources::opened(0, 0, false))
+            .begin(nz(42), ShutdownResources::opened(0, 0, false))
             .unwrap();
         recorder.record(ShutdownEvent::LeaveCall { id });
         recorder.record(ShutdownEvent::EnterCall { id });
@@ -916,7 +915,7 @@ mod tests {
         let mut initial = ShutdownResources::opened(0, 0, false);
         initial.diagnostics_pending = 1;
         initial.diagnostics_running = true;
-        recorder.begin(42, initial).unwrap();
+        recorder.begin(nz(42), initial).unwrap();
         recorder.record(ShutdownEvent::FlushDiagnostic);
         recorder.record(ShutdownEvent::DiscardDiagnostic);
         recorder.record(ShutdownEvent::EnqueueDiagnostic);
@@ -948,7 +947,7 @@ mod tests {
         let mut initial = ShutdownResources::opened(0, 0, false);
         initial.diagnostics_pending = 1;
         initial.diagnostics_running = true;
-        recorder.begin(42, initial).unwrap();
+        recorder.begin(nz(42), initial).unwrap();
         // The recorder must not manufacture completion credit even for an
         // invalid stop. The independent checker rejects this observation.
         recorder.record(ShutdownEvent::StopDiagnostics);
@@ -984,7 +983,7 @@ mod tests {
         let composition = Arc::new(crate::composition_refinement::CompositionTrace::new());
         recorder.set_composition(Arc::clone(&composition));
         recorder
-            .begin(42, ShutdownResources::opened(0, 0, false))
+            .begin(nz(42), ShutdownResources::opened(0, 0, false))
             .unwrap();
         for _ in 0..=MAX_TRACE_EVENTS {
             recorder.record(ShutdownEvent::EnqueueDiagnostic);
@@ -998,7 +997,7 @@ mod tests {
     fn success_is_an_observed_recorder_outcome() {
         let recorder = recorder();
         recorder
-            .begin(42, ShutdownResources::opened(0, 0, false))
+            .begin(nz(42), ShutdownResources::opened(0, 0, false))
             .unwrap();
         recorder.record(ShutdownEvent::FinishClose);
         recorder.mark_returned_success();
@@ -1010,17 +1009,13 @@ mod tests {
     }
 
     #[test]
-    fn recorder_rejects_zero_generation_and_overlapping_sessions() {
+    fn recorder_rejects_overlapping_sessions() {
         let recorder = recorder();
-        assert_eq!(
-            recorder.begin(0, ShutdownResources::opened(0, 0, false)),
-            Err(TraceError::InvalidGeneration)
-        );
         recorder
-            .begin(1, ShutdownResources::opened(0, 0, false))
+            .begin(nz(1), ShutdownResources::opened(0, 0, false))
             .unwrap();
         assert_eq!(
-            recorder.begin(2, ShutdownResources::opened(0, 0, false)),
+            recorder.begin(nz(2), ShutdownResources::opened(0, 0, false)),
             Err(TraceError::SessionAlreadyActive)
         );
     }

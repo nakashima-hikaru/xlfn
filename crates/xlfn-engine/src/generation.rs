@@ -5,15 +5,24 @@ use std::num::NonZeroU64;
 pub struct RuntimeGeneration(NonZeroU64);
 
 impl RuntimeGeneration {
-    pub const fn new(raw: u64) -> Option<Self> {
+    pub const ONE: Self = Self(NonZeroU64::MIN);
+
+    pub const fn try_new(raw: u64) -> Option<Self> {
         match NonZeroU64::new(raw) {
             Some(raw) => Some(Self(raw)),
             None => None,
         }
     }
 
-    pub const fn get(self) -> u64 {
-        self.0.get()
+    pub const fn get(self) -> NonZeroU64 {
+        self.0
+    }
+
+    pub const fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(raw) => Some(Self(raw)),
+            None => None,
+        }
     }
 }
 
@@ -23,15 +32,28 @@ impl RuntimeGeneration {
 pub struct OpenAttemptId(NonZeroU64);
 
 impl OpenAttemptId {
-    pub const fn new(raw: u64) -> Option<Self> {
+    pub const ONE: Self = Self(NonZeroU64::MIN);
+
+    pub const fn try_new(raw: u64) -> Option<Self> {
         match NonZeroU64::new(raw) {
             Some(raw) => Some(Self(raw)),
             None => None,
         }
     }
 
-    pub const fn get(self) -> u64 {
-        self.0.get()
+    pub(crate) const fn from_non_zero(raw: NonZeroU64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn get(self) -> NonZeroU64 {
+        self.0
+    }
+
+    pub const fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(raw) => Some(Self(raw)),
+            None => None,
+        }
     }
 
     /// Promote the identity of a successful open transaction to the
@@ -77,7 +99,7 @@ impl RemovalAttemptId {
         }
     }
 
-    pub const fn new(raw: u64) -> Option<Self> {
+    pub const fn try_new(raw: u64) -> Option<Self> {
         match NonZeroU64::new(raw) {
             Some(raw) => Some(Self(raw)),
             None => None,
@@ -91,9 +113,9 @@ mod removal_attempt_tests {
 
     #[test]
     fn exhaustion_never_wraps_to_an_old_removal_identity() {
-        let penultimate = RemovalAttemptId::new(u64::MAX - 1).unwrap();
+        let penultimate = const { RemovalAttemptId::try_new(u64::MAX - 1).unwrap() };
         let last = penultimate.checked_next().unwrap();
-        assert_eq!(last, RemovalAttemptId::new(u64::MAX).unwrap());
+        assert_eq!(last, const { RemovalAttemptId::try_new(u64::MAX).unwrap() });
         assert!(last.checked_next().is_none());
         assert_ne!(last, RemovalAttemptId::ONE);
     }
@@ -105,15 +127,17 @@ mod removal_attempt_tests {
 pub struct ServerGeneration(NonZeroU64);
 
 impl ServerGeneration {
-    pub const fn new(raw: u64) -> Option<Self> {
+    pub const ONE: Self = Self(NonZeroU64::MIN);
+
+    pub const fn try_new(raw: u64) -> Option<Self> {
         match NonZeroU64::new(raw) {
             Some(raw) => Some(Self(raw)),
             None => None,
         }
     }
 
-    pub const fn get(self) -> u64 {
-        self.0.get()
+    pub const fn get(self) -> NonZeroU64 {
+        self.0
     }
 }
 
@@ -122,7 +146,9 @@ impl ServerGeneration {
 pub struct ConnectionGeneration(NonZeroU64);
 
 impl ConnectionGeneration {
-    pub const fn new(raw: u64) -> Option<Self> {
+    pub const ONE: Self = Self(NonZeroU64::MIN);
+
+    pub const fn try_new(raw: u64) -> Option<Self> {
         match NonZeroU64::new(raw) {
             Some(raw) => Some(Self(raw)),
             None => None,

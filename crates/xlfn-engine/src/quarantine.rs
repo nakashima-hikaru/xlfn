@@ -3,6 +3,7 @@
 //! and later reinstall its opaque owner under its own coordinator lock.
 
 mod transitions;
+use std::num::NonZeroU64;
 use transitions::{claim_cleanup, complete_cleanup};
 
 /// An affine authorization for one cleanup incarnation, not a native owner.
@@ -10,7 +11,7 @@ use transitions::{claim_cleanup, complete_cleanup};
 pub struct CleanupClaim<Issuer, Epoch> {
     issuer: Issuer,
     epoch: Epoch,
-    incarnation: u64,
+    incarnation: NonZeroU64,
 }
 
 impl<Issuer, Epoch: Copy> CleanupClaim<Issuer, Epoch> {
@@ -46,7 +47,7 @@ enum Progress<Issuer, Epoch> {
     Running {
         issuer: Issuer,
         epoch: Epoch,
-        incarnation: u64,
+        incarnation: NonZeroU64,
     },
     Drained(Epoch),
     Retained(Epoch),
@@ -57,14 +58,14 @@ enum Progress<Issuer, Epoch> {
 /// asynchronous cleanup operation within the caller's terminal lifecycle.
 pub struct CleanupProtocol<Issuer, Epoch> {
     progress: Progress<Issuer, Epoch>,
-    next_incarnation: u64,
+    next_incarnation: NonZeroU64,
 }
 
 impl<Issuer: Copy + Eq, Epoch: Copy + Eq> CleanupProtocol<Issuer, Epoch> {
     pub const fn new() -> Self {
         Self {
             progress: Progress::Idle,
-            next_incarnation: 1,
+            next_incarnation: NonZeroU64::MIN,
         }
     }
 
@@ -132,5 +133,16 @@ mod tests {
         assert!(matches!(cleanup.observe(|_| true), Obs::Retained(7)));
         assert!(!cleanup.complete(1, &claim, |_| true, Outcome::Drained));
         assert!(cleanup.claim(1, 8).is_none());
+    }
+
+    #[test]
+    fn exhaustion_leaves_progress_and_incarnation_unchanged() {
+        let mut cleanup = CleanupProtocol {
+            progress: super::Progress::Pending,
+            next_incarnation: super::NonZeroU64::MAX,
+        };
+        assert!(cleanup.claim(1, 7).is_none());
+        assert_eq!(cleanup.next_incarnation, super::NonZeroU64::MAX);
+        assert!(matches!(cleanup.observe(|_| true), Obs::SelectOwner));
     }
 }

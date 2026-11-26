@@ -272,7 +272,7 @@ impl TaskRegistry {
             limit: AtomicUsize::new(0),
             closing: AtomicBool::new(true),
             current: AtomicPtr::new(current.as_ptr()),
-            published_epoch: AtomicU64::new(CalculationEpoch::INITIAL.get()),
+            published_epoch: AtomicU64::new(CalculationEpoch::INITIAL.get().get()),
             publication: Mutex::new(()),
             transition: Mutex::new(()),
             control: Mutex::new(RegistryControl::new(initial)),
@@ -292,7 +292,7 @@ impl TaskRegistry {
     }
 
     pub(crate) fn current_epoch(&self) -> CalculationEpoch {
-        CalculationEpoch::new(self.published_epoch.load(Ordering::Acquire))
+        CalculationEpoch::try_new(self.published_epoch.load(Ordering::Acquire))
             .expect("published calculation epochs are non-zero")
     }
 
@@ -301,7 +301,8 @@ impl TaskRegistry {
     // it grants no calculation admission or allocation lifetime authority.
     fn publish_current(&self, pointer: NonNull<CalculationState>, epoch: CalculationEpoch) {
         self.current.store(pointer.as_ptr(), Ordering::Release);
-        self.published_epoch.store(epoch.get(), Ordering::Release);
+        self.published_epoch
+            .store(epoch.get().get(), Ordering::Release);
     }
 
     pub(crate) fn snapshot(&self) -> CalculationSnapshot<'_> {
@@ -600,7 +601,7 @@ mod epoch_projection_tests {
     #[test]
     fn miri_epoch_projection_preserves_the_terminal_epoch_on_overflow() {
         let registry = TaskRegistry::new();
-        let terminal = CalculationEpoch::new(u64::MAX).unwrap();
+        let terminal = const { CalculationEpoch::try_new(u64::MAX).unwrap() };
         registry.set_stopped_epoch(terminal);
         assert_epoch(&registry, terminal);
         assert!(!registry.advance());

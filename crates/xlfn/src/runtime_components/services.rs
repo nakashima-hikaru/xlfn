@@ -327,7 +327,7 @@ mod tests {
     use super::*;
 
     fn armed() -> ArmedServices {
-        let generation = RuntimeGeneration::new(1).unwrap();
+        let generation = RuntimeGeneration::ONE;
         GenerationServices::arm_generation(
             generation,
             crate::addin_impl::RuntimeConfig::default(),

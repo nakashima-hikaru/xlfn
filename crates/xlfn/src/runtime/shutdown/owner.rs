@@ -651,12 +651,12 @@ mod quarantine_request_tests {
         );
         assert_eq!(
             events.last().unwrap()["quarantineOpen"]["attempt"],
-            attempt.get()
+            attempt.get().get()
         );
         let shutdown: serde_json::Value =
             serde_json::from_str(&runtime.shutdown_trace_json()).unwrap();
         assert_eq!(shutdown["outcome"], "quarantined");
-        assert_eq!(shutdown["attempt"], attempt.get());
+        assert_eq!(shutdown["attempt"], attempt.get().get());
         #[cfg(not(miri))]
         for (variable, trace) in [
             ("XLFN_COMPOSITION_CHECKER", composition),

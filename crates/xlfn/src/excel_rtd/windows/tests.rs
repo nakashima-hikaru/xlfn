@@ -927,7 +927,7 @@ fn com_module_lifetime_emits_rtd_resource_trace_events() {
     let trace = triomphe::Arc::new(crate::shutdown_trace::ShutdownTraceRecorder::new());
     trace
         .begin(
-            1,
+            std::num::NonZeroU64::MIN,
             crate::shutdown_trace::ShutdownResources::opened(0, 0, false),
         )
         .unwrap();
@@ -1313,10 +1313,9 @@ fn shared_server_subscription_shutdown_preserves_handle_roots_until_handle_shutd
         handles.prepare(key, || Ok(Payload)).unwrap();
         handles
             .connect(
-                crate::formula_lifetime::FormulaLifetimeGeneration::new(
+                crate::formula_lifetime::FormulaLifetimeGeneration::from_non_zero(
                     ensured.active.generation.get(),
-                )
-                .unwrap(),
+                ),
                 1,
                 &lifetime_key,
             )
@@ -1412,10 +1411,9 @@ fn handle_shutdown_retires_unobserved_and_other_generation_topics() {
         handles
             .claim_lifetime(
                 &old_lifetime_key,
-                crate::formula_lifetime::FormulaLifetimeGeneration::new(
-                    ensured.active.generation.get() + 1,
-                )
-                .unwrap(),
+                crate::formula_lifetime::FormulaLifetimeGeneration::from_non_zero(
+                    ensured.active.generation.get().checked_add(1).unwrap(),
+                ),
             )
             .unwrap();
 
@@ -3680,7 +3678,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     let source = DispatchTestSource::new(Arc::clone(&disconnected));
     let (arena, source_handle) =
         crate::subscription::SourceArena::<DispatchTestSubscription>::with_source(
-            crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+            crate::generation::RuntimeGeneration::ONE,
             source.clone(),
         )
         .unwrap();
@@ -3865,7 +3863,7 @@ fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cl
         };
         let registration = crate::subscription::SourceRegistration::<
             crate::subscription::RtdChannelSubscription,
-        >::new(crate::generation::RuntimeGeneration::new(1).unwrap());
+        >::new(crate::generation::RuntimeGeneration::ONE);
         let (sender_tx, sender_rx) = mpsc::sync_channel(1);
         let source = registration
             .register(crate::subscription::RtdChannelSource::new(
@@ -4392,7 +4390,7 @@ fn sta_subscription_shutdown_dispatches_during_each_disconnect_barrier() {
             S_OK
         );
         let (arena, source) = crate::subscription::SourceArena::with_source(
-            crate::generation::RuntimeGeneration::new(1).unwrap(),
+            crate::generation::RuntimeGeneration::ONE,
             ComSource(cookie),
         )
         .unwrap();
@@ -4551,7 +4549,7 @@ fn sta_failed_connect_dispatches_during_rollback_and_rejected_install() {
         }
         let disconnected = Arc::new(AtomicBool::new(false));
         let (arena, source) = crate::subscription::SourceArena::with_source(
-            crate::generation::RuntimeGeneration::new(1).unwrap(),
+            crate::generation::RuntimeGeneration::ONE,
             RollbackSource {
                 cancel_cookie: cancel_before_install.then_some(cancel_cookie),
                 cleanup_cookie,
@@ -4622,7 +4620,7 @@ fn connect_dispatch_preflight_failure_never_starts_a_source() {
     let _apartment = TestComApartment::enter();
     let calls = Arc::new(AtomicUsize::new(0));
     let (arena, source) = crate::subscription::SourceArena::<()>::with_source(
-        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        crate::generation::RuntimeGeneration::ONE,
         CountingSource(Arc::clone(&calls)),
     )
     .unwrap();
@@ -4738,7 +4736,7 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
             .unwrap();
         let registration = crate::subscription::SourceRegistration::<
             crate::subscription::RtdChannelSubscription,
-        >::new(crate::generation::RuntimeGeneration::new(1).unwrap());
+        >::new(crate::generation::RuntimeGeneration::ONE);
         let (sender_tx, sender_rx) = mpsc::sync_channel(1);
         let source = registration
             .register(crate::subscription::RtdChannelSource::new(
@@ -4986,7 +4984,7 @@ fn typed_com_port_keeps_mixed_owners_and_rolls_back_failed_value_conversion() {
     let registration = crate::subscription::SourceRegistration::<
         MixedComSubscriptions,
         MixedComSources,
-    >::new(crate::generation::RuntimeGeneration::new(1).unwrap());
+    >::new(crate::generation::RuntimeGeneration::ONE);
     let (first, second) = registration
         .register_sources((
             DispatchTestSource::new(Arc::clone(&first_disconnected)),
@@ -5258,7 +5256,7 @@ fn subscription_shutdown_signals_sources_before_draining_deferred_com_disconnect
     let (entered, receiver) = mpsc::channel();
     let observed_stop = Arc::new(AtomicBool::new(false));
     let (arena, source) = crate::subscription::SourceArena::with_source(
-        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        crate::generation::RuntimeGeneration::ONE,
         StopSource {
             stopped: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
             entered,
@@ -5826,7 +5824,7 @@ fn failed_excel_rtd_invocation_rolls_back_subscription_observation() {
     let source = DispatchTestSource::new(Arc::new(AtomicBool::new(false)));
     let (arena, source_handle) =
         crate::subscription::SourceArena::<DispatchTestSubscription>::with_source(
-            crate::generation::RuntimeGeneration::new(1).unwrap(),
+            crate::generation::RuntimeGeneration::ONE,
             source,
         )
         .unwrap();

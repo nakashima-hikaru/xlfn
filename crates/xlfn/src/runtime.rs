@@ -1090,7 +1090,7 @@ pub(crate) mod tests {
         let certificate = rollback_attempt
             .certify::<OpenRollback>(
                 QuiescenceProof::for_test(
-                    Some(crate::generation::RuntimeGeneration::new(1).unwrap()),
+                    Some(crate::generation::RuntimeGeneration::ONE),
                     module_epoch,
                 ),
                 runtime.shutdown_deps(),
@@ -1654,7 +1654,7 @@ pub(crate) mod tests {
         let certificate = removal_attempt
             .certify::<FinalRemoval>(
                 QuiescenceProof::for_test(
-                    Some(crate::generation::RuntimeGeneration::new(1).unwrap()),
+                    Some(crate::generation::RuntimeGeneration::ONE),
                     module_epoch,
                 ),
                 runtime.shutdown_deps(),
@@ -1748,7 +1748,7 @@ pub(crate) mod tests {
         runtime
             .lifecycle
             .access()
-            .set_next_lifecycle_attempt_for_test(u64::MAX);
+            .set_next_lifecycle_attempt_for_test(std::num::NonZeroU64::MAX);
         assert!(runtime.begin_open().is_err());
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
         assert_eq!(runtime.host_intent(), intent);
@@ -1780,7 +1780,7 @@ pub(crate) mod tests {
                 .expect("RTD module quiescence");
         let removal_attempt = match removal_attempt.certify::<FinalRemoval>(
             QuiescenceProof::for_test(
-                Some(crate::generation::RuntimeGeneration::new(1).unwrap()),
+                Some(crate::generation::RuntimeGeneration::ONE),
                 module_epoch,
             ),
             runtime.shutdown_deps(),
@@ -1795,7 +1795,7 @@ pub(crate) mod tests {
         let certificate = removal_attempt
             .certify::<FinalRemoval>(
                 QuiescenceProof::for_test(
-                    Some(crate::generation::RuntimeGeneration::new(1).unwrap()),
+                    Some(crate::generation::RuntimeGeneration::ONE),
                     module_epoch,
                 ),
                 runtime.shutdown_deps(),
@@ -2285,7 +2285,7 @@ pub(crate) mod tests {
 
         runtime.finish_calculation();
         let second = runtime.async_runtime().current_epoch();
-        assert_eq!(runtime.calculation_id().get(), first.get() + 1);
+        assert_eq!(runtime.calculation_id().get(), first.get().get() + 1);
         assert!(matches!(
             runtime.async_runtime().submit(
                 first,
@@ -2341,7 +2341,7 @@ pub(crate) mod tests {
         published_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
         let published = runtime.async_runtime().current_epoch();
-        assert_eq!(published.get(), first + 1);
+        assert_eq!(published.get().get(), first + 1);
         let (spawned_tx, spawned_rx) = mpsc::sync_channel(1);
         let spawning_runtime = Arc::clone(&runtime);
         let spawning = thread::spawn(move || {

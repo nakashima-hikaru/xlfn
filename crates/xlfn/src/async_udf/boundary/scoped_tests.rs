@@ -238,7 +238,7 @@ fn pending(
             handles
                 .lookup::<Payload>(&mut context, &token)
                 .unwrap()
-                .into_pending(RuntimeGeneration::new(1).unwrap())
+                .into_pending(RuntimeGeneration::ONE)
                 .unwrap()
         });
     handles.terminate_all_topics();
@@ -325,7 +325,7 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
     let commit = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
         if instrumented {
             reservation.commit_handle_scoped(
-                RuntimeGeneration::new(1).unwrap(),
+                RuntimeGeneration::ONE,
                 UnbuiltScopedTask::new(
                     build,
                     responder(),
@@ -342,7 +342,7 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
             );
         } else {
             reservation.commit_handle_scoped(
-                RuntimeGeneration::new(1).unwrap(),
+                RuntimeGeneration::ONE,
                 UnbuiltScopedTask::new(build, responder(), token, NoObservation),
                 cancellation,
             );
@@ -498,7 +498,7 @@ fn miri_external_executor_retains_scoped_handle_until_opaque_task_destruction() 
         .reserve(CalculationEpoch::INITIAL)
         .unwrap()
         .commit_handle_scoped(
-            RuntimeGeneration::new(1).unwrap(),
+            RuntimeGeneration::ONE,
             UnbuiltScopedTask::new(build, responder(), token, NoObservation),
             cancellation,
         );

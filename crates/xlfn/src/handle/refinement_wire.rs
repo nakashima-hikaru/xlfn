@@ -7,5 +7,5 @@ use serde::Serialize;
 pub(crate) struct TokenWire {
     pub(crate) session: u64,
     pub(crate) slot: u64,
-    pub(crate) generation: u64,
+    pub(crate) generation: std::num::NonZeroU64,
 }

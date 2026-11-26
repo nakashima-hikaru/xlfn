@@ -12,7 +12,7 @@ import zipfile
 from pathlib import Path
 
 INSTALLER = Path(__file__).resolve().parents[1] / "install_verus.sh"
-VERSION = "0.2026.10.26.d17fbd0"
+VERSION = "0.2026.11.22.1ce6a59"
 # Keep the fixture compiler older than the workspace to exercise independent selection.
 TOOLCHAIN = "1.98.1-x86_64-unknown-linux-gnu"
 

@@ -50,7 +50,7 @@ fn runtime_with_sources(
 ) {
     let stopped = Arc::new(AtomicUsize::new(0));
     let joined = Arc::new(AtomicUsize::new(0));
-    let sources = SourceRegistration::new(RuntimeGeneration::new(1).unwrap());
+    let sources = SourceRegistration::new(RuntimeGeneration::ONE);
     for index in 0..2 {
         sources
             .register(Source {
@@ -117,7 +117,7 @@ fn miri_failed_runtime_server_owner_keeps_publish_core_through_fallback_disconne
 
     let disconnected = Arc::new(AtomicUsize::new(0));
     let (sources, source) = SourceArena::with_source(
-        RuntimeGeneration::new(1).unwrap(),
+        RuntimeGeneration::ONE,
         SinkSource(Arc::clone(&disconnected)),
     )
     .unwrap();
@@ -236,7 +236,7 @@ fn production_disconnect_releases_export_admission_after_source_stop() {
     INGRESS.complete_open(|| Ok::<_, ()>(())).unwrap().unwrap();
     let (stop, receive) = mpsc::channel();
     let (entered, entered_rx) = mpsc::channel();
-    let generation = RuntimeGeneration::new(1).unwrap();
+    let generation = RuntimeGeneration::ONE;
     let (sources, source) = SourceArena::with_source(
         generation,
         StopSource {

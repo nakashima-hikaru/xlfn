@@ -207,7 +207,7 @@ fn finalized_inputs_keep_service_permit<M: InputMode>() {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         threads.spawn(move || {
             begin_rx.recv().unwrap();
-            slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
+            slot.seal(crate::generation::RuntimeGeneration::ONE)
                 .unwrap()
                 .finish()
                 .unwrap();

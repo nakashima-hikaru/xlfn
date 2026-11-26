@@ -140,7 +140,7 @@ mod tests {
         OpenContext::new(
             std::path::PathBuf::from("test.xll"),
             BuildInfo::new(AddinId::parse("test").unwrap(), "0", "test"),
-            RuntimeGeneration::new(1).expect("test generation is non-zero"),
+            RuntimeGeneration::ONE,
         )
     }
 
@@ -1054,10 +1054,7 @@ mod tests {
                     // SAFETY: `subscriptions` is owned by `runtime` which outlives this test closure.
                     let server = unsafe {
                         subscriptions
-                            .register_server(
-                                crate::subscription::ServerGeneration::new(1)
-                                    .expect("non-zero test server generation"),
-                            )
+                            .register_server(crate::subscription::ServerGeneration::ONE)
                             .unwrap()
                     };
                     server
@@ -1883,10 +1880,7 @@ mod tests {
                     // SAFETY: `subscriptions` is owned by `runtime` which outlives this test closure.
                     let server = unsafe {
                         subscriptions
-                            .register_server(
-                                crate::subscription::ServerGeneration::new(1)
-                                    .expect("non-zero test server generation"),
-                            )
+                            .register_server(crate::subscription::ServerGeneration::ONE)
                             .unwrap()
                     };
                     let prepared = subscriptions

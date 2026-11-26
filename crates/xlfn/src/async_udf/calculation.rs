@@ -16,25 +16,25 @@ pub(crate) struct CalculationEpoch(std::num::NonZeroU64);
 impl CalculationEpoch {
     pub(crate) const INITIAL: Self = Self(std::num::NonZeroU64::new(1).unwrap());
 
-    pub(crate) const fn new(value: u64) -> Option<Self> {
+    pub(crate) const fn try_new(value: u64) -> Option<Self> {
         match std::num::NonZeroU64::new(value) {
             Some(value) => Some(Self(value)),
             None => None,
         }
     }
 
-    pub(crate) const fn get(self) -> u64 {
-        self.0.get()
+    pub(crate) const fn get(self) -> std::num::NonZeroU64 {
+        self.0
     }
 
     pub(crate) fn checked_next(self) -> Option<Self> {
-        Self::new(self.get().checked_add(1)?)
+        self.0.checked_add(1).map(Self)
     }
 }
 
 impl From<CalculationEpoch> for crate::execution::CalculationId {
     fn from(epoch: CalculationEpoch) -> Self {
-        Self::new(epoch.get())
+        Self::new(epoch.get().get())
     }
 }
 
@@ -278,7 +278,7 @@ mod tests {
     fn miri_calculation_final_pin_release_can_race_owner_reclamation() {
         for id in 0..16 {
             let owner = PublishedOwner::new(CalculationState::new(
-                CalculationEpoch::new(id + 1).unwrap(),
+                CalculationEpoch::try_new(id + 1).unwrap(),
             ));
             // SAFETY: the owner is private until both pins are acquired;
             // reclamation below waits for their terminal publication.

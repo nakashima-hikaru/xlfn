@@ -165,13 +165,13 @@ fn executor_start_can_reenter_calculation_control_without_framework_lock() {
         let runtime = weak.upgrade().unwrap();
         runtime.cancel_current_calculation();
         assert!(runtime.advance_calculation());
-        assert_eq!(runtime.current_epoch().get(), 2);
+        assert_eq!(runtime.current_epoch().get().get(), 2);
         assert!(!runtime.is_running());
     });
     runtime
         .start(ReentrantExecutor(callback), AsyncTaskLimit::DEFAULT)
         .unwrap();
-    assert_eq!(runtime.current_epoch().get(), 2);
+    assert_eq!(runtime.current_epoch().get().get(), 2);
     assert!(runtime.close().is_ok());
 }
 

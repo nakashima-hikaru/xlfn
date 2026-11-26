@@ -3,6 +3,7 @@
 //! native payload and its recovery owner before releasing the lock.
 
 use crate::generation::{OpenAttemptId, RemovalAttemptId, RemovalEpoch, RuntimeGeneration};
+use std::num::NonZeroU64;
 
 /// An open request that did not receive an attempt.
 #[derive(Debug, Eq, PartialEq)]
@@ -11,13 +12,11 @@ pub enum OpenClaimError {
     Unavailable,
     /// The monotonic attempt sequence cannot allocate another attempt.
     Exhausted,
-    /// Zero is reserved and never names an actual open.
-    InvalidSequence,
 }
 
 /// All monotonic decisions associated with starts and removals for one runtime.
 pub struct LifecycleSequence {
-    next_open: u64,
+    next_open: NonZeroU64,
     next_removal: RemovalAttemptId,
     removal_epoch: RemovalEpoch,
 }
@@ -25,7 +24,7 @@ pub struct LifecycleSequence {
 impl LifecycleSequence {
     pub const fn new() -> Self {
         Self {
-            next_open: 1,
+            next_open: NonZeroU64::MIN,
             next_removal: RemovalAttemptId::ONE,
             removal_epoch: RemovalEpoch::new(0),
         }
@@ -56,7 +55,7 @@ impl LifecycleSequence {
             .next_open
             .checked_add(1)
             .ok_or(OpenClaimError::Exhausted)?;
-        let attempt = OpenAttemptId::new(self.next_open).ok_or(OpenClaimError::InvalidSequence)?;
+        let attempt = OpenAttemptId::from_non_zero(self.next_open);
         self.next_open = next;
         Ok(attempt)
     }
@@ -76,13 +75,13 @@ impl LifecycleSequence {
     /// Publish for test/support callers needing to check sequence exhaustion
     /// without issuing a prohibitively large number of attempts.
     #[doc(hidden)]
-    pub const fn seeded_next_open_for_test(mut self, next: u64) -> Self {
+    pub const fn seeded_next_open_for_test(mut self, next: NonZeroU64) -> Self {
         self.next_open = next;
         self
     }
 
     /// Read the next open sequence value (monotonic identity boundary for residency).
-    pub const fn next_open_sequence(&self) -> u64 {
+    pub const fn next_open_sequence(&self) -> NonZeroU64 {
         self.next_open
     }
 }
@@ -112,26 +111,23 @@ mod tests {
             Err(OpenClaimError::Unavailable)
         );
         let open = sequence.claim_open(true, current).unwrap();
-        assert_eq!(open.get(), 1);
+        assert_eq!(open.get(), NonZeroU64::MIN);
         assert!(sequence.is_latest_open(open.into_runtime_generation()));
         assert_eq!(sequence.claim_removal(), Some(RemovalAttemptId::ONE));
-        assert_eq!(sequence.claim_open(true, current).unwrap().get(), 2);
+        assert_eq!(
+            sequence.claim_open(true, current).unwrap().get(),
+            NonZeroU64::new(2).unwrap()
+        );
         assert!(!sequence.is_latest_open(open.into_runtime_generation()));
     }
 
     #[test]
-    fn exhaustion_and_reserved_zero_do_not_mutate_sequence() {
-        let mut exhausted = LifecycleSequence::new().seeded_next_open_for_test(u64::MAX);
+    fn exhaustion_does_not_mutate_sequence() {
+        let mut exhausted = LifecycleSequence::new().seeded_next_open_for_test(NonZeroU64::MAX);
         assert_eq!(
             exhausted.claim_open(true, exhausted.removal_epoch()),
             Err(OpenClaimError::Exhausted)
         );
-        assert_eq!(exhausted.next_open_sequence(), u64::MAX);
-        let mut zero = LifecycleSequence::new().seeded_next_open_for_test(0);
-        assert_eq!(
-            zero.claim_open(true, zero.removal_epoch()),
-            Err(OpenClaimError::InvalidSequence)
-        );
-        assert_eq!(zero.next_open_sequence(), 0);
+        assert_eq!(exhausted.next_open_sequence(), NonZeroU64::MAX);
     }
 }

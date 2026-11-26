@@ -147,7 +147,7 @@ impl TokenCodec {
         token[..7].copy_from_slice(b"xllh:3:");
         write_hex(self.session, &mut token[7..23]);
         write_hex(u64::from(id.slot), &mut token[24..32]);
-        write_hex(id.generation.get(), &mut token[33..49]);
+        write_hex(id.generation.get().get(), &mut token[33..49]);
         let (pairs, _) = token[50..].as_chunks_mut::<2>();
         for (byte, pair) in self.authentication_tag(id).iter().zip(pairs) {
             pair[0] = HEX[(byte >> 4) as usize];
@@ -198,7 +198,7 @@ impl TokenCodec {
         let session = decode_hex(&bytes[7..23]).ok_or(XllError::InvalidHandle)?;
         let slot = decode_hex(&bytes[24..32]).ok_or(XllError::InvalidHandle)? as u32;
         let generation = decode_hex(&bytes[33..49])
-            .and_then(BindingGeneration::new)
+            .and_then(BindingGeneration::try_new)
             .ok_or(XllError::InvalidHandle)?;
         let tag = decode_tag(&bytes[50..]).ok_or(XllError::InvalidHandle)?;
         Ok(ParsedHandleToken {
@@ -223,7 +223,7 @@ impl TokenCodec {
         message[..21].copy_from_slice(b"xlfn-handle-token-v1\0");
         message[21..29].copy_from_slice(&self.session.to_le_bytes());
         message[29..33].copy_from_slice(&id.slot.to_le_bytes());
-        message[33..41].copy_from_slice(&id.generation.get().to_le_bytes());
+        message[33..41].copy_from_slice(&id.generation.get().get().to_le_bytes());
         blake3::keyed_hash(&self.secret, &message).as_bytes()[..16]
             .try_into()
             .expect("the BLAKE3 output contains a 128-bit tag")
@@ -438,7 +438,7 @@ mod tests {
                 for generation in [1, 2, u64::MAX] {
                     let id = HandleId {
                         slot,
-                        generation: BindingGeneration::new(generation).unwrap(),
+                        generation: BindingGeneration::try_new(generation).unwrap(),
                     };
                     // Independent streaming construction checks the wire MAC
                     // bytes while production uses one fixed-layout message.
@@ -475,7 +475,7 @@ mod tests {
         let codec = TokenCodec::new(0xab, [19; 32]);
         let id = HandleId {
             slot: 0xab,
-            generation: BindingGeneration::new(0xab).unwrap(),
+            generation: const { BindingGeneration::try_new(0xab).unwrap() },
         };
         let token = codec.format(id);
         for length in 0..HANDLE_TOKEN_LENGTH {

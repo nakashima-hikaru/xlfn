@@ -607,9 +607,8 @@ mod tests {
         >,
         RtdSender<i32>,
     ) {
-        let registration = SourceRegistration::<crate::rtd::RtdChannelSubscription>::new(
-            RuntimeGeneration::new(1).unwrap(),
-        );
+        let registration =
+            SourceRegistration::<crate::rtd::RtdChannelSubscription>::new(RuntimeGeneration::ONE);
         let (sender_tx, sender_rx) = mpsc::sync_channel(1);
         let source = registration
             .register(RtdChannelSource::new(
@@ -625,7 +624,7 @@ mod tests {
             ))
             .unwrap();
         let runtime = StdArc::new(SubscriptionRuntime::with_host(
-            RuntimeGeneration::new(1).unwrap(),
+            RuntimeGeneration::ONE,
             crate::subscription::RtdLimits::standard(),
             host,
             registration.finish(),
@@ -711,7 +710,7 @@ mod tests {
             assert!(matches!(
                 server.test_server().publish.publish(
                     TopicId(1),
-                    ConnectionGeneration::new(1).unwrap(),
+                    ConnectionGeneration::ONE,
                     StoredRtdValue::Integer(99),
                 ),
                 Err(XllError::Closing)
@@ -807,7 +806,7 @@ mod tests {
 
         let (started, observed_start) = mpsc::channel();
         let (release, observed_release) = mpsc::channel();
-        let generation = RuntimeGeneration::new(1).unwrap();
+        let generation = RuntimeGeneration::ONE;
         let registration = SourceRegistration::new(generation);
         let slow = registration
             .register(Source(Mutex::new(Some(BlockedBarrier {
@@ -917,7 +916,7 @@ mod tests {
             let (arena, source, sink_slot, disconnected) =
                 crate::subscription::tests::publishing_source::<i32>(None);
             let runtime = SubscriptionRuntime::with_host(
-                RuntimeGeneration::new(1).unwrap(),
+                RuntimeGeneration::ONE,
                 crate::subscription::RtdLimits::standard().with_max_active(
                     crate::subscription::RtdCapacity::bounded(NonZeroUsize::new(1).unwrap()),
                 ),
@@ -989,9 +988,8 @@ mod tests {
         let (joining_tx, joining_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let release = StdArc::new(Mutex::new(Some(release_rx)));
-        let registration = SourceRegistration::<crate::rtd::RtdChannelSubscription>::new(
-            RuntimeGeneration::new(1).unwrap(),
-        );
+        let registration =
+            SourceRegistration::<crate::rtd::RtdChannelSubscription>::new(RuntimeGeneration::ONE);
         let source = registration
             .register(
                 RtdChannelSource::new(
@@ -1021,7 +1019,7 @@ mod tests {
             )
             .unwrap();
         let runtime = SubscriptionRuntime::with_host(
-            RuntimeGeneration::new(1).unwrap(),
+            RuntimeGeneration::ONE,
             crate::subscription::RtdLimits::standard().with_max_active(
                 crate::subscription::RtdCapacity::bounded(NonZeroUsize::new(1).unwrap()),
             ),
@@ -1095,7 +1093,7 @@ mod tests {
             let (release_tx, release_rx) = mpsc::sync_channel(1);
             let release = StdArc::new(Mutex::new(Some(release_rx)));
             let registration = SourceRegistration::<crate::rtd::RtdChannelSubscription>::new(
-                RuntimeGeneration::new(1).unwrap(),
+                RuntimeGeneration::ONE,
             );
             let source = registration
                 .register(RtdChannelSource::new(
@@ -1120,7 +1118,7 @@ mod tests {
                 ))
                 .unwrap();
             let runtime = StdArc::new(SubscriptionRuntime::with_host(
-                RuntimeGeneration::new(1).unwrap(),
+                RuntimeGeneration::ONE,
                 crate::subscription::RtdLimits::standard().with_max_active(
                     crate::subscription::RtdCapacity::bounded(NonZeroUsize::new(1).unwrap()),
                 ),
@@ -1203,7 +1201,7 @@ mod tests {
             let calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
             let called = StdArc::clone(&calls);
             let registration = SourceRegistration::<crate::rtd::RtdChannelSubscription>::new(
-                RuntimeGeneration::new(1).unwrap(),
+                RuntimeGeneration::ONE,
             );
             let source = registration
                 .register(
@@ -1224,7 +1222,7 @@ mod tests {
                 )
                 .unwrap();
             let runtime = SubscriptionRuntime::with_host(
-                RuntimeGeneration::new(1).unwrap(),
+                RuntimeGeneration::ONE,
                 crate::subscription::RtdLimits::standard().with_max_active(
                     crate::subscription::RtdCapacity::bounded(NonZeroUsize::new(1).unwrap()),
                 ),
@@ -1429,7 +1427,7 @@ mod tests {
         for (fail_cancel, fail_disconnect) in [(true, false), (false, true)] {
             let sink = StdArc::new(Mutex::new(None));
             let disconnected = StdArc::new(AtomicBool::new(false));
-            let registration = SourceRegistration::new(RuntimeGeneration::new(1).unwrap());
+            let registration = SourceRegistration::new(RuntimeGeneration::ONE);
             let source = registration
                 .register(FixtureSource {
                     sink: StdArc::clone(&sink),

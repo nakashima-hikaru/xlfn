@@ -299,10 +299,13 @@ fn concurrent_calculation_advances_are_serialized() {
 
     assert!(first.join().unwrap());
     assert!(second.join().unwrap());
-    assert_eq!(lifecycle.current_epoch(), CalculationEpoch::new(3).unwrap());
+    assert_eq!(
+        lifecycle.current_epoch(),
+        const { CalculationEpoch::try_new(3).unwrap() }
+    );
     lifecycle
         .submit(
-            CalculationEpoch::new(3).unwrap(),
+            const { CalculationEpoch::try_new(3).unwrap() },
             async {},
             test_cancellation_source(),
         )
@@ -717,7 +720,7 @@ fn cancelled_calculation_rejects_late_spawn_and_next_generation_accepts_work() {
         Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
     ));
 
-    let next = CalculationEpoch::new(2).unwrap();
+    let next = const { CalculationEpoch::try_new(2).unwrap() };
     assert!(lifecycle.advance_calculation());
     assert!(matches!(
         lifecycle.submit(
@@ -744,7 +747,7 @@ fn cancelling_new_calculation_does_not_cancel_live_work_from_previous_calculatio
         .submit(TEST_CALCULATION, std::future::pending(), old_source)
         .unwrap();
 
-    let next = CalculationEpoch::new(2).unwrap();
+    let next = const { CalculationEpoch::try_new(2).unwrap() };
     assert!(lifecycle.advance_calculation());
     let (new_source, new_token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
     lifecycle
@@ -2130,7 +2133,10 @@ fn old_calculation_retained_entry_rejected_on_spawn() {
         .submit(TEST_CALCULATION, std::future::pending::<()>(), source1)
         .unwrap();
     assert!(lifecycle.advance_calculation());
-    assert_eq!(lifecycle.current_epoch(), CalculationEpoch::new(2).unwrap());
+    assert_eq!(
+        lifecycle.current_epoch(),
+        const { CalculationEpoch::try_new(2).unwrap() }
+    );
 
     let (source2, token2) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
     let res = lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source2);
@@ -2162,7 +2168,7 @@ fn rejection_priority_old_calculation_over_max_pending() {
     assert!(matches!(res_curr, Err(XllError::Overloaded)));
 
     assert!(lifecycle.advance_calculation());
-    let gen2 = CalculationEpoch::new(2).unwrap();
+    let gen2 = const { CalculationEpoch::try_new(2).unwrap() };
 
     for _ in 0..TASK_LIMIT {
         let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
@@ -2367,13 +2373,13 @@ fn calculation_exhaustion_does_not_republish_an_old_identity() {
     let lifecycle = TestRuntime::new();
     lifecycle
         .registry()
-        .set_stopped_epoch(CalculationEpoch::new(u64::MAX).unwrap());
+        .set_stopped_epoch(const { CalculationEpoch::try_new(u64::MAX).unwrap() });
     assert!(!lifecycle.advance_calculation());
     lifecycle
         .start(builtin(1), AsyncTaskLimit::DEFAULT)
         .unwrap();
     assert!(!lifecycle.advance_calculation());
-    assert_eq!(lifecycle.current_epoch().get(), u64::MAX);
+    assert_eq!(lifecycle.current_epoch().get().get(), u64::MAX);
     assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 

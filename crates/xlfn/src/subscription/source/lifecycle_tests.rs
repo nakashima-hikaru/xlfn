@@ -83,7 +83,7 @@ unsafe impl RtdSource for LifecycleSource {
 #[test]
 fn runtime_cancels_all_sources_and_disconnects_before_joining_shared_workers() {
     let events = Arc::new(Mutex::new(Vec::new()));
-    let registration = SourceRegistration::new(RuntimeGeneration::new(1).unwrap());
+    let registration = SourceRegistration::new(RuntimeGeneration::ONE);
     let mut handles = Vec::new();
     for id in 0..3 {
         handles.push(
@@ -137,7 +137,7 @@ fn runtime_cancels_all_sources_and_disconnects_before_joining_shared_workers() {
 fn source_lifecycle_failures_do_not_skip_later_cancellation_or_join_hooks() {
     for failure in [Failure::StopPanic, Failure::JoinError, Failure::JoinPanic] {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let registration = SourceRegistration::new(RuntimeGeneration::new(1).unwrap());
+        let registration = SourceRegistration::new(RuntimeGeneration::ONE);
         for id in 0..3 {
             registration
                 .register(LifecycleSource {
@@ -235,7 +235,7 @@ fn source_cancellation_precedes_waiting_for_deferred_disconnect_admission() {
         changed: Condvar::new(),
     });
     let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
-    let registration = SourceRegistration::new(RuntimeGeneration::new(1).unwrap());
+    let registration = SourceRegistration::new(RuntimeGeneration::ONE);
     let source = registration
         .register(StopDependentSource {
             signal,
@@ -294,7 +294,7 @@ fn miri_static_catalog_stops_every_source_before_join_despite_each_failure() {
         let registration = SourceRegistration::<
             LifecycleSubscription,
             (LifecycleSource, LifecycleSource, LifecycleSource),
-        >::new(RuntimeGeneration::new(1).unwrap());
+        >::new(RuntimeGeneration::ONE);
         let (a, b, c) = registration
             .register_sources((source(0), source(1), source(2)))
             .unwrap();
@@ -349,7 +349,7 @@ fn miri_static_catalog_stops_every_source_before_join_despite_each_failure() {
 
 #[test]
 fn static_catalog_rejects_repeated_registration_and_foreign_source_ids() {
-    let generation = RuntimeGeneration::new(1).unwrap();
+    let generation = RuntimeGeneration::ONE;
     let registration =
         SourceRegistration::<LifecycleSubscription, (LifecycleSource,)>::new(generation);
     let source = || LifecycleSource {
@@ -367,7 +367,7 @@ fn static_catalog_rejects_repeated_registration_and_foreign_source_ids() {
     assert_eq!(foreign.id.generation, handle.id.generation);
     assert!(arena.resolve(foreign.id).is_none());
     for (generation, sequence) in [
-        (RuntimeGeneration::new(2).unwrap(), 1),
+        (const { RuntimeGeneration::try_new(2).unwrap() }, 1),
         (generation, 0),
         (generation, 2),
         (generation, u64::MAX),
@@ -392,7 +392,7 @@ fn static_catalog_rejects_repeated_registration_and_foreign_source_ids() {
 #[test]
 fn erased_sources_share_identity_without_weakening_generation_or_shutdown_barriers() {
     let events = Arc::new(Mutex::new(Vec::new()));
-    let generation = RuntimeGeneration::new(1).unwrap();
+    let generation = RuntimeGeneration::ONE;
     let registration = SourceRegistration::<crate::BoxedRtdSubscription>::new(generation);
     let source = || LifecycleSource {
         id: 0,
@@ -439,7 +439,7 @@ fn erased_sources_share_identity_without_weakening_generation_or_shutdown_barrie
 
 #[test]
 fn typed_source_handle_erasure_preserves_catalog_identity() {
-    let generation = RuntimeGeneration::new(1).unwrap();
+    let generation = RuntimeGeneration::ONE;
     let registration =
         SourceRegistration::<LifecycleSubscription, (LifecycleSource,)>::new(generation);
     let (typed,) = registration
@@ -465,7 +465,7 @@ fn typed_source_handle_erasure_preserves_catalog_identity() {
 #[test]
 fn exhausted_source_registration_identity_fails_before_retaining_sources() {
     let mut dynamic =
-        SourceRegistration::<crate::BoxedRtdSubscription>::new(RuntimeGeneration::new(1).unwrap());
+        SourceRegistration::<crate::BoxedRtdSubscription>::new(RuntimeGeneration::ONE);
     dynamic.registration_id = None;
     let source = || LifecycleSource {
         id: 0,
@@ -475,7 +475,7 @@ fn exhausted_source_registration_identity_fails_before_retaining_sources() {
     assert!(dynamic.register_erased(source()).is_err());
     assert!(dynamic.finish().is_empty());
     let mut typed = SourceRegistration::<LifecycleSubscription, (LifecycleSource,)>::new(
-        RuntimeGeneration::new(1).unwrap(),
+        RuntimeGeneration::ONE,
     );
     typed.registration_id = None;
     assert!(typed.register_sources((source(),)).is_err());

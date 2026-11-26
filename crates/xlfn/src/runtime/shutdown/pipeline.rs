@@ -1769,7 +1769,7 @@ mod tests {
                 .unwrap();
             runtime.shutdown_deps().returns().close_admission();
         } else {
-            let other = crate::generation::RuntimeGeneration::new(generation.get() + 1).unwrap();
+            let other = generation.checked_next().unwrap();
             teardown.stage.services.subscriptions_stopped =
                 crate::excel_rtd_protocol::stopped_subscriptions(Some(other));
         }

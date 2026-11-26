@@ -1553,9 +1553,10 @@ mod tests {
         }
 
         let disconnected = Arc::new(AtomicBool::new(false));
-        let generation = crate::generation::RuntimeGeneration::new(1).unwrap();
+        const GENERATION: crate::generation::RuntimeGeneration =
+            crate::generation::RuntimeGeneration::ONE;
         let (arena, source) = crate::subscription::SourceArena::with_source(
-            generation,
+            GENERATION,
             TestSource {
                 disconnected: Arc::clone(&disconnected),
             },
@@ -1577,8 +1578,7 @@ mod tests {
                 let server = unsafe {
                     subscriptions
                         .register_server(
-                            crate::subscription::ServerGeneration::new(51)
-                                .expect("non-zero test server generation"),
+                            const { crate::subscription::ServerGeneration::try_new(51).unwrap() },
                         )
                         .unwrap()
                 };
@@ -1673,7 +1673,7 @@ mod tests {
             crate::cancellation::CancellationGuarantee::CalculationScoped,
         );
         let generation = Arc::new(crate::generation::ExecutionGeneration::<AsyncTestAddin> {
-            id: crate::generation::RuntimeGeneration::new(1).unwrap(),
+            id: crate::generation::RuntimeGeneration::ONE,
             shared_state: 23_u32,
             layers: (),
         });
@@ -1705,7 +1705,7 @@ mod tests {
         let context = crate::OpenContext::<()>::new(
             std::path::PathBuf::from("/test/module.xll"),
             build_info,
-            super::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+            super::RuntimeGeneration::ONE,
         );
         let diag = context.diagnostics();
         assert!(std::ptr::eq(diag.context, &context));

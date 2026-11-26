@@ -105,7 +105,7 @@ fn sink<E: RtdSubscription>(
     RtdSubscriptionHost::publish_sink(
         server.test_server().publish.as_ref(),
         TopicId(1),
-        ConnectionGeneration::new(1).unwrap(),
+        ConnectionGeneration::ONE,
     )
 }
 
@@ -113,7 +113,7 @@ fn sink<E: RtdSubscription>(
 fn miri_source_ticket_survives_arena_and_runtime_moves() {
     let counts = Arc::new(Counts::default());
     let reentry = Arc::new(Mutex::new(None));
-    let (arena, handle) = source(RuntimeGeneration::new(1).unwrap(), &counts, &reentry, false);
+    let (arena, handle) = source(RuntimeGeneration::ONE, &counts, &reentry, false);
     // The independent publish root stays fixed while the source arena and its
     // later owning runtime move. The probe does not retain or use this sink.
     let publish_runtime = Box::new(ProbeRuntime::new());
@@ -166,7 +166,7 @@ fn miri_source_ticket_survives_arena_and_runtime_moves() {
 fn miri_source_ticket_cancel_panic_preserves_owner_and_next_owner_is_independent() {
     let counts = Arc::new(Counts::default());
     let reentry = Arc::new(Mutex::new(None));
-    let (arena, handle) = source(RuntimeGeneration::new(1).unwrap(), &counts, &reentry, true);
+    let (arena, handle) = source(RuntimeGeneration::ONE, &counts, &reentry, true);
     let runtime = Box::new(ProbeRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let adapter = runtime.sources.resolve(handle.id).unwrap();
@@ -192,7 +192,7 @@ fn miri_source_ticket_cancel_panic_preserves_owner_and_next_owner_is_independent
 fn miri_source_ticket_cancel_reenters_same_source_without_a_storage_lock() {
     let counts = Arc::new(Counts::default());
     let reentry = Arc::new(Mutex::new(None));
-    let (arena, handle) = source(RuntimeGeneration::new(1).unwrap(), &counts, &reentry, false);
+    let (arena, handle) = source(RuntimeGeneration::ONE, &counts, &reentry, false);
     let runtime = Arc::new(ProbeRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let topic = RtdTopic::single("outer-cancel").unwrap();
@@ -235,9 +235,8 @@ fn miri_source_ticket_cancel_reenters_same_source_without_a_storage_lock() {
 fn stale_source_handle_cannot_reach_a_new_generation_adapter() {
     let counts = Arc::new(Counts::default());
     let reentry = Arc::new(Mutex::new(None));
-    let (old_arena, old_handle) =
-        source(RuntimeGeneration::new(1).unwrap(), &counts, &reentry, false);
-    let generation = RuntimeGeneration::new(2).unwrap();
+    let (old_arena, old_handle) = source(RuntimeGeneration::ONE, &counts, &reentry, false);
+    let generation = const { RuntimeGeneration::try_new(2).unwrap() };
     let (arena, _) = source(generation, &counts, &reentry, false);
     let runtime = ProbeRuntime::with_host(
         generation,
@@ -379,7 +378,7 @@ fn miri_static_catalog_subscription_retains_source_address_across_owner_moves() 
         (StaticAddressSource,),
     >;
     let registration = SourceRegistration::<StaticAddressSubscription, (StaticAddressSource,)>::new(
-        RuntimeGeneration::new(1).unwrap(),
+        RuntimeGeneration::ONE,
     );
     let (handle,) = registration
         .register_sources((StaticAddressSource {
@@ -444,9 +443,8 @@ unsafe impl RtdSource for ConversionBarrierSource {
 #[test]
 fn miri_static_catalog_conversion_panic_preserves_subscription_barrier() {
     let completed = Arc::new(AtomicUsize::new(0));
-    let registration = SourceRegistration::<(), (ConversionBarrierSource,)>::new(
-        RuntimeGeneration::new(1).unwrap(),
-    );
+    let registration =
+        SourceRegistration::<(), (ConversionBarrierSource,)>::new(RuntimeGeneration::ONE);
     let (handle,) = registration
         .register_sources((ConversionBarrierSource(Arc::clone(&completed)),))
         .unwrap();

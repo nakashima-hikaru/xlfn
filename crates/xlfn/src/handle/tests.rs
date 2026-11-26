@@ -22,7 +22,8 @@ fn with_decode_scope_and_state<S, R>(
 }
 
 fn lifetime_generation(raw: u64) -> crate::handle::FormulaLifetimeGeneration {
-    crate::handle::FormulaLifetimeGeneration::new(raw).expect("test server generation is non-zero")
+    crate::handle::FormulaLifetimeGeneration::try_new(raw)
+        .expect("test server generation is non-zero")
 }
 
 fn armed_handle_slot() -> (
@@ -729,7 +730,7 @@ fn exhausted_generation_retires_the_slot_permanently() {
     let first = insert_production(&registry, Arc::new(1_u32)).unwrap();
     registry.remove::<u32>(&first).unwrap();
     registry.bindings.write_state().slots[0].next_generation =
-        crate::generation::BindingGeneration::new(u64::MAX).unwrap();
+        const { crate::generation::BindingGeneration::try_new(u64::MAX).unwrap() };
     let final_token = insert_production(&registry, Arc::new(1_u32)).unwrap();
     registry.remove::<u32>(&final_token).unwrap();
     assert!(registry.bindings.read_state().free.is_empty());
@@ -853,7 +854,7 @@ fn public_handle_identity_changes_after_runtime_regeneration() {
         (token, identity)
     };
 
-    slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
+    slot.seal(crate::generation::RuntimeGeneration::ONE)
         .unwrap();
     slot.arm(crate::HandleConfig::default()).unwrap();
     let runtime = slot.read().unwrap();
@@ -884,15 +885,13 @@ fn handle_lease_as_ref_and_identity_match_the_synchronous_handle() {
         let handle = runtime.lookup::<DataRecord>(scope, &token).unwrap();
         let identity = handle.object_id();
         let pending = handle
-            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+            .into_pending(crate::generation::RuntimeGeneration::ONE)
             .unwrap();
         (identity, pending)
     });
     let pins = TaskPins::new();
-    let scope = crate::async_udf::AsyncTaskScope::new(
-        crate::generation::RuntimeGeneration::new(1).unwrap(),
-        &pins,
-    );
+    let scope =
+        crate::async_udf::AsyncTaskScope::new(crate::generation::RuntimeGeneration::ONE, &pins);
     let lease = pending.bind(scope).unwrap();
     assert_eq!(lease.object_id(), identity);
     assert_eq!(lease.as_ref().0, 51);
@@ -1246,7 +1245,7 @@ fn pending_handle_argument_conversion_leases_the_payload() {
         handles
             .lookup::<DataRecord>(scope, &token)
             .unwrap()
-            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+            .into_pending(crate::generation::RuntimeGeneration::ONE)
             .unwrap()
     });
     handles
@@ -1969,7 +1968,7 @@ fn prepare_pinned_counted_record(
         runtime
             .lookup::<CountedDataRecord>(scope, &token)
             .unwrap()
-            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+            .into_pending(crate::generation::RuntimeGeneration::ONE)
             .unwrap()
     });
     (drops, token, pinned)
@@ -2058,7 +2057,7 @@ fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
     let reservation = runtime.reserve(calculation).unwrap();
     let (started_tx, started_rx) = mpsc::channel();
     reservation.commit_handle_scoped(
-        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        crate::generation::RuntimeGeneration::ONE,
         PendingTask {
             pending,
             started: started_tx,
@@ -2158,7 +2157,7 @@ fn pin_promotion_keeps_a_snapshot_owned_payload_without_a_binding() {
             .remove_and_drop(&token, "test remove before lease promotion");
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         handle
-            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+            .into_pending(crate::generation::RuntimeGeneration::ONE)
             .unwrap()
     });
 
@@ -3608,7 +3607,7 @@ fn close_resets_to_closed_for_reopen() {
     let session1 = slot.read().unwrap().store.session();
     assert!(!slot.is_none());
 
-    slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
+    slot.seal(crate::generation::RuntimeGeneration::ONE)
         .map(|_| ())
         .unwrap();
     assert!(slot.is_none());
@@ -3629,7 +3628,7 @@ fn handle_slot_seal_is_local_to_its_generation_bundle() {
     assert!(slot.read().is_ok());
     assert!(matches!(slot.disarm(), Err(XllError::Closing)));
 
-    slot.seal(crate::generation::RuntimeGeneration::new(1).unwrap())
+    slot.seal(crate::generation::RuntimeGeneration::ONE)
         .unwrap();
     assert!(slot.is_none());
 }
@@ -4181,9 +4180,10 @@ fn miri_deferred_seal_drains_debt_below_batch_threshold() {
 fn sealed_registry_finishes_its_owner_while_another_store_stays_open() {
     let first = super::store::HandleStore::try_new(8).unwrap();
     let second = super::store::HandleStore::try_new(8).unwrap();
-    let generation = crate::generation::RuntimeGeneration::new(1).unwrap();
-    let proof = first.seal().unwrap().quiescent(Some(generation)).unwrap();
-    assert_eq!(proof.generation(), Some(generation));
+    const GENERATION: crate::generation::RuntimeGeneration =
+        crate::generation::RuntimeGeneration::ONE;
+    let proof = first.seal().unwrap().quiescent(Some(GENERATION)).unwrap();
+    assert_eq!(proof.generation(), Some(GENERATION));
     assert_eq!(first.registry.phase(), HandleRegistryPhase::Closed);
     assert!(matches!(first.erase(DataRecord(1)), Err(XllError::Closing)));
     assert_eq!(second.registry.phase(), HandleRegistryPhase::Open);
@@ -4208,14 +4208,15 @@ fn miri_pending_handle_lease_rejects_foreign_generation_before_exposing_value() 
             .unwrap()
             .into_token();
         let pending = with_handle::<CountedDataRecord, _>(&handles, &token, |handle| {
-            handle.into_pending(RuntimeGeneration::new(1).unwrap())
+            handle.into_pending(RuntimeGeneration::ONE)
         })
         .unwrap()
         .unwrap();
         handles.terminate_all_topics();
         assert_eq!(drops.load(Ordering::Acquire), 0);
         let pins = TaskPins::new();
-        let scope = AsyncTaskScope::new(RuntimeGeneration::new(scope_generation).unwrap(), &pins);
+        let scope =
+            AsyncTaskScope::new(RuntimeGeneration::try_new(scope_generation).unwrap(), &pins);
         let mut accesses = 0;
         let outcome = pending.bind(scope).map(|lease| {
             accesses += 1;
@@ -4254,7 +4255,7 @@ fn miri_task_pin_storage_spill_preserves_prior_projections() {
         })
         .unwrap()
         .into_token();
-    let generation = RuntimeGeneration::new(1).unwrap();
+    let generation = RuntimeGeneration::ONE;
     let pending: Vec<_> = (0..6)
         .map(|_| {
             with_handle::<CountedDataRecord, _>(&handles, &token, |handle| {

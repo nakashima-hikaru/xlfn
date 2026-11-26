@@ -5,7 +5,8 @@ use std::sync::mpsc;
 use std::thread;
 
 fn lifetime_generation(raw: u64) -> crate::handle::FormulaLifetimeGeneration {
-    crate::handle::FormulaLifetimeGeneration::new(raw).expect("test server generation is non-zero")
+    crate::handle::FormulaLifetimeGeneration::try_new(raw)
+        .expect("test server generation is non-zero")
 }
 
 struct TraceValue;

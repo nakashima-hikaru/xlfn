@@ -5,18 +5,22 @@ macro_rules! claim_cleanup {
     ($progress:expr, $next:expr, $issuer:expr, $epoch:expr) => {{
         if matches!($progress, Progress::Idle | Progress::Pending) {
             let incarnation = $next;
-            if let Some(next) = incarnation.checked_add(1u64) {
-                $next = next;
-                $progress = Progress::Running {
-                    issuer: $issuer,
-                    epoch: $epoch,
-                    incarnation,
-                };
-                Some(CleanupClaim {
-                    issuer: $issuer,
-                    epoch: $epoch,
-                    incarnation,
-                })
+            if let Some(next_raw) = incarnation.get().checked_add(1u64) {
+                if let Some(next) = NonZeroU64::new(next_raw) {
+                    $next = next;
+                    $progress = Progress::Running {
+                        issuer: $issuer,
+                        epoch: $epoch,
+                        incarnation,
+                    };
+                    Some(CleanupClaim {
+                        issuer: $issuer,
+                        epoch: $epoch,
+                        incarnation,
+                    })
+                } else {
+                    None
+                }
             } else {
                 None
             }

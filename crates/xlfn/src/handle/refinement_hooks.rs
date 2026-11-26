@@ -39,7 +39,7 @@ impl HandleRefinementHooks {
             TokenWire {
                 session: 0,
                 slot: 0,
-                generation: 0,
+                generation: std::num::NonZeroU64::MIN,
             }
         }
     }
@@ -106,7 +106,7 @@ impl HandleRefinementHooks {
         key: &HandleTopicKey,
         runtime_id: u64,
         slot: u64,
-        generation: u64,
+        generation: std::num::NonZeroU64,
     ) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace

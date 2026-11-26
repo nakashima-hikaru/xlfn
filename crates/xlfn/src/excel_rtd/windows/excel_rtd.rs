@@ -47,8 +47,7 @@ pub(crate) fn observe<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
 
     let topic = CountedString::concat(["handle:", rtd_key])?;
 
-    let lifetime_generation = FormulaLifetimeGeneration::new(active.generation.get())
-        .expect("an active Excel RTD server has a non-zero lifetime generation");
+    let lifetime_generation = FormulaLifetimeGeneration::from_non_zero(active.generation.get());
     handles.claim_lifetime(rtd_key, lifetime_generation)?;
 
     let matched = invoke_rtd(host, active.identity.prog_id_utf16(), &topic, |result| {

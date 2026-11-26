@@ -80,10 +80,10 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         H: Default,
     {
         Self::with_host(
-            RuntimeGeneration::new(1).expect("test generation is non-zero"),
+            RuntimeGeneration::ONE,
             RtdLimits::standard(),
             H::default(),
-            SourceArena::empty(RuntimeGeneration::new(1).expect("test generation is non-zero")),
+            SourceArena::empty(RuntimeGeneration::ONE),
         )
     }
 
@@ -92,7 +92,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     where
         H: Default,
     {
-        let generation = RuntimeGeneration::new(1).expect("test generation is non-zero");
+        let generation = RuntimeGeneration::ONE;
         Self::with_host(generation, RtdLimits::standard(), H::default(), sources)
     }
 
@@ -212,7 +212,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         // SAFETY: test helper guarantees runtime outlives the server handle in the test.
         unsafe {
             self.register_server(
-                ServerGeneration::new(generation).expect("non-zero test server generation"),
+                ServerGeneration::try_new(generation).expect("non-zero test server generation"),
             )
             .unwrap()
         }
@@ -349,7 +349,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         // runtime and its server arena remain allocated for this owned
         // connection operation under the register/close lifecycle contract.
         let operation = unsafe { server.enter_owned_operation()? };
-        let conn_gen = ConnectionGeneration::new(
+        let conn_gen = ConnectionGeneration::try_new(
             runtime
                 .next_connection_generation
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -1091,7 +1091,7 @@ mod typestate_tests {
                 )
                 .unwrap();
             let id = prepared.id();
-            let generation = ConnectionGeneration::new(1).unwrap();
+            let generation = ConnectionGeneration::ONE;
             let ticket = runtime
                 .catalog
                 .lock()

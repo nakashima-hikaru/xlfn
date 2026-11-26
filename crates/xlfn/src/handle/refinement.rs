@@ -26,7 +26,7 @@ pub(crate) struct FormulaRevisionKeyWire {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OwnerWire {
     #[serde(rename = "serverGeneration")]
-    pub(crate) generation: u64,
+    pub(crate) generation: std::num::NonZeroU64,
     pub(crate) topic_id: i32,
 }
 
@@ -55,7 +55,7 @@ pub(crate) enum Event {
         #[serde(rename = "runtimeId")]
         runtime_id: u64,
         slot: u64,
-        generation: u64,
+        generation: std::num::NonZeroU64,
     },
     PublishAndInstallProvisional {
         key: FormulaRevisionKeyWire,
@@ -82,7 +82,7 @@ pub(crate) enum Event {
         #[serde(rename = "runtimeId")]
         runtime_id: u64,
         #[serde(rename = "nextGeneration")]
-        next_generation: u64,
+        next_generation: std::num::NonZeroU64,
     },
     RollbackPendingRetire {
         key: FormulaRevisionKeyWire,
@@ -108,7 +108,7 @@ pub(crate) enum Event {
     },
     ClaimServer {
         key: FormulaRevisionKeyWire,
-        generation: u64,
+        generation: std::num::NonZeroU64,
     },
     BeginConnection {
         key: FormulaRevisionKeyWire,
@@ -131,14 +131,14 @@ pub(crate) enum Event {
         owner: OwnerWire,
     },
     DetachGeneration {
-        generation: u64,
+        generation: std::num::NonZeroU64,
     },
     DrainPendingReuse {
         token: TokenWire,
         #[serde(rename = "runtimeId")]
         runtime_id: u64,
         #[serde(rename = "nextGeneration")]
-        next_generation: u64,
+        next_generation: std::num::NonZeroU64,
     },
     DrainPendingRetire {
         token: TokenWire,
@@ -148,7 +148,7 @@ pub(crate) enum Event {
     DrainPublishedReuse {
         token: TokenWire,
         #[serde(rename = "nextGeneration")]
-        next_generation: u64,
+        next_generation: std::num::NonZeroU64,
     },
     DrainPublishedRetire {
         token: TokenWire,
@@ -380,7 +380,7 @@ impl HandleRefinementTrace {
         key: &HandleTopicKey,
         runtime_id: u64,
         slot: u64,
-        generation: u64,
+        generation: std::num::NonZeroU64,
     ) {
         self.inner.lock().push(Event::InsertPendingReuse {
             key: topic_key(key),

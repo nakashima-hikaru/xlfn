@@ -1,5 +1,6 @@
 //! Sequential quarantine machine over arbitrary issuer/epoch identities.
 
+use std::num::NonZeroU64;
 use vstd::prelude::*;
 
 #[path = "../../../../crates/xlfn-engine/src/quarantine/transitions.rs"]
@@ -11,7 +12,7 @@ verus! {
 pub enum Progress {
     Idle,
     Pending,
-    Running { issuer: u64, epoch: u64, incarnation: u64 },
+    Running { issuer: u64, epoch: u64, incarnation: NonZeroU64 },
     Drained(u64),
     Retained(u64),
 }
@@ -19,7 +20,7 @@ pub enum Progress {
 pub struct CleanupClaim {
     pub issuer: u64,
     pub epoch: u64,
-    pub incarnation: u64,
+    pub incarnation: NonZeroU64,
 }
 
 pub enum CleanupOutcome {
@@ -36,20 +37,20 @@ pub open spec fn selectable(progress: Progress) -> bool {
 
 pub fn verify_claim(
     before: Progress,
-    next_before: u64,
+    next_before: NonZeroU64,
     issuer: u64,
     epoch: u64,
-) -> (result: (Progress, u64, Option<CleanupClaim>))
+) -> (result: (Progress, NonZeroU64, Option<CleanupClaim>))
     ensures
         match result.2 {
             Some(claim) => selectable(before)
-                && next_before < u64::MAX
+                && next_before.get() < u64::MAX
                 && result.0 == (Progress::Running { issuer, epoch, incarnation: next_before })
-                && result.1 as int == next_before as int + 1
+                && result.1.get() as int == next_before.get() as int + 1
                 && claim.issuer == issuer
                 && claim.epoch == epoch
                 && claim.incarnation == next_before,
-            None => (!selectable(before) || next_before == u64::MAX)
+            None => (!selectable(before) || next_before.get() == u64::MAX)
                 && result.0 == before
                 && result.1 == next_before,
         },
@@ -71,7 +72,7 @@ pub open spec fn exact(
     match before {
         Progress::Running { issuer, epoch, incarnation } =>
             caller == issuer && claim.issuer == issuer && claim.epoch == epoch
-                && claim.incarnation == incarnation && current == epoch,
+                && claim.incarnation@ == incarnation@ && current == epoch,
         _ => false,
     }
 }
