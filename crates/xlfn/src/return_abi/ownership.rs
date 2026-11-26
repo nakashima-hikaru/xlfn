@@ -79,22 +79,23 @@ impl ReturnObserver {
         }
     }
 
-    #[cfg(not(any(test, feature = "refinement")))]
-    fn record(&self, _: crate::shutdown_trace::ShutdownEvent) {}
-
     fn create_block(&self) {
+        #[cfg(any(test, feature = "refinement"))]
         self.record(crate::shutdown_trace::ShutdownEvent::CreateReturnBlock);
     }
 
     fn begin_free(&self) {
+        #[cfg(any(test, feature = "refinement"))]
         self.record(crate::shutdown_trace::ShutdownEvent::BeginReturnFree);
     }
 
     fn release_block(&self) {
+        #[cfg(any(test, feature = "refinement"))]
         self.record(crate::shutdown_trace::ShutdownEvent::ReleaseReturnBlock);
     }
 
     fn end_free(&self) {
+        #[cfg(any(test, feature = "refinement"))]
         self.record(crate::shutdown_trace::ShutdownEvent::EndReturnFree);
     }
 }

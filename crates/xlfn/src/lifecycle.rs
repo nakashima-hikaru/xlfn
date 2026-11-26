@@ -25,13 +25,16 @@ pub(crate) fn lifecycle_access_error(error: ThreadAffineError) -> XllError {
     crate::error::construct::internal(diagnostic_id)
 }
 
+#[cfg(test)]
 #[cold]
-pub(crate) fn lifecycle_invariant_violation(_message: &'static str) -> ! {
-    #[cfg(not(test))]
-    std::process::abort();
+pub(crate) fn lifecycle_invariant_violation(message: &'static str) -> ! {
+    panic!("lifecycle ownership invariant violated: {message}");
+}
 
-    #[cfg(test)]
-    panic!("lifecycle ownership invariant violated: {_message}");
+#[cfg(not(test))]
+#[cold]
+pub(crate) fn lifecycle_invariant_violation(_: &'static str) -> ! {
+    std::process::abort();
 }
 
 #[cfg(test)]

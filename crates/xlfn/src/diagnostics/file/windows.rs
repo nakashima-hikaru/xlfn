@@ -95,7 +95,6 @@ impl LogDirectory {
     pub(super) fn rotate_file(
         &self,
         file: &fs::File,
-        _source: &OsStr,
         destination: Option<&OsStr>,
     ) -> io::Result<()> {
         if file_information(file)?.nNumberOfLinks != 1 {

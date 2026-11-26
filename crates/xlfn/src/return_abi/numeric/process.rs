@@ -22,9 +22,18 @@ pub(super) unsafe fn reclaim_detached_block(
     // SAFETY: publication initialized this plain charge before exposing the
     // block. Its borrow ends here, before the allocation can be freed below.
     let charge = unsafe { retained.assume_init_read() };
-    // SAFETY: this is the exclusively owned block which contained the
-    // charge. Accounting supplies the exact original allocation size.
-    let release = |bytes| unsafe { super::release_block(pointer, bytes) };
+    #[cfg(target_os = "windows")]
+    let release = |_| {
+        // SAFETY: this is the exclusively owned block which contained the
+        // charge and was allocated from the Windows process heap.
+        unsafe { super::release_block(pointer) }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let release = |bytes| {
+        // SAFETY: this is the exclusively owned block which contained the
+        // charge. Accounting supplies the exact original allocation size.
+        unsafe { super::release_block(pointer, bytes) }
+    };
     // SAFETY: the charge was installed on this block before publication and
     // the releaser reports whether the free physically succeeded.
     unsafe { charge.reclaim(release) }

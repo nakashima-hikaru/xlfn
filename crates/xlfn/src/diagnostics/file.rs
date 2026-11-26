@@ -332,7 +332,12 @@ impl<'a> LogLock<'a> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
         };
-        self.directory.rotate_file(&file, name, destination)
+        self.directory.rotate_file(
+            &file,
+            #[cfg(not(target_os = "windows"))]
+            name,
+            destination,
+        )
     }
 }
 

@@ -68,17 +68,17 @@ impl InputIdentityEncoder {
         match self.unavailable {}
     }
 
-    pub(crate) fn semantic_utf16(&mut self, _units: &[u16]) -> XllResult<()> {
+    pub(crate) fn semantic_utf16(&mut self, _: &[u16]) -> XllResult<()> {
         match self.unavailable {}
     }
 
-    pub(crate) fn utf16(&mut self, _units: &[u16]) {
+    pub(crate) fn utf16(&mut self, _: &[u16]) {
         match self.unavailable {}
     }
 
     pub(crate) fn f64_sequence(
         &mut self,
-        _values: impl Iterator<Item = XllResult<f64>>,
+        _: impl Iterator<Item = XllResult<f64>>,
     ) -> XllResult<()> {
         match self.unavailable {}
     }
@@ -87,11 +87,11 @@ impl InputIdentityEncoder {
         match self.unavailable {}
     }
 
-    pub(crate) fn fail(&mut self, _error: XllError) {
+    pub(crate) fn fail(&mut self, _: XllError) {
         match self.unavailable {}
     }
 
-    pub(crate) fn fail_input(&mut self, _reason: InputError) {
+    pub(crate) fn fail_input(&mut self, _: InputError) {
         match self.unavailable {}
     }
 }

@@ -241,25 +241,29 @@ impl RuntimeObserver {
         crate::diagnostics::connect_trace(Arc::clone(&trace), |snapshot| {
             resources.diagnostics_running = snapshot.running;
             resources.diagnostics_pending = snapshot.pending;
-            crate::excel_rtd_protocol::connect_trace(Arc::clone(&trace), |snapshot| {
-                resources.rtd_class_factories = snapshot.rtd_class_factories;
-                resources.rtd_servers = snapshot.rtd_servers;
-                resources.rtd_server_locks = snapshot.rtd_server_locks;
-                // Publish the parent session before the recorder can
-                // accept any lifted certificate. In particular, a
-                // concurrent diagnostic reconfiguration can report one
-                // as soon as these trace handoff locks are released.
-                self.record_composition_event(
-                    crate::composition_refinement::CompositionEvent::CommitOpen {
-                        attempt: attempt.get(),
-                        resources: resources.clone(),
-                    },
-                );
-                trace
-                    .begin(attempt.get(), resources.clone())
-                    .expect("open trace begins before ingress publication");
-                Ok(())
-            })
+            crate::excel_rtd_protocol::connect_trace(
+                #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+                Arc::clone(&trace),
+                |snapshot| {
+                    resources.rtd_class_factories = snapshot.rtd_class_factories;
+                    resources.rtd_servers = snapshot.rtd_servers;
+                    resources.rtd_server_locks = snapshot.rtd_server_locks;
+                    // Publish the parent session before the recorder can
+                    // accept any lifted certificate. In particular, a
+                    // concurrent diagnostic reconfiguration can report one
+                    // as soon as these trace handoff locks are released.
+                    self.record_composition_event(
+                        crate::composition_refinement::CompositionEvent::CommitOpen {
+                            attempt: attempt.get(),
+                            resources: resources.clone(),
+                        },
+                    );
+                    trace
+                        .begin(attempt.get(), resources.clone())
+                        .expect("open trace begins before ingress publication");
+                    Ok(())
+                },
+            )
         })
         .expect("diagnostic and RTD trace initialization succeeds");
         #[cfg(test)]

@@ -45,7 +45,11 @@ pub fn validate_path_components(path: &Path) -> PackageResult {
             continue;
         }
         match fs::symlink_metadata(ancestor) {
-            Ok(metadata) if is_reparse_point(&metadata) && !is_trusted_system_alias(ancestor) => {
+            Ok(metadata) if is_reparse_point(&metadata) => {
+                #[cfg(target_os = "macos")]
+                if is_trusted_system_alias(ancestor) {
+                    continue;
+                }
                 return Err(format!(
                     "path component must not be a symlink or reparse point: {}",
                     ancestor.display()
@@ -69,7 +73,11 @@ pub fn validate_directory_path(path: &Path) -> PackageResult {
             continue;
         }
         match fs::symlink_metadata(ancestor) {
-            Ok(metadata) if !metadata.is_dir() && !is_trusted_system_alias(ancestor) => {
+            Ok(metadata) if !metadata.is_dir() => {
+                #[cfg(target_os = "macos")]
+                if is_trusted_system_alias(ancestor) {
+                    continue;
+                }
                 return Err(
                     format!("path component must be a directory: {}", ancestor.display()).into(),
                 );
@@ -91,11 +99,6 @@ pub(crate) fn is_trusted_system_alias(path: &Path) -> bool {
         _ => return false,
     };
     fs::canonicalize(path).is_ok_and(|resolved| resolved == expected)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) const fn is_trusted_system_alias(_path: &Path) -> bool {
-    false
 }
 
 pub(crate) fn windows_name_key(field: &str, name: &str) -> PackageResult<String> {

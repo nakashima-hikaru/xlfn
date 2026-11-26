@@ -7,44 +7,20 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 type ServerIdentity<E, C> = fn(E, C) -> (E, C);
-type ReturnContextMarker<'call, 'scope, E, C> =
-    (Rc<()>, &'call (), &'scope (), ServerIdentity<E, C>);
+type ReturnContextMarker<'call, 'scope, M, E, C> = (
+    Rc<()>,
+    &'call (),
+    &'scope (),
+    fn() -> M,
+    ServerIdentity<E, C>,
+);
 
 /// Callback authority supplied by the admitted call frame.
+#[cfg(feature = "handles")]
 #[doc(hidden)]
 pub struct ReturnFrameAccess<'call> {
-    #[cfg_attr(
-        not(feature = "handles"),
-        allow(dead_code, reason = "Only formula returns read frame callback access")
-    )]
     pub(crate) udf_id: &'static str,
-    #[cfg_attr(
-        not(feature = "handles"),
-        allow(dead_code, reason = "Only formula returns read frame callback access")
-    )]
     pub(crate) callbacks: &'call crate::host_callback::HostCallbackSession,
-}
-
-/// Retains the invocation lifetime for plain-input return preparation.
-#[cfg(feature = "handles")]
-#[doc(hidden)]
-pub struct PlainReturnState<'call> {
-    _scope: PhantomData<&'call crate::call::CallScope<'call>>,
-}
-
-#[cfg(feature = "handles")]
-impl<'call> PlainReturnState<'call> {
-    const fn empty() -> Self {
-        Self {
-            _scope: PhantomData,
-        }
-    }
-
-    pub(crate) fn with_call(_call: crate::value::input::CallContext<'call>) -> Self {
-        Self {
-            _scope: PhantomData,
-        }
-    }
 }
 
 /// Return capabilities selected by the UDF's input identity mode.
@@ -56,20 +32,25 @@ pub struct ReturnContext<
     E: crate::RtdSubscription = (),
     C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
 > {
-    #[cfg_attr(
-        not(feature = "handles"),
-        allow(dead_code, reason = "Plain contexts carry only unit state")
-    )]
+    #[cfg(feature = "handles")]
     state: M::ReturnState<'call, 'scope, E, C>,
-    lifetime: PhantomData<ReturnContextMarker<'call, 'scope, E, C>>,
+    lifetime: PhantomData<ReturnContextMarker<'call, 'scope, M, E, C>>,
 }
 
 impl<'call, 'scope, M: InputMode, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
     ReturnContext<'call, 'scope, M, E, C>
 {
+    #[cfg(feature = "handles")]
     pub(crate) fn from_state(state: M::ReturnState<'call, 'scope, E, C>) -> Self {
         Self {
             state,
+            lifetime: PhantomData,
+        }
+    }
+
+    #[cfg(not(feature = "handles"))]
+    pub(crate) const fn empty() -> Self {
+        Self {
             lifetime: PhantomData,
         }
     }
@@ -81,8 +62,6 @@ impl ReturnContext<'_, '_> {
     pub const fn new() -> Self {
         Self {
             #[cfg(feature = "handles")]
-            state: PlainReturnState::empty(),
-            #[cfg(not(feature = "handles"))]
             state: (),
             lifetime: PhantomData,
         }

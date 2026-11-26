@@ -109,8 +109,6 @@ pub mod v1 {
     #[doc(hidden)]
     pub use inventory::submit as submit_registration;
 
-    #[cfg(feature = "handles")]
-    pub use crate::call_return::PlainReturnState;
     #[doc(hidden)]
     pub use crate::call_return::{NumericReturn, ReturnContext};
     #[doc(hidden)]
@@ -154,8 +152,11 @@ pub mod v1 {
     pub use crate::__xlfn_private_calculation_exports as __xlfn_calculation_exports;
     #[doc(hidden)]
     pub use crate::__xlfn_private_excel_rtd_exports as __xlfn_excel_rtd_exports;
+    pub use crate::call_return::EncodedReturn;
     #[cfg(feature = "handles")]
     pub use crate::call_return::FormulaPublisher;
+    #[cfg(feature = "handles")]
+    pub use crate::call_return::ReturnFrameAccess;
     pub use crate::call_return::ReturnPayload as ExcelOutput;
     #[doc(hidden)]
     pub use crate::call_return::assert_async_parameter;
@@ -164,7 +165,6 @@ pub mod v1 {
         AsyncReturn, ExcelReturn, ExcelReturnSealed, MacroSheetReturn, MainThreadReturn,
         ThreadSafeReturn, VolatileReturn,
     };
-    pub use crate::call_return::{EncodedReturn, ReturnFrameAccess};
     #[doc(hidden)]
     pub use crate::call_return::{
         assert_async_return, assert_macro_sheet_return, assert_main_thread_return,
@@ -611,13 +611,6 @@ pub mod v1 {
         arguments: ArgumentContext<'brand, 'call, M>,
     }
 
-    /// The reusable call environment paired with its finalized return authority.
-    #[doc(hidden)]
-    pub type FinishedCall<'call, M, E, C, X> = (
-        CallEnvironment<'call, E, C, X>,
-        ReturnContext<'call, 'call, M, E, C>,
-    );
-
     impl<
         'brand,
         'call,
@@ -665,22 +658,27 @@ pub mod v1 {
             Ok((environment, arguments.finish_typed()?))
         }
 
-        #[doc(hidden)]
-        pub fn finish(self, udf_id: &'static str) -> XllResult<FinishedCall<'call, M, E, C, X>> {
-            let (environment, arguments) = self.finish_arguments()?;
-            let context = arguments.return_context(ReturnFrameAccess {
-                udf_id,
-                callbacks: environment.callbacks,
-            })?;
-            Ok((environment, context))
-        }
-
+        #[cfg(feature = "handles")]
         #[doc(hidden)]
         pub fn return_context(
             self,
             udf_id: &'static str,
         ) -> XllResult<ReturnContext<'call, 'call, M, E, C>> {
-            self.finish(udf_id).map(|(_, context)| context)
+            let (environment, arguments) = self.finish_arguments()?;
+            arguments.return_context(ReturnFrameAccess {
+                udf_id,
+                callbacks: environment.callbacks,
+            })
+        }
+
+        #[cfg(not(feature = "handles"))]
+        #[doc(hidden)]
+        pub fn return_context(
+            self,
+            _: &'static str,
+        ) -> XllResult<ReturnContext<'call, 'call, M, E, C>> {
+            let (_, arguments) = self.finish_arguments()?;
+            Ok(arguments.return_context())
         }
 
         #[doc(hidden)]

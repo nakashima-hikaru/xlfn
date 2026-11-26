@@ -261,6 +261,7 @@ impl ModuleResidency {
         state.resident_event_count() == 0 || state.lease.is_some()
     }
 
+    #[cfg(any(test, feature = "refinement", feature = "rtd", feature = "handles"))]
     pub(crate) fn is_held(&self) -> bool {
         self.state.lock().lease.is_some()
     }

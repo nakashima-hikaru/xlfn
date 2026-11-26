@@ -132,10 +132,7 @@ where
     any(test, feature = "refinement"),
     not(all(target_os = "windows", any(feature = "rtd", feature = "handles")))
 ))]
-pub(crate) fn connect_trace<F>(
-    _: crate::shutdown_trace::ShutdownTraceHandle,
-    initialize: F,
-) -> crate::XllResult<()>
+pub(crate) fn connect_trace<F>(initialize: F) -> crate::XllResult<()>
 where
     F: FnOnce(RtdTraceSnapshot) -> crate::XllResult<()>,
 {
@@ -176,6 +173,6 @@ pub(crate) fn wait_for_module_quiescence(
 }
 
 #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
-pub(crate) fn wait_for_module_quiescence(_: bool) -> Result<RtdQuiescent, RtdQuiescenceError> {
+pub(crate) fn wait_for_module_quiescence() -> Result<RtdQuiescent, RtdQuiescenceError> {
     Ok(RtdQuiescent(()))
 }

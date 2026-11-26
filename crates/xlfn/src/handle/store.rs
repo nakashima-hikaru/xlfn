@@ -41,6 +41,7 @@ impl HandleStore {
         PendingObjectBinding::from_alias(&self.registry, source)
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) const fn session(&self) -> u64 {
         self.registry.codec.session
     }

@@ -271,7 +271,13 @@ impl Drop for NumericAllocation {
     fn drop(&mut self) {
         // SAFETY: this owner is never retained after publication. Thus an
         // ordinary drop releases only an unpublished, exclusively owned block.
-        if unsafe { release_block(self.pointer, self.bytes) } {
+        if unsafe {
+            release_block(
+                self.pointer,
+                #[cfg(not(target_os = "windows"))]
+                self.bytes,
+            )
+        } {
             // SAFETY: publication forgets the owner; this is the unique
             // unpublished reservation, and its allocation was just freed.
             unsafe { ManuallyDrop::drop(&mut self.reservation) };
@@ -570,7 +576,7 @@ fn allocate_block(bytes: usize) -> XllResult<NonNull<NumericBlock>> {
 }
 
 #[cfg(target_os = "windows")]
-unsafe fn release_block(pointer: NonNull<NumericBlock>, _bytes: usize) -> bool {
+unsafe fn release_block(pointer: NonNull<NumericBlock>) -> bool {
     #[cfg(test)]
     if FAIL_NEXT_BLOCK_FREE.with(|fail| fail.replace(false)) {
         return false;

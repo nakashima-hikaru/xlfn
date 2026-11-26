@@ -5,7 +5,9 @@
 //! cleanup failures live in this separate allocation, including while final
 //! runtime Drop exclusively borrows the control plane and joins producers.
 
-use crate::shutdown_trace::{ObservationSink, ShutdownEvent, ShutdownTraceHandle};
+#[cfg(any(test, feature = "refinement"))]
+use crate::shutdown_trace::ShutdownTraceHandle;
+use crate::shutdown_trace::{ObservationSink, ShutdownEvent};
 use crate::sync::Mutex;
 use crate::{XllError, XllResult};
 use xlfn_kernel::operation_gate::OperationGate;
@@ -38,6 +40,7 @@ impl RuntimeServices {
         }
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: ShutdownTraceHandle) {
         self.observer.set_trace_sink(trace);
     }

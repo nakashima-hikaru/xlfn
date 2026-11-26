@@ -142,6 +142,7 @@ impl DiagnosticRouter {
         }
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     fn trace_handle(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
         self.observer.trace_handle()
     }
@@ -507,6 +508,7 @@ fn configure_diagnostic_sink_with<S: DiagnosticSink>(
     }
     let make_sink = || {
         let sink = Box::new(AsyncDiagnosticSink::new(make_inner_sink()?)?);
+        #[cfg(any(test, feature = "refinement"))]
         if let Some(trace) = router.trace_handle() {
             sink.set_trace_sink(trace);
         }

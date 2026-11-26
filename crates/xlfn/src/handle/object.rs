@@ -50,6 +50,7 @@ impl FreshObject<'_> {
             },
         );
         drop(state);
+        #[cfg(any(test, feature = "refinement"))]
         self.arena
             .record(crate::shutdown_trace::ShutdownEvent::AddHandleObject);
         Ok(ObjectBinding { cell: pointer })
@@ -214,6 +215,7 @@ impl ObjectArena {
         })?;
         state.active_pins = active_pins;
         drop(state);
+        #[cfg(any(test, feature = "refinement"))]
         self.record(crate::shutdown_trace::ShutdownEvent::AddHandlePin);
         Ok(RawObjectLeaseGuard { cell })
     }
@@ -291,6 +293,7 @@ impl ObjectArena {
                     .cell
             })
         };
+        #[cfg(any(test, feature = "refinement"))]
         if OBSERVED {
             self.record(crate::shutdown_trace::ShutdownEvent::RemoveHandlePin);
         }
@@ -308,6 +311,7 @@ impl ObjectArena {
             crate::diagnostics::report_no_unwind("handle object final drop", &error);
             self.cleanup.record(error);
         }
+        #[cfg(any(test, feature = "refinement"))]
         self.record(crate::shutdown_trace::ShutdownEvent::RemoveHandleObject);
     }
 
@@ -405,9 +409,6 @@ impl ObjectArena {
             trace.record(event);
         }
     }
-
-    #[cfg(not(any(test, feature = "refinement")))]
-    fn record(&self, _: crate::shutdown_trace::ShutdownEvent) {}
 }
 
 impl Drop for ObjectArena {

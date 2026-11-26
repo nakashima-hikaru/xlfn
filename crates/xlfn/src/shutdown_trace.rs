@@ -256,16 +256,9 @@ impl ObservationSink {
         *self.trace.lock() = Some(trace);
     }
 
-    #[cfg(not(any(test, feature = "refinement")))]
-    pub(crate) fn set_trace_sink(&self, _: ShutdownTraceHandle) {}
-
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn trace_handle(&self) -> Option<ShutdownTraceHandle> {
-        #[cfg(any(test, feature = "refinement"))]
-        {
-            return self.trace.lock().clone();
-        }
-        #[cfg(not(any(test, feature = "refinement")))]
-        None
+        self.trace.lock().clone()
     }
 
     #[cfg(any(test, feature = "refinement"))]

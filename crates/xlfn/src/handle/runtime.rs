@@ -108,12 +108,16 @@ pub(crate) struct FormulaHandleService {
 impl FormulaHandleService {
     pub(crate) fn try_new(maximum_bindings: u32) -> XllResult<Self> {
         let store = HandleStore::try_new(maximum_bindings)?;
+        #[cfg(any(test, feature = "refinement"))]
         let registry_session = store.session();
         Ok(Self {
             store,
             topics: TopicTable::new(),
             prepares: HandlePrepareState::new(),
-            refinement: HandleRefinementHooks::new(registry_session),
+            refinement: HandleRefinementHooks::new(
+                #[cfg(any(test, feature = "refinement"))]
+                registry_session,
+            ),
         })
     }
 

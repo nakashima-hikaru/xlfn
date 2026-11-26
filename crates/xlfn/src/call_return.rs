@@ -10,11 +10,9 @@ mod payload;
 mod rtd;
 mod traits;
 
+pub use context::ReturnContext;
 #[cfg(feature = "handles")]
-pub use context::FormulaPublisher;
-#[cfg(feature = "handles")]
-pub use context::PlainReturnState;
-pub use context::{ReturnContext, ReturnFrameAccess};
+pub use context::{FormulaPublisher, ReturnFrameAccess};
 pub use numeric::NumericReturn;
 pub use payload::{EncodedReturn, ReturnPayload};
 pub use traits::{

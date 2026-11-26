@@ -26,6 +26,7 @@ pub(crate) mod sealed {
         where
             Self: super::InputMode;
 
+        #[cfg(feature = "handles")]
         fn finish_return<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
             arguments: super::FinishedArguments<'call, Self>,
             access: crate::call_return::ReturnFrameAccess<'call>,
@@ -44,6 +45,7 @@ pub trait InputMode: sealed::InputModeSealed + Sized {
     type Identity;
     type Fingerprint;
     type FinishedFingerprint;
+    #[cfg(feature = "handles")]
     type ReturnState<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>;
 
     fn finish_typed(fingerprint: Self::Fingerprint) -> XllResult<Self::FinishedFingerprint>;
@@ -128,17 +130,12 @@ impl sealed::InputModeSealed for PlainInputMode {
         Ok(None)
     }
 
+    #[cfg(feature = "handles")]
     fn finish_return<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
-        _arguments: FinishedArguments<'call, Self>,
-        _access: crate::call_return::ReturnFrameAccess<'call>,
+        _: FinishedArguments<'call, Self>,
+        _: crate::call_return::ReturnFrameAccess<'call>,
     ) -> XllResult<crate::call_return::ReturnContext<'call, 'call, Self, E, C>> {
-        #[cfg(feature = "handles")]
-        let context = crate::call_return::ReturnContext::from_state(
-            crate::call_return::PlainReturnState::with_call(_arguments.call),
-        );
-        #[cfg(not(feature = "handles"))]
-        let context = crate::call_return::ReturnContext::from_state(());
-        Ok(context)
+        Ok(crate::call_return::ReturnContext::from_state(()))
     }
 }
 #[cfg(any(feature = "handles", test))]
@@ -155,30 +152,26 @@ impl sealed::InputModeSealed for FormulaInputMode {
             .map(|fingerprint| Some(*fingerprint.as_bytes()))
     }
 
+    #[cfg(feature = "handles")]
     fn finish_return<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
-        _arguments: FinishedArguments<'call, Self>,
-        _access: crate::call_return::ReturnFrameAccess<'call>,
+        arguments: FinishedArguments<'call, Self>,
+        access: crate::call_return::ReturnFrameAccess<'call>,
     ) -> XllResult<crate::call_return::ReturnContext<'call, 'call, Self, E, C>> {
-        #[cfg(feature = "handles")]
-        {
-            let FinishedArguments { mut call, inputs } = _arguments;
-            let state = crate::call_return::FormulaPublisher::new(
-                call.take_handle_access().ok_or_else(|| {
-                    XllError::input(
-                        "<formula return>",
-                        crate::error::InputError::Malformed(
-                            "formula return requires admitted handle access",
-                        ),
-                    )
-                })?,
-                _access.udf_id,
-                inputs,
-                _access.callbacks,
-            );
-            Ok(crate::call_return::ReturnContext::from_state(state))
-        }
-        #[cfg(not(feature = "handles"))]
-        Ok(crate::call_return::ReturnContext::from_state(()))
+        let FinishedArguments { mut call, inputs } = arguments;
+        let state = crate::call_return::FormulaPublisher::new(
+            call.take_handle_access().ok_or_else(|| {
+                XllError::input(
+                    "<formula return>",
+                    crate::error::InputError::Malformed(
+                        "formula return requires admitted handle access",
+                    ),
+                )
+            })?,
+            access.udf_id,
+            inputs,
+            access.callbacks,
+        );
+        Ok(crate::call_return::ReturnContext::from_state(state))
     }
 }
 
@@ -188,9 +181,6 @@ impl InputMode for PlainInputMode {
     type Fingerprint = ();
     type FinishedFingerprint = ();
     #[cfg(feature = "handles")]
-    type ReturnState<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> =
-        crate::call_return::PlainReturnState<'call>;
-    #[cfg(not(feature = "handles"))]
     type ReturnState<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> = ();
     fn finish_typed(_: ()) -> XllResult<()> {
         Ok(())
@@ -263,8 +253,6 @@ impl InputMode for FormulaInputMode {
     #[cfg(feature = "handles")]
     type ReturnState<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> =
         crate::call_return::FormulaPublisher<'call, 'scope, E, C>;
-    #[cfg(not(feature = "handles"))]
-    type ReturnState<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> = ();
     #[inline]
     fn finish_typed(fingerprint: Self::Fingerprint) -> XllResult<[u8; 32]> {
         fingerprint.finish().map(|value| *value.as_bytes())
@@ -864,7 +852,7 @@ impl<'call, T: FromExcel<'call>> ExcelParameter<'call, PlainInputMode> for T {
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        _context: &mut DecodeCallContext<'_, 'call>,
+        _: &mut DecodeCallContext<'_, 'call>,
         _: &mut (),
     ) -> XllResult<Self> {
         T::from_excel(value, argument)
@@ -938,7 +926,7 @@ where
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
-        _context: &mut DecodeCallContext<'_, 'call>,
+        _: &mut DecodeCallContext<'_, 'call>,
         identity: &mut InputIdentityEncoder,
     ) -> XllResult<Self> {
         T::from_excel_with_identity(value, argument, identity)
@@ -1194,11 +1182,19 @@ impl<'call, M: InputMode> FinishedArguments<'call, M> {
         &self.inputs
     }
 
+    #[cfg(feature = "handles")]
     pub(crate) fn return_context<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
         self,
         access: crate::call_return::ReturnFrameAccess<'call>,
     ) -> XllResult<crate::call_return::ReturnContext<'call, 'call, M, E, C>> {
         M::finish_return(self, access)
+    }
+
+    #[cfg(not(feature = "handles"))]
+    pub(crate) fn return_context<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+        self,
+    ) -> crate::call_return::ReturnContext<'call, 'call, M, E, C> {
+        crate::call_return::ReturnContext::empty()
     }
 }
 

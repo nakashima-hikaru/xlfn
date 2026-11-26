@@ -42,6 +42,10 @@ impl<F: Future<Output = ()>> Future for AsyncTask<F> {
 /// that permits generation and executor reclamation.
 pub(crate) struct TrackedFuture<F> {
     future: NoUnwindFuture<CancellableTaskFuture<F>, TaskDestruction>,
+    #[cfg_attr(
+        not(any(test, feature = "refinement")),
+        allow(dead_code, reason = "Retained for drop order after the tracked future")
+    )]
     completion: CompletionGuard,
 }
 
@@ -105,10 +109,13 @@ impl<F: Future<Output = ()>> Future for TrackedFuture<F> {
         // ends; no method moves it and field drop destroys it in place before
         // completion. The &mut pointer upholds PinSafePointer's contract.
         match unsafe { Pin::new_unchecked(&mut this.future) }.poll(context) {
+            #[cfg(any(test, feature = "refinement"))]
             Poll::Ready(result) => {
                 this.completion.observation.finished(result.is_ok());
                 Poll::Ready(())
             }
+            #[cfg(not(any(test, feature = "refinement")))]
+            Poll::Ready(_) => Poll::Ready(()),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -257,9 +264,6 @@ impl CompletionObservation {
             crate::shutdown_trace::Completion::Canceled
         };
     }
-
-    #[cfg(not(any(test, feature = "refinement")))]
-    pub(crate) fn finished(&self, _: bool) {}
 
     fn completion(&self) -> crate::shutdown_trace::Completion {
         #[cfg(any(test, feature = "refinement"))]

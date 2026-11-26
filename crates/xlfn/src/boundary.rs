@@ -12,6 +12,7 @@ mod event_lifecycle_tests;
 #[cfg(test)]
 mod event_shutdown_tests;
 
+#[cfg(target_os = "windows")]
 use crate::diagnostics::AddinId;
 use crate::error::XllError;
 use crate::panic_boundary::catch_no_unwind;
@@ -24,9 +25,6 @@ pub(crate) fn write_startup_log(addin_id: &AddinId, message: &str) {
     };
     let _ = crate::diagnostics::append_startup_log(&directory.join("startup.log"), message);
 }
-
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn write_startup_log(_: &AddinId, _: &str) {}
 
 pub(crate) fn report_cleanup_issue(issue: &crate::shutdown::CleanupIssue) {
     let _ = catch_no_unwind(AssertUnwindSafe(|| {

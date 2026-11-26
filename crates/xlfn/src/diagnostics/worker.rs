@@ -89,10 +89,12 @@ impl DiagnosticObserver {
         })
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
         self.sink.set_trace_sink(trace);
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn trace_handle(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
         self.sink.trace_handle()
     }
@@ -253,6 +255,7 @@ impl AsyncDiagnosticSink {
         Ok(Self { sender, worker })
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
         self.worker.observer().set_trace_sink(trace);
     }

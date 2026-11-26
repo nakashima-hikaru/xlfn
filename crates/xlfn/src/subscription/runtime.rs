@@ -132,6 +132,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         *self.test_enter_hook.lock() = hook;
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
         self.services.set_trace_sink(trace);
     }

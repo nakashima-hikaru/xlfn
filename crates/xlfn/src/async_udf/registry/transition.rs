@@ -30,11 +30,11 @@ enum AdvanceAcquisition<'registry> {
 
 impl<'registry> AdvanceOwner<'registry> {
     fn allocate_successor(
-        _registry: &TaskRegistry,
+        #[cfg(test)] registry: &TaskRegistry,
         next: CalculationEpoch,
     ) -> PublishedOwner<CalculationState> {
         #[cfg(test)]
-        tests::before_successor_allocation(_registry);
+        tests::before_successor_allocation(registry);
         PublishedOwner::new(CalculationState::new(next))
     }
 
@@ -50,7 +50,11 @@ impl<'registry> AdvanceOwner<'registry> {
             return AdvanceAcquisition::Done(false);
         };
         if let Some(mut stopped) = control.stopped() {
-            let state = Self::allocate_successor(registry, next);
+            let state = Self::allocate_successor(
+                #[cfg(test)]
+                registry,
+                next,
+            );
             state.seal_admission();
             let pointer = NonNull::from(state.as_ref());
             // Insertion under control cannot affect concurrent snapshots
@@ -114,7 +118,11 @@ impl<'registry> AdvanceOwner<'registry> {
                 return false;
             }
         };
-        let state = Self::allocate_successor(registry, self.next);
+        let state = Self::allocate_successor(
+            #[cfg(test)]
+            registry,
+            self.next,
+        );
         let pointer = NonNull::from(state.as_ref());
         displaced = advancing.calculations().insert(self.next, state);
         let publication = registry.publication.lock();

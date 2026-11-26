@@ -30,7 +30,11 @@ pub(crate) fn observe<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     token: &str,
     host: ExcelHost<'_>,
 ) -> XllResult<()> {
-    let _rtd_operation = crate::excel_rtd::begin_operation(handles, ingress)?;
+    let _rtd_operation = crate::excel_rtd::begin_operation(
+        #[cfg(any(test, feature = "refinement"))]
+        handles,
+        ingress,
+    )?;
     let mut observation = ServerObservation::begin(ensure_server::<E, C>(Some(handles), None)?)?;
     let ensured = observation.server();
     let active = &ensured.active;

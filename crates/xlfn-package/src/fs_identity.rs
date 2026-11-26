@@ -195,21 +195,13 @@ pub(crate) fn file_snapshot_state(file: &std::fs::File) -> io::Result<FileSnapsh
     })
 }
 
-#[cfg(unix)]
-pub(crate) fn same_file_identity(left: &std::fs::File, right: &std::fs::File) -> io::Result<bool> {
-    Ok(file_snapshot_state(left)?.identity == file_snapshot_state(right)?.identity)
-}
-
-#[cfg(target_os = "windows")]
+#[cfg(any(unix, target_os = "windows"))]
 pub(crate) fn same_file_identity(left: &std::fs::File, right: &std::fs::File) -> io::Result<bool> {
     Ok(file_snapshot_state(left)?.identity == file_snapshot_state(right)?.identity)
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-pub(crate) fn same_file_identity(
-    _left: &std::fs::File,
-    _right: &std::fs::File,
-) -> io::Result<bool> {
+pub(crate) fn same_file_identity(_: &std::fs::File, _: &std::fs::File) -> io::Result<bool> {
     // The supported release hosts are Unix and Windows. Keep other targets
     // conservative rather than claiming identity from path metadata alone.
     Ok(false)

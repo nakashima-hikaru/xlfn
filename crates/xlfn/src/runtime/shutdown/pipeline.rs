@@ -1259,8 +1259,11 @@ impl<'runtime, A: Addin, K: TerminalCertificateKind>
         }
         #[cfg(test)]
         tests::check_reclaim_fault(true)?;
-        let rtd = crate::excel_rtd_protocol::wait_for_module_quiescence(deps.residency().is_held())
-            .map_err(ReclaimFailure::Rtd)?;
+        let rtd = crate::excel_rtd_protocol::wait_for_module_quiescence(
+            #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+            deps.residency().is_held(),
+        )
+        .map_err(ReclaimFailure::Rtd)?;
         if K::RECORD_RECLAIM {
             deps.observer().rtd_drained();
         }

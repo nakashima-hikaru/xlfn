@@ -271,7 +271,7 @@ impl HandleRefinementHooks {
 
 #[cfg(not(any(test, feature = "refinement")))]
 impl HandleRefinementHooks {
-    pub(crate) fn new(_: u64) -> Self {
+    pub(crate) fn new() -> Self {
         Self {}
     }
 

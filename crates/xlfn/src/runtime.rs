@@ -1061,9 +1061,11 @@ pub(crate) mod tests {
         // deliberately does not synthesize lifecycle trace milestones; those
         // are exercised by the real lifecycle close path.
         runtime.disable_trace_for_test();
-        let _rtd =
-            crate::excel_rtd_protocol::wait_for_module_quiescence(runtime.module_residency_held())
-                .expect("RTD module quiescence");
+        let _rtd = crate::excel_rtd_protocol::wait_for_module_quiescence(
+            #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+            runtime.module_residency_held(),
+        )
+        .expect("RTD module quiescence");
         let last_generation = runtime.lifecycle.access().last_committed_generation();
         let certificate = removal_attempt
             .certify::<FinalRemoval>(
@@ -1647,9 +1649,11 @@ pub(crate) mod tests {
         let (module_quiescent, _exports) = drained.certify_for_test();
         let module_epoch = module_quiescent.id();
         runtime.disable_trace_for_test();
-        let _rtd =
-            crate::excel_rtd_protocol::wait_for_module_quiescence(runtime.module_residency_held())
-                .expect("RTD module quiescence");
+        let _rtd = crate::excel_rtd_protocol::wait_for_module_quiescence(
+            #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+            runtime.module_residency_held(),
+        )
+        .expect("RTD module quiescence");
         let certificate = removal_attempt
             .certify::<FinalRemoval>(
                 QuiescenceProof::for_test(
@@ -1774,9 +1778,11 @@ pub(crate) mod tests {
         let drained = module_closing.seal_and_drain().unwrap();
         let (module_quiescent, _exports) = drained.certify_for_test();
         let module_epoch = module_quiescent.id();
-        let _rtd =
-            crate::excel_rtd_protocol::wait_for_module_quiescence(runtime.module_residency_held())
-                .expect("RTD module quiescence");
+        let _rtd = crate::excel_rtd_protocol::wait_for_module_quiescence(
+            #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+            runtime.module_residency_held(),
+        )
+        .expect("RTD module quiescence");
         let removal_attempt = match removal_attempt.certify::<FinalRemoval>(
             QuiescenceProof::for_test(
                 Some(crate::generation::RuntimeGeneration::ONE),

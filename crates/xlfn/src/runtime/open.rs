@@ -2,7 +2,9 @@
 
 use crate::XllError;
 use crate::addin_impl::{Addin, BuildInfo};
-use crate::boundary::{report_boundary_error, write_startup_log};
+use crate::boundary::report_boundary_error;
+#[cfg(target_os = "windows")]
+use crate::boundary::write_startup_log;
 use crate::diagnostics::AddinId;
 use crate::generation::OpeningGeneration;
 use crate::host_callback::HostCallbackSession;
@@ -226,16 +228,19 @@ where
 
     let opened = match result {
         Ok(Ok(())) => {
+            #[cfg(target_os = "windows")]
             write_startup_log(addin_id, "xlAutoOpen succeeded");
             1
         }
         Ok(Err(error)) => {
+            #[cfg(target_os = "windows")]
             write_startup_log(addin_id, &format!("xlAutoOpen failed: {error}"));
             report_boundary_error("xlAutoOpen", &error);
             0
         }
         Err(_) => {
             let error = XllError::Panic;
+            #[cfg(target_os = "windows")]
             write_startup_log(addin_id, "xlAutoOpen failed: panic at boundary");
             report_boundary_error("xlAutoOpen", &error);
             runtime.lifecycle_orchestrator().quarantine();

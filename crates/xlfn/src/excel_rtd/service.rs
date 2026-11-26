@@ -33,6 +33,7 @@ pub(crate) struct SubscriptionServiceSlot<
         SubscriptionRuntime<E, C>,
         crate::XllError,
     >,
+    #[cfg(any(test, feature = "refinement"))]
     observer: crate::shutdown_trace::ObservationSink,
 }
 
@@ -52,6 +53,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SubscriptionServiceSlot<
     pub(crate) const fn new() -> Self {
         Self {
             service: xlfn_kernel::service_slot::GenerationServiceSlot::new(),
+            #[cfg(any(test, feature = "refinement"))]
             observer: crate::shutdown_trace::ObservationSink::new(),
         }
     }
@@ -86,11 +88,14 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SubscriptionServiceSlot<
                         config.sources,
                     )))
                 },
+                #[cfg(any(test, feature = "refinement"))]
                 |runtime| {
                     if let Some(trace) = self.observer.trace_handle() {
                         runtime.set_trace_sink(trace);
                     }
                 },
+                #[cfg(not(any(test, feature = "refinement")))]
+                |_| {},
             )
             .map_err(crate::error::map_service_slot_error)
     }
