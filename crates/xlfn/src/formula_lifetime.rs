@@ -16,7 +16,7 @@ use std::num::NonZeroU64;
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct FormulaLifetimeGeneration(NonZeroU64);
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(all(feature = "handles", test))]
 impl FormulaLifetimeGeneration {
     pub(crate) const fn try_new(raw: u64) -> Option<Self> {
         match NonZeroU64::new(raw) {
@@ -24,8 +24,10 @@ impl FormulaLifetimeGeneration {
             None => None,
         }
     }
+}
 
-    #[cfg(target_os = "windows")]
+#[cfg(target_os = "windows")]
+impl FormulaLifetimeGeneration {
     pub(crate) const fn from_non_zero(raw: NonZeroU64) -> Self {
         Self(raw)
     }
