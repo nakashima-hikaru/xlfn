@@ -611,7 +611,6 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         Ok(CallGuard {
             diagnostics: &self.diagnostics,
             admission,
-            _ingress: ingress,
             _observation: observation,
         })
     }
@@ -630,7 +629,6 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
             call: CallGuard {
                 diagnostics: &self.diagnostics,
                 admission,
-                _ingress: ingress,
                 _observation: self.observer().observe_call(),
             },
         })
@@ -951,7 +949,6 @@ impl<'call, A: crate::Addin> std::ops::Deref for AsyncCallGuard<'call, A> {
 
 pub struct CallGuard<'runtime, A: crate::Addin> {
     diagnostics: &'runtime crate::diagnostics::DiagnosticHistory,
-    _ingress: &'runtime AdmittedExport<'runtime>,
     admission: GenerationAdmission<'runtime, A>,
     _observation: observer::CallObservation<'runtime>,
 }

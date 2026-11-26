@@ -164,7 +164,7 @@ type HandlePermits = permits::Retained<crate::handle::HandleDomainPermit>;
 #[derive(Clone, Copy)]
 enum HandleWitnessSource<'scope> {
     Scope {
-        _scope: &'scope CallScope<'scope>,
+        _scope: std::marker::PhantomData<&'scope CallScope<'scope>>,
         domain: std::ptr::NonNull<crate::handle::HandleReadDomain>,
     },
     #[cfg(test)]
@@ -287,7 +287,7 @@ impl<'brand, 'call> CallStorage<'brand, 'call> {
         // field through this storage borrow keeps the entire owner alive.
         Ok(HandleDomainWitness {
             source: HandleWitnessSource::Scope {
-                _scope: &self.scope,
+                _scope: std::marker::PhantomData,
                 domain: domain_ptr,
             },
         })

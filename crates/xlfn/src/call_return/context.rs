@@ -21,18 +21,20 @@ pub struct ReturnFrameAccess<'call> {
 #[cfg(feature = "handles")]
 #[doc(hidden)]
 pub struct PlainReturnState<'call> {
-    _scope: Option<&'call crate::call::CallScope<'call>>,
+    _scope: PhantomData<&'call crate::call::CallScope<'call>>,
 }
 
 #[cfg(feature = "handles")]
 impl<'call> PlainReturnState<'call> {
     const fn empty() -> Self {
-        Self { _scope: None }
+        Self {
+            _scope: PhantomData,
+        }
     }
 
-    pub(crate) fn with_call(call: crate::value::input::CallContext<'call>) -> Self {
+    pub(crate) fn with_call(_call: crate::value::input::CallContext<'call>) -> Self {
         Self {
-            _scope: Some(call.scope()),
+            _scope: PhantomData,
         }
     }
 }

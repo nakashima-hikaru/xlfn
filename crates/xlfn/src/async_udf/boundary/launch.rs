@@ -52,7 +52,7 @@ pub(super) struct PreparedLaunch<'guard, 'call, A: crate::Addin, B, O: Completio
 }
 
 pub(super) struct ReservedLaunch<'guard, 'call, A: crate::Addin, B, O: CompletionObserver> {
-    _guard: &'guard crate::runtime::AsyncCallGuard<'call, A>,
+    _guard: std::marker::PhantomData<&'guard crate::runtime::AsyncCallGuard<'call, A>>,
     reservation: RuntimeReservation<'static, A::AsyncExecutor>,
     cancellation: TaskCancellationOwner,
     // Release reservation and admission before capture cleanup can reenter.
@@ -239,7 +239,7 @@ impl<'guard, 'call, A: crate::Addin, B, O: CompletionObserver>
         let Self { owner, capture } = self;
         match owner.calculation.reserve() {
             Ok(reservation) => Some(ReservedLaunch {
-                _guard: owner.guard,
+                _guard: std::marker::PhantomData,
                 reservation,
                 cancellation: owner.cancellation,
                 capture,

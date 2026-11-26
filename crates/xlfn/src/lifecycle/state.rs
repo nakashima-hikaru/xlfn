@@ -287,14 +287,19 @@ pub(crate) enum OpeningPayload<A: crate::Addin> {
 }
 
 impl<A: crate::Addin> OpeningPayload<A> {
-    fn into_close_resources(self, attempt: OpenAttemptId) -> CloseResources<A> {
+    fn into_close_resources(
+        self,
+        #[cfg(any(test, feature = "refinement"))] attempt: OpenAttemptId,
+    ) -> CloseResources<A> {
         match self {
             Self::Empty => CloseResources::AwaitingOpenAbort {
-                _attempt: attempt,
+                #[cfg(any(test, feature = "refinement"))]
+                attempt,
                 payload: OpenAbortPayload::Empty,
             },
             Self::Staged(opening) => CloseResources::AwaitingOpenAbort {
-                _attempt: attempt,
+                #[cfg(any(test, feature = "refinement"))]
+                attempt,
                 payload: OpenAbortPayload::Staged(opening),
             },
             Self::Published(bundle) => {
@@ -596,7 +601,8 @@ impl<A: crate::Addin> ClaimedClose<A> {
 /// retains the concrete receiver that permits its next operation.
 pub(crate) enum CloseResources<A: crate::Addin> {
     AwaitingOpenAbort {
-        _attempt: OpenAttemptId,
+        #[cfg(any(test, feature = "refinement"))]
+        attempt: OpenAttemptId,
         payload: OpenAbortPayload<A>,
     },
     Unowned {
@@ -860,10 +866,14 @@ pub(crate) enum ActiveOpeningClose<A: crate::Addin> {
 }
 
 impl<A: crate::Addin> ActiveOpeningClose<A> {
-    fn resolve(self, attempt: OpenAttemptId) -> CloseResources<A> {
+    fn resolve(
+        self,
+        #[cfg(any(test, feature = "refinement"))] attempt: OpenAttemptId,
+    ) -> CloseResources<A> {
         match self {
             Self::AwaitingAbort { payload } => CloseResources::AwaitingOpenAbort {
-                _attempt: attempt,
+                #[cfg(any(test, feature = "refinement"))]
+                attempt,
                 payload,
             },
             Self::Published { payload, authority } => CloseResources::Available(AvailableClose {
@@ -948,11 +958,16 @@ impl<A: crate::Addin> ClosingState<A> {
     fn resolve_open_failure(self) -> LifecycleState<A> {
         match self {
             Self::OpeningActive {
+                #[cfg(any(test, feature = "refinement"))]
                 attempt,
                 resources,
                 quarantine_requested,
+                ..
             } => {
-                let resources = resources.resolve(attempt);
+                let resources = resources.resolve(
+                    #[cfg(any(test, feature = "refinement"))]
+                    attempt,
+                );
                 if quarantine_requested {
                     resources.quarantine()
                 } else {
@@ -1545,8 +1560,8 @@ impl<'coordinator, A: crate::Addin> LifecycleAccess<'coordinator, A> {
             // still owes the module authority. This is diagnostic identity,
             // never a claim or a permission to reclaim the pending payload.
             LifecycleState::Stopping(StoppingState::RollbackOpen(
-                CloseResources::AwaitingOpenAbort { _attempt, .. },
-            )) => Some(*_attempt),
+                CloseResources::AwaitingOpenAbort { attempt, .. },
+            )) => Some(*attempt),
             _ => None,
         }
     }
@@ -2079,9 +2094,17 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed);
             let (state, disposition) = match state {
-                LifecycleState::Opening { attempt, payload } => (
+                LifecycleState::Opening {
+                    #[cfg(any(test, feature = "refinement"))]
+                    attempt,
+                    payload,
+                    ..
+                } => (
                     LifecycleState::Stopping(StoppingState::RollbackOpen(
-                        payload.into_close_resources(attempt),
+                        payload.into_close_resources(
+                            #[cfg(any(test, feature = "refinement"))]
+                            attempt,
+                        ),
                     )),
                     OpenFailureDisposition::RollbackRequired,
                 ),

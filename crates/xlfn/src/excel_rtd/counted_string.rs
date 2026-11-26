@@ -79,14 +79,14 @@ impl AsRef<[u16]> for InlineCountedTransport {
 }
 
 struct BorrowedCountedString<'a> {
-    _units: &'a [u16],
+    _units: std::marker::PhantomData<&'a [u16]>,
     oper: XLOPER12,
 }
 
 impl<'a> BorrowedCountedString<'a> {
     fn new(units: &'a [u16]) -> Self {
         Self {
-            _units: units,
+            _units: std::marker::PhantomData,
             oper: XLOPER12 {
                 value: XLOPER12Value {
                     // The RTD input is read-only; Excel exposes a mutable

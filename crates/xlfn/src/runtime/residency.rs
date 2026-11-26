@@ -19,7 +19,6 @@ pub(crate) struct ResidencyRelease<'a, A: Addin> {
 
 enum ReleaseReason<'a, A: Addin> {
     Closed {
-        _boundary: &'a HostCloseBoundary<'a>,
         completed: CompletedRemovalIntent<'a, A>,
     },
     FailedOpen {
@@ -151,10 +150,7 @@ impl<A: Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         };
         ResidencyRelease {
             module: &self.residency,
-            reason: ReleaseReason::Closed {
-                _boundary: boundary,
-                completed,
-            },
+            reason: ReleaseReason::Closed { completed },
         }
         .release()
         .map(Some)

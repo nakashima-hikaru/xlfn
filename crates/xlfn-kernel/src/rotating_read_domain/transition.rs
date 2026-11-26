@@ -19,6 +19,7 @@ pub(super) mod retirement;
 #[derive(Debug)]
 pub struct DrainedGeneration<'drain> {
     index: GenerationIndex,
+    #[cfg(test)]
     _domain: &'drain AtomicUsize,
     transition: std::marker::PhantomData<&'drain mut Option<GenerationIndex>>,
 }
@@ -48,7 +49,7 @@ impl DrainedGeneration<'_> {
 /// ```
 #[derive(Debug)]
 pub struct ClosedDomain<'domain> {
-    _domain: &'domain AtomicUsize,
+    _domain: std::marker::PhantomData<&'domain AtomicUsize>,
 }
 
 pub(super) struct LockedDomain<'domain, const N: usize> {
@@ -229,6 +230,7 @@ impl<'domain, const N: usize> DrainedRotation<'domain, N> {
     fn certificate(&mut self) -> DrainedGeneration<'_> {
         DrainedGeneration {
             index: self.old,
+            #[cfg(test)]
             _domain: &self.authority.domain.current,
             transition: std::marker::PhantomData,
         }
@@ -418,7 +420,7 @@ impl<const N: usize> RotatingReadDomain<N> {
             drop(self.generations[1].control().seal().wait())
         );
         ClosedDomain {
-            _domain: &self.current,
+            _domain: std::marker::PhantomData,
         }
     }
 }
