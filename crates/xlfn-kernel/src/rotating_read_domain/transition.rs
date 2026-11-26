@@ -237,11 +237,16 @@ impl<'domain, const N: usize> DrainedRotation<'domain, N> {
     }
 
     pub(super) fn run<R>(
-        self,
+        mut self,
         operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> R,
     ) -> (NewRotation<'domain, N>, R) {
-        self.try_run(|certificate| Some(operation(certificate)))
-            .unwrap_or_else(|| crate::invariant::fail_stop())
+        let result = protocol::finish_rotation!(result;
+            operation(self.certificate()), *self.authority.pending = None);
+        let next = NewRotation {
+            old: self.authority.domain.current_generation(),
+            authority: self.authority,
+        };
+        (next, result)
     }
 
     fn try_run<R>(
