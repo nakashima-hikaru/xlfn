@@ -167,19 +167,20 @@ impl RetirementAccounting {
     }
 
     pub(super) fn quiesce_reclaim(&self) -> ReclaimBatch<'_> {
-        let records = self
-            .domain
-            .quiesce()
-            .unwrap_or_default()
-            .into_iter()
-            .flatten()
-            .map(|batch| batch.into_inner())
-            .filter(|records| !records.is_empty())
-            .reduce(|mut first, mut second| {
-                first.append(&mut second);
-                first
-            })
-            .unwrap_or_default();
+        let records = match self.domain.quiesce() {
+            Ok((Some(first), second)) => {
+                let mut first = first.into_inner();
+                let mut second = second.into_inner();
+                if first.is_empty() {
+                    second
+                } else {
+                    first.append(&mut second);
+                    first
+                }
+            }
+            Ok((None, current)) => current.into_inner(),
+            Err(_) => Default::default(),
+        };
         self.account_records(records)
     }
 

@@ -365,8 +365,8 @@ mod tests {
             assert_eq!(generation.index(), 0);
             registration.append(7);
         });
-        let batches = issuing.quiesce().unwrap();
-        let batch = batches.into_iter().flatten().next().unwrap();
+        let (pending, batch) = issuing.quiesce().unwrap();
+        assert!(pending.is_none());
         assert!(batch.belongs_to(&issuing));
         assert!(!batch.belongs_to(&foreign));
         assert_eq!(batch.into_inner(), vec![7]);
@@ -438,7 +438,7 @@ mod tests {
             domain
                 .quiesce(|old| old.index_for(&domain).unwrap())
                 .unwrap(),
-            [Some(0), Some(1)]
+            (Some(0), 1)
         );
         assert_eq!(domain.current_generation().index(), 0);
         assert!(domain.transition.lock().is_none());

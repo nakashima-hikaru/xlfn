@@ -171,14 +171,11 @@ impl<V> CacheLookupDomain<V> {
         #[cfg(any(test, feature = "bench-internals"))]
         let start = Instant::now();
         let mut records = PendingEntries::new();
-        for batch in self
-            .domain
-            .quiesce()
-            .unwrap_or_default()
-            .into_iter()
-            .flatten()
-        {
-            append_records(&mut records, batch.into_inner());
+        if let Ok((pending, current)) = self.domain.quiesce() {
+            if let Some(batch) = pending {
+                append_records(&mut records, batch.into_inner());
+            }
+            append_records(&mut records, current.into_inner());
         }
         let entries = ReclaimEntries::account(self, records);
         #[cfg(any(test, feature = "bench-internals"))]

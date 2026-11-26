@@ -7,7 +7,8 @@ fn consume(pending: PendingRotation<'_, 1>) -> usize {
 }
 fn queues(owner: &RotatingRetirementDomain<1, Vec<usize>>) {
     owner.register_retired(|_, mut registration| registration.append(1));
-    for batch in owner.quiesce().unwrap().into_iter().flatten() {
+    let (pending, current) = owner.quiesce().unwrap();
+    for batch in pending.into_iter().chain(std::iter::once(current)) {
         assert!(batch.belongs_to(owner));
         drop(batch.into_inner());
     }

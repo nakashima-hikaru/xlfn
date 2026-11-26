@@ -78,8 +78,10 @@ impl<const N: usize, Q: RetirementStorage> ClosedRetirement<'_, N, Q> {
 impl<const N: usize, Q: RetirementStorage> RotatingRetirementDomain<N, Q> {
     /// Drains and transfers retired work. No caller can obtain a disposable
     /// owner until the entire transition (including pending retirement) ends.
-    pub fn quiesce(&self) -> Result<[Option<DisposableBatch<'_, N, Q>>; 2], DomainClosed> {
-        let batches = self.domain.quiesce_with_publication_barrier(
+    pub fn quiesce(
+        &self,
+    ) -> Result<(Option<DisposableBatch<'_, N, Q>>, DisposableBatch<'_, N, Q>), DomainClosed> {
+        let (pending, current) = self.domain.quiesce_with_publication_barrier(
             |generation| self.queues[generation.index()].lock(),
             |certificate| {
                 // The scoped certificate was just issued by self.domain.
@@ -88,7 +90,10 @@ impl<const N: usize, Q: RetirementStorage> RotatingRetirementDomain<N, Q> {
                 DetachedLocked::detach(self, self.queues[certificate.index.index()].lock())
             },
         )?;
-        Ok(batches.map(|batch| batch.map(|batch| batch.after_unlock())))
+        Ok((
+            pending.map(DetachedLocked::after_unlock),
+            current.after_unlock(),
+        ))
     }
 
     pub fn try_quiesce_if_idle(&self) -> Option<Result<DisposableBatch<'_, N, Q>, DomainClosed>> {
@@ -292,14 +297,9 @@ mod tests {
         domain.register_retired(|_, mut registration| {
             registration.append_batch(smallvec::smallvec![1, 2, 3])
         });
-        let batch = domain
-            .quiesce()
-            .unwrap()
-            .into_iter()
-            .flatten()
-            .next()
-            .unwrap()
-            .into_inner();
+        let (pending, current) = domain.quiesce().unwrap();
+        assert!(pending.is_none());
+        let batch = current.into_inner();
         assert!(!batch.spilled());
         assert_eq!(batch.as_slice(), &[1, 2, 3]);
     }

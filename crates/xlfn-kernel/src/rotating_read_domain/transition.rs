@@ -113,20 +113,20 @@ impl<'domain, const N: usize> LockedDomain<'domain, N> {
 
     fn rotate<B, R>(
         self,
-        results: &mut [Option<R>; 2],
+        pending_result: &mut Option<R>,
         barrier: impl FnOnce(GenerationIndex) -> B,
         mut operation: impl for<'drain> FnMut(DrainedGeneration<'drain>) -> R,
-    ) {
+    ) -> R {
         let new = match self.classify() {
             RotationStart::Pending(pending) => {
                 let (next, result) = pending.wait().run(&mut operation);
-                results[0] = Some(result);
+                *pending_result = Some(result);
                 next
             }
             RotationStart::New(new) => new,
         };
         let (_, result) = new.begin(barrier, || {}).wait().run(operation);
-        results[1] = Some(result);
+        result
     }
 }
 
@@ -278,10 +278,10 @@ impl<const N: usize> RotatingReadDomain<N> {
     pub fn quiesce<R>(
         &self,
         operation: impl for<'drain> FnMut(DrainedGeneration<'drain>) -> R,
-    ) -> Result<[Option<R>; 2], DomainClosed> {
-        let mut results = [None, None];
-        LockedDomain::lock(self)?.rotate(&mut results, |_| (), operation);
-        Ok(results)
+    ) -> Result<(Option<R>, R), DomainClosed> {
+        let mut pending = None;
+        let current = LockedDomain::lock(self)?.rotate(&mut pending, |_| (), operation);
+        Ok((pending, current))
     }
 
     /// Rotates while synchronizing deferred registration with publication.
@@ -296,10 +296,10 @@ impl<const N: usize> RotatingReadDomain<N> {
         &self,
         barrier: impl FnOnce(GenerationIndex) -> B,
         operation: impl for<'drain> FnMut(DrainedGeneration<'drain>) -> R,
-    ) -> Result<[Option<R>; 2], DomainClosed> {
-        let mut results = [None, None];
-        LockedDomain::lock(self)?.rotate(&mut results, barrier, operation);
-        Ok(results)
+    ) -> Result<(Option<R>, R), DomainClosed> {
+        let mut pending = None;
+        let current = LockedDomain::lock(self)?.rotate(&mut pending, barrier, operation);
+        Ok((pending, current))
     }
 
     /// Best-effort form of [`Self::quiesce`] for maintenance paths that must
@@ -311,13 +311,13 @@ impl<const N: usize> RotatingReadDomain<N> {
     pub fn try_quiesce<R>(
         &self,
         operation: impl for<'drain> FnMut(DrainedGeneration<'drain>) -> R,
-    ) -> Option<Result<[Option<R>; 2], DomainClosed>> {
-        let mut results = [None, None];
+    ) -> Option<Result<(Option<R>, R), DomainClosed>> {
+        let mut pending = None;
         let result = LockedDomain::try_lock(self)?;
         match result {
             Ok(authority) => {
-                authority.rotate(&mut results, |_| (), operation);
-                Some(Ok(results))
+                let current = authority.rotate(&mut pending, |_| (), operation);
+                Some(Ok((pending, current)))
             }
             Err(error) => Some(Err(error)),
         }

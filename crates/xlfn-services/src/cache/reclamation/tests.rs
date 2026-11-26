@@ -110,7 +110,7 @@ fn nonblocking_drain_does_not_wait_for_detached_debt_owner() {
     ReclaimEntry::sentinel(&domain, 1).enqueue();
     // Model a blocking drain that has released the rotation lock but has not
     // yet accounted for its own batch.
-    let detached = domain.domain.quiesce().unwrap();
+    let (pending, current) = domain.domain.quiesce().unwrap();
     assert_eq!(domain.stats().pending_nodes, 1);
     let (tx, rx) = std::sync::mpsc::channel();
     let completed = std::thread::scope(|scope| {
@@ -120,9 +120,10 @@ fn nonblocking_drain_does_not_wait_for_detached_debt_owner() {
         let completed = rx.recv_timeout(std::time::Duration::from_secs(5));
         // Account even if the check timed out, so a failing test does not
         // strand the polling thread.
-        for batch in detached.into_iter().flatten() {
+        if let Some(batch) = pending {
             let _ = ReclaimEntries::account(&domain, batch.into_inner());
         }
+        let _ = ReclaimEntries::account(&domain, current.into_inner());
         completed
     });
     assert_eq!(completed.unwrap(), 0);
