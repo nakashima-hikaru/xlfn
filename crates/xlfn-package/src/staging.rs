@@ -67,7 +67,12 @@ impl PrivateStagingDirectory {
             ))
         })?;
         let metadata = handle.metadata()?;
-        validate_private_directory(path, &handle, &metadata)?;
+        validate_private_directory(
+            path,
+            #[cfg(target_os = "windows")]
+            &handle,
+            &metadata,
+        )?;
         let identity =
             DirectoryIdentity::from_file_identity(file_snapshot_state(&handle)?.identity);
         Ok(Self {
@@ -99,7 +104,13 @@ impl PrivateStagingDirectory {
                 .map_err(|_| PackageError::StagingDirectoryReplaced {
                     path: self.path.clone(),
                 })?;
-        if validate_private_directory(&self.path, &path_handle, &path_metadata).is_err()
+        if validate_private_directory(
+            &self.path,
+            #[cfg(target_os = "windows")]
+            &path_handle,
+            &path_metadata,
+        )
+        .is_err()
             || DirectoryIdentity::from_file_identity(file_snapshot_state(&path_handle)?.identity)
                 != self.identity
         {
@@ -109,7 +120,12 @@ impl PrivateStagingDirectory {
         }
 
         let handle_metadata = self.handle.metadata()?;
-        validate_private_directory(&self.path, &self.handle, &handle_metadata)?;
+        validate_private_directory(
+            &self.path,
+            #[cfg(target_os = "windows")]
+            &self.handle,
+            &handle_metadata,
+        )?;
         let handle_identity =
             DirectoryIdentity::from_file_identity(file_snapshot_state(&self.handle)?.identity);
         if handle_identity != self.identity {
@@ -164,7 +180,11 @@ pub(crate) fn open_bundle_source_for_snapshot(path: &Path) -> io::Result<std::fs
 }
 
 pub(crate) fn open_staged_file_no_follow(path: &Path) -> io::Result<std::fs::File> {
-    open_staged_path_no_follow_with_kind(path, false)
+    open_staged_path_no_follow_with_kind(
+        path,
+        #[cfg(target_os = "windows")]
+        false,
+    )
 }
 
 pub(crate) fn open_commit_source_file(path: &Path) -> io::Result<std::fs::File> {
@@ -196,18 +216,19 @@ pub(crate) fn open_commit_source_file(path: &Path) -> io::Result<std::fs::File> 
 }
 
 pub(crate) fn open_staged_directory_no_follow(path: &Path) -> io::Result<std::fs::File> {
-    open_staged_path_no_follow_with_kind(path, true)
+    open_staged_path_no_follow_with_kind(
+        path,
+        #[cfg(target_os = "windows")]
+        true,
+    )
 }
 
 pub(crate) fn open_staged_path_no_follow_with_kind(
     path: &Path,
-    directory: bool,
+    #[cfg(target_os = "windows")] directory: bool,
 ) -> io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
-
-    #[cfg(not(target_os = "windows"))]
-    let _ = directory;
 
     #[cfg(unix)]
     {
@@ -273,7 +294,7 @@ pub(crate) fn create_private_directory(path: &Path) -> PackageResult {
 #[allow(unsafe_code, reason = "Low-level staging directory validation")]
 pub(crate) fn validate_private_directory(
     path: &Path,
-    handle: &std::fs::File,
+    #[cfg(target_os = "windows")] handle: &std::fs::File,
     metadata: &std::fs::Metadata,
 ) -> PackageResult {
     if !metadata.is_dir() || is_reparse_point(metadata) {
@@ -309,8 +330,6 @@ pub(crate) fn validate_private_directory(
 
     #[cfg(target_os = "windows")]
     validate_private_windows_directory(handle)?;
-    #[cfg(not(target_os = "windows"))]
-    let _ = handle;
 
     Ok(())
 }

@@ -199,10 +199,13 @@ mod tests {
         let services = PublishedOwner::from_box(
             GenerationServices::arm_generation(
                 generation,
+                #[cfg(any(feature = "rtd", feature = "handles"))]
                 crate::addin_impl::RuntimeConfig::default(),
                 #[cfg(feature = "rtd")]
                 crate::excel_rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
+                #[cfg(any(feature = "rtd", feature = "handles"))]
                 crate::runtime_components::GenerationServiceInputs::empty_for_generation(
+                    #[cfg(feature = "rtd")]
                     generation,
                 ),
             )

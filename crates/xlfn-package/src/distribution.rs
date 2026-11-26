@@ -257,51 +257,52 @@ fn atomic_replace_file(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Flushes a directory entry where the host platform supports it.
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let directory = std::fs::File::open(path)?;
-        directory.sync_all()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use crate::win32::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-            FILE_SHARE_READ, FILE_SHARE_WRITE,
-        };
-        use std::os::windows::fs::OpenOptionsExt;
+    let directory = std::fs::File::open(path)?;
+    directory.sync_all()
+}
 
-        // Windows does not expose a portable parent-directory fsync. File
-        // contents are flushed before this call, and every publishing rename
-        // uses MoveFileExW with MOVEFILE_WRITE_THROUGH. Reopen the directory
-        // to validate that it still resolves to a directory, but do not call
-        // File::sync_all: that maps to FlushFileBuffers on a read-only handle
-        // and deterministically returns ERROR_ACCESS_DENIED.
-        let mut options = std::fs::OpenOptions::new();
-        options
-            .read(true)
-            .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT) as u32)
-            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE) as u32);
-        let directory = options.open(path)?;
-        if !directory.metadata()?.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotADirectory,
-                format!(
-                    "directory synchronization target is not a directory: {}",
-                    path.display()
-                ),
-            ));
-        }
-        Ok(())
+/// Flushes a directory entry where the host platform supports it.
+#[cfg(target_os = "windows")]
+fn sync_directory(path: &Path) -> io::Result<()> {
+    use crate::win32::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // Windows does not expose a portable parent-directory fsync. File
+    // contents are flushed before this call, and every publishing rename
+    // uses MoveFileExW with MOVEFILE_WRITE_THROUGH. Reopen the directory
+    // to validate that it still resolves to a directory, but do not call
+    // File::sync_all: that maps to FlushFileBuffers on a read-only handle
+    // and deterministically returns ERROR_ACCESS_DENIED.
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT) as u32)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE) as u32);
+    let directory = options.open(path)?;
+    if !directory.metadata()?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            format!(
+                "directory synchronization target is not a directory: {}",
+                path.display()
+            ),
+        ));
     }
-    #[cfg(not(any(unix, target_os = "windows")))]
-    {
-        let _ = path;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "directory synchronization is unsupported on this platform",
-        ))
-    }
+    Ok(())
+}
+
+/// Flushes a directory entry where the host platform supports it.
+#[cfg(not(any(unix, target_os = "windows")))]
+fn sync_directory(_: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "directory synchronization is unsupported on this platform",
+    ))
 }
 
 /// Syncs both directory entries affected by a rename.

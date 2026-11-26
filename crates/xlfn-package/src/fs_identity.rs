@@ -34,26 +34,25 @@ pub(crate) struct FileIdentity {
 pub(crate) struct FileIdentity;
 
 impl DirectoryIdentity {
+    #[cfg(unix)]
     pub(crate) fn from_file_identity(identity: FileIdentity) -> Self {
-        #[cfg(unix)]
-        {
-            Self {
-                dev: identity.dev,
-                ino: identity.ino,
-            }
+        Self {
+            dev: identity.dev,
+            ino: identity.ino,
         }
-        #[cfg(target_os = "windows")]
-        {
-            Self {
-                volume_serial_number: identity.volume_serial_number,
-                file_id: identity.file_id,
-            }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn from_file_identity(identity: FileIdentity) -> Self {
+        Self {
+            volume_serial_number: identity.volume_serial_number,
+            file_id: identity.file_id,
         }
-        #[cfg(not(any(unix, target_os = "windows")))]
-        {
-            let _ = identity;
-            Self
-        }
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    pub(crate) fn from_file_identity(_: FileIdentity) -> Self {
+        Self
     }
 }
 
@@ -207,10 +206,12 @@ pub(crate) fn same_file_identity(left: &std::fs::File, right: &std::fs::File) ->
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-pub(crate) fn same_file_identity(left: &std::fs::File, right: &std::fs::File) -> io::Result<bool> {
+pub(crate) fn same_file_identity(
+    _left: &std::fs::File,
+    _right: &std::fs::File,
+) -> io::Result<bool> {
     // The supported release hosts are Unix and Windows. Keep other targets
     // conservative rather than claiming identity from path metadata alone.
-    let _ = (left, right);
     Ok(false)
 }
 

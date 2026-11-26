@@ -249,18 +249,17 @@ impl CompletionObservation {
         }
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn finished(&self, completed: bool) {
-        #[cfg(any(test, feature = "refinement"))]
-        {
-            *self.completion.lock() = if completed {
-                crate::shutdown_trace::Completion::Completed
-            } else {
-                crate::shutdown_trace::Completion::Canceled
-            };
-        }
-        #[cfg(not(any(test, feature = "refinement")))]
-        let _ = completed;
+        *self.completion.lock() = if completed {
+            crate::shutdown_trace::Completion::Completed
+        } else {
+            crate::shutdown_trace::Completion::Canceled
+        };
     }
+
+    #[cfg(not(any(test, feature = "refinement")))]
+    pub(crate) fn finished(&self, _: bool) {}
 
     fn completion(&self) -> crate::shutdown_trace::Completion {
         #[cfg(any(test, feature = "refinement"))]

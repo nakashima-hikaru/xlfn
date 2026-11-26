@@ -72,14 +72,15 @@ impl ReturnObserver {
         let _ = self.trace.set(trace);
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     fn record(&self, event: crate::shutdown_trace::ShutdownEvent) {
-        #[cfg(any(test, feature = "refinement"))]
         if let Some(trace) = self.trace.get() {
             trace.record(event);
         }
-        #[cfg(not(any(test, feature = "refinement")))]
-        let _ = event;
     }
+
+    #[cfg(not(any(test, feature = "refinement")))]
+    fn record(&self, _: crate::shutdown_trace::ShutdownEvent) {}
 
     fn create_block(&self) {
         self.record(crate::shutdown_trace::ShutdownEvent::CreateReturnBlock);

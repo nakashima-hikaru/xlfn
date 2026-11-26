@@ -1002,7 +1002,10 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
             },
             (),
         ) = self.into_parts();
+        #[cfg(any(feature = "rtd", feature = "handles"))]
         let (attempt, module, inputs) = core.into_parts();
+        #[cfg(not(any(feature = "rtd", feature = "handles")))]
+        let (attempt, module, _) = core.into_parts();
         // The arm step may consume or discard raw inputs, including running
         // application destructors. Keep recovery armed before entering it.
         let recovery = OpeningTxn::new_state(
@@ -1015,7 +1018,13 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
             },
             (),
         );
-        let services = match arm_services::<A>(attempt, config, inputs) {
+        let services = match arm_services::<A>(
+            attempt,
+            #[cfg(any(feature = "rtd", feature = "handles"))]
+            config,
+            #[cfg(any(feature = "rtd", feature = "handles"))]
+            inputs,
+        ) {
             Ok(services) => services,
             Err(error) => return Err(super::open::OpenFailure::rollback(recovery, error)),
         };
@@ -1044,8 +1053,8 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
 
 fn arm_services<A: crate::Addin>(
     attempt: OpenAttemptId,
-    config: crate::addin_impl::RuntimeConfig,
-    inputs: RawServiceInputs<A>,
+    #[cfg(any(feature = "rtd", feature = "handles"))] config: crate::addin_impl::RuntimeConfig,
+    #[cfg(any(feature = "rtd", feature = "handles"))] inputs: RawServiceInputs<A>,
 ) -> XllResult<PreparedServices<A>> {
     #[cfg(test)]
     check_prepare_services_fault()?;
@@ -1057,9 +1066,11 @@ fn arm_services<A: crate::Addin>(
     };
     Ok(GenerationServices::arm_generation(
         attempt.into_runtime_generation(),
+        #[cfg(any(feature = "rtd", feature = "handles"))]
         config,
         #[cfg(feature = "rtd")]
         crate::excel_rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
+        #[cfg(any(feature = "rtd", feature = "handles"))]
         inputs,
     )?
     .commit())
@@ -2083,10 +2094,14 @@ mod owner_tests {
             .begin_open()
             .unwrap()
             .attach_host(HostCallbackSession::new());
+        #[cfg(feature = "rtd")]
         let generation = transaction.attempt_id().into_runtime_generation();
         transaction.begin_initialization().initialized(
             RetainedLifecycle(Arc::clone(drops)),
-            crate::runtime_components::GenerationServiceInputs::empty_for_generation(generation),
+            crate::runtime_components::GenerationServiceInputs::empty_for_generation(
+                #[cfg(feature = "rtd")]
+                generation,
+            ),
         )
     }
 

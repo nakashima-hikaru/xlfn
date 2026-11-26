@@ -105,7 +105,7 @@ impl RtdNotifier {
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
 #[cfg(feature = "handles")]
 pub(crate) struct RtdOperationGuard {
-    ingress_guard: crate::ingress::AdmittedExport<'static>,
+    _ingress_guard: crate::ingress::AdmittedExport<'static>,
     #[cfg(any(test, feature = "refinement"))]
     trace: Option<crate::shutdown_trace::ShutdownTraceHandle>,
 }
@@ -118,7 +118,6 @@ impl Drop for RtdOperationGuard {
         if let Some(trace) = self.trace.as_ref() {
             trace.record(crate::shutdown_trace::ShutdownEvent::EndRtdOperation);
         }
-        let _ = &self.ingress_guard;
     }
 }
 
@@ -143,7 +142,7 @@ pub(crate) fn begin_operation(
         Err(_) => return Err(crate::XllError::Closing),
     };
     Ok(RtdOperationGuard {
-        ingress_guard,
+        _ingress_guard: ingress_guard,
         #[cfg(any(test, feature = "refinement"))]
         trace,
     })
@@ -170,7 +169,7 @@ pub(crate) fn physical_unload_ready() -> bool {
     windows::physical_unload_ready()
 }
 
-#[cfg(feature = "handles")]
+#[cfg(all(target_os = "windows", feature = "handles"))]
 pub(crate) fn observe_handle<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     handles: &FormulaLifetimeBackend,
     ingress: &'static ExportIngress,
@@ -178,49 +177,46 @@ pub(crate) fn observe_handle<E: crate::RtdSubscription, C: crate::RtdSourceCatal
     token: &str,
     host: ExcelHost<'_>,
 ) -> XllResult<()> {
-    #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
-    {
-        windows::observe::<E, C>(handles, ingress, lifetime_key, token, host)
-    }
-    #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
-    {
-        let _ = (
-            handles,
-            ingress,
-            lifetime_key,
-            token,
-            host,
-            std::marker::PhantomData::<(E, C)>,
-        );
-        Err(crate::error::construct::excel_api(
-            crate::error::ExcelApiFunction::Rtd,
-            crate::error::ExcelApiFailure::Status(crate::return_abi::ExcelCallbackStatus::Failed(
-                xlfn_sys::XLRET_FAILED,
-            )),
-        ))
-    }
+    windows::observe::<E, C>(handles, ingress, lifetime_key, token, host)
 }
 
-#[cfg(feature = "rtd")]
+#[cfg(all(not(target_os = "windows"), feature = "handles"))]
+pub(crate) fn observe_handle<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    _: &FormulaLifetimeBackend,
+    _: &'static ExportIngress,
+    _: &str,
+    _: &str,
+    _: ExcelHost<'_>,
+) -> XllResult<()> {
+    Err(crate::error::construct::excel_api(
+        crate::error::ExcelApiFunction::Rtd,
+        crate::error::ExcelApiFailure::Status(crate::return_abi::ExcelCallbackStatus::Failed(
+            xlfn_sys::XLRET_FAILED,
+        )),
+    ))
+}
+
+#[cfg(all(target_os = "windows", feature = "rtd"))]
 pub(crate) fn observe_subscription<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     subscriptions: &crate::subscription::SubscriptionRuntime<E, C>,
     key: &crate::subscription::SubscriptionKey,
     host: ExcelHost<'_>,
 ) -> XllResult<crate::subscription::RtdValue> {
-    #[cfg(all(target_os = "windows", feature = "rtd"))]
-    {
-        windows::observe_subscription(subscriptions, key, host)
-    }
-    #[cfg(not(all(target_os = "windows", feature = "rtd")))]
-    {
-        let _ = (subscriptions, key, host);
-        Err(crate::error::construct::excel_api(
-            crate::error::ExcelApiFunction::Rtd,
-            crate::error::ExcelApiFailure::Status(crate::return_abi::ExcelCallbackStatus::Failed(
-                xlfn_sys::XLRET_FAILED,
-            )),
-        ))
-    }
+    windows::observe_subscription(subscriptions, key, host)
+}
+
+#[cfg(all(not(target_os = "windows"), feature = "rtd"))]
+pub(crate) fn observe_subscription<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    _: &crate::subscription::SubscriptionRuntime<E, C>,
+    _: &crate::subscription::SubscriptionKey,
+    _: ExcelHost<'_>,
+) -> XllResult<crate::subscription::RtdValue> {
+    Err(crate::error::construct::excel_api(
+        crate::error::ExcelApiFunction::Rtd,
+        crate::error::ExcelApiFailure::Status(crate::return_abi::ExcelCallbackStatus::Failed(
+            xlfn_sys::XLRET_FAILED,
+        )),
+    ))
 }
 
 #[cfg(feature = "handles")]
@@ -250,7 +246,7 @@ pub(crate) fn shutdown_subscriptions<E: crate::RtdSubscription, C: crate::RtdSou
     }
 }
 
-#[cfg(any(feature = "rtd", feature = "handles"))]
+#[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
 /// Returns the temporary Excel RTD COM class factory.
 ///
 /// # Safety
@@ -261,20 +257,26 @@ pub(crate) unsafe fn dll_get_class_object(
     interface_id: *const core::ffi::c_void,
     output: *mut *mut core::ffi::c_void,
 ) -> i32 {
-    #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
-    {
-        // SAFETY: exported COM boundary forwards its pointer contract.
-        unsafe { windows::dll_get_class_object(class_id, interface_id, output) }
+    // SAFETY: exported COM boundary forwards its pointer contract.
+    unsafe { windows::dll_get_class_object(class_id, interface_id, output) }
+}
+
+#[cfg(all(not(target_os = "windows"), any(feature = "rtd", feature = "handles")))]
+/// Returns the temporary Excel RTD COM class factory.
+///
+/// # Safety
+/// The three pointers must follow the COM `DllGetClassObject` contract.
+#[allow(unsafe_code, reason = "COM export is the raw Excel RTD ABI leaf")]
+pub(crate) unsafe fn dll_get_class_object(
+    _: *const core::ffi::c_void,
+    _: *const core::ffi::c_void,
+    output: *mut *mut core::ffi::c_void,
+) -> i32 {
+    if !output.is_null() {
+        // SAFETY: the caller supplied a writable COM output pointer.
+        unsafe { *output = core::ptr::null_mut() };
     }
-    #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
-    {
-        let _ = (class_id, interface_id);
-        if !output.is_null() {
-            // SAFETY: the caller supplied a writable COM output pointer.
-            unsafe { *output = core::ptr::null_mut() };
-        }
-        0x8004_0111_u32 as i32
-    }
+    0x8004_0111_u32 as i32
 }
 
 #[cfg(any(feature = "rtd", feature = "handles"))]

@@ -1638,6 +1638,7 @@ pub mod v1 {
                 let context = OpenContext::new(
                     std::path::PathBuf::from("test.xll"),
                     BuildInfo::new(AddinId::parse("test").unwrap(), "0", "test"),
+                    #[cfg(feature = "rtd")]
                     runtime.protocol_generation().unwrap(),
                 );
                 let failure = match initialize_addin::<ErrorBeforeState>(context, transaction) {

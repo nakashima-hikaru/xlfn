@@ -972,30 +972,29 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
                 }
             }
 
-            let (newly_attached_subscriptions, subscription_handle) =
-                if let Some(subscriptions) = subscriptions {
-                    match backends.subscriptions.as_ref() {
-                        Some(active) if active.runtime.same_runtime(subscriptions) => {
-                            (None, backends.subscription_server())
-                        }
-                        Some(_) => {
-                            return Err(crate::error::construct::internal(
-                                crate::diagnostics::catalog::RTD_MULTI,
-                            ));
-                        }
-                        None => {
-                            // SAFETY: admission/shutdown retain the runtime through every typed handle call.
-                            let attachment = unsafe {
-                                AttachedSubscriptions::register(subscriptions, existing.generation)?
-                            };
-                            let handle = attachment.server;
-                            backends.subscriptions = Some(attachment);
-                            (Some(handle), Some(handle))
-                        }
+            let newly_attached_subscriptions = if let Some(subscriptions) = subscriptions {
+                match backends.subscriptions.as_ref() {
+                    Some(active) if active.runtime.same_runtime(subscriptions) => None,
+                    Some(_) => {
+                        return Err(crate::error::construct::internal(
+                            crate::diagnostics::catalog::RTD_MULTI,
+                        ));
                     }
-                } else {
-                    (None, backends.subscription_server())
-                };
+                    None => {
+                        // SAFETY: admission/shutdown retain the runtime through every typed handle call.
+                        let attachment = unsafe {
+                            AttachedSubscriptions::register(subscriptions, existing.generation)?
+                        };
+                        let handle = attachment.server;
+                        backends.subscriptions = Some(attachment);
+                        Some(handle)
+                    }
+                }
+            } else {
+                None
+            };
+            #[cfg(any(test, feature = "rtd"))]
+            let subscription_handle = backends.subscription_server();
 
             drop(backends);
 
@@ -1013,9 +1012,6 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
             // SAFETY: ACTIVE_SERVER owns a live server reference. This increments
             // the count to create the separate temporary reference held by the guard.
             unsafe { server_add_ref(server) };
-
-            #[cfg(not(any(test, feature = "rtd")))]
-            let _ = subscription_handle;
 
             return Ok(EnsuredServer::<E, C> {
                 active: existing.clone(),
@@ -1055,6 +1051,7 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
             None
         };
 
+        #[cfg(any(test, feature = "rtd"))]
         let subscription_handle = attached_subscriptions
             .as_ref()
             .map(|attached| attached.server);
@@ -1087,9 +1084,6 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
         // SAFETY: the construction reference is now owned by ACTIVE_SERVER.
         // Incrementing here creates a separate temporary reference for EnsuredServer<E, C>.
         unsafe { server_add_ref(pointer as *mut RtdServer<E, C>) };
-
-        #[cfg(not(any(test, feature = "rtd")))]
-        let _ = subscription_handle;
 
         return Ok(EnsuredServer::<E, C> {
             active: entry,

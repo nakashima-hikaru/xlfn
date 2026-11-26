@@ -446,8 +446,13 @@ fn prepare_directory_entry(
     budget: &mut PreparedBudget,
 ) -> PackageResult<PreparedDirectoryEntry> {
     budget.account_entry(path)?;
+    #[cfg(target_os = "windows")]
     let link_metadata = fs::symlink_metadata(path)?;
-    let mut handle = open_staged_path_no_follow_with_kind(path, link_metadata.is_dir())?;
+    let mut handle = open_staged_path_no_follow_with_kind(
+        path,
+        #[cfg(target_os = "windows")]
+        link_metadata.is_dir(),
+    )?;
     let metadata = handle.metadata()?;
     if is_reparse_point(&metadata) {
         return Err(format!(

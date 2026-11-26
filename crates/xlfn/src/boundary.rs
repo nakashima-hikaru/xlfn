@@ -17,17 +17,16 @@ use crate::error::XllError;
 use crate::panic_boundary::catch_no_unwind;
 use std::panic::AssertUnwindSafe;
 
+#[cfg(target_os = "windows")]
 pub(crate) fn write_startup_log(addin_id: &AddinId, message: &str) {
-    #[cfg(target_os = "windows")]
-    {
-        let Ok(directory) = crate::diagnostics::file::log_directory(addin_id) else {
-            return;
-        };
-        let _ = crate::diagnostics::append_startup_log(&directory.join("startup.log"), message);
-    }
-    #[cfg(not(target_os = "windows"))]
-    let _ = (addin_id, message);
+    let Ok(directory) = crate::diagnostics::file::log_directory(addin_id) else {
+        return;
+    };
+    let _ = crate::diagnostics::append_startup_log(&directory.join("startup.log"), message);
 }
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn write_startup_log(_: &AddinId, _: &str) {}
 
 pub(crate) fn report_cleanup_issue(issue: &crate::shutdown::CleanupIssue) {
     let _ = catch_no_unwind(AssertUnwindSafe(|| {

@@ -72,16 +72,24 @@ where
     if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
         return Err(transaction.failure(XllError::Closing));
     }
-    let generation = deps
-        .protocol_generation()
-        .ok_or(crate::error::construct::internal(
+    #[cfg(feature = "rtd")]
+    let Some(generation) = deps.protocol_generation() else {
+        return Err(transaction.failure(crate::error::construct::internal(
             crate::diagnostics::catalog::OPEN_STATE,
-        ));
-    let generation = match generation {
-        Ok(generation) => generation,
-        Err(error) => return Err(transaction.failure(error)),
+        )));
     };
-    let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
+    #[cfg(not(feature = "rtd"))]
+    if deps.protocol_generation().is_none() {
+        return Err(transaction.failure(crate::error::construct::internal(
+            crate::diagnostics::catalog::OPEN_STATE,
+        )));
+    }
+    let context = OpenContext::new(
+        registrar.module_path().clone(),
+        build_info,
+        #[cfg(feature = "rtd")]
+        generation,
+    );
     let transaction = initialize_addin::<A>(context, transaction)?;
     if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
         return Err(transaction.failure(XllError::Closing));
@@ -161,8 +169,11 @@ where
             return Err(transaction.failure(IntoXllError::into_xll_error(error)));
         }
     };
+    #[cfg(feature = "async")]
     let (shared_state, lifecycle_state, layers, runtime_config, async_executor) =
         opened.into_parts();
+    #[cfg(not(feature = "async"))]
+    let (shared_state, lifecycle_state, layers, runtime_config, _) = opened.into_parts();
     let service_inputs = context.into_service_inputs();
     // Keep the non-Send lifecycle state in the open transaction until the
     // final pre-publication transfer into the thread-affine slot. It must not
@@ -185,8 +196,6 @@ where
     {
         return Err(transaction.failure(error));
     }
-    #[cfg(not(feature = "async"))]
-    let _ = async_executor;
     Ok(transaction)
 }
 

@@ -252,13 +252,19 @@ pub(crate) struct Topic {
 impl Topic {
     fn removal(
         &self,
-        key: HandleTopicKey,
-        initializing: &FxHashMap<HandleTopicKey, InitializationPtr>,
+        #[cfg(any(test, feature = "refinement"))] key: HandleTopicKey,
+        #[cfg(any(test, feature = "refinement"))] initializing: &FxHashMap<
+            HandleTopicKey,
+            InitializationPtr,
+        >,
     ) -> TopicRemoval {
         TopicRemoval {
             token: self.publication.token.clone(),
+            #[cfg(any(test, all(target_os = "windows", feature = "refinement")))]
             key,
+            #[cfg(any(test, feature = "refinement"))]
             was_provisional: self.publication.state() == PublishedTopicState::Provisional,
+            #[cfg(any(test, feature = "refinement"))]
             initialization_id: initializing
                 .get(&key)
                 .map(|initialization| initialization.refinement_id),
@@ -628,7 +634,12 @@ impl TopicTable {
         key: HandleTopicKey,
     ) -> Option<(TopicRemoval, PublishedTopicOwner)> {
         let topic = state.by_key.get(&key)?;
-        let removal = topic.removal(key, &state.initializing);
+        let removal = topic.removal(
+            #[cfg(any(test, feature = "refinement"))]
+            key,
+            #[cfg(any(test, feature = "refinement"))]
+            &state.initializing,
+        );
         self.withdraw_topic(key, topic);
         let topic = state.by_key.remove(&key)?;
         topic.remove_indexes(&mut state.by_lifetime_key, &mut state.by_observer_id);
@@ -729,11 +740,21 @@ impl TopicTable {
             by_key,
             by_lifetime_key,
             by_observer_id,
+            #[cfg(any(test, feature = "refinement"))]
             initializing,
             ..
         } = &mut *state;
-        for (key, topic) in by_key.drain() {
-            let removal = topic.removal(key, initializing);
+        for item in by_key.drain() {
+            #[cfg(any(test, feature = "refinement"))]
+            let (key, topic) = item;
+            #[cfg(not(any(test, feature = "refinement")))]
+            let (_, topic) = item;
+            let removal = topic.removal(
+                #[cfg(any(test, feature = "refinement"))]
+                key,
+                #[cfg(any(test, feature = "refinement"))]
+                initializing,
+            );
             topic
                 .publication
                 .state
@@ -758,6 +779,7 @@ impl TopicTable {
             by_key,
             by_lifetime_key,
             by_observer_id,
+            #[cfg(any(test, feature = "refinement"))]
             initializing,
             ..
         } = &mut *state;
@@ -766,7 +788,12 @@ impl TopicTable {
             if topic.lifetime_generation != Some(lifetime_generation) {
                 return false;
             }
-            removals.push(topic.removal(key, initializing));
+            removals.push(topic.removal(
+                #[cfg(any(test, feature = "refinement"))]
+                key,
+                #[cfg(any(test, feature = "refinement"))]
+                initializing,
+            ));
             // Withdraw the publication while the primary index still owns it.
             self.withdraw_topic(key, topic);
             true
@@ -782,9 +809,12 @@ impl TopicTable {
 
 pub(crate) struct TopicRemoval {
     pub(crate) token: String,
+    #[cfg(any(test, all(target_os = "windows", feature = "refinement")))]
     pub(crate) key: HandleTopicKey,
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) was_provisional: bool,
-    pub(crate) initialization_id: Option<u64>,
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) initialization_id: Option<super::refinement_hooks::InitializerTraceId>,
 }
 
 pub(crate) struct Initialization {
@@ -792,7 +822,7 @@ pub(crate) struct Initialization {
     pub(crate) owner_done: AtomicBool,
     pub(crate) wait: Mutex<()>,
     pub(crate) completed: Condvar,
-    pub(crate) refinement_id: u64,
+    pub(crate) refinement_id: super::refinement_hooks::InitializerTraceId,
     #[cfg(test)]
     pub(crate) waiters: AtomicUsize,
 }

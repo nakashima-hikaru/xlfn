@@ -292,12 +292,8 @@ impl FormulaHandleService {
         let publication_txn = publication_reservation.insert_object::<T>(prepared)?;
         let parsed = self.refinement_token(publication_txn.token());
         if publication_txn.allocation() == &ObjectAllocation::Reused {
-            self.refinement.observe_insert_pending_reuse(
-                &key,
-                initialization_id,
-                parsed.slot,
-                parsed.generation,
-            );
+            self.refinement
+                .observe_insert_pending_reuse(&key, initialization_id, parsed);
         } else {
             self.refinement
                 .observe_insert_pending_fresh(&key, initialization_id);
@@ -446,8 +442,8 @@ impl FormulaHandleService {
         }
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     fn remove_topic_value(&self, removed: &TopicRemoval, operation: &'static str) {
-        let _key = removed.key;
         let token_wire = self.refinement_token(&removed.token);
         let refinement = &self.refinement;
         let was_provisional = removed.was_provisional;
@@ -465,6 +461,13 @@ impl FormulaHandleService {
                 });
     }
 
+    #[cfg(not(any(test, feature = "refinement")))]
+    fn remove_topic_value(&self, removed: &TopicRemoval, operation: &'static str) {
+        let _ = self
+            .store
+            .remove_and_drop_with_observer(&removed.token, operation, |_| {});
+    }
+
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn disconnect(&self, lifetime_generation: FormulaLifetimeGeneration, topic_id: i32) {
         let owner = FormulaObserverId {
@@ -474,6 +477,7 @@ impl FormulaHandleService {
         let Some(removed) = self.topics.remove_by_observer(owner) else {
             return;
         };
+        #[cfg(any(test, feature = "refinement"))]
         self.refinement.observe_disconnect(&removed.key, owner);
         self.remove_topic_value(&removed, "handle topic disconnect");
     }

@@ -83,14 +83,15 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServiceInputs<
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn empty_for_generation(generation: RuntimeGeneration) -> Self {
+    pub(crate) fn empty_for_generation(
+        #[cfg(feature = "rtd")] generation: RuntimeGeneration,
+    ) -> Self {
         #[cfg(feature = "rtd")]
         {
             Self::with_rtd_sources(crate::subscription::SourceArena::empty(generation))
         }
         #[cfg(not(feature = "rtd"))]
         {
-            let _ = generation;
             Self::empty()
         }
     }
@@ -152,12 +153,10 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> ArmedServices<E, C> {
 impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C> {
     pub(crate) fn arm_generation(
         generation: RuntimeGeneration,
-        _config: crate::addin_impl::RuntimeConfig,
+        #[cfg(any(feature = "rtd", feature = "handles"))] config: crate::addin_impl::RuntimeConfig,
         #[cfg(feature = "rtd")] subscription_host: crate::excel_rtd::RtdSubscriptionHost,
-        inputs: GenerationServiceInputs<E, C>,
+        #[cfg(any(feature = "rtd", feature = "handles"))] inputs: GenerationServiceInputs<E, C>,
     ) -> crate::XllResult<ArmedServices<E, C>> {
-        #[cfg(not(any(feature = "rtd", feature = "handles")))]
-        let _ = inputs;
         let services = Self {
             generation,
             marker: std::marker::PhantomData,
@@ -170,12 +169,12 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C>
             },
         };
         #[cfg(feature = "handles")]
-        services.formula_handles.arm(_config.handle_config())?;
+        services.formula_handles.arm(config.handle_config())?;
         #[cfg(feature = "rtd")]
         services
             .rtd
             .subscriptions
-            .arm(generation, _config.rtd_limits(), inputs.rtd_sources)?;
+            .arm(generation, config.rtd_limits(), inputs.rtd_sources)?;
         #[cfg(feature = "handles")]
         services
             .formula_handles
@@ -330,10 +329,15 @@ mod tests {
         let generation = RuntimeGeneration::ONE;
         GenerationServices::arm_generation(
             generation,
+            #[cfg(any(feature = "rtd", feature = "handles"))]
             crate::addin_impl::RuntimeConfig::default(),
             #[cfg(feature = "rtd")]
             crate::excel_rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress()),
-            GenerationServiceInputs::empty_for_generation(generation),
+            #[cfg(any(feature = "rtd", feature = "handles"))]
+            GenerationServiceInputs::empty_for_generation(
+                #[cfg(feature = "rtd")]
+                generation,
+            ),
         )
         .unwrap()
     }

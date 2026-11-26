@@ -366,6 +366,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         let access = self
             .bind_addin_lifecycle()
             .expect("test runtime binds its lifecycle thread");
+        #[cfg(feature = "rtd")]
         let generation = opening.attempt_id().into_runtime_generation();
         let transaction = opening
             .attach_host(crate::host_callback::HostCallbackSession::new())
@@ -373,6 +374,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
             .initialized(
                 lifecycle_state,
                 crate::runtime_components::GenerationServiceInputs::empty_for_generation(
+                    #[cfg(feature = "rtd")]
                     generation,
                 ),
             );
@@ -2089,6 +2091,7 @@ pub(crate) mod tests {
                     "0",
                     "test",
                 ),
+                #[cfg(feature = "rtd")]
                 runtime.protocol_generation().unwrap(),
             );
             let failure = match test_support::initialize_addin::<ProbeAddin>(context, transaction) {

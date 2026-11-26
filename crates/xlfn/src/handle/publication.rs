@@ -43,7 +43,7 @@ struct ProvisionalPublication<'runtime> {
     runtime: &'runtime FormulaHandleService,
     key: HandleTopicKey,
     token: String,
-    refinement_id: u64,
+    refinement_id: super::refinement_hooks::InitializerTraceId,
 }
 
 impl Rollback for ProvisionalPublication<'_> {

@@ -129,19 +129,15 @@ impl sealed::InputModeSealed for PlainInputMode {
     }
 
     fn finish_return<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
-        arguments: FinishedArguments<'call, Self>,
-        access: crate::call_return::ReturnFrameAccess<'call>,
+        _arguments: FinishedArguments<'call, Self>,
+        _access: crate::call_return::ReturnFrameAccess<'call>,
     ) -> XllResult<crate::call_return::ReturnContext<'call, 'call, Self, E, C>> {
-        let _ = (access.udf_id, access.callbacks);
         #[cfg(feature = "handles")]
         let context = crate::call_return::ReturnContext::from_state(
-            crate::call_return::PlainReturnState::with_call(arguments.call),
+            crate::call_return::PlainReturnState::with_call(_arguments.call),
         );
         #[cfg(not(feature = "handles"))]
-        let context = {
-            let _ = (arguments.call.scope(), arguments.inputs);
-            crate::call_return::ReturnContext::from_state(())
-        };
+        let context = crate::call_return::ReturnContext::from_state(());
         Ok(context)
     }
 }
@@ -160,14 +156,13 @@ impl sealed::InputModeSealed for FormulaInputMode {
     }
 
     fn finish_return<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
-        arguments: FinishedArguments<'call, Self>,
-        access: crate::call_return::ReturnFrameAccess<'call>,
+        _arguments: FinishedArguments<'call, Self>,
+        _access: crate::call_return::ReturnFrameAccess<'call>,
     ) -> XllResult<crate::call_return::ReturnContext<'call, 'call, Self, E, C>> {
-        let FinishedArguments { call, inputs } = arguments;
         #[cfg(feature = "handles")]
-        let state = {
-            let mut call = call;
-            crate::call_return::FormulaPublisher::new(
+        {
+            let FinishedArguments { mut call, inputs } = _arguments;
+            let state = crate::call_return::FormulaPublisher::new(
                 call.take_handle_access().ok_or_else(|| {
                     XllError::input(
                         "<formula return>",
@@ -176,18 +171,14 @@ impl sealed::InputModeSealed for FormulaInputMode {
                         ),
                     )
                 })?,
-                access.udf_id,
+                _access.udf_id,
                 inputs,
-                access.callbacks,
-            )
-        };
-        #[cfg(not(feature = "handles"))]
-        {
-            let _ = (call, inputs, access);
-            Ok(crate::call_return::ReturnContext::from_state(()))
+                _access.callbacks,
+            );
+            Ok(crate::call_return::ReturnContext::from_state(state))
         }
-        #[cfg(feature = "handles")]
-        Ok(crate::call_return::ReturnContext::from_state(state))
+        #[cfg(not(feature = "handles"))]
+        Ok(crate::call_return::ReturnContext::from_state(()))
     }
 }
 
@@ -979,21 +970,24 @@ pub(crate) struct HandleCallAccess<'call> {
 /// Generation services are independent from the optional formula-handle
 /// capability. Keeping them as separate fields means RTD access does not
 /// acquire a handle resolver, and a core-only build has no handle access path.
+#[cfg(feature = "handles")]
 struct RuntimeCallAccess<'call> {
     scope: &'call CallScope<'call>,
-    #[cfg(feature = "handles")]
     handles: crate::handle::FormulaHandleServiceResolver<'call>,
 }
 
 /// Runtime services retained after input decoding has finished.
+#[cfg(feature = "handles")]
 #[doc(hidden)]
 pub(crate) struct CallContext<'call> {
     access: CallAccess<'call>,
 }
+#[cfg(feature = "handles")]
 enum CallAccess<'call> {
     Plain(&'call CallScope<'call>),
     Runtime(RuntimeCallAccess<'call>),
 }
+#[cfg(feature = "handles")]
 impl<'call> CallContext<'call> {
     pub(crate) fn scope(&self) -> &'call CallScope<'call> {
         match &self.access {
@@ -1001,7 +995,6 @@ impl<'call> CallContext<'call> {
             CallAccess::Runtime(access) => access.scope,
         }
     }
-    #[cfg(feature = "handles")]
     pub(crate) fn take_handle_access(&mut self) -> Option<HandleCallAccess<'call>> {
         let scope = self.scope();
         match std::mem::replace(&mut self.access, CallAccess::Plain(scope)) {
@@ -1024,10 +1017,24 @@ enum DecodeCallAccess<'brand, 'call> {
     #[cfg(any(test, feature = "bench-internals"))]
     Storage {
         storage: &'call crate::call::CallStorage<'brand, 'call>,
+        #[cfg_attr(
+            not(feature = "handles"),
+            allow(
+                dead_code,
+                reason = "Owned GhostToken<'brand> is only borrowed by handle domain entry"
+            )
+        )]
         token: ghost_cell::GhostToken<'brand>,
     },
     Runtime {
         storage: &'call crate::call::CallStorage<'brand, 'call>,
+        #[cfg_attr(
+            not(feature = "handles"),
+            allow(
+                dead_code,
+                reason = "Owned GhostToken<'brand> is only borrowed by handle domain entry"
+            )
+        )]
         token: ghost_cell::GhostToken<'brand>,
         #[cfg(feature = "handles")]
         handles: crate::handle::FormulaHandleServiceResolver<'call>,
@@ -1048,20 +1055,27 @@ impl<'brand, 'call> DecodeCallContext<'brand, 'call> {
             access: DecodeCallAccess::Storage { storage, token },
         }
     }
+    #[cfg(feature = "handles")]
     pub(crate) fn with_call<A: crate::Addin>(
         call: &'call crate::runtime::CallGuard<'_, A>,
         storage: &'call crate::call::CallStorage<'brand, 'call>,
         token: ghost_cell::GhostToken<'brand>,
     ) -> Self {
-        #[cfg(not(feature = "handles"))]
-        let _ = call;
         Self {
             access: DecodeCallAccess::Runtime {
                 storage,
                 token,
-                #[cfg(feature = "handles")]
                 handles: call.handle_call_access(storage),
             },
+        }
+    }
+    #[cfg(not(feature = "handles"))]
+    pub(crate) fn with_call(
+        storage: &'call crate::call::CallStorage<'brand, 'call>,
+        token: ghost_cell::GhostToken<'brand>,
+    ) -> Self {
+        Self {
+            access: DecodeCallAccess::Runtime { storage, token },
         }
     }
     #[cfg(all(test, feature = "handles"))]
@@ -1112,27 +1126,20 @@ impl<'brand, 'call> DecodeCallContext<'brand, 'call> {
         }
     }
     /// Erases the brand after decoding without releasing the storage's permits.
+    #[cfg(feature = "handles")]
     pub(crate) fn finish(self) -> CallContext<'call> {
         let access = match self.access {
             DecodeCallAccess::Plain(scope) => CallAccess::Plain(scope),
             #[cfg(any(test, feature = "bench-internals"))]
-            DecodeCallAccess::Storage { storage, token } => {
-                let _ = token;
-                CallAccess::Plain(storage.scope())
-            }
+            DecodeCallAccess::Storage { storage, token: _ } => CallAccess::Plain(storage.scope()),
             DecodeCallAccess::Runtime {
                 storage,
-                token,
-                #[cfg(feature = "handles")]
+                token: _,
                 handles,
-            } => {
-                let _ = token;
-                CallAccess::Runtime(RuntimeCallAccess {
-                    scope: storage.scope(),
-                    #[cfg(feature = "handles")]
-                    handles,
-                })
-            }
+            } => CallAccess::Runtime(RuntimeCallAccess {
+                scope: storage.scope(),
+                handles,
+            }),
         };
         CallContext { access }
     }
@@ -1174,7 +1181,10 @@ pub struct ArgumentContext<'brand, 'call, M: InputMode> {
 #[doc(hidden)]
 #[must_use = "consume the finalized arguments when preparing the return"]
 pub struct FinishedArguments<'call, M: InputMode> {
+    #[cfg(feature = "handles")]
     call: CallContext<'call>,
+    #[cfg(not(feature = "handles"))]
+    _call: std::marker::PhantomData<&'call CallScope<'call>>,
     inputs: M::FinishedFingerprint,
 }
 
@@ -1194,13 +1204,20 @@ impl<'call, M: InputMode> FinishedArguments<'call, M> {
 
 impl<'brand, 'call, M: InputMode> ArgumentContext<'brand, 'call, M> {
     pub fn new<A: crate::Addin>(
+        #[cfg_attr(
+            not(feature = "handles"),
+            allow(unused_variables, reason = "Only handle builds read call guard access")
+        )]
         call: &'call crate::runtime::CallGuard<'_, A>,
         storage: &'call crate::call::CallStorage<'brand, 'call>,
         token: ghost_cell::GhostToken<'brand>,
         argument_count: usize,
     ) -> Self {
         Self {
+            #[cfg(feature = "handles")]
             call: DecodeCallContext::with_call(call, storage, token),
+            #[cfg(not(feature = "handles"))]
+            call: DecodeCallContext::with_call(storage, token),
             inputs: M::new_fingerprint(argument_count),
         }
     }
@@ -1228,11 +1245,17 @@ impl<'brand, 'call, M: InputMode> ArgumentContext<'brand, 'call, M> {
 
     #[inline(always)]
     pub(crate) fn finish_typed(self) -> XllResult<FinishedArguments<'call, M>> {
-        let Self { call, inputs } = self;
+        let Self {
+            call: _call,
+            inputs,
+        } = self;
         let finished = M::finish_typed_ref(&inputs)?;
         drop(inputs);
         Ok(FinishedArguments {
-            call: call.finish(),
+            #[cfg(feature = "handles")]
+            call: _call.finish(),
+            #[cfg(not(feature = "handles"))]
+            _call: std::marker::PhantomData,
             inputs: finished,
         })
     }

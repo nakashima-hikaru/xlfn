@@ -2,6 +2,7 @@
 use crate::cancellation::{CancellationGuarantee, CancellationToken};
 use crate::diagnostics::{AddinId, DiagnosticFileConfig, DiagnosticInitError, DiagnosticSink};
 use crate::error::IntoXllError;
+#[cfg(feature = "rtd")]
 use crate::generation::RuntimeGeneration;
 use crate::host_api::ExcelHost;
 use crate::reference::ExcelReference;
@@ -92,14 +93,12 @@ impl<A: Addin> OpenContext<A> {
     pub(crate) fn new(
         module_path: PathBuf,
         build_info: BuildInfo,
-        generation: RuntimeGeneration,
+        #[cfg(feature = "rtd")] generation: RuntimeGeneration,
     ) -> Self {
         let module_directory = module_path
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default();
-        #[cfg(not(feature = "rtd"))]
-        let _ = generation;
         Self {
             marker: PhantomData,
             module_path,
@@ -1705,6 +1704,7 @@ mod tests {
         let context = crate::OpenContext::<()>::new(
             std::path::PathBuf::from("/test/module.xll"),
             build_info,
+            #[cfg(feature = "rtd")]
             super::RuntimeGeneration::ONE,
         );
         let diag = context.diagnostics();

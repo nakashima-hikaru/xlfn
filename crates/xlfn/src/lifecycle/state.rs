@@ -1432,10 +1432,12 @@ pub(crate) struct CommittedOpen<'access, 'coordinator, A: crate::Addin> {
 }
 
 impl<A: crate::Addin> CommittedOpen<'_, '_, A> {
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn attempt(&self) -> OpenAttemptId {
         self.attempt
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn access(&self) -> &LifecycleAccess<'_, A> {
         self._access
     }

@@ -113,7 +113,11 @@ pub(crate) struct RtdTraceSnapshot {
     pub(crate) rtd_server_locks: u64,
 }
 
-#[cfg(any(test, feature = "refinement"))]
+#[cfg(all(
+    any(test, feature = "refinement"),
+    target_os = "windows",
+    any(feature = "rtd", feature = "handles")
+))]
 pub(crate) fn connect_trace<F>(
     trace: crate::shutdown_trace::ShutdownTraceHandle,
     initialize: F,
@@ -121,15 +125,21 @@ pub(crate) fn connect_trace<F>(
 where
     F: FnOnce(RtdTraceSnapshot) -> crate::XllResult<()>,
 {
-    #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
-    {
-        crate::excel_rtd::connect_trace(trace, initialize)
-    }
-    #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
-    {
-        let _ = trace;
-        initialize(RtdTraceSnapshot::default())
-    }
+    crate::excel_rtd::connect_trace(trace, initialize)
+}
+
+#[cfg(all(
+    any(test, feature = "refinement"),
+    not(all(target_os = "windows", any(feature = "rtd", feature = "handles")))
+))]
+pub(crate) fn connect_trace<F>(
+    _: crate::shutdown_trace::ShutdownTraceHandle,
+    initialize: F,
+) -> crate::XllResult<()>
+where
+    F: FnOnce(RtdTraceSnapshot) -> crate::XllResult<()>,
+{
+    initialize(RtdTraceSnapshot::default())
 }
 
 #[cfg(any(test, feature = "refinement"))]
@@ -157,12 +167,15 @@ pub(crate) fn physical_unload_ready() -> bool {
     }
 }
 
+#[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
 pub(crate) fn wait_for_module_quiescence(
     module_residency_held: bool,
 ) -> Result<RtdQuiescent, RtdQuiescenceError> {
-    #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
     crate::excel_rtd::wait_for_transport_quiescence(module_residency_held)?;
-    #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
-    let _ = module_residency_held;
+    Ok(RtdQuiescent(()))
+}
+
+#[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
+pub(crate) fn wait_for_module_quiescence(_: bool) -> Result<RtdQuiescent, RtdQuiescenceError> {
     Ok(RtdQuiescent(()))
 }

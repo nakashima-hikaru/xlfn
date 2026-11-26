@@ -845,6 +845,7 @@ mod tests {
                 "0",
                 "test",
             ),
+            #[cfg(feature = "rtd")]
             generation,
         );
         let Ok(mut transaction) =

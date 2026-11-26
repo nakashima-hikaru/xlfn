@@ -251,14 +251,13 @@ impl ObservationSink {
         }
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: ShutdownTraceHandle) {
-        #[cfg(any(test, feature = "refinement"))]
-        {
-            *self.trace.lock() = Some(trace);
-        }
-        #[cfg(not(any(test, feature = "refinement")))]
-        let _ = trace;
+        *self.trace.lock() = Some(trace);
     }
+
+    #[cfg(not(any(test, feature = "refinement")))]
+    pub(crate) fn set_trace_sink(&self, _: ShutdownTraceHandle) {}
 
     pub(crate) fn trace_handle(&self) -> Option<ShutdownTraceHandle> {
         #[cfg(any(test, feature = "refinement"))]
@@ -269,15 +268,17 @@ impl ObservationSink {
         None
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     #[inline(always)]
     pub(crate) fn record(&self, event: ShutdownEvent) {
-        #[cfg(any(test, feature = "refinement"))]
         if let Some(trace) = self.trace.lock().as_ref().cloned() {
             trace.record(event);
         }
-        #[cfg(not(any(test, feature = "refinement")))]
-        let _ = event;
     }
+
+    #[cfg(not(any(test, feature = "refinement")))]
+    #[inline(always)]
+    pub(crate) fn record(&self, _: ShutdownEvent) {}
 
     #[cfg(test)]
     pub(crate) fn disable_for_test(&self) {

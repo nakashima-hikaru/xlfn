@@ -1220,7 +1220,7 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
-    type Prepared = (usize, usize, &'static str, T::Elements);
+    type Prepared = (usize, usize, T::Elements);
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -1235,9 +1235,7 @@ where
         M::u64(identity, rows as u64);
         M::u64(identity, columns as u64);
         let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
-        Ok(PreparedArgument::prepared((
-            rows, columns, argument, elements,
-        )))
+        Ok(PreparedArgument::prepared((rows, columns, elements)))
     }
 
     type ElementPrepared = Self::Prepared;
@@ -1252,12 +1250,9 @@ where
     }
 
     fn materialize_prepared(value: Self::Prepared) -> XllResult<Self> {
-        let (rows, columns, argument, elements) = value;
-        {
-            let _ = (rows, columns, argument);
-            let values = T::materialize_elements(elements)?;
-            Matrix::new(rows, columns, values)
-        }
+        let (rows, columns, elements) = value;
+        let values = T::materialize_elements(elements)?;
+        Matrix::new(rows, columns, values)
     }
     fn materialize_element(value: Self::ElementPrepared) -> XllResult<Self> {
         <Self as ExcelParameter<'call, M>>::materialize_prepared(value)
@@ -1410,7 +1405,7 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
-    type Prepared = (usize, usize, &'static str, T::Elements);
+    type Prepared = T::Elements;
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -1421,12 +1416,9 @@ where
             return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
         }
         let grid = convert::grid::<convert::VectorShape>(value, argument)?;
-        let (rows, columns) = grid.shape();
         M::u64(identity, grid.cells().len() as u64);
         let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
-        Ok(PreparedArgument::prepared((
-            rows, columns, argument, elements,
-        )))
+        Ok(PreparedArgument::prepared(elements))
     }
 
     type ElementPrepared = Self::Prepared;
@@ -1441,12 +1433,7 @@ where
     }
 
     fn materialize_prepared(value: Self::Prepared) -> XllResult<Self> {
-        let (rows, columns, argument, elements) = value;
-        {
-            let _ = (rows, columns, argument);
-            let values = T::materialize_elements(elements)?;
-            Ok(values)
-        }
+        T::materialize_elements(value)
     }
     fn materialize_element(value: Self::ElementPrepared) -> XllResult<Self> {
         <Self as ExcelParameter<'call, M>>::materialize_prepared(value)
@@ -1497,7 +1484,7 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
-    type Prepared = (usize, usize, &'static str, T::Elements);
+    type Prepared = (&'static str, T::Elements);
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -1508,12 +1495,9 @@ where
             return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
         }
         let grid = convert::bounded_grid::<MAX>(value, argument)?;
-        let (rows, columns) = grid.shape();
         M::u64(identity, grid.cells().len() as u64);
         let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
-        Ok(PreparedArgument::prepared((
-            rows, columns, argument, elements,
-        )))
+        Ok(PreparedArgument::prepared((argument, elements)))
     }
 
     type ElementPrepared = Self::Prepared;
@@ -1528,15 +1512,12 @@ where
     }
 
     fn materialize_prepared(value: Self::Prepared) -> XllResult<Self> {
-        let (rows, columns, argument, elements) = value;
-        {
-            let _ = (rows, columns, argument);
-            let values = T::materialize_elements(elements)?;
-            Self::new(values).map_err(|error| match error {
-                XllError::Input { reason, .. } => XllError::Input { argument, reason },
-                other => other,
-            })
-        }
+        let (argument, elements) = value;
+        let values = T::materialize_elements(elements)?;
+        Self::new(values).map_err(|error| match error {
+            XllError::Input { reason, .. } => XllError::Input { argument, reason },
+            other => other,
+        })
     }
     fn materialize_element(value: Self::ElementPrepared) -> XllResult<Self> {
         <Self as ExcelParameter<'call, M>>::materialize_prepared(value)
@@ -1591,7 +1572,7 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
-    type Prepared = (usize, usize, &'static str, T::Elements);
+    type Prepared = T::Elements;
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -1602,12 +1583,9 @@ where
             return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
         }
         let grid = convert::grid::<convert::RowShape>(value, argument)?;
-        let (rows, columns) = grid.shape();
         M::u64(identity, grid.cells().len() as u64);
         let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
-        Ok(PreparedArgument::prepared((
-            rows, columns, argument, elements,
-        )))
+        Ok(PreparedArgument::prepared(elements))
     }
 
     type ElementPrepared = Self::Prepared;
@@ -1622,12 +1600,8 @@ where
     }
 
     fn materialize_prepared(value: Self::Prepared) -> XllResult<Self> {
-        let (rows, columns, argument, elements) = value;
-        {
-            let _ = (rows, columns, argument);
-            let values = T::materialize_elements(elements)?;
-            Self::new(values)
-        }
+        let values = T::materialize_elements(value)?;
+        Self::new(values)
     }
     fn materialize_element(value: Self::ElementPrepared) -> XllResult<Self> {
         <Self as ExcelParameter<'call, M>>::materialize_prepared(value)
@@ -1677,7 +1651,7 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
-    type Prepared = (usize, usize, &'static str, T::Elements);
+    type Prepared = T::Elements;
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -1688,12 +1662,9 @@ where
             return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
         }
         let grid = convert::grid::<convert::ColumnShape>(value, argument)?;
-        let (rows, columns) = grid.shape();
         M::u64(identity, grid.cells().len() as u64);
         let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
-        Ok(PreparedArgument::prepared((
-            rows, columns, argument, elements,
-        )))
+        Ok(PreparedArgument::prepared(elements))
     }
 
     type ElementPrepared = Self::Prepared;
@@ -1708,12 +1679,8 @@ where
     }
 
     fn materialize_prepared(value: Self::Prepared) -> XllResult<Self> {
-        let (rows, columns, argument, elements) = value;
-        {
-            let _ = (rows, columns, argument);
-            let values = T::materialize_elements(elements)?;
-            Self::new(values)
-        }
+        let values = T::materialize_elements(value)?;
+        Self::new(values)
     }
     fn materialize_element(value: Self::ElementPrepared) -> XllResult<Self> {
         <Self as ExcelParameter<'call, M>>::materialize_prepared(value)

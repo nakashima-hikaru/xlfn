@@ -44,6 +44,7 @@ mod tests {
     use crate::addin_impl::{Addin, BuildInfo, OpenContext};
     use crate::boundary::host::{host_auto_close, host_auto_open, host_auto_remove};
     use crate::diagnostics::AddinId;
+    #[cfg(feature = "rtd")]
     use crate::generation::RuntimeGeneration;
     use crate::host_callback::HostCallbackSession;
     use crate::runtime::AddinLifecycleAccess;
@@ -140,6 +141,7 @@ mod tests {
         OpenContext::new(
             std::path::PathBuf::from("test.xll"),
             BuildInfo::new(AddinId::parse("test").unwrap(), "0", "test"),
+            #[cfg(feature = "rtd")]
             RuntimeGeneration::ONE,
         )
     }
@@ -777,6 +779,7 @@ mod tests {
             .begin_open()
             .unwrap()
             .attach_host(crate::host_callback::HostCallbackSession::new());
+        #[cfg(feature = "rtd")]
         let attempt = runtime.protocol_generation().unwrap();
         let starting: serde_json::Value =
             serde_json::from_str(&runtime.composition_trace_json()).unwrap();
@@ -784,6 +787,7 @@ mod tests {
         let context = OpenContext::new(
             std::path::PathBuf::from("test.xll"),
             BuildInfo::new(AddinId::parse("test").unwrap(), "0", "test"),
+            #[cfg(feature = "rtd")]
             attempt,
         );
         let lifecycle = lifecycle_access(&runtime);

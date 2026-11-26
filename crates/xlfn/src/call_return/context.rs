@@ -13,7 +13,15 @@ type ReturnContextMarker<'call, 'scope, E, C> =
 /// Callback authority supplied by the admitted call frame.
 #[doc(hidden)]
 pub struct ReturnFrameAccess<'call> {
+    #[cfg_attr(
+        not(feature = "handles"),
+        allow(dead_code, reason = "Only formula returns read frame callback access")
+    )]
     pub(crate) udf_id: &'static str,
+    #[cfg_attr(
+        not(feature = "handles"),
+        allow(dead_code, reason = "Only formula returns read frame callback access")
+    )]
     pub(crate) callbacks: &'call crate::host_callback::HostCallbackSession,
 }
 

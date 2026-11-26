@@ -224,7 +224,12 @@ impl ComModuleLifetime {
                 lifetime: self,
                 _thread_export: crate::ingress::ThreadExportGuard::enter(),
                 _ingress_guard: ingress_guard,
-                _observation: ComModuleCallObservation::begin(self, accepted),
+                _observation: ComModuleCallObservation::begin(
+                    #[cfg(any(test, feature = "refinement"))]
+                    self,
+                    #[cfg(any(test, feature = "refinement"))]
+                    accepted,
+                ),
             },
             accepted,
         )
@@ -377,13 +382,14 @@ struct ComModuleCallObservation {
 }
 
 impl ComModuleCallObservation {
-    fn begin(lifetime: &'static ComModuleLifetime, accepted: bool) -> Self {
+    fn begin(
+        #[cfg(any(test, feature = "refinement"))] lifetime: &'static ComModuleLifetime,
+        #[cfg(any(test, feature = "refinement"))] accepted: bool,
+    ) -> Self {
         #[cfg(any(test, feature = "refinement"))]
         if accepted {
             lifetime.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
         }
-        #[cfg(not(any(test, feature = "refinement")))]
-        let _ = (lifetime, accepted);
         Self {
             #[cfg(any(test, feature = "refinement"))]
             lifetime,

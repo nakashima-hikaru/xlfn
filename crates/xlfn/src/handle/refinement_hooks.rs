@@ -13,16 +13,28 @@ use super::{FormulaLifetimeGeneration, FormulaObserverId};
 #[cfg(any(test, feature = "refinement"))]
 use super::refinement::HandleRefinementTrace;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct InitializerTraceId {
+    #[cfg(any(test, feature = "refinement"))]
+    id: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WarmReadTraceId {
+    #[cfg(any(test, feature = "refinement"))]
+    id: u64,
+}
+
 pub(crate) struct HandleRefinementHooks {
     #[cfg(any(test, feature = "refinement"))]
     trace: HandleRefinementTrace,
 }
 
+#[cfg(any(test, feature = "refinement"))]
 impl HandleRefinementHooks {
-    pub(crate) fn new(_session: u64) -> Self {
+    pub(crate) fn new(session: u64) -> Self {
         Self {
-            #[cfg(any(test, feature = "refinement"))]
-            trace: HandleRefinementTrace::new(_session),
+            trace: HandleRefinementTrace::new(session),
         }
     }
 
@@ -31,17 +43,7 @@ impl HandleRefinementHooks {
     /// cache, so calling it before a no-op observer cannot be optimized away.
     #[inline]
     pub(crate) fn token_payload(&self, store: &HandleStore, token: &str) -> TokenWire {
-        #[cfg(any(test, feature = "refinement"))]
-        return store.refinement_token(token);
-        #[cfg(not(any(test, feature = "refinement")))]
-        {
-            let _ = (store, token);
-            TokenWire {
-                session: 0,
-                slot: 0,
-                generation: std::num::NonZeroU64::MIN,
-            }
-        }
+        store.refinement_token(token)
     }
 
     #[cfg(test)]
@@ -68,157 +70,137 @@ impl HandleRefinementHooks {
 
     #[inline]
     pub(crate) fn observe_begin_prepare(&self) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.begin_prepare();
     }
 
     #[inline]
     fn observe_end_prepare(&self) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.end_prepare();
     }
 
     #[inline]
-    pub(crate) fn observe_allocate_initializer_id(&self) -> u64 {
-        #[cfg(any(test, feature = "refinement"))]
-        return self.trace.allocate_initializer_id();
-        #[cfg(not(any(test, feature = "refinement")))]
-        0
+    pub(crate) fn observe_allocate_initializer_id(&self) -> InitializerTraceId {
+        InitializerTraceId {
+            id: self.trace.allocate_initializer_id(),
+        }
     }
 
     #[inline]
-    pub(crate) fn observe_begin_initializer(&self, key: &HandleTopicKey, runtime_id: u64) {
-        #[cfg(any(test, feature = "refinement"))]
-        self.trace.begin_initializer(key, runtime_id);
-        let _ = (key, runtime_id);
+    pub(crate) fn observe_begin_initializer(
+        &self,
+        key: &HandleTopicKey,
+        runtime_id: InitializerTraceId,
+    ) {
+        self.trace.begin_initializer(key, runtime_id.id);
     }
 
     #[inline]
-    pub(crate) fn observe_insert_pending_fresh(&self, key: &HandleTopicKey, runtime_id: u64) {
-        #[cfg(any(test, feature = "refinement"))]
-        self.trace.insert_pending_fresh(key, runtime_id);
-        let _ = (key, runtime_id);
+    pub(crate) fn observe_insert_pending_fresh(
+        &self,
+        key: &HandleTopicKey,
+        runtime_id: InitializerTraceId,
+    ) {
+        self.trace.insert_pending_fresh(key, runtime_id.id);
     }
 
     #[inline]
     pub(crate) fn observe_insert_pending_reuse(
         &self,
         key: &HandleTopicKey,
-        runtime_id: u64,
-        slot: u64,
-        generation: std::num::NonZeroU64,
+        runtime_id: InitializerTraceId,
+        token: TokenWire,
     ) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace
-            .insert_pending_reuse(key, runtime_id, slot, generation);
-        let _ = (key, runtime_id, slot, generation);
+            .insert_pending_reuse(key, runtime_id.id, token.slot, token.generation);
     }
 
     #[inline]
     pub(crate) fn observe_publish_and_install(
         &self,
         key: &HandleTopicKey,
-        runtime_id: u64,
+        runtime_id: InitializerTraceId,
         token: TokenWire,
         lifetime_key: &str,
     ) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace
-            .publish_and_install(key, runtime_id, token, lifetime_key);
-        let _ = (key, runtime_id, token, lifetime_key);
+            .publish_and_install(key, runtime_id.id, token, lifetime_key);
     }
 
     #[inline]
     pub(crate) fn observe_commit_and_activate(
         &self,
         key: &HandleTopicKey,
-        runtime_id: u64,
+        runtime_id: InitializerTraceId,
         token: TokenWire,
     ) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace
             .linearize()
-            .commit_and_activate(key, runtime_id, token);
-        let _ = (key, runtime_id, token);
+            .commit_and_activate(key, runtime_id.id, token);
     }
 
     #[inline]
-    pub(crate) fn observe_finish_initializer(&self, runtime_id: u64) {
-        #[cfg(any(test, feature = "refinement"))]
-        self.trace.finish_initializer(runtime_id);
-        let _ = runtime_id;
+    pub(crate) fn observe_finish_initializer(&self, runtime_id: InitializerTraceId) {
+        self.trace.finish_initializer(runtime_id.id);
     }
 
     #[inline]
     pub(crate) fn observe_withdraw_and_invalidate(
         &self,
         key: &HandleTopicKey,
-        runtime_id: u64,
+        runtime_id: InitializerTraceId,
         token: TokenWire,
     ) {
-        #[cfg(any(test, feature = "refinement"))]
-        self.trace.withdraw_and_invalidate(key, runtime_id, token);
-        let _ = (key, runtime_id, token);
+        self.trace
+            .withdraw_and_invalidate(key, runtime_id.id, token);
     }
 
     #[inline]
     pub(crate) fn observe_rollback_pending(
         &self,
         key: &HandleTopicKey,
-        runtime_id: u64,
+        runtime_id: InitializerTraceId,
         reusable: bool,
         token: TokenWire,
     ) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace
-            .rollback_pending(key, runtime_id, reusable, token);
-        let _ = (key, runtime_id, reusable, token);
+            .rollback_pending(key, runtime_id.id, reusable, token);
     }
 
     #[inline]
-    pub(crate) fn observe_begin_warm_read(&self, key: &HandleTopicKey) -> u64 {
-        #[cfg(any(test, feature = "refinement"))]
-        return self.trace.begin_warm_read(key);
-        #[cfg(not(any(test, feature = "refinement")))]
-        {
-            let _ = key;
-            0
+    pub(crate) fn observe_begin_warm_read(&self, key: &HandleTopicKey) -> WarmReadTraceId {
+        WarmReadTraceId {
+            id: self.trace.begin_warm_read(key),
         }
     }
 
     #[inline]
-    pub(crate) fn observe_finish_warm_read(&self, reader_id: u64) {
-        #[cfg(any(test, feature = "refinement"))]
-        self.trace.finish_warm_read(reader_id);
-        let _ = reader_id;
+    pub(crate) fn observe_finish_warm_read(&self, reader_id: WarmReadTraceId) {
+        self.trace.finish_warm_read(reader_id.id);
     }
 
     #[inline]
-    pub(crate) fn observe_fail_warm_read(&self, reader_id: u64) {
-        #[cfg(any(test, feature = "refinement"))]
-        self.trace.fail_warm_read(reader_id);
-        let _ = reader_id;
+    pub(crate) fn observe_fail_warm_read(&self, reader_id: WarmReadTraceId) {
+        self.trace.fail_warm_read(reader_id.id);
     }
 
     #[inline]
-    pub(crate) fn observe_abandon_warm_read(&self, reader_id: u64) {
-        #[cfg(any(test, feature = "refinement"))]
-        self.trace.abandon_warm_read(reader_id);
-        let _ = reader_id;
+    pub(crate) fn observe_abandon_warm_read(&self, reader_id: WarmReadTraceId) {
+        self.trace.abandon_warm_read(reader_id.id);
     }
 
     #[inline]
-    pub(crate) fn observe_drain_pending(&self, token: TokenWire, runtime_id: u64, reusable: bool) {
-        #[cfg(any(test, feature = "refinement"))]
-        self.trace.drain_pending(token, runtime_id, reusable);
-        let _ = (token, runtime_id, reusable);
+    pub(crate) fn observe_drain_pending(
+        &self,
+        token: TokenWire,
+        runtime_id: InitializerTraceId,
+        reusable: bool,
+    ) {
+        self.trace.drain_pending(token, runtime_id.id, reusable);
     }
 
     #[inline]
     pub(crate) fn observe_drain_published(&self, token: TokenWire, reusable: bool) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.drain_published(token, reusable);
-        let _ = (token, reusable);
     }
 
     #[cfg(any(target_os = "windows", test))]
@@ -227,16 +209,12 @@ impl HandleRefinementHooks {
         key: &HandleTopicKey,
         generation: FormulaLifetimeGeneration,
     ) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.claim_lifetime(key, generation);
-        let _ = (key, generation);
     }
 
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn observe_begin_connection(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.begin_connection(key, owner);
-        let _ = (key, owner);
     }
 
     #[cfg(any(target_os = "windows", test))]
@@ -245,16 +223,12 @@ impl HandleRefinementHooks {
         key: &HandleTopicKey,
         owner: FormulaObserverId,
     ) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.reuse_committed_connection(key, owner);
-        let _ = (key, owner);
     }
 
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn observe_commit_connection(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.commit_connection(key, owner);
-        let _ = (key, owner);
     }
 
     #[cfg(any(target_os = "windows", test))]
@@ -263,52 +237,173 @@ impl HandleRefinementHooks {
         key: &HandleTopicKey,
         owner: FormulaObserverId,
     ) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.rollback_connection(key, owner);
-        let _ = (key, owner);
     }
 
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn observe_disconnect(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.disconnect(key, owner);
-        let _ = (key, owner);
     }
 
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn observe_detach_generation(&self, generation: FormulaLifetimeGeneration) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.detach_generation(generation);
-        let _ = generation;
     }
 
     pub(crate) fn observe_seal_for_close(&self) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.seal_for_close();
     }
 
     #[inline]
     pub(crate) fn observe_close_registry(&self) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.close_registry();
     }
 
     #[inline]
     pub(crate) fn observe_finish_close(&self) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.finish_close();
     }
 
     pub(crate) fn observe_mark_returned_success(&self) {
-        #[cfg(any(test, feature = "refinement"))]
         self.trace.mark_returned_success();
     }
 }
 
-pub(crate) struct PrepareObservation<'a> {
-    hooks: &'a HandleRefinementHooks,
+#[cfg(not(any(test, feature = "refinement")))]
+impl HandleRefinementHooks {
+    pub(crate) fn new(_: u64) -> Self {
+        Self {}
+    }
+
+    #[inline]
+    pub(crate) fn token_payload(&self, _: &HandleStore, _: &str) -> TokenWire {
+        TokenWire {}
+    }
+
+    #[inline]
+    pub(crate) fn observe_prepare(&self) -> PrepareObservation<'_> {
+        PrepareObservation {
+            _hooks: std::marker::PhantomData,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn observe_allocate_initializer_id(&self) -> InitializerTraceId {
+        InitializerTraceId {}
+    }
+
+    #[inline]
+    pub(crate) fn observe_begin_initializer(&self, _: &HandleTopicKey, _: InitializerTraceId) {}
+
+    #[inline]
+    pub(crate) fn observe_insert_pending_fresh(&self, _: &HandleTopicKey, _: InitializerTraceId) {}
+
+    #[inline]
+    pub(crate) fn observe_insert_pending_reuse(
+        &self,
+        _: &HandleTopicKey,
+        _: InitializerTraceId,
+        _: TokenWire,
+    ) {
+    }
+
+    #[inline]
+    pub(crate) fn observe_publish_and_install(
+        &self,
+        _: &HandleTopicKey,
+        _: InitializerTraceId,
+        _: TokenWire,
+        _: &str,
+    ) {
+    }
+
+    #[inline]
+    pub(crate) fn observe_commit_and_activate(
+        &self,
+        _: &HandleTopicKey,
+        _: InitializerTraceId,
+        _: TokenWire,
+    ) {
+    }
+
+    #[inline]
+    pub(crate) fn observe_finish_initializer(&self, _: InitializerTraceId) {}
+
+    #[inline]
+    pub(crate) fn observe_withdraw_and_invalidate(
+        &self,
+        _: &HandleTopicKey,
+        _: InitializerTraceId,
+        _: TokenWire,
+    ) {
+    }
+
+    #[inline]
+    pub(crate) fn observe_rollback_pending(
+        &self,
+        _: &HandleTopicKey,
+        _: InitializerTraceId,
+        _: bool,
+        _: TokenWire,
+    ) {
+    }
+
+    #[inline]
+    pub(crate) fn observe_begin_warm_read(&self, _: &HandleTopicKey) -> WarmReadTraceId {
+        WarmReadTraceId {}
+    }
+
+    #[inline]
+    pub(crate) fn observe_finish_warm_read(&self, _: WarmReadTraceId) {}
+
+    #[inline]
+    pub(crate) fn observe_fail_warm_read(&self, _: WarmReadTraceId) {}
+
+    #[inline]
+    pub(crate) fn observe_abandon_warm_read(&self, _: WarmReadTraceId) {}
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn observe_claim_lifetime(&self, _: &HandleTopicKey, _: FormulaLifetimeGeneration) {}
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn observe_begin_connection(&self, _: &HandleTopicKey, _: FormulaObserverId) {}
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn observe_reuse_committed_connection(
+        &self,
+        _: &HandleTopicKey,
+        _: FormulaObserverId,
+    ) {
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn observe_commit_connection(&self, _: &HandleTopicKey, _: FormulaObserverId) {}
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn observe_rollback_connection(&self, _: &HandleTopicKey, _: FormulaObserverId) {}
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn observe_detach_generation(&self, _: FormulaLifetimeGeneration) {}
+
+    pub(crate) fn observe_seal_for_close(&self) {}
+
+    #[inline]
+    pub(crate) fn observe_close_registry(&self) {}
+
+    #[inline]
+    pub(crate) fn observe_finish_close(&self) {}
+
+    pub(crate) fn observe_mark_returned_success(&self) {}
 }
 
+pub(crate) struct PrepareObservation<'a> {
+    #[cfg(any(test, feature = "refinement"))]
+    hooks: &'a HandleRefinementHooks,
+    #[cfg(not(any(test, feature = "refinement")))]
+    _hooks: std::marker::PhantomData<&'a HandleRefinementHooks>,
+}
+
+#[cfg(any(test, feature = "refinement"))]
 impl Drop for PrepareObservation<'_> {
     fn drop(&mut self) {
         self.hooks.observe_end_prepare();

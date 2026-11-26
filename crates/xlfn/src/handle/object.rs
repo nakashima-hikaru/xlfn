@@ -390,6 +390,7 @@ impl ObjectArena {
         let _ = self.trace.set(trace);
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     fn record(&self, event: crate::shutdown_trace::ShutdownEvent) {
         #[cfg(test)]
         if matches!(event, crate::shutdown_trace::ShutdownEvent::RemoveHandlePin) {
@@ -400,13 +401,13 @@ impl ObjectArena {
                 hook();
             }
         }
-        #[cfg(any(test, feature = "refinement"))]
         if let Some(trace) = self.trace.get() {
             trace.record(event);
         }
-        #[cfg(not(any(test, feature = "refinement")))]
-        let _ = event;
     }
+
+    #[cfg(not(any(test, feature = "refinement")))]
+    fn record(&self, _: crate::shutdown_trace::ShutdownEvent) {}
 }
 
 impl Drop for ObjectArena {

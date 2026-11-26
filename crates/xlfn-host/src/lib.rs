@@ -51,7 +51,16 @@ impl NativeModuleReference {
     ///
     /// Windows interprets a non-null address as an image location; the
     /// address is never read as memory by this adapter.
-    pub fn acquire(anchor: *const ()) -> Result<Self, ModuleReferenceError> {
+    pub fn acquire(
+        #[cfg_attr(
+            not(windows),
+            allow(
+                unused_variables,
+                reason = "Only Windows acquires a loader handle by address"
+            )
+        )]
+        anchor: *const (),
+    ) -> Result<Self, ModuleReferenceError> {
         #[cfg(windows)]
         {
             if anchor.is_null() {
@@ -78,7 +87,6 @@ impl NativeModuleReference {
         }
         #[cfg(not(windows))]
         {
-            let _ = anchor;
             Ok(Self {})
         }
     }
