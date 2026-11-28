@@ -55,7 +55,7 @@ pub type CachePanicReporter = fn(&'static str, &XllError);
 const fn ignore_cache_panic(_: &'static str, _: &XllError) {}
 
 fn report_drop_panic(report: CachePanicReporter, context: &'static str) {
-    let _ = catch_no_unwind(AssertUnwindSafe(|| report(context, &XllError::Panic)));
+    let _ = catch_no_unwind(AssertUnwindSafe(|| report(context, &XllError::PANIC)));
 }
 use xlfn_kernel::rollback::{Rollback, RollbackGuard};
 use xlfn_kernel::rotating_read_domain::{
@@ -1375,7 +1375,7 @@ impl<V> CacheLookupDomain<V> {
         let permit = self
             .domain
             .enter_current_thread()
-            .map_err(|_| XllError::Closing)?;
+            .map_err(|_| XllError::CLOSING)?;
         Ok(CacheDomainPermit {
             _registration: TlsReaderRegistration::enter(std::ptr::from_ref(self).addr()),
             _permit: permit,
@@ -2090,7 +2090,7 @@ mod tests {
     fn value_drop_reports_to_the_issuing_cache_after_final_lease() {
         static REPORTS: AtomicUsize = AtomicUsize::new(0);
         fn report(context: &'static str, error: &XllError) {
-            if context == "calculation cache value final drop" && matches!(error, XllError::Panic) {
+            if context == "calculation cache value final drop" && error.is_panic() {
                 REPORTS.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -2624,7 +2624,7 @@ mod tests {
                     .map(|v| *v)
             },
         );
-        assert!(matches!(result, Err(XllError::Internal { .. })));
+        assert!(matches!(result, Err(error) if error.diagnostic_id().is_some()));
         assert!(cache.get(&1).is_none());
     }
 
@@ -2640,7 +2640,7 @@ mod tests {
                     .map(|v| *v)
             },
         );
-        assert!(matches!(result, Err(XllError::Internal { .. })));
+        assert!(matches!(result, Err(error) if error.diagnostic_id().is_some()));
         assert!(cache.get(&1).is_none());
         assert!(cache.get(&2).is_none());
     }
@@ -2658,7 +2658,7 @@ mod tests {
                     .map(|value| *value + 1)
             },
         );
-        assert!(matches!(result, Err(XllError::Internal { .. })));
+        assert!(matches!(result, Err(error) if error.diagnostic_id().is_some()));
         assert!(first.get(&1).is_none());
         assert!(second.get(&2).is_none());
     }
@@ -2757,8 +2757,7 @@ mod tests {
                 CacheRegistry::downcast_cache::<Text, u64, u64>(entry).map(|_| ()),
             ] {
                 assert!(
-                    matches!(rejected, Err(XllError::Internal { diagnostic_id, .. })
-                    if diagnostic_id == CACHE_TYPE)
+                    matches!(rejected, Err(error) if error.diagnostic_id() == Some(CACHE_TYPE))
                 );
             }
         }
@@ -3800,7 +3799,7 @@ mod tests {
                     if succeeds {
                         Ok(DropProbe(Arc::clone(&drops)))
                     } else {
-                        Err(XllError::Closing)
+                        Err(XllError::CLOSING)
                     }
                 },
             );
@@ -4127,7 +4126,7 @@ mod tests {
                     let _ = (cache.len(), cache.used_weight());
                     assert_eq!(drops.load(Ordering::Relaxed), 0);
                     assert_eq!(cache.reclamation_stats().pending_nodes, 0);
-                    Err(XllError::Closing)
+                    Err(XllError::CLOSING)
                 },
             )
             .unwrap_err();
@@ -4275,8 +4274,7 @@ mod tests {
                     // rejection contract even across different endpoints.
                     assert!(matches!(
                         registry.get_or_try_insert_weighted(&second, 2, |_| 1, || Ok(9)),
-                        Err(XllError::Internal { diagnostic_id, .. })
-                            if diagnostic_id == CACHE_REENTRANT
+                        Err(error) if error.diagnostic_id() == Some(CACHE_REENTRANT)
                     ));
                     Ok(7)
                 },

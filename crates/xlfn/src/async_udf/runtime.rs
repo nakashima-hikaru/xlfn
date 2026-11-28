@@ -83,19 +83,19 @@ impl<'a, E: AsyncExecutor> RuntimeCalculationSnapshot<'a, E> {
     pub(crate) fn preflight(&self) -> XllResult<()> {
         let runtime = self.runtime;
         if runtime.publication.load(Ordering::Acquire).is_null() {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         if self.calculation.preflight_available()? {
             return Ok(());
         }
         // The executor reader preserves the existing saturation/close ordering.
-        let _executor = runtime.executor().ok_or(XllError::Closing)?;
+        let _executor = runtime.executor().ok_or(XllError::CLOSING)?;
         self.calculation.preflight()
     }
 
     pub(crate) fn reserve(self) -> XllResult<RuntimeReservation<'a, E>> {
         let runtime = self.runtime;
-        let executor = runtime.executor().ok_or(XllError::Closing)?;
+        let executor = runtime.executor().ok_or(XllError::CLOSING)?;
         #[cfg(test)]
         {
             let hook = runtime.after_executor_snapshot.lock().clone();
@@ -106,7 +106,7 @@ impl<'a, E: AsyncExecutor> RuntimeCalculationSnapshot<'a, E> {
         let permit = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
             executor.reserve()
         }))
-        .unwrap_or(Err(XllError::Panic))?;
+        .unwrap_or(Err(XllError::PANIC))?;
         // A snapshot pins storage only; it does not pre-admit the calculation.
         // Final reservation must re-enter admission and check capacity.
         let task = self.calculation.reserve()?;
@@ -250,7 +250,7 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
         // The ordinary preflight neither dereferences the executor nor owns a
         // task. Only final reserve needs its authoritative publication reader.
         if self.publication.load(Ordering::Acquire).is_null() {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         if self.registry().preflight_available()? {
             return Ok(());
@@ -258,13 +258,13 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
         // Saturation takes a temporary registry reservation. Keep publication
         // admission through that path so close cannot seal registry activity
         // between calculation admission and its capacity check.
-        let _executor = self.executor().ok_or(XllError::Closing)?;
+        let _executor = self.executor().ok_or(XllError::CLOSING)?;
         self.registry().preflight(epoch)
     }
 
     #[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
     pub(crate) fn reserve(&self, epoch: CalculationEpoch) -> XllResult<RuntimeReservation<'_, E>> {
-        let executor = self.executor().ok_or(XllError::Closing)?;
+        let executor = self.executor().ok_or(XllError::CLOSING)?;
         #[cfg(test)]
         {
             let hook = self.after_executor_snapshot.lock().clone();
@@ -275,7 +275,7 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
         let permit = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
             executor.reserve()
         }))
-        .unwrap_or(Err(XllError::Panic))?;
+        .unwrap_or(Err(XllError::PANIC))?;
         let task = self.registry().reserve(epoch)?;
         Ok(RuntimeReservation {
             task,
@@ -302,7 +302,7 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
                 Ok(())
             }
             Err(error) => {
-                if !matches!(error, XllError::Overloaded) {
+                if !error.is_overloaded() {
                     super::registry::cancel_source_no_unwind(&cancellation);
                 }
                 drop(future);
@@ -590,7 +590,7 @@ mod close_tests {
     fn registry_close_rejection_restores_executor_for_retry() {
         let (runtime, counters) = start();
         let competing = runtime.registry().request_close().unwrap();
-        assert!(matches!(runtime.close(), Err(XllError::Closing)));
+        assert!(matches!(runtime.close(), Err(__err) if __err.is_closing()));
         assert_retained(&runtime, &counters);
         assert_eq!(counters.stops.load(Ordering::Relaxed), 0);
         drop(competing);
@@ -602,7 +602,7 @@ mod close_tests {
     fn panicking_executor_shutdown_retains_owner_without_stopped_certificate() {
         let (runtime, counters) = start();
         counters.panic_on_shutdown.store(true, Ordering::Relaxed);
-        assert!(matches!(runtime.close(), Err(XllError::Panic)));
+        assert!(matches!(runtime.close(), Err(__err) if __err.is_panic()));
         assert_retained(&runtime, &counters);
         counters.panic_on_shutdown.store(false, Ordering::Relaxed);
         assert!(runtime.close().unwrap().issues.is_empty());

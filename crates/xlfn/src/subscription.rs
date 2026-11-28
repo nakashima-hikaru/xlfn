@@ -59,7 +59,7 @@ impl RuntimeShutdownOutcome {
     pub(crate) fn result(self) -> crate::XllResult<()> {
         match self {
             Self::Clean => Ok(()),
-            Self::PublisherPanicked => Err(crate::XllError::Panic),
+            Self::PublisherPanicked => Err(crate::XllError::PANIC),
         }
     }
 }

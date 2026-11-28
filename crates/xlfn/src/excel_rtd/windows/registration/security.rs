@@ -372,9 +372,8 @@ mod tests {
         let handle = unsafe { CreateMutexW(&attributes, 0, wide.as_ptr()) };
         assert!(!handle.is_null());
         let _handle = MutexHandle(handle);
-        assert!(matches!(
-            CrossProcessRegistrationGuard::acquire_named(&name),
-            Err(XllError::WindowsApi {
+        assert!(matches!((CrossProcessRegistrationGuard::acquire_named(&name)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::WindowsApi {
                 function: "RTD registration mutex owner or DACL does not match",
                 code: E_INVALIDARG,
                 ..

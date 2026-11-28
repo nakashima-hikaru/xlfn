@@ -138,13 +138,13 @@ impl<'a> ActiveReservation<'a> {
         // waits for both task accounting and the notification tail before
         // reclaiming the allocation.
         let tail = unsafe { registry.activity.try_enter_detached() }
-            .map_err(|_| crate::XllError::Closing)?;
+            .map_err(|_| crate::XllError::CLOSING)?;
         registry
             .active_tasks
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
                 (active < registry.capacity()).then(|| active + 1)
             })
-            .map_err(|_| crate::XllError::Overloaded)?;
+            .map_err(|_| crate::XllError::OVERLOADED)?;
         Ok(Self {
             activity: RollbackGuard::new(ReservedRegistryActivity { registry, tail }),
         })

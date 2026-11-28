@@ -724,7 +724,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
                     .formula_handle_service()
                     .map(|service| operation(&service))
             })
-            .ok_or(XllError::Closing)?
+            .ok_or(XllError::CLOSING)?
     }
 
     #[cfg(any(feature = "bench-internals", all(test, feature = "rtd")))]
@@ -739,7 +739,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     ) -> XllResult<R> {
         self.lifecycle
             .with_generation_services(operation)
-            .ok_or(XllError::Closing)
+            .ok_or(XllError::CLOSING)
     }
 
     #[cfg(test)]
@@ -1499,7 +1499,7 @@ pub(crate) mod tests {
                                 .map(|_| ())
                         }
                     ),
-                    Err(XllError::StaleHandle | XllError::InvalidHandle)
+                    Err(error) if error.is_stale_handle() || error.is_invalid_handle()
                 ));
             })
             .unwrap();
@@ -1600,7 +1600,7 @@ pub(crate) mod tests {
         assert_ne!(runtime.removal_epoch(), removal_epoch);
         assert!(matches!(
             runtime.finish_open(opening, Vec::new()),
-            Err(XllError::Closing)
+            Err(__err) if __err.is_closing()
         ));
         assert_eq!(runtime.open_attempt(), None);
 
@@ -1831,7 +1831,7 @@ pub(crate) mod tests {
         let guard = runtime.enter(&ingress).unwrap();
         assert!(runtime.lifecycle_orchestrator().begin_close());
         crate::module_runtime::ingress().begin_close_with(|| {});
-        assert!(matches!(runtime.enter(&ingress), Err(XllError::Closing)));
+        assert!(matches!(runtime.enter(&ingress), Err(__err) if __err.is_closing()));
 
         let (sender, receiver) = mpsc::channel();
         let handle = thread::spawn(move || {
@@ -1868,7 +1868,7 @@ pub(crate) mod tests {
 
         // Model removal winning between call admission and async launch.
         let removal = runtime.begin_final_removal().unwrap();
-        assert!(matches!(call.try_execution_lease(), Err(XllError::Closing)));
+        assert!(matches!(call.try_execution_lease(), Err(__err) if __err.is_closing()));
         assert_eq!(*call.state(), 7);
         drop(call);
         drop(ingress);
@@ -1961,14 +1961,14 @@ pub(crate) mod tests {
                     id: 1.0,
                     excel_name: "TEST_DEBT",
                 },
-                XllError::Closing,
+                XllError::CLOSING,
             ),
             crate::registration::MetadataDebt::new(
                 RegistrationId {
                     id: 2.0,
                     excel_name: "test_debt",
                 },
-                XllError::Panic,
+                XllError::PANIC,
             ),
         ]);
         assert_eq!(runtime.host.metadata_debt_snapshot().len(), 1);
@@ -2029,13 +2029,13 @@ pub(crate) mod tests {
             fn start(&self) -> XllResult<()> {
                 COUNTS.starts.fetch_add(1, Ordering::Relaxed);
                 if COUNTS.fail_start.load(Ordering::Relaxed) {
-                    Err(XllError::Overloaded)
+                    Err(XllError::OVERLOADED)
                 } else {
                     Ok(())
                 }
             }
             fn reserve(&self) -> XllResult<Self::Reservation> {
-                Err(XllError::Closing)
+                Err(XllError::CLOSING)
             }
             fn submit<F>(&self, reservation: Self::Reservation, _: crate::AsyncTask<F>)
             where
@@ -2111,10 +2111,10 @@ pub(crate) mod tests {
                     assert!(!fail_start);
                     assert_eq!(COUNTS.stops.load(Ordering::Relaxed), 0);
                     // Registration failures enter this same owning rollback path.
-                    transaction.failure(XllError::Overloaded)
+                    transaction.failure(XllError::OVERLOADED)
                 }
             };
-            assert!(matches!(failure.recover(&lifecycle), XllError::Overloaded));
+            assert!(matches!(failure.recover(&lifecycle), __err if __err.is_overloaded()));
             assert!(runtime.async_runtime().is_stopped());
             assert_eq!(runtime.phase(), LifecyclePhase::Closed);
             assert_eq!(COUNTS.starts.load(Ordering::Relaxed), 1);
@@ -2139,7 +2139,7 @@ pub(crate) mod tests {
         }
 
         fn reserve(&self) -> XllResult<Self::Reservation> {
-            Err(XllError::Closing)
+            Err(XllError::CLOSING)
         }
 
         fn submit<F>(&self, permit: Self::Reservation, _: crate::AsyncTask<F>)
@@ -2151,7 +2151,7 @@ pub(crate) mod tests {
 
         fn shutdown(&self) -> XllResult<()> {
             if self.failing.load(Ordering::Acquire) {
-                Err(XllError::Panic)
+                Err(XllError::PANIC)
             } else {
                 Ok(())
             }
@@ -2303,7 +2303,7 @@ pub(crate) mod tests {
                 )
                 .0,
             ),
-            Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+            Err(__err) if __err.excel_value_error() == Some(crate::ExcelError::NotAvailable)
         ));
 
         let (second_source, second_token) = crate::cancellation::CancellationSource::new(

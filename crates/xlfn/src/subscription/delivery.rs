@@ -485,11 +485,10 @@ mod typed_sink_tests {
         );
         assert!(matches!(
             stale.publish_stored(StoredRtdValue::Integer(10)),
-            Err(XllError::Closing)
-        ));
+            Err(__err) if __err.is_closing()));
         assert!(matches!(
             stale.publish_batch(smallvec::smallvec![StoredRtdValue::Integer(10)], &stopping),
-            Err(XllError::Closing)
+            Err(__err) if __err.is_closing()
         ));
         assert_eq!(server.pending_update_count(), 0);
 
@@ -503,11 +502,10 @@ mod typed_sink_tests {
         // reject both direct adapter paths before looking up a retired topic.
         assert!(matches!(
             sink.publish_stored(StoredRtdValue::Integer(12)),
-            Err(XllError::Closing)
-        ));
+            Err(__err) if __err.is_closing()));
         assert!(matches!(
             sink.publish_batch(smallvec::smallvec![StoredRtdValue::Integer(12)], &stopping),
-            Err(XllError::Closing)
+            Err(__err) if __err.is_closing()
         ));
         assert_eq!(runtime.services.active_quota.used(), 0);
         assert_eq!(runtime.services.queued_update_quota.used(), 0);

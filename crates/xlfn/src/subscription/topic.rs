@@ -300,18 +300,18 @@ impl SubscriptionKey {
         const PREFIX: &str = "stream:v1:";
 
         let Some(rest) = value.strip_prefix(PREFIX) else {
-            return Err(XllError::InvalidHandle);
+            return Err(XllError::INVALID_HANDLE);
         };
 
         let Some((runtime, subscription)) = rest.split_once(':') else {
-            return Err(XllError::InvalidHandle);
+            return Err(XllError::INVALID_HANDLE);
         };
 
         let Some(runtime_id) = parse_fixed_hex(runtime) else {
-            return Err(XllError::InvalidHandle);
+            return Err(XllError::INVALID_HANDLE);
         };
         let Some(subscription_id) = parse_fixed_hex(subscription) else {
-            return Err(XllError::InvalidHandle);
+            return Err(XllError::INVALID_HANDLE);
         };
 
         Ok(Self {

@@ -1,6 +1,6 @@
 use super::{AsyncExecutor, AsyncRuntime, AsyncTask, CalculationEpoch};
 use crate::sync::Mutex;
-use crate::{AsyncTaskLimit, ExcelError, XllError, XllResult};
+use crate::{AsyncTaskLimit, ExcelError, XllResult};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -95,7 +95,7 @@ fn start_runtime(limit: AsyncTaskLimit) -> (AsyncRuntime<HoldingExecutor>, Arc<E
 fn assert_cancelled<T>(result: XllResult<T>) {
     assert!(matches!(
         result,
-        Err(XllError::ExcelValue(ExcelError::NotAvailable))
+        Err(__err) if __err.excel_value_error() == Some(ExcelError::NotAvailable)
     ));
 }
 
@@ -127,8 +127,7 @@ fn executor_reservation_panic_is_a_single_recoverable_launch_error() {
     *state.reserve_hook.lock() = Some(Arc::new(|| panic!("reservation panic")));
     assert!(matches!(
         runtime.snapshot_calculation().reserve(),
-        Err(XllError::Panic)
-    ));
+        Err(__err) if __err.is_panic()));
     assert_unregistered(&runtime);
     assert_eq!(state.submitted.load(Ordering::Relaxed), 0);
     *state.reserve_hook.lock() = None;
@@ -144,13 +143,11 @@ fn sealed_registry_activity_is_closing_not_capacity_exhaustion() {
     let reserved = super::task::ActiveReservation::try_acquire(registry).unwrap();
     assert!(matches!(
         super::task::ActiveReservation::try_acquire(registry),
-        Err(XllError::Overloaded)
-    ));
+        Err(__err) if __err.is_overloaded()));
     drop(registry.activity.control().seal());
     assert!(matches!(
         super::task::ActiveReservation::try_acquire(registry),
-        Err(XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     drop(reserved);
     assert_eq!(registry.active_tasks.load(Ordering::Acquire), 0);
     assert!(runtime.close().is_ok());
@@ -225,8 +222,7 @@ fn close_admission_during_advance_leaves_a_stable_control_state() {
     );
     assert!(matches!(
         runtime.registry().reserve(before),
-        Err(XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     assert!(!runtime.advance_calculation());
     assert!(runtime.close().is_ok());
 }
@@ -311,7 +307,7 @@ fn snapshot_does_not_block_close_but_prevents_same_epoch_owner_replacement() {
 
     assert!(matches!(
         runtime.start(HoldingExecutor(Arc::clone(&state)), AsyncTaskLimit::DEFAULT),
-        Err(XllError::Closing)
+        Err(__err) if __err.is_closing()
     ));
     assert!(runtime.is_stopped());
     assert_eq!(
@@ -401,8 +397,8 @@ fn snapshot_saturation_preserves_cancelled_and_closing_error_priority() {
     assert_eq!(future_drops.load(Ordering::Relaxed), 0);
 
     let saturated = runtime.snapshot_calculation();
-    assert!(matches!(saturated.preflight(), Err(XllError::Overloaded)));
-    assert!(matches!(saturated.reserve(), Err(XllError::Overloaded)));
+    assert!(matches!(saturated.preflight(), Err(__err) if __err.is_overloaded()));
+    assert!(matches!(saturated.reserve(), Err(__err) if __err.is_overloaded()));
     assert_eq!(state.reserves.load(Ordering::Relaxed), 2);
     assert_eq!(state.permit_drops.load(Ordering::Relaxed), 2);
 
@@ -415,8 +411,8 @@ fn snapshot_saturation_preserves_cancelled_and_closing_error_priority() {
 
     let closing = runtime.snapshot_calculation();
     runtime.registry().close_admission();
-    assert!(matches!(closing.preflight(), Err(XllError::Closing)));
-    assert!(matches!(closing.reserve(), Err(XllError::Closing)));
+    assert!(matches!(closing.preflight(), Err(__err) if __err.is_closing()));
+    assert!(matches!(closing.reserve(), Err(__err) if __err.is_closing()));
     assert_eq!(runtime.registry().next_task_id(), 2);
     assert_eq!(runtime.registry().active_tasks.load(Ordering::Acquire), 1);
     assert_eq!(

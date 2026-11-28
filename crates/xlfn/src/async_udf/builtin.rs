@@ -213,7 +213,7 @@ impl AsyncExecutor for BuiltinAsyncExecutor {
                     Ok(())
                 };
             }
-            Lifecycle::Closing | Lifecycle::Stopped(_) => return Err(XllError::Closing),
+            Lifecycle::Closing | Lifecycle::Stopped(_) => return Err(XllError::CLOSING),
             Lifecycle::Idle => {}
         }
         BuiltinStartup {
@@ -224,9 +224,9 @@ impl AsyncExecutor for BuiltinAsyncExecutor {
     }
 
     fn reserve(&self) -> XllResult<Self::Reservation> {
-        let shared = self.shared.get().ok_or(XllError::Closing)?;
+        let shared = self.shared.get().ok_or(XllError::CLOSING)?;
         if shared.closing.load(Ordering::Acquire) {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         if shared.failed.load(Ordering::Acquire) || shared.live_pollers.load(Ordering::Acquire) == 0
         {

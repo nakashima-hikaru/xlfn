@@ -35,7 +35,7 @@ impl TaskPins {
 
     fn retain(&self, pin: RawObjectLeaseGuard) -> XllResult<()> {
         let mut pins = self.pins.lock();
-        pins.try_reserve(1).map_err(|_| XllError::Overloaded)?;
+        pins.try_reserve(1).map_err(|_| XllError::OVERLOADED)?;
         pins.push(pin);
         Ok(())
     }
@@ -108,7 +108,7 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
                     "Excel handle type mismatch"
                 );
             }));
-            return Err(XllError::InvalidHandle);
+            return Err(XllError::INVALID_HANDLE);
         };
         Ok(Self {
             binding,
@@ -273,7 +273,7 @@ impl<T: ExcelHandleObject> PendingHandleLease<T> {
         // runtime generation of an independently obtained pending pin. Reject
         // the join before exposing a typed borrow or invoking user task code.
         if self.generation != scope.generation() {
-            return Err(XllError::StaleHandle);
+            return Err(XllError::STALE_HANDLE);
         }
         scope.pins().retain(self.lease)?;
         Ok(HandleLease {

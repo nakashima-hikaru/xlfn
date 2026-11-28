@@ -174,9 +174,8 @@ fn prepared_numeric_matrices_preserve_flagged_cell_semantics() {
     flagged_nonfinite.xltype |= xlfn_sys::XLBIT_DLL_FREE;
     cells[0] = flagged_nonfinite;
     let root = array_root(&mut cells);
-    assert!(matches!(
-        numeric_matrix_identity(&root, true),
-        Err(XllError::Input {
+    assert!(matches!((numeric_matrix_identity(&root, true)).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Input {
             argument: "values",
             reason: InputError::NonFinite,
         })
@@ -332,9 +331,8 @@ fn prepared_matrix_ref_keeps_array_budget_errors_before_element_conversion() {
             Ok(_) => panic!("array budget must reject preparation"),
             Err(error) => error,
         };
-        assert!(matches!(
-            prepared_error,
-            XllError::Input {
+        assert!(matches!(crate::error::construct::view(&(prepared_error)),
+            crate::error::construct::ErrorView::Input {
                 argument: "values",
                 reason: InputError::TooLarge {
                     limit: MAX_ARRAY_BYTES,
@@ -463,16 +461,14 @@ fn miri_streamed_numeric_preparation_keeps_late_validation_and_error_order() {
     }
     let mut cells = [XLOPER12::number(f64::NAN), unknown_flag];
     let root = array_root(&mut cells);
-    assert!(matches!(
-        numeric_matrix_identity(&root, true),
-        Err(XllError::Input {
+    assert!(matches!((numeric_matrix_identity(&root, true)).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Input {
             argument: "values",
             reason: InputError::NonFinite,
         }),
     ));
-    assert!(matches!(
-        numeric_matrix_ref_identity(&root, true),
-        Err(XllError::Input {
+    assert!(matches!((numeric_matrix_ref_identity(&root, true)).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Input {
             argument: "values",
             reason: InputError::NonFinite,
         }),

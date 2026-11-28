@@ -137,7 +137,7 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
     ) -> Result<(), (XllError, OpeningGeneration<A>)> {
         let mut control = self.coordinator.access();
         if control.open_attempt() != Some(attempt_id) {
-            return Err((XllError::Closing, opening));
+            return Err((XllError::CLOSING, opening));
         }
         self.coordinator
             .stage_opening_generation_locked(&mut control, opening)
@@ -151,7 +151,7 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         if control.open_attempt() == Some(attempt_id) {
             Ok(())
         } else {
-            Err(XllError::Closing)
+            Err(XllError::CLOSING)
         }
     }
 

@@ -304,7 +304,7 @@ mod tests {
             .unwrap();
         // Inject a stale generation after the last observation check.
         runtime.topics.write().generation = generation.next().unwrap();
-        assert!(matches!(observed.commit(), Err(crate::XllError::Closing)));
+        assert!(matches!(observed.commit(), Err(__err) if __err.is_closing()));
         assert!(!observed_done.load(Ordering::Acquire));
         assert!(initialization.owner_done.load(Ordering::Acquire));
         let state = runtime.topics.read();

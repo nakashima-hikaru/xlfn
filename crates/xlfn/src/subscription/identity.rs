@@ -9,7 +9,7 @@ pub(crate) fn map_index_error(error: IndexError) -> XllError {
     let diagnostic_id = match error {
         IndexError::Duplicate => crate::diagnostics::catalog::RTD_INDEX_DUPLICATE,
         IndexError::Overflow => crate::diagnostics::catalog::RTD_SUBSCRIPTION_OVERFLOW,
-        IndexError::SourceLimit => return XllError::Overloaded,
+        IndexError::SourceLimit => return XllError::OVERLOADED,
     };
     crate::error::construct::internal(diagnostic_id)
 }

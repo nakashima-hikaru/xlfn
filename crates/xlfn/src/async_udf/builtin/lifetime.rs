@@ -97,7 +97,7 @@ impl RunningPoller {
             thread.join()
         });
         JoinedPoller {
-            outcome: crate::panic_boundary::contain_panic(outcome).map_err(|_| XllError::Panic),
+            outcome: crate::panic_boundary::contain_panic(outcome).map_err(|_| XllError::PANIC),
         }
     }
 
@@ -254,7 +254,7 @@ mod tests {
     fn miri_worker_panic_returns_a_joined_poller() {
         let thread = thread::spawn(|| panic!("poller panicked"));
         let running = RunningPoller(RollbackGuard::new(UnjoinedThread(thread)));
-        assert!(matches!(running.join().outcome, Err(XllError::Panic)));
+        assert!(matches!(running.join().outcome, Err(__err) if __err.is_panic()));
     }
 
     #[cfg(not(miri))]

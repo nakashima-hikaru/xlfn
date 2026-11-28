@@ -373,9 +373,8 @@ fn publication_rejects_lifetime_key_collision_without_overwriting_existing_topic
     }
 
     let result = runtime.prepare(second_key, || Ok(DataRecord(2)));
-    assert!(matches!(
-        result,
-        Err(XllError::Internal {
+    assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::HANDLE_TOPIC_COLLISION,
             ..
         })
@@ -476,8 +475,7 @@ fn generation_prevents_aba_and_lookup_keeps_value_alive() {
     registry.remove::<TestObj>(&token).unwrap();
     assert!(matches!(
         registry.lookup::<TestObj>(&token),
-        Err(XllError::StaleHandle)
-    ));
+        Err(__err) if __err.is_stale_handle()));
 
     let replacement = insert_production(&registry, Arc::new(TestObj("replacement"))).unwrap();
     assert_ne!(token, replacement);
@@ -635,7 +633,7 @@ fn slot_reuse_can_publish_while_old_record_waits_for_grace() {
     with_decode_scope_and_state(&registry, |registry, scope| {
         assert!(matches!(
             registry.lookup_handle::<Counted>(scope, &old_token),
-            Err(XllError::StaleHandle)
+            Err(__err) if __err.is_stale_handle()
         ));
         assert_eq!(
             registry
@@ -750,8 +748,7 @@ fn exhausted_generation_retires_the_slot_permanently() {
     );
     assert!(matches!(
         registry.lookup::<u32>(&final_token),
-        Err(XllError::StaleHandle)
-    ));
+        Err(__err) if __err.is_stale_handle()));
 }
 
 #[test]
@@ -822,7 +819,7 @@ fn public_handle_identity_survives_as_a_value_without_pinning_the_object() {
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     assert!(matches!(
         with_handle::<CountedDataRecord, _>(&runtime, &token, |_| ()),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
 
     let replacement = runtime
@@ -905,9 +902,8 @@ fn csprng_failure_is_a_stable_initialization_error_not_a_panic() {
     let error = HandleRegistry::try_new_with(2, |_| Err("injected CSPRNG failure"), false)
         .err()
         .expect("injected entropy failure is returned");
-    assert!(matches!(
-        error,
-        XllError::Internal {
+    assert!(matches!(crate::error::construct::view(&(error)),
+        crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::HANDLE_ENTROPY,
             ..
         }
@@ -924,7 +920,7 @@ fn close_invalidates_tokens_and_rejects_new_bindings() {
     assert_eq!(value, 42);
     assert!(matches!(
         insert_production(&registry, Arc::new(7_u32)),
-        Err(XllError::Closing)
+        Err(__err) if __err.is_closing()
     ));
 }
 
@@ -977,14 +973,13 @@ fn insert_racing_close_at_publication_boundaries_never_leaves_a_live_handle() {
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         match boundary {
             InsertBoundary::BeforeReserve | InsertBoundary::AfterReserve => {
-                assert!(matches!(result, Err(XllError::Closing)));
+                assert!(matches!(result, Err(__err) if __err.is_closing()));
             }
             InsertBoundary::BeforePublish | InsertBoundary::AfterPublish => {
                 let token = result.unwrap();
                 assert!(matches!(
                     registry.lookup::<u32>(&token),
-                    Err(XllError::Closing)
-                ));
+                    Err(__err) if __err.is_closing()));
             }
         }
     }
@@ -996,8 +991,7 @@ fn wrong_remove_type_does_not_consume_handle() {
     let token = insert_production(&registry, Arc::new(42_u32)).unwrap();
     assert!(matches!(
         registry.remove::<String>(&token),
-        Err(XllError::InvalidHandle)
-    ));
+        Err(__err) if __err.is_invalid_handle()));
     assert_eq!(registry.lookup::<u32>(&token).unwrap(), 42);
 }
 
@@ -1012,10 +1006,10 @@ fn close_drops_values_outside_registry_lock() {
                 self.registry.bindings.try_read_state().is_some(),
                 "binding lock must not be held while user Drop runs"
             );
-            assert!(matches!(self.registry.seal(), Err(XllError::Closing)));
+            assert!(matches!(self.registry.seal(), Err(__err) if __err.is_closing()));
             assert!(matches!(
                 insert_production(&self.registry, Arc::new(1_u32)),
-                Err(XllError::Closing)
+                Err(__err) if __err.is_closing()
             ));
         }
     }
@@ -1057,7 +1051,7 @@ fn close_contains_panicking_destructors_and_continues_dropping() {
 
     let sealed = registry.seal().unwrap();
     sealed.finish_quiescence().unwrap();
-    assert!(matches!(registry.cleanup_result(), Err(XllError::Panic)));
+    assert!(matches!(registry.cleanup_result(), Err(__err) if __err.is_panic()));
     assert_eq!(registry.len(), 0);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert_eq!(payload_drops.load(Ordering::Acquire), 0);
@@ -1126,7 +1120,7 @@ fn repeated_formula_revision_runs_factory_exactly_once() {
     assert_eq!(runtime.len(), 0);
     assert!(matches!(
         with_handle::<DataRecord, _>(&runtime, &first, |_| ()),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
 }
 
@@ -1228,7 +1222,7 @@ fn fresh_handle_revisions_run_factory_and_keep_old_leases_until_disconnect() {
     .unwrap();
     assert!(matches!(
         with_handle::<DataRecord, _>(&runtime, &first, |_| ()),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
     runtime.disconnect(lifetime_generation(1), 42);
     assert_eq!(runtime.len(), 0);
@@ -1282,7 +1276,7 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
                 &mut wrong_raw,
             )
         };
-        assert!(matches!(wrong, Err(XllError::InvalidHandle)));
+        assert!(matches!(wrong, Err(__err) if __err.is_invalid_handle()));
     });
 
     let (foreign_slot, _foreign_handles) = armed_handle_slot();
@@ -1299,7 +1293,7 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
                 &mut foreign_raw,
             )
         };
-        assert!(matches!(foreign, Err(XllError::InvalidHandle)));
+        assert!(matches!(foreign, Err(__err) if __err.is_invalid_handle()));
     });
 
     let mut tampered = token.clone();
@@ -1318,7 +1312,7 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
                 &mut tampered_raw,
             )
         };
-        assert!(matches!(tampered, Err(XllError::InvalidHandle)));
+        assert!(matches!(tampered, Err(__err) if __err.is_invalid_handle()));
     });
 
     handles.disconnect(lifetime_generation(1), 91);
@@ -1335,7 +1329,7 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
                 &mut stale_raw,
             )
         };
-        assert!(matches!(stale, Err(XllError::StaleHandle)));
+        assert!(matches!(stale, Err(__err) if __err.is_stale_handle()));
     });
 }
 
@@ -1439,7 +1433,7 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
     runtime.disconnect(lifetime_generation(1), 1);
     assert!(matches!(
         with_handle::<DataRecord, _>(&runtime, &source_token, |_| ()),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
     assert_eq!(
         with_handle::<DataRecord, _>(&runtime, &alias_token, |value| value.0).unwrap(),
@@ -1495,7 +1489,7 @@ fn aliased_binding_survives_source_retirement_and_drops_once() {
     runtime.disconnect(lifetime_generation(1), 3);
     assert!(matches!(
         with_handle::<DropTracked, _>(&runtime, &source_token, |_| ()),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 
@@ -1806,11 +1800,11 @@ fn lifetime_generation_prevents_stale_rtd_ownership_after_claim_and_rollback() {
         .unwrap();
     assert!(matches!(
         runtime.claim_lifetime(&lifetime_key, lifetime_generation(2)),
-        Err(XllError::InvalidHandle)
+        Err(__err) if __err.is_invalid_handle()
     ));
     assert!(matches!(
         runtime.connect(lifetime_generation(2), 7, &lifetime_key),
-        Err(XllError::InvalidHandle)
+        Err(__err) if __err.is_invalid_handle()
     ));
 
     let provisional = runtime
@@ -1819,7 +1813,7 @@ fn lifetime_generation_prevents_stale_rtd_ownership_after_claim_and_rollback() {
     drop(provisional);
     assert!(matches!(
         runtime.connect(lifetime_generation(2), 7, &lifetime_key),
-        Err(XllError::InvalidHandle)
+        Err(__err) if __err.is_invalid_handle()
     ));
 
     runtime
@@ -1890,7 +1884,7 @@ fn concurrent_handle_connect_rejects_an_uncommitted_assignment() {
         .unwrap();
     assert!(matches!(
         runtime.connect_transaction(lifetime_generation(1), 12, &lifetime_key),
-        Err(XllError::Overloaded)
+        Err(__err) if __err.is_overloaded()
     ));
     connection.commit().unwrap();
 
@@ -1943,7 +1937,7 @@ fn excel_topic_id_cannot_be_connected_to_two_formula_topics() {
         .unwrap();
     assert!(matches!(
         runtime.connect(lifetime_generation(1), 9, &second_lifetime_key),
-        Err(XllError::InvalidHandle)
+        Err(__err) if __err.is_invalid_handle()
     ));
     runtime.disconnect(lifetime_generation(1), 9);
     assert_eq!(runtime.len(), 1);
@@ -2090,9 +2084,8 @@ fn handle_lease_survives_terminal_runtime_close() {
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     assert_eq!(pinned.value_for_test().0.load(Ordering::SeqCst), 0);
-    assert!(matches!(
-        sealed.finish_quiescence(),
-        Err(XllError::Internal { diagnostic_id, .. })
+    assert!(matches!((sealed.finish_quiescence()).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Internal { diagnostic_id, .. })
             if diagnostic_id == crate::diagnostics::catalog::HANDLE_PINS
     ));
     drop(pinned);
@@ -2317,7 +2310,7 @@ fn same_thread_factory_reentry_returns_an_error_without_waiting() {
     let preparation = runtime
         .prepare(key, || {
             let nested = runtime.prepare(key, || Ok(DataRecord(2)));
-            assert!(matches!(nested, Err(XllError::ReentrantCall)));
+            assert!(matches!(nested, Err(__err) if __err.is_reentrant_call()));
             Ok(DataRecord(1))
         })
         .unwrap();
@@ -2334,7 +2327,7 @@ fn miri_same_key_reentry_only_rejects_a_cycle_in_the_same_service() {
             let inner_value = inner.prepare(key, || {
                 assert!(matches!(
                     outer.prepare::<DataRecord, _>(key, || panic!("cycle must not run")),
-                    Err(XllError::ReentrantCall)
+                    Err(__err) if __err.is_reentrant_call()
                 ));
                 Ok(DataRecord(2))
             })?;
@@ -2373,7 +2366,7 @@ fn same_thread_observer_reentry_returns_an_error_without_waiting() {
             || Ok(DataRecord(1)),
             |_, _| {
                 let nested = runtime.prepare(key, || Ok(DataRecord(2)));
-                assert!(matches!(nested, Err(XllError::ReentrantCall)));
+                assert!(matches!(nested, Err(__err) if __err.is_reentrant_call()));
                 Ok(())
             },
         )
@@ -2411,7 +2404,7 @@ fn nested_initialization_rejects_only_a_cycle() {
         .prepare(outer_key, || {
             let nested = runtime.prepare(inner_key, || {
                 let cycle = runtime.prepare(outer_key, || Ok(DataRecord(3)));
-                assert!(matches!(cycle, Err(XllError::ReentrantCall)));
+                assert!(matches!(cycle, Err(__err) if __err.is_reentrant_call()));
                 Ok(DataRecord(2))
             });
             assert!(nested.is_ok());
@@ -2439,7 +2432,7 @@ fn failed_observation_does_not_publish_a_topic_and_allows_retry() {
             ))
         },
     );
-    assert!(matches!(first, Err(XllError::ExcelApi { .. })));
+    assert!(matches!((first).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::ExcelApi { .. })));
     assert_eq!(runtime.len(), 0);
 
     let preparation = runtime
@@ -2481,7 +2474,7 @@ fn cache_hit_observe_failure_does_not_invalidate_object() {
             ))
         },
     );
-    assert!(matches!(result, Err(XllError::ExcelApi { .. })));
+    assert!(matches!((result).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::ExcelApi { .. })));
 
     // factory was never invoked because cache hit skips it
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -2518,7 +2511,7 @@ fn cache_hit_observe_failure_preserves_existing_topic() {
             ))
         },
     );
-    assert!(matches!(result, Err(XllError::ExcelApi { .. })));
+    assert!(matches!((result).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::ExcelApi { .. })));
 
     // Retry with successful observation still reuses the same object
     let retry_preparation = runtime
@@ -2545,7 +2538,7 @@ fn observation_cannot_commit_a_topic_removed_reentrantly() {
             Ok(())
         },
     );
-    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert!(matches!(result, Err(__err) if __err.is_stale_handle()));
     assert_eq!(runtime.len(), 0);
 }
 
@@ -2570,7 +2563,7 @@ fn published_warm_observation_rejects_topic_removed_reentrantly() {
         },
     );
 
-    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert!(matches!(result, Err(__err) if __err.is_stale_handle()));
     assert_eq!(runtime.len(), 0);
 }
 
@@ -2602,7 +2595,7 @@ fn warm_observation_rejects_generation_terminated_topic() {
         },
     );
 
-    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert!(matches!(result, Err(__err) if __err.is_stale_handle()));
     assert_eq!(runtime.len(), 0);
 }
 
@@ -2670,7 +2663,7 @@ fn miri_terminating_one_generation_keeps_old_reads_safe_and_other_topics_live() 
 
     assert!(matches!(
         with_handle::<DataRecord, _>(&runtime, &observed_token, |_| ()),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
     assert_eq!(
         with_handle::<DataRecord, _>(&runtime, &active_token, |value| value.0).unwrap(),
@@ -2728,7 +2721,7 @@ fn warm_observation_does_not_follow_recreated_same_key() {
     );
 
     replacement.join().unwrap();
-    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert!(matches!(result, Err(__err) if __err.is_stale_handle()));
     assert_eq!(runtime.len(), 1);
 }
 
@@ -2763,7 +2756,7 @@ fn disconnect_can_remove_pending_formula_root_during_excel_connection() {
             // without inspecting the connection commit bit.
             assert!(matches!(
                 with_handle::<DataRecord, _>(&observed_runtime, token, |_| ()),
-                Err(XllError::StaleHandle)
+                Err(__err) if __err.is_stale_handle()
             ));
 
             // The connection guard observes that the topic was already
@@ -2773,7 +2766,7 @@ fn disconnect_can_remove_pending_formula_root_during_excel_connection() {
         },
     );
 
-    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert!(matches!(result, Err(__err) if __err.is_stale_handle()));
     assert_eq!(runtime.len(), 0);
 }
 
@@ -2798,16 +2791,16 @@ fn disconnect_rejects_provisional_excel_commit_after_topic_detach() {
 
             // The commit must fail at the detached ownership boundary. Its
             // drop path must not recreate the topic or registry root.
-            assert!(matches!(connection.commit(), Err(XllError::StaleHandle)));
+            assert!(matches!(connection.commit(), Err(__err) if __err.is_stale_handle()));
             assert!(matches!(
                 with_handle::<DataRecord, _>(&observed_runtime, token, |_| ()),
-                Err(XllError::StaleHandle)
+                Err(__err) if __err.is_stale_handle()
             ));
             Ok(())
         },
     );
 
-    assert!(matches!(result, Err(XllError::StaleHandle)));
+    assert!(matches!(result, Err(__err) if __err.is_stale_handle()));
     assert_eq!(runtime.len(), 0);
 }
 
@@ -2867,9 +2860,8 @@ fn concurrent_waiter_retries_after_observation_failure() {
     }
 
     finish_tx.send(()).unwrap();
-    assert!(matches!(
-        first.join().unwrap(),
-        Err(XllError::ExcelApi { .. })
+    assert!(matches!((first.join().unwrap()).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::ExcelApi { .. })
     ));
     let second_preparation = second.join().unwrap().unwrap();
     let created = second_preparation.is_published();
@@ -3062,10 +3054,9 @@ fn close_wakes_waiter_and_prevents_creator_from_publishing() {
     }
     assert!(matches!(
         waiter_done_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-        Err(XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     release_factory_tx.send(()).unwrap();
-    assert!(matches!(creator.join().unwrap(), Err(XllError::Closing)));
+    assert!(matches!(creator.join().unwrap(), Err(__err) if __err.is_closing()));
     closer.join().unwrap().unwrap();
     waiter.join().unwrap();
     assert!(!observed.load(Ordering::Acquire));
@@ -3169,7 +3160,7 @@ fn close_waits_for_in_flight_warm_observation_before_closing_registry() {
 
     release_tx.send(()).unwrap();
 
-    assert!(matches!(warm.join().unwrap(), Err(XllError::Closing)));
+    assert!(matches!(warm.join().unwrap(), Err(__err) if __err.is_closing()));
 
     closed_rx
         .recv_timeout(Duration::from_secs(1))
@@ -3201,7 +3192,7 @@ fn handle_type_mismatch_returns_invalid_handle() {
     // Looking up TypeA as TypeB must fail with InvalidHandle
     with_decode_scope_and_state(&runtime, |runtime, scope| {
         let result = runtime.lookup::<TypeB>(scope, &token);
-        assert!(matches!(result, Err(XllError::InvalidHandle)));
+        assert!(matches!(result, Err(__err) if __err.is_invalid_handle()));
     });
 
     // Looking up TypeA as TypeA must succeed
@@ -3382,8 +3373,7 @@ fn drop_panic_is_recorded_in_handle_cleanup_state() {
         .flush_for_test();
     assert!(matches!(
         runtime.store.registry.cleanup_result(),
-        Err(XllError::Panic)
-    ));
+        Err(__err) if __err.is_panic()));
     assert_eq!(payload_drops.load(Ordering::Acquire), 0);
 }
 
@@ -3564,7 +3554,7 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
         let err = return_ctx
             .publish_new_handle(|| Ok(TestObj(456)))
             .unwrap_err();
-        assert!(matches!(err, XllError::ExcelApi { .. }));
+        assert!(matches!(crate::error::construct::view(&(err)), crate::error::construct::ErrorView::ExcelApi { .. }));
     });
 }
 
@@ -3622,11 +3612,11 @@ fn close_resets_to_closed_for_reopen() {
 #[test]
 fn handle_slot_seal_is_local_to_its_generation_bundle() {
     let slot = FormulaHandleServiceSlot::new();
-    assert!(matches!(slot.read(), Err(XllError::Closing)));
+    assert!(matches!(slot.read(), Err(__err) if __err.is_closing()));
 
     slot.arm(crate::HandleConfig::default()).unwrap();
     assert!(slot.read().is_ok());
-    assert!(matches!(slot.disarm(), Err(XllError::Closing)));
+    assert!(matches!(slot.disarm(), Err(__err) if __err.is_closing()));
 
     slot.seal(crate::generation::RuntimeGeneration::ONE)
         .unwrap();
@@ -3651,7 +3641,7 @@ fn topic_table_tombstones_are_bounded_and_reclaimed() {
     for i in 0..50 {
         let key = test_topic_key(&format!("fail-init-{i}"));
         let result = runtime.prepare(key, || -> XllResult<DataRecord> {
-            Err(XllError::InvalidHandle)
+            Err(XllError::INVALID_HANDLE)
         });
         assert!(result.is_err());
     }
@@ -3761,8 +3751,7 @@ fn miri_handle_scope_and_binding_lifecycle() {
     registry.remove::<DataRecord>(&token).unwrap();
     assert!(matches!(
         registry.lookup::<DataRecord>(&token),
-        Err(XllError::StaleHandle)
-    ));
+        Err(__err) if __err.is_stale_handle()));
 }
 
 #[test]
@@ -3841,7 +3830,7 @@ fn miri_foreign_runtime_alias_rejected_before_topic_publication() {
         assert_eq!(handle.0, 42);
         assert!(matches!(
             second.prepare_observed_alias::<DataRecord, _>(target, handle.alias(), |_, _| Ok(())),
-            Err(XllError::StaleHandle)
+            Err(__err) if __err.is_stale_handle()
         ));
     });
     assert_eq!(second.store.len(), 0);
@@ -3863,8 +3852,7 @@ fn miri_typed_pending_alias_rejects_foreign_store_and_keeps_source_live() {
         let handle = first.lookup::<CountedDataRecord>(scope, &source).unwrap();
         assert!(matches!(
             handle.alias().into_pending_object_binding(&second),
-            Err(XllError::StaleHandle)
-        ));
+            Err(__err) if __err.is_stale_handle()));
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         let handle = first.lookup::<CountedDataRecord>(scope, &source).unwrap();
         let pending = handle.alias().into_pending_object_binding(first).unwrap();
@@ -3933,7 +3921,7 @@ fn miri_lookup_linearizes_before_withdrawal_during_projection() {
             remover.join().unwrap();
             assert!(matches!(
                 registry.lookup_handle::<DataRecord>(scope, token),
-                Err(XllError::StaleHandle)
+                Err(__err) if __err.is_stale_handle()
             ));
         });
     });
@@ -3961,7 +3949,7 @@ fn miri_deferred_hard_debt_backpressures_publication_without_waiting_on_own_scop
         );
         assert!(matches!(
             insert_production(registry, Arc::new(DataRecord(42))),
-            Err(XllError::Overloaded)
+            Err(__err) if __err.is_overloaded()
         ));
     });
     registry.bindings.read_domain().flush_for_test();
@@ -4057,8 +4045,7 @@ fn miri_borrowing_remover_retains_registry_through_reentrant_drop() {
         fn drop(&mut self) {
             assert!(matches!(
                 self.registry.as_ref().unwrap().seal(),
-                Err(XllError::Closing)
-            ));
+                Err(__err) if __err.is_closing()));
             self.entered.send(()).unwrap();
             self.release.get_mut().recv().unwrap();
             drop(self.registry.take());
@@ -4116,7 +4103,7 @@ fn miri_deferred_removal_keeps_borrows_across_slot_reuse_and_batches() {
             );
             assert!(matches!(
                 registry.lookup_handle::<CountedDataRecord>(scope, &token),
-                Err(crate::XllError::StaleHandle)
+                Err(__err) if __err.is_stale_handle()
             ));
             assert_eq!(drops.load(Ordering::Relaxed), 0);
         }
@@ -4185,7 +4172,7 @@ fn sealed_registry_finishes_its_owner_while_another_store_stays_open() {
     let proof = first.seal().unwrap().quiescent(Some(GENERATION)).unwrap();
     assert_eq!(proof.generation(), Some(GENERATION));
     assert_eq!(first.registry.phase(), HandleRegistryPhase::Closed);
-    assert!(matches!(first.erase(DataRecord(1)), Err(XllError::Closing)));
+    assert!(matches!(first.erase(DataRecord(1)), Err(__err) if __err.is_closing()));
     assert_eq!(second.registry.phase(), HandleRegistryPhase::Open);
     let pending = second.erase(DataRecord(2)).unwrap();
     pending.publish().unwrap();
@@ -4226,7 +4213,7 @@ fn miri_pending_handle_lease_rejects_foreign_generation_before_exposing_value() 
             assert!(outcome.is_ok());
             assert_eq!(accesses, 1);
         } else {
-            assert!(matches!(outcome, Err(XllError::StaleHandle)));
+            assert!(matches!(outcome, Err(__err) if __err.is_stale_handle()));
             assert_eq!(accesses, 0);
         }
         // Rejection releases the original pin immediately; success transfers

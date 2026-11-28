@@ -46,12 +46,10 @@ impl<'table> BindingReservation<'table> {
         // binding cap this bounds total records by maximum_bindings + 256,
         // including batches whose arbitrary destructors are still running.
         if table.read_domain.debt() >= crate::handle::domain::HARD_DEBT_LIMIT {
-            return Err(XllError::Overloaded);
+            return Err(XllError::OVERLOADED);
         }
         if state.live_bindings >= table.maximum_bindings {
-            return Err(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            });
+            return Err(XllError::domain(DomainErrorCode::Overflow));
         }
         let (index, slot, origin) = match state.free.pop() {
             Some(slot) => (slot as usize, slot, ReservationOrigin::Reused),
@@ -60,13 +58,9 @@ impl<'table> BindingReservation<'table> {
                 // Exhausted generations permanently consume their slot. Do
                 // not treat padding in the last publication page as capacity.
                 if index >= table.maximum_bindings as usize {
-                    return Err(XllError::Domain {
-                        code: DomainErrorCode::Overflow,
-                    });
+                    return Err(XllError::domain(DomainErrorCode::Overflow));
                 }
-                let slot = u32::try_from(index).map_err(|_| XllError::Domain {
-                    code: DomainErrorCode::Overflow,
-                })?;
+                let slot = u32::try_from(index).map_err(|_| XllError::domain(DomainErrorCode::Overflow))?;
                 state.slots.push(BindingSlot {
                     next_generation: BindingGeneration::ONE,
                     record: None,
@@ -191,7 +185,7 @@ impl<'table> BindingRemoval<'table> {
             .get(id.slot as usize)
             .and_then(|slot| slot.record.as_deref())
             .filter(|record| record.id == id)
-            .ok_or(XllError::StaleHandle)?;
+            .ok_or(XllError::STALE_HANDLE)?;
         Ok(BindingRemoval { state, id })
     }
 

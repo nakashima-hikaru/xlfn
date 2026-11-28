@@ -116,7 +116,7 @@ impl AsyncSpawnBenchmark {
 
                         match res {
                             Ok(()) => result.accepted += 1,
-                            Err(XllError::Overloaded) => result.overloaded += 1,
+                            Err(__err) if __err.is_overloaded() => result.overloaded += 1,
                             Err(_) => result.other_errors += 1,
                         }
                     }

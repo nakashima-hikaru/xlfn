@@ -102,7 +102,7 @@ impl<'runtime, A: Addin> OpeningTxn<'runtime, A, Initialized<A>> {
                 if transaction.deps().lifecycle_access().phase()
                     != crate::lifecycle::LifecyclePhase::Opening
                 {
-                    return Err(OpenFailure::rollback(transaction, XllError::Closing));
+                    return Err(OpenFailure::rollback(transaction, XllError::CLOSING));
                 }
                 Ok(transaction)
             }
@@ -160,7 +160,7 @@ where
                 active_runtime_generation(runtime),
             );
             if outcome.cleanup_owned_elsewhere() {
-                return Err(XllError::Closing);
+                return Err(XllError::CLOSING);
             }
             if !outcome.is_finalized() {
                 let error = crate::error::construct::internal(
@@ -175,7 +175,7 @@ where
         }
 
         if runtime.removal_epoch() != removal_epoch {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
 
         if let Some(status) = callbacks.terminal_status() {
@@ -207,7 +207,7 @@ where
         if runtime.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested
         {
             transaction.into_rollback().run(lifecycle);
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         let (transaction, registrations) = open_addin_inner::<A>(
             BuildInfo::new(addin_id.clone(), version, target),
@@ -239,7 +239,7 @@ where
             0
         }
         Err(_) => {
-            let error = XllError::Panic;
+            let error = XllError::PANIC;
             #[cfg(target_os = "windows")]
             write_startup_log(addin_id, "xlAutoOpen failed: panic at boundary");
             report_boundary_error("xlAutoOpen", &error);

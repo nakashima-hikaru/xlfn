@@ -90,7 +90,7 @@ impl Drop for DropProbe {
             let result =
                 cache.get_or_try_insert_weighted(Key::plain(key), |_| 1, || Ok(DropProbe(None)));
             let expected = if expect_error {
-                matches!(result, Err(XllError::Overloaded))
+                matches!(result, Err(error) if error.is_overloaded())
             } else {
                 result.is_ok()
             };
@@ -229,7 +229,7 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
     };
     let hash = cache.index.prepare(&key.as_ref()).fingerprint();
     let flight = Arc::new(Flight::new(key, hash));
-    *flight.state.lock() = FlightState::Finished(Err(Box::new(XllError::Overloaded)));
+    *flight.state.lock() = FlightState::Finished(Err(Box::new(XllError::OVERLOADED)));
     cache
         .flights
         .shard(hash)
@@ -250,7 +250,7 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
         |_| 1,
         || panic!("must join failed flight"),
     );
-    assert!(matches!(result, Err(XllError::Overloaded)));
+    assert!(matches!(result, Err(error) if error.is_overloaded()));
     reentry.assert_completed();
     assert_eq!(cache.reclamation_stats().pending_nodes, 0);
     assert!(cache.flights.shard(hash).lock().remove(&flight).is_some());

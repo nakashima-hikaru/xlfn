@@ -300,12 +300,12 @@ impl BindingTable {
             witness.domain() == NonNull::from(self.read_domain()),
             xlfn_kernel::invariant::fail_stop(),
             self.published.load(id.slot).record,
-            return Err(XllError::StaleHandle),
+            return Err(XllError::STALE_HANDLE),
             // SAFETY: authorization precedes loading and dereferencing a pointer
             // published by this domain. The retained witness prevents reclamation.
             unsafe { record.0.as_ref() },
             record_ref.id == id && record_ref.state() == BindingState::Live,
-            return Err(XllError::StaleHandle),
+            return Err(XllError::STALE_HANDLE),
             Ok(BindingReadLease {
                 record,
                 _protection: BindingReadProtection::Scoped { _witness: witness },
@@ -317,11 +317,11 @@ impl BindingTable {
     pub(crate) fn read_standalone(&self, id: HandleId) -> XllResult<BindingReadLease<'_>> {
         let permit = self.read_domain.enter()?;
         let snapshot = self.published.load(id.slot);
-        let record = snapshot.record.ok_or(XllError::StaleHandle)?;
+        let record = snapshot.record.ok_or(XllError::STALE_HANDLE)?;
         // SAFETY: permit guarantees the binding record cannot be reclaimed while entering.
         let record_ref = unsafe { record.0.as_ref() };
         if record_ref.id != id || record_ref.state() != BindingState::Live {
-            return Err(XllError::StaleHandle);
+            return Err(XllError::STALE_HANDLE);
         }
         Ok(BindingReadLease {
             record,
@@ -391,9 +391,7 @@ mod tests {
         registry.remove::<usize>(&token).unwrap();
         assert!(matches!(
             registry.insert_pending(&mut Some(3_usize)),
-            Err(XllError::Domain {
-                code: DomainErrorCode::Overflow
-            })
+            Err(__err) if __err.domain_code() == Some(DomainErrorCode::Overflow)
         ));
         assert!(registry.bindings.published.load(1).record.is_none());
     }

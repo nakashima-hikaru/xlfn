@@ -276,18 +276,15 @@ mod tests {
             assert_eq!(registry.snapshot().epoch(), expected);
             assert!(matches!(
                 registry.preflight_available(),
-                Err(XllError::Closing)
-            ));
-            assert!(matches!(old_snapshot.reserve(), Err(XllError::Closing)));
+                Err(__err) if __err.is_closing()));
+            assert!(matches!(old_snapshot.reserve(), Err(__err) if __err.is_closing()));
             assert!(matches!(
                 registry.snapshot().reserve(),
-                Err(XllError::Closing)
-            ));
+                Err(__err) if __err.is_closing()));
             assert!(!registry.advance());
             assert!(matches!(
                 registry.prepare_start(crate::AsyncTaskLimit::DEFAULT),
-                Err(XllError::Closing)
-            ));
+                Err(__err) if __err.is_closing()));
             assert!(!token.is_cancelled());
 
             let closing = registry.request_close().unwrap().cancel();

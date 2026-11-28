@@ -165,7 +165,7 @@ fn deferred_termination_worker<E: RtdSubscription, C: crate::RtdSourceCatalog<E>
     }));
 
     if let Err(payload) = outcome {
-        crate::diagnostics::report_no_unwind("IRtdServer::deferred termination", &XllError::Panic);
+        crate::diagnostics::report_no_unwind("IRtdServer::deferred termination", &XllError::PANIC);
         drop(reference);
         std::panic::resume_unwind(payload);
     }

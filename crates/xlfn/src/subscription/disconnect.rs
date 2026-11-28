@@ -52,7 +52,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         // operation releases runtime admission.
         let mut subscription = self.subscription;
         let cancel = catch_no_unwind(AssertUnwindSafe(|| subscription.request_cancel()))
-            .map_err(|_| XllError::Panic);
+            .map_err(|_| XllError::PANIC);
         // Even a panicking cancellation must finish the sink-user barrier.
         let disconnect = disconnect_one_no_unwind(subscription);
         let result = cancel.and(disconnect);
@@ -239,28 +239,28 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
 
     pub(super) fn reserve(&self) -> XllResult<DisconnectReservation<H, E, C>> {
         if self.capacity == 0 {
-            return Err(XllError::Overloaded);
+            return Err(XllError::OVERLOADED);
         }
         let queue = match self.published.get() {
             Some(queue) => queue,
             None => self.initialize()?,
         };
         if queue.closed.load(Ordering::Acquire) {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         let required = queue
             .outstanding
             .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < self.capacity).then(|| count + 1)
             })
-            .map_err(|_| XllError::Overloaded)?
+            .map_err(|_| XllError::OVERLOADED)?
             + 1;
         // This affine reservation also rolls quota back on allocation failure.
         let reservation = DisconnectReservation {
             queue: Arc::clone(queue),
         };
         if queue.closed.load(Ordering::Acquire) {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         if required > queue.storage_capacity.load(Ordering::Acquire) {
             let mut ready = queue.ready.lock();
@@ -272,7 +272,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 ready
                     .jobs
                     .try_reserve(additional)
-                    .map_err(|_| XllError::Overloaded)?;
+                    .map_err(|_| XllError::OVERLOADED)?;
                 queue
                     .storage_capacity
                     .store(ready.jobs.capacity(), Ordering::Release);
@@ -290,7 +290,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 .fail_spawn
                 .swap(false, std::sync::atomic::Ordering::Relaxed)
             {
-                return Err(XllError::Overloaded);
+                return Err(XllError::OVERLOADED);
             }
             #[cfg(test)]
             let fail_initialize = self
@@ -316,7 +316,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             *worker = DisconnectWorker::Running(running);
         }
         if !matches!(*worker, DisconnectWorker::Running(_)) {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         Ok(self
             .published
@@ -340,7 +340,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             let handle = builder
                 .spawn(move || {
                     if fail_initialize {
-                        let _ = started.send(Err(XllError::Overloaded));
+                        let _ = started.send(Err(XllError::OVERLOADED));
                         return;
                     }
                     #[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
@@ -358,11 +358,13 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                         shared.run();
                     }
                 })
-                .map_err(|error| XllError::Native {
-                    code: error.raw_os_error().unwrap_or(0),
-                    message: format!("failed to start RTD disconnect worker: {error}"),
+                .map_err(|error| {
+                    XllError::native(
+                        error.raw_os_error().unwrap_or(0),
+                        format!("failed to start RTD disconnect worker: {error}"),
+                    )
                 })?;
-            if let Err(error) = startup.recv().unwrap_or(Err(XllError::Panic)) {
+            if let Err(error) = startup.recv().unwrap_or(Err(XllError::PANIC)) {
                 let _ = join_worker(handle);
                 return Err(error);
             }
@@ -380,7 +382,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             let mut worker = self.worker.lock();
             match std::mem::replace(&mut *worker, DisconnectWorker::Joining) {
                 DisconnectWorker::Running(running) => running,
-                DisconnectWorker::Joining => return Err(XllError::Closing),
+                DisconnectWorker::Joining => return Err(XllError::CLOSING),
                 DisconnectWorker::Dormant | DisconnectWorker::Stopped => {
                     *worker = DisconnectWorker::Stopped;
                     return Ok(());
@@ -392,7 +394,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         self.stop_attempts.fetch_add(1, Ordering::Relaxed);
         #[cfg(test)]
         if self.fail_stop_preflight.swap(false, Ordering::Relaxed) {
-            return self.retain_worker(drain, XllError::Overloaded);
+            return self.retain_worker(drain, XllError::OVERLOADED);
         }
         // The final job releases runtime admission before either worker's
         // CoUninitialize. Keep the closing STA dispatchable through that tail.
@@ -660,7 +662,7 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let first = shared.reserve().unwrap();
             let second = shared.reserve().unwrap();
-            assert!(matches!(shared.reserve(), Err(XllError::Overloaded)));
+            assert!(matches!(shared.reserve(), Err(__err) if __err.is_overloaded()));
             drop((first, second));
             sent.send(()).unwrap();
         });
@@ -672,7 +674,7 @@ mod tests {
         assert_eq!(queue.ready.lock().jobs.capacity(), queue_capacity);
         assert_eq!(queue.outstanding.load(Ordering::Acquire), 0);
         pool.stop().unwrap();
-        assert!(matches!(pool.reserve(), Err(XllError::Closing)));
+        assert!(matches!(pool.reserve(), Err(__err) if __err.is_closing()));
     }
 
     #[test]
@@ -688,10 +690,10 @@ mod tests {
             };
             assert!(running.pending.get().helper.is_none());
         }
-        assert!(matches!(pool.reserve(), Err(XllError::Overloaded)));
+        assert!(matches!(pool.reserve(), Err(__err) if __err.is_overloaded()));
         drop(reservations);
         pool.stop().unwrap();
-        assert!(matches!(pool.reserve(), Err(XllError::Closing)));
+        assert!(matches!(pool.reserve(), Err(__err) if __err.is_closing()));
     }
 
     #[test]
@@ -713,7 +715,7 @@ mod tests {
                     ConnectionGeneration::ONE,
                     StoredRtdValue::Integer(99),
                 ),
-                Err(XllError::Closing)
+                Err(__err) if __err.is_closing()
             ));
             returned_tx.send(()).unwrap();
         }));
@@ -887,7 +889,7 @@ mod tests {
             self.sink.lock().take();
             self.disconnected.store(true, Ordering::Release);
             if self.fail_disconnect {
-                Err(XllError::Overloaded)
+                Err(XllError::OVERLOADED)
             } else {
                 Ok(())
             }
@@ -940,7 +942,7 @@ mod tests {
             };
             assert!(matches!(
                 server.connect_transaction(TopicId(1), prepared.id()),
-                Err(XllError::Overloaded)
+                Err(__err) if __err.is_overloaded()
             ));
             assert!(
                 sink_slot.lock().is_none(),
@@ -1051,7 +1053,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             server.connect_transaction(TopicId(2), second.id()),
-            Err(XllError::Overloaded)
+            Err(__err) if __err.is_overloaded()
         ));
         assert_eq!(
             calls.load(Ordering::Relaxed),
@@ -1178,8 +1180,7 @@ mod tests {
             if matches!(path, "owner-drop" | "rollback" | "disconnect") {
                 assert!(matches!(
                     runtime.disconnects.reserve(),
-                    Err(XllError::Overloaded)
-                ));
+                    Err(__err) if __err.is_overloaded()));
                 // The owner-drop path still has a published topic to retire.
                 assert_eq!(
                     runtime.services.active_quota.used(),
@@ -1210,7 +1211,7 @@ mod tests {
                         move |_| {
                             if called.fetch_add(1, Ordering::Relaxed) == 0 {
                                 assert!(!panic, "injected source setup panic");
-                                return Err(XllError::Overloaded);
+                                return Err(XllError::OVERLOADED);
                             }
                             Ok(move |sender: RtdSender<i32>| {
                                 assert!(sender.wait_closed(DEADLINE));
@@ -1239,7 +1240,7 @@ mod tests {
             if panic {
                 assert!(result.is_err());
             } else {
-                assert!(matches!(result, Ok(Err(XllError::Overloaded))));
+                assert!(matches!(result, Ok(Err(__err)) if __err.is_overloaded()));
             }
             assert_eq!(runtime.services.active_quota.used(), 0);
             assert_eq!(runtime.disconnects.retained_source_count(), 0);
@@ -1272,7 +1273,7 @@ mod tests {
             .fail_stop_preflight
             .store(true, Ordering::Relaxed);
         let close = || {
-            assert!(matches!(runtime.close(), Err(XllError::Overloaded)));
+            assert!(matches!(runtime.close(), Err(__err) if __err.is_overloaded()));
         };
         close();
         assert!(sender.is_closed());
@@ -1280,7 +1281,7 @@ mod tests {
         assert_eq!(runtime.disconnects.retained_source_count(), 0);
         assert!(matches!(
             server.disconnect_deferred(TopicId(1), Box::new(())),
-            Err(XllError::Closing)
+            Err(__err) if __err.is_closing()
         ));
         {
             let worker = runtime.disconnects.worker.lock();
@@ -1308,8 +1309,7 @@ mod tests {
             std::thread::spawn(move || waiter_runtime.close())
                 .join()
                 .unwrap(),
-            Err(XllError::Overloaded)
-        ));
+            Err(__err) if __err.is_overloaded()));
         assert_eq!(runtime.disconnects.stop_attempts.load(Ordering::Relaxed), 1);
         assert!(matches!(
             runtime.termination_coordinator.phase(),
@@ -1343,7 +1343,7 @@ mod tests {
         let original_queue = pool.published.get().unwrap();
         for fail in failures {
             fail();
-            assert!(matches!(pool.stop(), Err(XllError::Native { .. })));
+            assert!(matches!((pool.stop()).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::Native { .. })));
             let worker = pool.worker.lock();
             let DisconnectWorker::Running(running) = &*worker else {
                 panic!("COM preparation must return the unstarted drain");
@@ -1381,8 +1381,8 @@ mod tests {
         first.join().unwrap().unwrap();
 
         assert!(closing);
-        assert!(matches!(competing, Err(XllError::Closing)));
-        assert!(matches!(pool.reserve(), Err(XllError::Closing)));
+        assert!(matches!(competing, Err(__err) if __err.is_closing()));
+        assert!(matches!(pool.reserve(), Err(__err) if __err.is_closing()));
         pool.stop().unwrap();
     }
 
@@ -1454,9 +1454,9 @@ mod tests {
                 .unwrap();
             let result = runtime.close();
             if fail_cancel {
-                assert!(matches!(result, Err(XllError::Panic)));
+                assert!(matches!(result, Err(__err) if __err.is_panic()));
             } else {
-                assert!(matches!(result, Err(XllError::Overloaded)));
+                assert!(matches!(result, Err(__err) if __err.is_overloaded()));
             }
             assert!(disconnected.load(Ordering::Acquire));
             assert!(sink.lock().is_none());

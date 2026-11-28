@@ -60,9 +60,7 @@ use xlfn::prelude::*;
 #[excel_function(name = "MATH.SQRT", thread_safe)]
 pub fn square_root(value: f64) -> XllResult<f64> {
     if value < 0.0 {
-        return Err(XllError::Domain {
-            code: DomainErrorCode::InvalidInput,
-        });
+        return Err(XllError::domain(DomainErrorCode::InvalidInput));
     }
     Ok(value.sqrt())
 }

@@ -1494,10 +1494,7 @@ where
     T: ExcelParameter<'call, PlainInputMode>,
 {
     // SAFETY: The generated wrapper forwards Excel's live call argument.
-    let borrowed = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| match error {
-        XllError::Input { reason, .. } => XllError::Input { argument, reason },
-        other => other,
-    })?;
+    let borrowed = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| error.with_argument(argument))?;
     T::decode(
         borrowed,
         argument,
@@ -1519,10 +1516,7 @@ where
     T: ExcelParameter<'call, PlainInputMode>,
 {
     // SAFETY: The generated wrapper forwards Excel's live call argument.
-    let borrowed = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| match error {
-        XllError::Input { reason, .. } => XllError::Input { argument, reason },
-        other => other,
-    })?;
+    let borrowed = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| error.with_argument(argument))?;
     T::decode(
         borrowed,
         argument,
@@ -1544,10 +1538,7 @@ where
     T: ExcelParameter<'call, M>,
 {
     // SAFETY: The generated wrapper forwards Excel's live call argument.
-    let borrowed = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| match error {
-        XllError::Input { reason, .. } => XllError::Input { argument, reason },
-        other => other,
-    })?;
+    let borrowed = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| error.with_argument(argument))?;
     arguments.decode(index, argument, borrowed)
 }
 
@@ -1566,10 +1557,7 @@ pub unsafe fn cell_presence_from_raw(
     raw: *mut XLOPER12,
 ) -> XllResult<CellPresence> {
     // SAFETY: this function forwards its caller's raw-value contract.
-    let value = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| match error {
-        XllError::Input { reason, .. } => XllError::Input { argument, reason },
-        other => other,
-    })?;
+    let value = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| error.with_argument(argument))?;
     Ok(match value.value_type() {
         XlValueType::Nil => CellPresence::Blank,
         XlValueType::Missing => CellPresence::Missing,
@@ -1631,9 +1619,8 @@ mod preparation_tests {
         crate::call::with_excel_call_scope(|scope| {
             for raw in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
                 let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
-                assert!(matches!(
-                    arguments.native_f64(0, "value", raw),
-                    Err(XllError::Input {
+                assert!(matches!((arguments.native_f64(0, "value", raw)).as_ref().map_err(crate::error::construct::view),
+                    Err(crate::error::construct::ErrorView::Input {
                         argument: "value",
                         reason: InputError::NonFinite
                     }),
@@ -1644,9 +1631,8 @@ mod preparation_tests {
             }
             for raw in [i16::MIN, -1, 2, i16::MAX] {
                 let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
-                assert!(matches!(
-                    arguments.native_bool(0, "value", raw),
-                    Err(XllError::Input {
+                assert!(matches!((arguments.native_bool(0, "value", raw)).as_ref().map_err(crate::error::construct::view),
+                    Err(crate::error::construct::ErrorView::Input {
                         argument: "value",
                         reason: InputError::Malformed("invalid Excel Boolean")
                     }),
@@ -1799,9 +1785,8 @@ mod preparation_tests {
                 let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
                 // SAFETY: the readable count and its complete payload are live.
                 let result = unsafe { arguments.prepare_native_string(0, "value", pointer) };
-                assert!(matches!(
-                    result,
-                    Err(XllError::Input {
+                assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+                    Err(crate::error::construct::ErrorView::Input {
                         argument: "value",
                         reason: InputError::InvalidUtf16
                     })
@@ -1810,9 +1795,8 @@ mod preparation_tests {
                 let mut borrowed = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
                 // SAFETY: the readable count and its complete payload are live.
                 let result = unsafe { borrowed.prepare_native_str(0, "value", pointer) };
-                assert!(matches!(
-                    result,
-                    Err(XllError::Input {
+                assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+                    Err(crate::error::construct::ErrorView::Input {
                         argument: "value",
                         reason: InputError::InvalidUtf16
                     })
@@ -1820,9 +1804,8 @@ mod preparation_tests {
                 assert!(borrowed.finish().is_err());
                 let value = XlValueRef::from_array_cell(root).unwrap();
                 let mut ordinary = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
-                assert!(matches!(
-                    ordinary.prepare::<&str>(0, "value", value),
-                    Err(XllError::Input {
+                assert!(matches!((ordinary.prepare::<&str>(0, "value", value)).as_ref().map_err(crate::error::construct::view),
+                    Err(crate::error::construct::ErrorView::Input {
                         argument: "value",
                         reason: InputError::InvalidUtf16
                     })
@@ -1838,9 +1821,8 @@ mod preparation_tests {
             let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
             // SAFETY: null is rejected before dereferencing the native pointer.
             let result = unsafe { arguments.prepare_native_string(0, "value", std::ptr::null()) };
-            assert!(matches!(
-                result,
-                Err(XllError::Input {
+            assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
                     argument: "value",
                     reason: InputError::NullPointer
                 })
@@ -1853,9 +1835,8 @@ mod preparation_tests {
             let misaligned = aligned.as_ptr().map_addr(|address| address + 1);
             // SAFETY: misalignment is rejected before reading the count.
             let result = unsafe { arguments.prepare_native_string(0, "value", misaligned) };
-            assert!(matches!(
-                result,
-                Err(XllError::Input {
+            assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
                     argument: "value",
                     reason: InputError::Malformed("misaligned string pointer"),
                 })
@@ -1876,9 +1857,8 @@ mod preparation_tests {
             let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
             // SAFETY: an over-limit count is rejected before constructing the payload slice.
             let result = unsafe { arguments.prepare_native_string(0, "value", units.as_ptr()) };
-            assert!(matches!(
-                result,
-                Err(XllError::Input {
+            assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
                     argument: "value",
                     reason: InputError::TooLarge {
                         limit: 32_767,
@@ -2080,12 +2060,14 @@ mod preparation_tests {
                 .is_ok()
             );
             assert!(matches!(
-                ExcelInputCells::wrapped_budget::<T, PreparedElement<'call, T, FormulaInputMode>, true>(maximum + 1, "v"),
-                Err(XllError::Input {
+                ExcelInputCells::wrapped_budget::<T, PreparedElement<'call, T, FormulaInputMode>, true>(maximum + 1, "v")
+                    .as_ref()
+                    .map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
                     argument: "v",
                     reason: crate::error::InputError::TooLarge { limit, actual },
-                }) if limit == crate::value::MAX_ARRAY_BYTES
-                    && actual == (maximum + 1) * bytes_per_cell
+                }) if *limit == crate::value::MAX_ARRAY_BYTES
+                    && *actual == (maximum + 1) * bytes_per_cell
             ));
         }
 
@@ -2422,8 +2404,10 @@ mod preparation_tests {
     fn optional_borrowed_preparation_preserves_retained_budget_precedence() {
         type LargePrepared = [u8; crate::value::MAX_ARRAY_BYTES];
         assert!(matches!(
-            ExcelInputCells::wrapped_budget::<f64, LargePrepared, true>(2, "v"),
-            Err(XllError::Input {
+            ExcelInputCells::wrapped_budget::<f64, LargePrepared, true>(2, "v")
+                .as_ref()
+                .map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: crate::error::InputError::TooLarge { .. },
                 ..
             })
@@ -2438,9 +2422,8 @@ mod preparation_tests {
                 .err()
                 .unwrap(),
         ] {
-            assert!(matches!(
-                error,
-                XllError::Input {
+            assert!(matches!(crate::error::construct::view(&(error)),
+                crate::error::construct::ErrorView::Input {
                     reason: crate::error::InputError::TooLarge { .. },
                     ..
                 }

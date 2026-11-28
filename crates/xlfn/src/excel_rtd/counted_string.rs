@@ -225,7 +225,6 @@ mod benchmark {
 )]
 mod tests {
     use super::*;
-    use crate::XllError;
     use crate::error::{ExcelApiFailure, ExcelApiFunction};
     use crate::host_api::ExcelHost;
     use crate::host_callback::HostCallbackSession;
@@ -288,9 +287,8 @@ mod tests {
                 .eq("handle:日本語😀".encode_utf16())
         );
         let long_tail = "a".repeat(crate::utf16::EXCEL_STRING_LIMIT - 6);
-        assert!(matches!(
-            CountedString::concat(["handle:", &long_tail]),
-            Err(XllError::Input {
+        assert!(matches!((CountedString::concat(["handle:", &long_tail])).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: 32_767,
                     actual: 32_768
@@ -320,9 +318,8 @@ mod tests {
         };
         // SAFETY: raw and its initialized counted buffer remain live.
         let value = unsafe { crate::value::XlValueRef::from_raw(&raw mut raw) }.unwrap();
-        assert!(matches!(
-            handle_matches(value, "Y"),
-            Err(XllError::Input {
+        assert!(matches!((handle_matches(value, "Y")).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 argument: "RTD handle",
                 reason: InputError::InvalidUtf16
             })
@@ -374,17 +371,15 @@ mod tests {
             })
         };
         assert!(matches!(observe(), Ok(false)));
-        assert!(matches!(
-            observe(),
-            Err(XllError::ExcelApi {
+        assert!(matches!((observe()).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::ExcelApi {
                 function: ExcelApiFunction::Free,
                 failure: ExcelApiFailure::Status(ExcelCallbackStatus::Abort),
                 ..
             })
         ));
-        assert!(matches!(
-            observe(),
-            Err(XllError::ExcelApi {
+        assert!(matches!((observe()).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::ExcelApi {
                 function: ExcelApiFunction::Rtd,
                 failure: ExcelApiFailure::Suppressed(ExcelCallbackStatus::Abort),
                 ..

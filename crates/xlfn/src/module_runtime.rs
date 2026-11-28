@@ -328,7 +328,7 @@ impl ModuleCleanupReady {
                 let result = catch_no_unwind(AssertUnwindSafe(|| {
                     closing.module.seal_and_drain_internal()
                 }))
-                .unwrap_or(Err(crate::XllError::Panic));
+                .unwrap_or(Err(crate::XllError::PANIC));
                 match result {
                     Ok(exports) => ModuleExportsDrained {
                         module: closing.module,
@@ -343,7 +343,7 @@ impl ModuleCleanupReady {
             Self::Drained(drained) => drained,
         };
         catch_no_unwind(AssertUnwindSafe(|| drained.close_exact_callbacks()))
-            .unwrap_or(Err(crate::XllError::Panic))
+            .unwrap_or(Err(crate::XllError::PANIC))
             .map_err(|error| (error, ModuleCleanupAuthority::Drained(drained)))
     }
 }
@@ -383,7 +383,7 @@ impl ModuleExportsDrained {
     fn close_exact_callbacks(&self) -> crate::XllResult<()> {
         let _transition = self.module.epoch_transition.lock();
         if !self.id.is_current() {
-            return Err(crate::XllError::Closing);
+            return Err(crate::XllError::CLOSING);
         }
         self.module.close_callbacks_internal();
         Ok(())
@@ -398,7 +398,7 @@ impl ModuleExportsDrained {
         }
         module.close_callbacks();
         if !module.module.callback_admission.is_closed_and_quiescent() {
-            return Err(crate::XllError::Closing);
+            return Err(crate::XllError::CLOSING);
         }
         #[cfg(any(feature = "rtd", feature = "handles"))]
         RtdModuleState::certify_logical_quiescence(LogicalQuiescencePublication {
@@ -487,7 +487,7 @@ impl ModuleRuntime {
     fn begin_open_internal(&'static self) -> crate::XllResult<ModuleOpening> {
         let _transition = self.epoch_transition.lock();
         if self.ingress.phase() != crate::ingress::PHASE_CLOSED {
-            return Err(crate::XllError::Closing);
+            return Err(crate::XllError::CLOSING);
         }
         self.callback_admission.try_reopen()?;
         #[cfg(any(feature = "rtd", feature = "handles"))]
@@ -605,7 +605,7 @@ mod tests {
         let replacement = module.begin_open_internal().unwrap();
         assert!(matches!(
             ModuleCleanupReady::Drained(prior).finish(),
-            Err((crate::XllError::Closing, ModuleCleanupAuthority::Drained(_)))
+            Err((error, ModuleCleanupAuthority::Drained(_))) if error.is_closing()
         ));
         assert!(module.callback_admission().enter_for_test().is_ok());
         let replacement = replacement.rollback(|| {}).seal_and_drain().unwrap();
@@ -622,8 +622,7 @@ mod tests {
         assert!(!module.callback_admission().is_closed_and_quiescent());
         assert!(matches!(
             module.begin_open_internal(),
-            Err(crate::XllError::Closing)
-        ));
+            Err(__err) if __err.is_closing()));
         assert!(drained.id().is_current());
         assert_eq!(module.ingress().phase(), crate::ingress::PHASE_CLOSED);
 

@@ -769,10 +769,7 @@ impl<'call> FromExcel<'call> for ExcelSerialDate {
             <f64 as FromExcel>::from_excel(value, argument)?,
             ExcelDateSystem::Workbook,
         )
-        .map_err(|error| match error {
-            XllError::Input { reason, .. } => XllError::Input { argument, reason },
-            other => other,
-        })
+        .map_err(|error| error.with_argument(argument))
     }
 }
 
@@ -886,7 +883,7 @@ fn try_allocate_cells<T>(count: usize) -> XllResult<Vec<T>> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(count)
-        .map_err(|_| XllError::Overloaded)?;
+        .map_err(|_| XllError::OVERLOADED)?;
     Ok(values)
 }
 
@@ -1514,10 +1511,7 @@ where
     fn materialize_prepared(value: Self::Prepared) -> XllResult<Self> {
         let (argument, elements) = value;
         let values = T::materialize_elements(elements)?;
-        Self::new(values).map_err(|error| match error {
-            XllError::Input { reason, .. } => XllError::Input { argument, reason },
-            other => other,
-        })
+        Self::new(values).map_err(|error| error.with_argument(argument))
     }
     fn materialize_element(value: Self::ElementPrepared) -> XllResult<Self> {
         <Self as ExcelParameter<'call, M>>::materialize_prepared(value)
@@ -1546,10 +1540,7 @@ where
         let actual = grid.cells().len();
         M::u64(identity, actual as u64);
         let elements = convert_grid_elements::<T, M>(&grid, argument, context, identity)?;
-        Self::new(elements).map_err(|error| match error {
-            XllError::Input { reason, .. } => XllError::Input { argument, reason },
-            other => other,
-        })
+        Self::new(elements).map_err(|error| error.with_argument(argument))
     }
 
     fn encode_decoded(&self, identity: &mut M::Identity) {
@@ -2262,9 +2253,7 @@ impl IntoExcel for i64 {
         if (-EXACT_LIMIT..=EXACT_LIMIT).contains(&self) {
             Ok(ExcelCellOutput::Number(self as f64))
         } else {
-            Err(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })
+            Err(XllError::domain(DomainErrorCode::Overflow))
         }
     }
 
@@ -2273,9 +2262,7 @@ impl IntoExcel for i64 {
         if (-EXACT_LIMIT..=EXACT_LIMIT).contains(&self) {
             sink.push_f64(self as f64)
         } else {
-            Err(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })
+            Err(XllError::domain(DomainErrorCode::Overflow))
         }
     }
 }
@@ -2285,9 +2272,7 @@ impl IntoExcel for u64 {
         if self <= 1_u64 << 53 {
             Ok(ExcelCellOutput::Number(self as f64))
         } else {
-            Err(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })
+            Err(XllError::domain(DomainErrorCode::Overflow))
         }
     }
 
@@ -2295,9 +2280,7 @@ impl IntoExcel for u64 {
         if self <= 1_u64 << 53 {
             sink.push_f64(self as f64)
         } else {
-            Err(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })
+            Err(XllError::domain(DomainErrorCode::Overflow))
         }
     }
 }
@@ -2437,16 +2420,12 @@ mod tests {
         for value in [exact_limit + 1, u64::MAX] {
             assert!(matches!(
                 IntoExcel::into_excel(value),
-                Err(XllError::Domain {
-                    code: DomainErrorCode::Overflow
-                })
+                Err(__err) if __err.domain_code() == Some(DomainErrorCode::Overflow)
             ));
             let mut builder = ExcelArrayBuilder::new(1, 1).unwrap();
             assert!(matches!(
                 value.write_into(&mut builder),
-                Err(XllError::Domain {
-                    code: DomainErrorCode::Overflow
-                })
+                Err(__err) if __err.domain_code() == Some(DomainErrorCode::Overflow)
             ));
         }
         assert_eq!(
@@ -2480,16 +2459,12 @@ mod tests {
         for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             assert!(matches!(
                 IntoExcel::into_excel(value),
-                Err(XllError::Domain {
-                    code: DomainErrorCode::InvalidInput
-                })
+                Err(__err) if __err.domain_code() == Some(DomainErrorCode::InvalidInput)
             ));
             let mut builder = ExcelArrayBuilder::new(1, 1).unwrap();
             assert!(matches!(
                 value.write_into(&mut builder),
-                Err(XllError::Domain {
-                    code: DomainErrorCode::InvalidInput
-                })
+                Err(__err) if __err.domain_code() == Some(DomainErrorCode::InvalidInput)
             ));
         }
     }
@@ -2573,9 +2548,9 @@ mod tests {
                 let write = cow.write_into(&mut array);
                 if text == too_long {
                     for error in [scalar.err().unwrap(), write.unwrap_err()] {
-                        assert!(matches!(error, XllError::Input {
+                        assert!(matches!(crate::error::construct::view(&(error)), crate::error::construct::ErrorView::Input {
                             reason: InputError::TooLarge { limit, actual }, ..
-                        } if limit == crate::utf16::EXCEL_STRING_LIMIT && actual == limit + 1));
+                        } if *limit == crate::utf16::EXCEL_STRING_LIMIT && *actual == *limit + 1));
                     }
                 } else {
                     let scalar = scalar.unwrap();
@@ -2829,18 +2804,16 @@ mod tests {
     #[test]
     fn integer_conversion_checks_fraction_and_range() {
         let mut fractional = XLOPER12::number(1.5);
-        assert!(matches!(
-            convert::<i32>(&mut fractional),
-            Err(XllError::Input {
+        assert!(matches!((convert::<i32>(&mut fractional)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::NotInteger,
                 ..
             })
         ));
 
         let mut huge = XLOPER12::number(i32::MAX as f64 + 1.0);
-        assert!(matches!(
-            convert::<i32>(&mut huge),
-            Err(XllError::Input {
+        assert!(matches!((convert::<i32>(&mut huge)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::NumericOverflow,
                 ..
             })
@@ -2852,16 +2825,14 @@ mod tests {
         let per_cell = std::mem::size_of::<XLOPER12>() + std::mem::size_of::<f64>();
         let maximum = MAX_ARRAY_BYTES / per_cell;
         assert!(ArrayInputBudget::new::<f64>(maximum, "values").is_ok());
-        assert!(matches!(
-            ArrayInputBudget::new::<f64>(maximum + 1, "values"),
-            Err(XllError::Input {
+        assert!(matches!((ArrayInputBudget::new::<f64>(maximum + 1, "values")).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 argument: "values",
                 reason: InputError::TooLarge { limit: MAX_ARRAY_BYTES, actual },
-            }) if actual == (maximum + 1) * per_cell
+            }) if *actual == (maximum + 1) * per_cell
         ));
-        assert!(matches!(
-            ArrayInputBudget::new::<f64>(usize::MAX, "values"),
-            Err(XllError::Input {
+        assert!(matches!((ArrayInputBudget::new::<f64>(usize::MAX, "values")).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::Malformed("output byte-size overflow"),
                 ..
             })
@@ -2884,12 +2855,11 @@ mod tests {
         };
         assert!(budget.include(value).is_ok());
         assert_eq!(budget.referenced_bytes, MAX_ARRAY_BYTES);
-        assert!(matches!(
-            budget.include(value),
-            Err(XllError::Input {
+        assert!(matches!((budget.include(value)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 argument: "values",
                 reason: InputError::TooLarge { limit: MAX_ARRAY_BYTES, actual },
-            }) if actual == MAX_ARRAY_BYTES + 5
+            }) if *actual == MAX_ARRAY_BYTES + 5
         ));
     }
 
@@ -2912,12 +2882,11 @@ mod tests {
         budget.referenced_bytes = MAX_ARRAY_BYTES - 6;
         budget.include_raw(value).unwrap();
         assert_eq!(budget.referenced_bytes, MAX_ARRAY_BYTES);
-        assert!(matches!(
-            budget.include_raw(value),
-            Err(XllError::Input {
+        assert!(matches!((budget.include_raw(value)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 argument: "raw_values",
                 reason: InputError::TooLarge { limit: MAX_ARRAY_BYTES, actual },
-            }) if actual == MAX_ARRAY_BYTES + 6
+            }) if *actual == MAX_ARRAY_BYTES + 6
         ));
     }
 
@@ -3056,9 +3025,8 @@ mod tests {
             },
             xltype: XLTYPE_STR | XLBIT_XL_FREE,
         };
-        assert!(matches!(
-            convert::<String>(&mut raw),
-            Err(XllError::Input {
+        assert!(matches!((convert::<String>(&mut raw)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::InvalidUtf16,
                 ..
             })
@@ -3179,9 +3147,8 @@ mod tests {
                 .map(|text| text.with_argument("currency"))
                 .map_err(|error| error.with_argument("currency"))
                 .unwrap();
-            assert!(matches!(
-                string.try_to_string(),
-                Err(XllError::Input {
+            assert!(matches!((string.try_to_string()).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
                     argument: "currency",
                     reason: InputError::InvalidUtf16,
                 })
@@ -3287,9 +3254,8 @@ mod tests {
                     argument_from_raw::<MatrixRef<'_, ExcelCellRef<'_>>>(scope, "arg", &mut raw)
                 }
                 .unwrap_err();
-                assert!(matches!(
-                    &borrowed,
-                    XllError::Input { argument: "arg", reason } if *reason == expected
+                assert!(matches!(crate::error::construct::view(&borrowed),
+                    crate::error::construct::ErrorView::Input { argument: "arg", reason } if *reason == expected
                 ));
                 assert_eq!(borrowed.to_string(), owned.to_string());
             });
@@ -3358,8 +3324,10 @@ mod tests {
             &[1.0, 2.0]
         );
         assert!(matches!(
-            convert::<BoundedVarArgs<f64, 1>>(&mut raw),
-            Err(XllError::Input {
+            convert::<BoundedVarArgs<f64, 1>>(&mut raw)
+                .as_ref()
+                .map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: 1,
                     actual: 2
@@ -3391,9 +3359,8 @@ mod tests {
         };
 
         let result = convert::<BoundedVarArgs<PanicOnConvert, 1>>(&mut raw);
-        assert!(matches!(
-            result,
-            Err(XllError::Input {
+        assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: 1,
                     actual: 2
@@ -3486,9 +3453,8 @@ mod tests {
     fn malformed_xltype_flags_are_rejected() {
         let mut raw = XLOPER12::number(1.0);
         raw.xltype |= 0x2000;
-        assert!(matches!(
-            convert::<f64>(&mut raw),
-            Err(XllError::Input {
+        assert!(matches!((convert::<f64>(&mut raw)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::Malformed("unknown xltype flag"),
                 ..
             })
@@ -3513,9 +3479,8 @@ mod tests {
             convert::<Matrix<f64>>(&mut array).unwrap_err(),
             convert::<ExcelValue>(&mut array).unwrap_err(),
         ] {
-            assert!(matches!(
-                error,
-                XllError::Input {
+            assert!(matches!(crate::error::construct::view(&(error)),
+                crate::error::construct::ErrorView::Input {
                     argument: "arg",
                     reason: InputError::Malformed("unknown xltype flag"),
                 }
@@ -3720,9 +3685,8 @@ mod tests {
         with_excel_call_scope(|scope| {
             // SAFETY: the root is live; the malformed nested pointer is tested for rejection.
             let result = unsafe { argument_from_raw::<XlArrayRef<'_>>(scope, "values", &mut raw) };
-            assert!(matches!(
-                result,
-                Err(XllError::Input {
+            assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
                     reason: InputError::Malformed("misaligned array pointer"),
                     ..
                 })
@@ -3787,8 +3751,8 @@ mod tests {
                 ];
                 for error in errors {
                     assert!(matches!(
-                        error,
-                        Some(XllError::Input {
+                        error.as_ref().map(crate::error::construct::view),
+                        Some(crate::error::construct::ErrorView::Input {
                             argument: "observations",
                             reason: InputError::Malformed("matrix dimensions must be non-zero"),
                         })
@@ -3894,9 +3858,9 @@ mod tests {
                 Matrix::<()>::from_fn(rows, columns, |_, _| panic!("invalid shape")).unwrap_err(),
             ];
             for error in errors {
-                assert!(matches!(error, XllError::Input {
+                assert!(matches!(crate::error::construct::view(&(error)), crate::error::construct::ErrorView::Input {
                     argument: "<matrix>", reason: actual,
-                } if actual == reason));
+                } if *actual == reason));
             }
         }
     }
@@ -3934,15 +3898,14 @@ mod tests {
                 xltype: XLTYPE_MULTI,
             };
 
-            assert!(matches!(
-                convert::<Matrix<f64>>(&mut raw),
-                Err(XllError::Input {
+            assert!(matches!((convert::<Matrix<f64>>(&mut raw)).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
                     reason: InputError::TooLarge {
                         limit: error_limit,
                         actual: error_actual,
                     },
                     ..
-                }) if error_limit == limit && error_actual == actual
+                }) if *error_limit == limit && *error_actual == actual
             ));
         }
     }
@@ -4017,9 +3980,7 @@ mod tests {
         let result = <Matrix<_> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new());
         assert!(matches!(
             result,
-            Err(XllError::Domain {
-                code: crate::error::DomainErrorCode::InvalidInput,
-            })
+            Err(__err) if __err.domain_code() == Some(crate::error::DomainErrorCode::InvalidInput)
         ));
         assert_eq!(conversions.get(), 3);
         assert_eq!(drops.map(|count| count.get()), [1; 4]);

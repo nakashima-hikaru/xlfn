@@ -191,14 +191,14 @@ impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
     pub(crate) fn try_execution_lease(
         &self,
     ) -> crate::XllResult<crate::generation::ExecutionLease<A>> {
-        let issuer = self.execution_issuer.ok_or(crate::XllError::Closing)?;
+        let issuer = self.execution_issuer.ok_or(crate::XllError::CLOSING)?;
         // Admission's original permit keeps its publication/root alive while
         // trying a fresh admission on the exact process-lifetime issuer. A
         // close that already sealed the gate must reject this new launch.
         let permit = issuer
             .publication_readers
             .try_enter_owned_current()
-            .map_err(|_| crate::XllError::Closing)?;
+            .map_err(|_| crate::XllError::CLOSING)?;
         // SAFETY: the static issuer was installed by try_admit_async on the
         // same coordinator that issued this admission and owns its root. Its
         // publication gate drains before that root can be reclaimed.
@@ -1313,7 +1313,7 @@ impl<A: crate::Addin> QuarantineWork<'_, A> {
         let result = if self.stamp.epoch().is_current() {
             owner.finish()
         } else {
-            Err((crate::XllError::Closing, owner.retain_without_draining()))
+            Err((crate::XllError::CLOSING, owner.retain_without_draining()))
         };
         self.issuer.complete_quarantine(&self.stamp, result)
     }
@@ -1329,7 +1329,7 @@ impl<A: crate::Addin> Drop for QuarantineWork<'_, A> {
         let Some(owner) = self.owner.take() else {
             return;
         };
-        let failure = Err((crate::XllError::Closing, owner.retain_without_draining()));
+        let failure = Err((crate::XllError::CLOSING, owner.retain_without_draining()));
         if let Err((_, Some(rejected))) = self.issuer.complete_quarantine(&self.stamp, failure) {
             // A different epoch must not receive this authority. Retain the
             // old ticket's resources separately from the current state.
@@ -1817,7 +1817,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         });
         if !completed {
             let retained = result.err().map(|(_, owner)| owner.into_authority());
-            return Err((crate::XllError::Closing, retained));
+            return Err((crate::XllError::CLOSING, retained));
         }
         match result {
             Ok(()) => Ok(()),
@@ -1936,10 +1936,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         let permit = self
             .publication_readers
             .try_enter_current()
-            .map_err(|_| crate::XllError::Closing)?;
+            .map_err(|_| crate::XllError::CLOSING)?;
         let Some(publication) = NonNull::new(self.publication.load(Ordering::Acquire)) else {
             drop(permit);
-            return Err(crate::XllError::Closing);
+            return Err(crate::XllError::CLOSING);
         };
         Ok(GenerationAdmission::new(publication, permit))
     }
@@ -2058,7 +2058,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         published: CanonicalGenerationPublished<'_, A>,
     ) -> crate::XllResult<CommittedOpen<'access, 'coordinator, A>> {
         if !std::ptr::eq(published.coordinator, self) || !std::ptr::eq(core.coordinator, self) {
-            return Err(crate::XllError::Closing);
+            return Err(crate::XllError::CLOSING);
         }
         let generation = published.attempt.into_runtime_generation();
         core.transition(|core| {
@@ -2512,7 +2512,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         if !matches!(&access.core.state,
             LifecycleState::Stopping(StoppingState::Finalizing(record)) if record.goal() == goal
         ) {
-            return Err(crate::XllError::Closing);
+            return Err(crate::XllError::CLOSING);
         }
         self.advance_finalization(access, |record| record.returning_success(attempt))
     }
@@ -2523,7 +2523,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         advance: impl FnOnce(&mut StopRecord) -> bool,
     ) -> crate::XllResult<()> {
         if !std::ptr::eq(access.coordinator, self) {
-            return Err(crate::XllError::Closing);
+            return Err(crate::XllError::CLOSING);
         }
         access.transition(|core| {
             let result = match &mut core.state {
@@ -2533,10 +2533,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     if advance(record) {
                         Ok(())
                     } else {
-                        Err(crate::XllError::Closing)
+                        Err(crate::XllError::CLOSING)
                     }
                 }
-                _ => Err(crate::XllError::Closing),
+                _ => Err(crate::XllError::CLOSING),
             };
             (result, TransitionEffect::Keep)
         })

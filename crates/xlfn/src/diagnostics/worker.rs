@@ -340,7 +340,7 @@ impl AsyncDiagnosticSink {
             .then_some(crate::shutdown::CleanupIssue {
                 component: "diagnostic sink",
                 kind: crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                error: crate::XllError::Panic,
+                error: crate::XllError::PANIC,
             }))
     }
 }
@@ -390,7 +390,7 @@ mod budget_tests {
             release: crate::sync::Mutex::new(wait),
         })
         .unwrap();
-        sink.report(&crate::XllError::Panic, metadata);
+        sink.report(&crate::XllError::PANIC, metadata);
         receiving.recv().unwrap();
         let (dropping, entered) = mpsc::sync_channel(1);
         let (dropped, finished) = mpsc::sync_channel(1);
@@ -412,10 +412,7 @@ mod budget_tests {
     #[test]
     fn miri_dequeued_credit_retains_bytes_after_slot_return() {
         let observer = DiagnosticObserver::new();
-        let error = crate::XllError::Native {
-            code: 1,
-            message: "payload".to_owned(),
-        };
+        let error = crate::XllError::native(1, "payload".to_owned());
         let QueuedDiagnosticEvent { event, credit } = observer
             .build_queued_event(&error, || event(error.clone()))
             .unwrap();
@@ -436,10 +433,7 @@ mod budget_tests {
     )]
     fn miri_forgotten_delivery_credit_cannot_discharge_bytes() {
         let observer = DiagnosticObserver::new();
-        let error = crate::XllError::Native {
-            code: 1,
-            message: "payload".to_owned(),
-        };
+        let error = crate::XllError::native(1, "payload".to_owned());
         let QueuedDiagnosticEvent { event, credit } = observer
             .build_queued_event(&error, || event(error.clone()))
             .unwrap();
@@ -453,10 +447,7 @@ mod budget_tests {
     #[test]
     fn miri_payload_credit_returns_on_failed_send_and_receiver_discard() {
         let observer = DiagnosticObserver::new();
-        let error = crate::XllError::Native {
-            code: 1,
-            message: "payload".to_owned(),
-        };
+        let error = crate::XllError::native(1, "payload".to_owned());
         let (sender, receiver) = mpsc::sync_channel(1);
         let first = observer
             .build_queued_event(&error, || event(error.clone()))
@@ -490,10 +481,7 @@ mod budget_tests {
             fn report(&self, _: &DiagnosticEvent<'_>) {}
         }
         let sink = Box::new(AsyncDiagnosticSink::new(Noop).unwrap());
-        let error = crate::XllError::Native {
-            code: 1,
-            message: "payload".to_owned(),
-        };
+        let error = crate::XllError::native(1, "payload".to_owned());
         assert!(
             crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
                 sink.report(&error, || panic!("metadata construction failed"));
@@ -512,10 +500,7 @@ mod budget_tests {
             .observer()
             .payload_bytes
             .store(0, Ordering::Relaxed);
-        let oversized = crate::XllError::Native {
-            code: 1,
-            message: "x".repeat(super::super::DIAGNOSTIC_PAYLOAD_MAX_BYTES + 1),
-        };
+        let oversized = crate::XllError::native(1, "x".repeat(super::super::DIAGNOSTIC_PAYLOAD_MAX_BYTES + 1));
         sink.report(&oversized, || {
             panic!("an oversize error must not be cloned")
         });
@@ -534,7 +519,7 @@ mod budget_tests {
         }
         impl DiagnosticSink for SlowSink {
             fn report(&self, event: &DiagnosticEvent<'_>) {
-                if let crate::XllError::Native { message, .. } = event.error() {
+                if let Some((_, message)) = event.error().native_details() {
                     assert_eq!(message.len(), 1024 * 1024);
                     assert!(message.bytes().all(|byte| byte == b'x'));
                     if self.reports.fetch_add(1, Ordering::Relaxed) == 0 {
@@ -559,10 +544,7 @@ mod budget_tests {
             })
             .unwrap(),
         );
-        let error = crate::XllError::Native {
-            code: 1,
-            message: "x".repeat(1024 * 1024),
-        };
+        let error = crate::XllError::native(1, "x".repeat(1024 * 1024));
         sink.report(&error, metadata);
         started_rx.recv().unwrap();
         assert_eq!(sink.worker.observer().reserved_payload_bytes(), 1024 * 1024);
@@ -578,7 +560,7 @@ mod budget_tests {
             panic!("processing bytes must count toward the limit")
         });
         // Zero-payload errors can still be admitted when the byte quota is full.
-        sink.report(&crate::XllError::Panic, metadata);
+        sink.report(&crate::XllError::PANIC, metadata);
         release_tx.send(()).unwrap();
         drained_rx.recv().unwrap();
         assert_eq!(sink.worker.observer().reserved_payload_bytes(), 0);
@@ -601,10 +583,7 @@ mod budget_tests {
             sender,
             worker: DiagnosticWorker::from_parts_for_test(observer, worker),
         };
-        let error = crate::XllError::Native {
-            code: 1,
-            message: "owned".to_owned(),
-        };
+        let error = crate::XllError::native(1, "owned".to_owned());
         for _ in 0..3 {
             sink.report(&error, metadata);
         }

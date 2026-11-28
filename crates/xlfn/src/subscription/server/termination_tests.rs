@@ -195,15 +195,15 @@ fn miri_termination_abandonment_cancels_all_before_disconnect_and_waiter_return(
                 Stage::CancelRequested => drop(owner.request_cancel()),
                 Stage::ReadersDrained => drop(owner.request_cancel().drain_readers().unwrap()),
             }
-            assert!(matches!(waiting.join().unwrap(), Err(XllError::Panic)));
+            assert!(matches!(waiting.join().unwrap(), Err(__err) if __err.is_panic()));
         });
         observation.assert_complete();
         assert_eq!(
             server.test_server().termination_coordinator.phase(),
             TerminationPhase::Failed
         );
-        assert!(matches!(server.terminate(), Err(XllError::Panic)));
-        assert!(matches!(runtime.close(), Err(XllError::Panic)));
+        assert!(matches!(server.terminate(), Err(__err) if __err.is_panic()));
+        assert!(matches!(runtime.close(), Err(__err) if __err.is_panic()));
         observation.assert_complete();
     }
 }
@@ -252,10 +252,10 @@ fn termination_cancel_error_remains_with_its_server_owner() {
 
     let failing_owner = failing_owner.request_cancel();
     let successful_owner = successful_owner.request_cancel();
-    assert!(matches!(failing_owner.finish(), Err(XllError::Panic)));
+    assert!(matches!(failing_owner.finish(), Err(__err) if __err.is_panic()));
     successful_owner.finish().unwrap();
     observation.assert_complete();
-    assert!(matches!(failing.terminate(), Err(XllError::Panic)));
+    assert!(matches!(failing.terminate(), Err(__err) if __err.is_panic()));
     successful.terminate().unwrap();
-    assert!(matches!(runtime.close(), Err(XllError::Panic)));
+    assert!(matches!(runtime.close(), Err(__err) if __err.is_panic()));
 }

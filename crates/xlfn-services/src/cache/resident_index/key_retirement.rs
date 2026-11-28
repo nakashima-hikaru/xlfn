@@ -109,7 +109,7 @@ mod tests {
 
         static REPORTS: AtomicUsize = AtomicUsize::new(0);
         fn report(context: &'static str, error: &XllError) {
-            if context == "calculation cache key final drop" && matches!(error, XllError::Panic) {
+            if context == "calculation cache key final drop" && error.is_panic() {
                 REPORTS.fetch_add(1, Ordering::Relaxed);
             }
         }

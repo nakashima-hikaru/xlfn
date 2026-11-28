@@ -49,10 +49,7 @@ fn domain_error() -> XllResult<f64> {
 
 #[allow(dead_code)]
 fn inspect_framework_context(error: &XllError) -> Option<(&'static str, i32)> {
-    match error {
-        XllError::WindowsApi { function, code, .. } => Some((*function, *code)),
-        _ => None,
-    }
+    error.windows_api_details()
 }
 
 fn main() {}

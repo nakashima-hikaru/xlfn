@@ -106,7 +106,7 @@ fn success_and_error_completion_do_not_reenter_key_callbacks() {
                         if succeeds {
                             Ok(DropProbe(StdArc::clone(&dropped)))
                         } else {
-                            Err(XllError::Overloaded)
+                            Err(XllError::OVERLOADED)
                         }
                     },
                 )
@@ -115,7 +115,7 @@ fn success_and_error_completion_do_not_reenter_key_callbacks() {
             let first = first.expect("completion must not call user Hash or Eq");
             assert_eq!(first.is_ok(), succeeds);
             if !succeeds {
-                assert!(matches!(&first, Err(XllError::Overloaded)));
+                assert!(matches!(&first, Err(error) if error.is_overloaded()));
             }
             drop(first);
             assert!(cache.flights.is_empty());
@@ -395,7 +395,7 @@ fn flight_drop_during_unwinding_contains_panicking_key_drop_and_reports() {
 
     static REPORTS: AtomicUsize = AtomicUsize::new(0);
     fn count_report(context: &'static str, error: &XllError) {
-        if context == "calculation cache key final drop" && matches!(error, XllError::Panic) {
+        if context == "calculation cache key final drop" && error.is_panic() {
             REPORTS.fetch_add(1, Ordering::Relaxed);
         }
     }

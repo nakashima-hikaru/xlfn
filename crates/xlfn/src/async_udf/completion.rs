@@ -154,7 +154,7 @@ impl<O: CompletionObserver> DeliveryParts<O> {
             ..
         } = self;
         let udf_id = responder.udf_id();
-        let delivery = deliver_error(responder, &XllError::Panic);
+        let delivery = deliver_error(responder, &XllError::PANIC);
         Self::finish(
             diagnostics,
             observation,
@@ -189,9 +189,9 @@ impl<O: CompletionObserver> DeliveryParts<O> {
             ))
         };
         let error = if panicked && !cancelled {
-            XllError::Panic
+            XllError::PANIC
         } else {
-            XllError::ExcelValue(crate::ExcelError::NotAvailable)
+            XllError::excel_value(crate::ExcelError::NotAvailable)
         };
         let delivery = deliver_error(responder, &error);
         Self::finish(
@@ -315,7 +315,7 @@ fn deliver_error(responder: ExcelAsyncResponder, error: &XllError) -> OwnedDeliv
 
 fn drop_evaluation_no_unwind<T>(udf_id: &'static str, evaluated: Result<XllResult<T>, String>) {
     if catch_no_unwind(AssertUnwindSafe(|| drop(evaluated))).is_err() {
-        crate::diagnostics::report_no_unwind(udf_id, &XllError::Panic);
+        crate::diagnostics::report_no_unwind(udf_id, &XllError::PANIC);
     }
 }
 
@@ -333,7 +333,7 @@ fn complete_evaluation<
             super::boundary::report_panic(diagnostics, responder.udf_id(), message);
         }
         drop_evaluation_no_unwind(responder.udf_id(), evaluated);
-        let cancel_error = XllError::ExcelValue(crate::ExcelError::NotAvailable);
+        let cancel_error = XllError::excel_value(crate::ExcelError::NotAvailable);
         return AsyncCompletion {
             completion: OwnedCompletionOutcome::Cancelled,
             delivery: deliver_error(responder, &cancel_error),
@@ -353,7 +353,7 @@ fn complete_evaluation<
                     OwnedCompletionOutcome::Error(error),
                 ),
                 Err(message) => (
-                    AsyncReturnValue::error(&XllError::Panic),
+                    AsyncReturnValue::error(&XllError::PANIC),
                     OwnedCompletionOutcome::Panic(message),
                 ),
             }
@@ -363,7 +363,7 @@ fn complete_evaluation<
             OwnedCompletionOutcome::Error(error),
         ),
         Err(message) => (
-            AsyncReturnValue::error(&XllError::Panic),
+            AsyncReturnValue::error(&XllError::PANIC),
             OwnedCompletionOutcome::Panic(message),
         ),
     };
@@ -491,15 +491,13 @@ mod tests {
     fn uninvoked_async_return_preserves_the_callback_failure_status() {
         use crate::error::{ExcelApiFailure, ExcelApiFunction};
         let failed = crate::error::callback_status_from_raw(xlfn_sys::XLRET_FAILED);
-        assert!(matches!(
-            check_async_acceptance(failed, XLOPER12::nil(), false),
-            Err(XllError::ExcelApi {
+        assert!(matches!((check_async_acceptance(failed, XLOPER12::nil(), false)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::ExcelApi {
                 function: ExcelApiFunction::AsyncReturn,
                 failure: ExcelApiFailure::Status(status), .. }) if status == failed
         ));
-        assert!(matches!(
-            check_async_acceptance(ExcelCallbackStatus::Success, XLOPER12::boolean(false), true),
-            Err(XllError::ExcelApi {
+        assert!(matches!((check_async_acceptance(ExcelCallbackStatus::Success, XLOPER12::boolean(false), true)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::ExcelApi {
                 function: ExcelApiFunction::AsyncReturn,
                 failure: ExcelApiFailure::UnexpectedResult,
                 ..

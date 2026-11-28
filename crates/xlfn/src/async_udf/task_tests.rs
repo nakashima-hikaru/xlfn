@@ -234,12 +234,10 @@ fn miri_registry_close_drop_cancels_and_allows_only_close_retry() {
     let closing = registry.request_close().unwrap();
     assert!(matches!(
         registry.request_close(),
-        Err(crate::XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     assert!(matches!(
         registry.start(AsyncTaskLimit::DEFAULT),
-        Err(crate::XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     assert!(!token.is_cancelled());
     // Dropping the pending stage performs its cancellation obligation. It
     // releases the close attempt but cannot grant permission to restart.
@@ -248,21 +246,18 @@ fn miri_registry_close_drop_cancels_and_allows_only_close_retry() {
     assert_eq!(registry.active_tasks.load(Ordering::Acquire), 1);
     assert!(matches!(
         registry.start(AsyncTaskLimit::DEFAULT),
-        Err(crate::XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     drop(task);
 
     let drained = registry.request_close().unwrap().cancel().wait();
     assert!(matches!(
         registry.request_close(),
-        Err(crate::XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     // Even a completed wait requires the final, consuming state transition.
     drop(drained);
     assert!(matches!(
         registry.start(AsyncTaskLimit::DEFAULT),
-        Err(crate::XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     registry.request_close().unwrap().cancel().wait().finish();
     registry.start(AsyncTaskLimit::DEFAULT).unwrap();
     registry.request_close().unwrap().cancel().wait().finish();
@@ -291,8 +286,7 @@ fn miri_registry_close_wait_retains_task_and_release_tail_authority() {
         ));
         assert!(matches!(
             registry.start(AsyncTaskLimit::DEFAULT),
-            Err(crate::XllError::Closing)
-        ));
+            Err(__err) if __err.is_closing()));
         drop(task);
         finished_rx.recv().unwrap();
         waiter.join().unwrap();
@@ -309,12 +303,10 @@ fn registry_close_cancellation_callbacks_run_outside_control_lock() {
             assert!(self.0.control.try_lock().is_some());
             assert!(matches!(
                 self.0.request_close(),
-                Err(crate::XllError::Closing)
-            ));
+                Err(__err) if __err.is_closing()));
             assert!(matches!(
                 self.0.start(AsyncTaskLimit::DEFAULT),
-                Err(crate::XllError::Closing)
-            ));
+                Err(__err) if __err.is_closing()));
             assert!(!self.0.advance());
             self.1.fetch_add(1, Ordering::Relaxed);
         }

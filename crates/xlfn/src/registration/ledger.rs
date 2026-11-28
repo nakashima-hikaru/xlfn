@@ -296,7 +296,7 @@ impl HostRegistrar {
         let mut outcome = UnregisterResult::new(registrations.len());
         for mut registration in registrations.into_iter().rev() {
             if !host.permits_callbacks() {
-                outcome.failed.push((registration, XllError::Closing));
+                outcome.failed.push((registration, XllError::CLOSING));
                 continue;
             }
             if registration.state == super::RegistrationCleanupState::NameDeleted {
@@ -323,7 +323,7 @@ impl HostRegistrar {
             if !host.permits_callbacks() {
                 outcome.metadata_debt.push(super::MetadataDebt::new(
                     registration.registration,
-                    XllError::Closing,
+                    XllError::CLOSING,
                 ));
                 continue;
             }
@@ -386,7 +386,7 @@ mod phase_tests {
                     id: 1.0,
                     excel_name: "price",
                 },
-                XllError::Closing,
+                XllError::CLOSING,
             )
         };
         let id = RegistrationId {

@@ -139,7 +139,7 @@ pub(crate) fn begin_operation(
         .into_admitted()
     {
         Ok(ingress_guard) => ingress_guard,
-        Err(_) => return Err(crate::XllError::Closing),
+        Err(_) => return Err(crate::XllError::CLOSING),
     };
     Ok(RtdOperationGuard {
         _ingress_guard: ingress_guard,

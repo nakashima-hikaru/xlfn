@@ -98,7 +98,7 @@ impl TerminationPermit<'_> {
 
 impl Rollback for TerminationPermit<'_> {
     fn rollback(self) {
-        self.publish(TerminalResult::Failed(XllError::Panic));
+        self.publish(TerminalResult::Failed(XllError::PANIC));
     }
 }
 
@@ -203,19 +203,18 @@ mod tests {
                 Err(std::sync::mpsc::TryRecvError::Empty)
             ));
             assert!(matches!(
-                owner.complete(Err(XllError::Closing)),
-                Err(XllError::Closing)
-            ));
+                owner.complete(Err(XllError::CLOSING)),
+                Err(__err) if __err.is_closing()));
             for _ in 0..2 {
-                assert!(matches!(result_rx.recv().unwrap(), Err(XllError::Closing)));
+                assert!(matches!(result_rx.recv().unwrap(), Err(__err) if __err.is_closing()));
             }
             for waiter in waiters {
                 waiter.join().unwrap();
             }
         });
         assert_eq!(coordinator.phase(), TerminationPhase::Terminated);
-        assert!(matches!(completed(&coordinator), Err(XllError::Closing)));
-        assert!(matches!(completed(&coordinator), Err(XllError::Closing)));
+        assert!(matches!(completed(&coordinator), Err(__err) if __err.is_closing()));
+        assert!(matches!(completed(&coordinator), Err(__err) if __err.is_closing()));
     }
 
     #[test]
@@ -236,11 +235,11 @@ mod tests {
                 Err(std::sync::mpsc::TryRecvError::Empty)
             ));
             drop(owner);
-            assert!(matches!(result_rx.recv().unwrap(), Err(XllError::Panic)));
+            assert!(matches!(result_rx.recv().unwrap(), Err(__err) if __err.is_panic()));
             waiting.join().unwrap();
         });
         assert_eq!(coordinator.phase(), TerminationPhase::Failed);
-        assert!(matches!(completed(&coordinator), Err(XllError::Panic)));
+        assert!(matches!(completed(&coordinator), Err(__err) if __err.is_panic()));
     }
 
     #[test]
@@ -249,12 +248,11 @@ mod tests {
         let owner = owner(&coordinator);
         let waiter = waiter(&coordinator);
         assert!(matches!(
-            owner.fail(XllError::Overloaded),
-            XllError::Overloaded
-        ));
-        assert!(matches!(waiter.wait(), Err(XllError::Overloaded)));
+            owner.fail(XllError::OVERLOADED),
+            __err if __err.is_overloaded()));
+        assert!(matches!(waiter.wait(), Err(__err) if __err.is_overloaded()));
         assert_eq!(coordinator.phase(), TerminationPhase::Failed);
-        assert!(matches!(completed(&coordinator), Err(XllError::Overloaded)));
+        assert!(matches!(completed(&coordinator), Err(__err) if __err.is_overloaded()));
     }
 
     #[test]

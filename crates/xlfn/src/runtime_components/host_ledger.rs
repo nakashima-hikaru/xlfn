@@ -150,7 +150,7 @@ impl HostLedger {
     fn claim_cleanup(&self) -> crate::XllResult<PreparedCleanup<'_, Vec<PendingRegistration>>> {
         let mut state = self.state.lock();
         if state.cleanup_in_progress {
-            return Err(crate::XllError::Closing);
+            return Err(crate::XllError::CLOSING);
         }
         state.cleanup_in_progress = true;
         let registrations = std::mem::take(&mut state.registrations);
@@ -218,7 +218,7 @@ impl HostLedger {
     fn claim_metadata_cleanup(&self) -> crate::XllResult<PreparedCleanup<'_, MetadataDebts>> {
         let mut state = self.state.lock();
         if state.metadata_cleanup_in_progress {
-            return Err(crate::XllError::Closing);
+            return Err(crate::XllError::CLOSING);
         }
         state.metadata_cleanup_in_progress = true;
         let debts = std::mem::take(&mut state.metadata_debt);
@@ -421,8 +421,7 @@ mod cleanup_tests {
         assert!(ledger.registration_state_unknown());
         assert!(matches!(
             ledger.claim_cleanup(),
-            Err(crate::XllError::Closing)
-        ));
+            Err(__err) if __err.is_closing()));
     }
 
     #[test]
@@ -472,7 +471,7 @@ mod cleanup_tests {
                 id: 7.0,
                 excel_name: "OLD.DEBT",
             },
-            crate::XllError::Closing,
+            crate::XllError::CLOSING,
         )]);
         let script =
             CallbackScript::install([Reply::success(XLF_EVALUATE, XLOPER12::number(99.0))]);
@@ -489,7 +488,7 @@ mod cleanup_tests {
             let nested = HostCallbackSession::new();
             assert!(matches!(
                 crate::registration::retry_metadata_debt(&reenter, &nested),
-                Err(crate::XllError::Closing)
+                Err(__err) if __err.is_closing()
             ));
             reenter.retain_metadata_debt(vec![
                 MetadataDebt::new(
@@ -497,14 +496,14 @@ mod cleanup_tests {
                         id: 9.0,
                         excel_name: "NEW.DEBT",
                     },
-                    crate::XllError::Closing,
+                    crate::XllError::CLOSING,
                 ),
                 MetadataDebt::new(
                     RegistrationId {
                         id: 11.0,
                         excel_name: "old.debt",
                     },
-                    crate::XllError::Closing,
+                    crate::XllError::CLOSING,
                 ),
             ]);
         });
@@ -539,7 +538,7 @@ mod cleanup_tests {
                 id: 7.0,
                 excel_name: "OLD.DEBT",
             },
-            crate::XllError::Closing,
+            crate::XllError::CLOSING,
         )]);
         let claim = ledger.claim_metadata_cleanup().unwrap();
         assert!(ledger.metadata_debt_snapshot().is_empty());
@@ -563,7 +562,7 @@ mod cleanup_tests {
                 id: 7.0,
                 excel_name: "OLD.DEBT",
             },
-            crate::XllError::Closing,
+            crate::XllError::CLOSING,
         )]);
         let claim = ledger.claim_metadata_cleanup().unwrap();
         ledger.retain_metadata_debt(vec![MetadataDebt::new(
@@ -571,7 +570,7 @@ mod cleanup_tests {
                 id: 9.0,
                 excel_name: "NEW.DEBT",
             },
-            crate::XllError::Closing,
+            crate::XllError::CLOSING,
         )]);
         let outcome =
             crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(move || {
@@ -594,7 +593,7 @@ mod cleanup_tests {
         assert!(ledger.registration_state_unknown());
         assert!(matches!(
             ledger.claim_metadata_cleanup(),
-            Err(crate::XllError::Closing),
+            Err(__err) if __err.is_closing(),
         ));
     }
 }

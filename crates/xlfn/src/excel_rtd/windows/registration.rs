@@ -48,7 +48,7 @@ impl TemporaryRegistration {
         // nested/concurrent attempt instead of blocking its callback forever.
         let maintenance = REGISTRATION_MAINTENANCE
             .try_lock()
-            .ok_or(XllError::ReentrantCall)?;
+            .ok_or(XllError::REENTRANT_CALL)?;
         let cross_process = CrossProcessRegistrationGuard::acquire()?;
 
         if let Err(error) = scavenge_owned_registrations(module_path, Some(identity.prog_id())) {
@@ -604,9 +604,7 @@ impl RegistryKey {
     fn set_value(&self, name: Option<&str>, value: &str) -> XllResult<()> {
         let name = name.map(wide_nul);
         let value = wide_nul(value);
-        let bytes = u32::try_from(size_of_val(value.as_slice())).map_err(|_| XllError::Domain {
-            code: crate::error::DomainErrorCode::Overflow,
-        })?;
+        let bytes = u32::try_from(size_of_val(value.as_slice())).map_err(|_| XllError::domain(crate::error::DomainErrorCode::Overflow))?;
 
         // SAFETY: this key is open and both buffers are NUL terminated.
         let status = unsafe {

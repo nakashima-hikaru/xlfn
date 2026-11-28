@@ -227,7 +227,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                         })
                         .map_err(crate::lifecycle::lifecycle_access_error)
                 }))
-                .map_err(|_| crate::XllError::Panic)
+                .map_err(|_| crate::XllError::PANIC)
                 .and_then(|result| result)
                 .and_then(|result| result);
                 if let Err(error) = quiesce {
@@ -240,7 +240,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                 }
                 let addin = Self::shared(deps, generation_id, generation.shared_state);
                 if catch_no_unwind(AssertUnwindSafe(|| drop(generation.layers))).is_err() {
-                    return Err(AddinQuiesceFailure::Quiesce(crate::XllError::Panic));
+                    return Err(AddinQuiesceFailure::Quiesce(crate::XllError::PANIC));
                 }
                 Ok(addin)
             }
@@ -253,7 +253,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                         })
                         .map_err(crate::lifecycle::lifecycle_access_error)
                 }))
-                .map_err(|_| crate::XllError::Panic)
+                .map_err(|_| crate::XllError::PANIC)
                 .and_then(|result| result)
                 .and_then(|result| result);
                 if let Err(error) = quiesce {
@@ -271,7 +271,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                 }
                 let addin = Self::shared(deps, generation_id, shared_state);
                 if catch_no_unwind(AssertUnwindSafe(|| drop(layers))).is_err() {
-                    return Err(AddinQuiesceFailure::Quiesce(crate::XllError::Panic));
+                    return Err(AddinQuiesceFailure::Quiesce(crate::XllError::PANIC));
                 }
                 Ok(addin)
             }
@@ -304,13 +304,13 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
             report.push(
                 "Addin::cleanup",
                 crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                crate::XllError::Panic,
+                crate::XllError::PANIC,
             );
             self.quarantine_shared_state(
                 shared_state,
                 crate::runtime_components::QuarantineReason::AddinCleanupPanicked,
             );
-            return Err(LifecycleFailure::retain(crate::XllError::Panic, installed));
+            return Err(LifecycleFailure::retain(crate::XllError::PANIC, installed));
         }
 
         let taken = match installed {
@@ -351,7 +351,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
             report.push(
                 "Addin::SharedState::drop",
                 crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                crate::XllError::Panic,
+                crate::XllError::PANIC,
             );
         }
         if !shared_state_dropped {
@@ -1697,7 +1697,7 @@ mod tests {
         RECLAIM_FAULT.with(|fault| match fault.get() {
             Some(ReclaimFault::Diagnostics) if !rtd => {
                 fault.set(None);
-                Err(ReclaimFailure::Diagnostics(crate::XllError::Closing))
+                Err(ReclaimFailure::Diagnostics(crate::XllError::CLOSING))
             }
             Some(point) if rtd => {
                 fault.set(None);
@@ -1868,11 +1868,10 @@ mod tests {
             };
             assert_eq!(boundary, expected_boundary);
             match expected_id {
-                Some(expected) => assert!(matches!(
-                    error,
-                    crate::XllError::Internal { diagnostic_id, .. } if diagnostic_id == expected
+                Some(expected) => assert!(matches!(crate::error::construct::view(&(error)),
+                    crate::error::construct::ErrorView::Internal { diagnostic_id, .. } if diagnostic_id == expected
                 )),
-                None => assert!(matches!(error, crate::XllError::Closing)),
+                None => assert!(matches!(error, __err if __err.is_closing())),
             }
             RECLAIM_FAULT.with(|fault| assert!(fault.get().is_none()));
             assert_eq!(
@@ -1930,7 +1929,7 @@ mod tests {
             SERVICE_SEAL_FAULT.with(|fault| {
                 if fault.get() == Some(point) {
                     fault.set(None);
-                    Err(crate::XllError::Closing)
+                    Err(crate::XllError::CLOSING)
                 } else {
                     Ok(())
                 }
@@ -1979,7 +1978,7 @@ mod tests {
 
         fn quiesce(_: &mut ObservedState, failure: &mut Failure) -> Result<(), Self::Error> {
             if *failure == Failure::Quiesce {
-                Err(crate::XllError::Closing)
+                Err(crate::XllError::CLOSING)
             } else {
                 Ok(())
             }
@@ -2028,7 +2027,7 @@ mod tests {
         let (hazard, boundary, error) = failure.into_diagnostic(context);
         assert_eq!(hazard, expected_hazard);
         assert_eq!(boundary, expected_boundary);
-        assert!(matches!(error, crate::XllError::Closing));
+        assert!(matches!(error, __err if __err.is_closing()));
         SERVICE_SEAL_FAULT.with(|fault| assert!(fault.get().is_none()));
         SERVICE_SEAL_ATTEMPTS.with(|attempts| {
             assert_eq!(

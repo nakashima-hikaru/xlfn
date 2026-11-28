@@ -40,8 +40,8 @@ fn cold_success_trace() {
 fn cold_failure_trace() {
     let runtime = FormulaHandleService::new(8);
     let key = test_topic_key("h4-cold-failure");
-    let result = runtime.prepare_observed(key, create_value, |_, _| Err(XllError::Panic));
-    assert!(matches!(result, Err(XllError::Panic)));
+    let result = runtime.prepare_observed(key, create_value, |_, _| Err(XllError::PANIC));
+    assert!(matches!(result, Err(__err) if __err.is_panic()));
     runtime.seal().map(|_| ()).expect("cold failure closes");
     write_trace(&runtime, "rust-handle-cold-observe-failure.json");
 }
@@ -72,8 +72,7 @@ fn warm_disconnect_trace() {
     release_tx.send(()).expect("release warm reader");
     assert!(matches!(
         worker.join().expect("warm reader panicked"),
-        Err(XllError::StaleHandle)
-    ));
+        Err(__err) if __err.is_stale_handle()));
     runtime.seal().map(|_| ()).expect("disconnect trace closes");
     write_trace(&runtime, "rust-handle-warm-disconnect.json");
 }
@@ -104,8 +103,7 @@ fn warm_generation_termination_trace() {
     release_tx.send(()).expect("release warm reader");
     assert!(matches!(
         worker.join().expect("warm reader panicked"),
-        Err(XllError::StaleHandle)
-    ));
+        Err(__err) if __err.is_stale_handle()));
     runtime
         .seal()
         .map(|_| ())
@@ -148,8 +146,7 @@ fn same_key_aba_trace() {
     release_tx.send(()).expect("release old warm reader");
     assert!(matches!(
         worker.join().expect("old warm reader panicked"),
-        Err(XllError::StaleHandle)
-    ));
+        Err(__err) if __err.is_stale_handle()));
     runtime.seal().map(|_| ()).expect("ABA trace closes");
     write_trace(&runtime, "rust-handle-same-key-aba.json");
 }
@@ -194,8 +191,7 @@ fn warm_close_trace() {
         .expect("release close seal test hook");
     assert!(matches!(
         worker.join().expect("warm reader panicked"),
-        Err(XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     close_thread
         .join()
         .expect("close thread panicked")

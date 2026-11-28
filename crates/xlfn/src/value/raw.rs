@@ -201,7 +201,7 @@ impl<'call> XlValueRef<'call> {
             let code = unsafe { self.raw.value.error };
             return ExcelError::from_code(code).map_or_else(
                 || XllError::input(argument, InputError::Malformed("unknown error code")),
-                XllError::ExcelValue,
+                XllError::excel_value,
             );
         }
         XllError::input(
@@ -506,10 +506,7 @@ pub(super) fn checked_grid_cell<'call>(
     cell: &'call XLOPER12,
     argument: &'static str,
 ) -> XllResult<XlValueRef<'call>> {
-    XlValueRef::from_array_cell(cell).map_err(|error| match error {
-        XllError::Input { reason, .. } => XllError::Input { argument, reason },
-        other => other,
-    })
+    XlValueRef::from_array_cell(cell).map_err(|error| error.with_argument(argument))
 }
 
 #[repr(u8)]
@@ -690,10 +687,10 @@ mod tests {
                     XlArrayRef::from_excel_with_identity(value, "values", encoder).map(drop)
                 }
             });
-            assert!(matches!(result, Err(XllError::Input {
+            assert!(matches!((result).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::Input {
                 argument: "values",
                 reason: InputError::TooLarge { limit: super::super::MAX_ARRAY_BYTES, actual },
-            }) if actual > super::super::MAX_ARRAY_BYTES));
+            }) if *actual > super::super::MAX_ARRAY_BYTES));
             assert!(builder.finish().is_err());
         }
     }
@@ -757,9 +754,8 @@ mod tests {
 
         assert_eq!(left, right);
         for (value, expected) in [(left, "left"), (right, "right")] {
-            assert!(matches!(
-                value.try_to_string(),
-                Err(XllError::Input {
+            assert!(matches!((value.try_to_string()).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
                     argument,
                     reason: InputError::InvalidUtf16,
                 }) if argument == expected
@@ -859,9 +855,8 @@ mod tests {
             .cast();
         // SAFETY: the misaligned root must be rejected without accessing it.
         let error = unsafe { XlValueRef::from_raw(pointer) }.unwrap_err();
-        assert!(matches!(
-            error,
-            XllError::Input {
+        assert!(matches!(crate::error::construct::view(&(error)),
+            crate::error::construct::ErrorView::Input {
                 reason: InputError::Malformed("misaligned value pointer"),
                 ..
             }
@@ -875,9 +870,8 @@ mod tests {
             xltype: XLTYPE_STR,
         };
         let value = XlValueRef::from_array_cell(&raw).unwrap();
-        assert!(matches!(
-            value.utf16("label"),
-            Err(XllError::Input {
+        assert!(matches!((value.utf16("label")).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 argument: "label",
                 reason: InputError::Malformed("misaligned string pointer"),
             })
@@ -925,12 +919,11 @@ mod tests {
             };
             let value = XlValueRef::from_array_cell(&raw).unwrap();
             let result = XlArrayRef::from_excel(value, "values");
-            assert!(matches!(
-                result,
-                Err(XllError::Input {
+            assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
                     argument: "values",
                     reason: InputError::Malformed(reason),
-                }) if reason == expected
+                }) if *reason == expected
             ));
         }
     }
@@ -961,9 +954,8 @@ mod tests {
             array.cells().next().unwrap().value_type(),
             XlValueType::String
         );
-        assert!(matches!(
-            array.get(0, 0).unwrap().as_str().unwrap().try_to_string(),
-            Err(XllError::Input {
+        assert!(matches!((array.get(0, 0).unwrap().as_str().unwrap().try_to_string()).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::InvalidUtf16,
                 ..
             })

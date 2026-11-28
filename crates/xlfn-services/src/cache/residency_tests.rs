@@ -328,7 +328,7 @@ fn failed_and_panicking_initializers_do_not_leave_pending_flights() {
     let cache = CalculationCache::<u32, u32>::new(crate::cache::CacheBudget::weight_units(16));
     assert!(
         cache
-            .get_or_try_insert_weighted(1, |_| 1, || Err(XllError::Closing))
+            .get_or_try_insert_weighted(1, |_| 1, || Err(XllError::CLOSING))
             .is_err()
     );
     assert!(

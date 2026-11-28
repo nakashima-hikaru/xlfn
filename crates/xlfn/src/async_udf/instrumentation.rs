@@ -104,7 +104,7 @@ fn call_outcome(completion: &AsyncCompletion, duration: std::time::Duration) -> 
         OwnedCompletionOutcome::Success => UdfCompletionOutcome::Success,
         OwnedCompletionOutcome::Error(error) => UdfCompletionOutcome::from_error(error),
         OwnedCompletionOutcome::Panic(_) => {
-            UdfCompletionOutcome::from_error(&crate::XllError::Panic)
+            UdfCompletionOutcome::from_error(&crate::XllError::PANIC)
         }
         OwnedCompletionOutcome::Cancelled => UdfCompletionOutcome::Cancelled,
     };
@@ -272,11 +272,8 @@ mod tests {
         let (_source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
         let (sender, receiver) = std::sync::mpsc::channel();
         let observation = observation(sender, token);
-        let computation_error = XllError::Native {
-            code: 73,
-            message: "computation".to_owned(),
-        };
-        let delivery_error = XllError::Panic;
+        let computation_error = XllError::native(73, "computation".to_owned());
+        let delivery_error = XllError::PANIC;
         let completion = AsyncCompletion {
             completion: OwnedCompletionOutcome::Error(computation_error),
             delivery: OwnedDeliveryOutcome::Failed(delivery_error),

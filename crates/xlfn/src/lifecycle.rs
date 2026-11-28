@@ -758,7 +758,7 @@ mod tests {
             if PANIC {
                 panic!("injected application initialization panic");
             }
-            Err(XllError::Overloaded)
+            Err(XllError::OVERLOADED)
         }
     }
 
@@ -798,7 +798,7 @@ mod tests {
             match initialize_addin::<InitializationFailure<PANIC>>(context, transaction) {
                 Ok(_) => panic!("injected initialization failure must fail"),
                 Err(failure) => {
-                    assert!(matches!(failure.recover(&lifecycle), XllError::Overloaded));
+                    assert!(matches!(failure.recover(&lifecycle), __err if __err.is_overloaded()));
                 }
             }
         }));
@@ -1036,7 +1036,7 @@ mod tests {
 
             crate::diagnostics::reset_diagnostic_router().unwrap();
             crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
-            crate::diagnostics::report_no_unwind("lean_checker_trace", &XllError::Panic);
+            crate::diagnostics::report_no_unwind("lean_checker_trace", &XllError::PANIC);
 
             let pointer = crate::return_abi::ffi_boundary(runtime, || Ok::<f64, XllError>(1.0));
             // SAFETY: `pointer` is the live DLL-owned block returned by the
@@ -1215,7 +1215,7 @@ mod tests {
         runtime.finish_open(opening, Vec::new()).unwrap();
         crate::diagnostics::reset_diagnostic_router().unwrap();
         crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
-        crate::diagnostics::report_no_unwind("composition_checker_trace", &XllError::Panic);
+        crate::diagnostics::report_no_unwind("composition_checker_trace", &XllError::PANIC);
 
         assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
         let trace = runtime.composition_trace_json();
@@ -1279,7 +1279,7 @@ mod tests {
             let opening = runtime.publish(opening, (), ());
             runtime.finish_open(opening, Vec::new()).unwrap();
             crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
-            crate::diagnostics::report_no_unwind(label, &XllError::Panic);
+            crate::diagnostics::report_no_unwind(label, &XllError::PANIC);
             assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
         }
 
@@ -1307,7 +1307,7 @@ mod tests {
         runtime.finish_open(opening, Vec::new()).unwrap();
         crate::diagnostics::reset_diagnostic_router().unwrap();
         crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
-        crate::diagnostics::report_no_unwind("composition_takeover_trace", &XllError::Panic);
+        crate::diagnostics::report_no_unwind("composition_takeover_trace", &XllError::PANIC);
 
         let first = runtime.begin_final_removal().unwrap();
         drop(first);
@@ -1349,7 +1349,7 @@ mod tests {
         );
         assert!(matches!(
             uncommitted.finish_open(opening, Vec::new()),
-            Err(XllError::Closing)
+            Err(__err) if __err.is_closing()
         ));
         owner_rx
             .recv_timeout(std::time::Duration::from_secs(5))

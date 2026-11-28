@@ -123,7 +123,7 @@ fn miri_joined_worker_panic_returns_its_quota() {
         handle: std::thread::spawn(|| panic!("worker panicked")),
     };
     assert!(ChannelBudget::try_worker(&budget).is_err());
-    assert!(matches!(started.join(), Err(XllError::Panic)));
+    assert!(matches!(started.join(), Err(__err) if __err.is_panic()));
     drop(ChannelBudget::try_worker(&budget).unwrap());
 }
 
@@ -142,7 +142,7 @@ fn miri_running_multiplex_worker_registers_without_relocking_worker_state() {
         loop {
             match context.recv_timeout(DEADLINE) {
                 Ok(_) => {}
-                Err(XllError::Closing) => return Ok(()),
+                Err(__err) if __err.is_closing() => return Ok(()),
                 Err(error) => return Err(error),
             }
         }
@@ -212,8 +212,7 @@ fn miri_disconnect_unwind_retries_the_sink_barrier_before_unsubscribing() {
                 state.active.contains_key(&id) && state.events.len() == 1 && state.removals == 0;
             let slot_retained = matches!(
                 ChannelBudget::try_subscription(&source.budget),
-                Err(XllError::Overloaded)
-            );
+                Err(__err) if __err.is_overloaded());
             (
                 (retry_started, sink_present, still_subscribed, slot_retained),
                 disconnect,
@@ -316,9 +315,9 @@ fn run_forwarder(
 ) -> XllResult<()> {
     loop {
         match context.recv_timeout(DEADLINE) {
-            Ok(Some(event)) => events.send(event).map_err(|_| XllError::Closing)?,
+            Ok(Some(event)) => events.send(event).map_err(|_| XllError::CLOSING)?,
             Ok(None) => {}
-            Err(XllError::Closing) => return Ok(()),
+            Err(__err) if __err.is_closing() => return Ok(()),
             Err(error) => return Err(error),
         }
     }
@@ -350,7 +349,7 @@ fn concurrent_shutdown_retains_worker_capacity_until_join_finishes() {
         while !context.is_closed() {
             match context.recv_timeout(DEADLINE) {
                 Ok(_) => {}
-                Err(XllError::Closing) => break,
+                Err(__err) if __err.is_closing() => break,
                 Err(error) => return Err(error),
             }
         }
@@ -381,8 +380,7 @@ fn concurrent_shutdown_retains_worker_capacity_until_join_finishes() {
         });
         assert!(matches!(
             ChannelBudget::try_worker(&budget),
-            Err(XllError::Overloaded)
-        ));
+            Err(__err) if __err.is_overloaded()));
         assert!(matches!(
             finished_rx.try_recv(),
             Err(mpsc::TryRecvError::Empty)
@@ -415,8 +413,8 @@ fn unstarted_capture_panic_is_cached_after_single_disposal() {
         drop(capture);
         Ok(())
     });
-    assert!(matches!(source.shutdown_and_wait(), Err(XllError::Panic)));
-    assert!(matches!(source.shutdown_and_wait(), Err(XllError::Panic)));
+    assert!(matches!(source.shutdown_and_wait(), Err(__err) if __err.is_panic()));
+    assert!(matches!(source.shutdown_and_wait(), Err(__err) if __err.is_panic()));
     drop(source);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
@@ -487,7 +485,7 @@ fn one_source_worker_delivers_updates_to_2048_subscriptions() {
                     .try_send(topic.part(0).unwrap().parse::<i32>().unwrap())
                     .map_err(RtdSendError::into_error)?,
                 Ok(_) => {}
-                Err(XllError::Closing) => return Ok(()),
+                Err(__err) if __err.is_closing() => return Ok(()),
                 Err(error) => return Err(error),
             }
         }
@@ -562,7 +560,7 @@ fn stalled_source_does_not_block_disconnect_and_retains_control_capacity_until_c
     assert_eq!(shared.state.lock().removals, 1);
     assert!(matches!(
         connect(&runtime, &server, &source, 2, "same-topic"),
-        Err(XllError::Overloaded),
+        Err(__err) if __err.is_overloaded(),
     ));
 
     read_events.store(true, Ordering::Release);
@@ -624,7 +622,7 @@ fn completion_and_failures_close_all_topics_and_apply_terminal_policy() {
             }
             match outcome {
                 0 => Ok(()),
-                1 => Err(XllError::Overloaded),
+                1 => Err(XllError::OVERLOADED),
                 _ => panic!("injected multiplexed producer panic"),
             }
         })
@@ -655,7 +653,7 @@ fn completion_and_failures_close_all_topics_and_apply_terminal_policy() {
         assert!(shared.closed.load(Ordering::Acquire));
         assert!(matches!(
             connect(&runtime, &server, &source, 3, "after-completion"),
-            Err(XllError::Closing),
+            Err(__err) if __err.is_closing(),
         ));
         runtime.close().unwrap();
     }
@@ -674,7 +672,7 @@ fn rejected_topic_validation_does_not_start_worker_or_consume_source_slot() {
         RtdSourceLimits::standard().with_max_subscriptions(RtdCapacity::disabled_if_zero(1)),
     )
     .with_topic_validator(|topic| match topic.part(0) {
-        Some("reject") => Err(XllError::Overloaded),
+        Some("reject") => Err(XllError::OVERLOADED),
         Some("panic") => panic!("injected topic validator panic"),
         _ => Ok(()),
     });
@@ -682,7 +680,7 @@ fn rejected_topic_validation_does_not_start_worker_or_consume_source_slot() {
     let server = runtime.register_test_server(1);
     assert!(matches!(
         connect(&runtime, &server, &source, 1, "reject"),
-        Err(XllError::Overloaded)
+        Err(__err) if __err.is_overloaded()
     ));
     let panicked = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
         connect(&runtime, &server, &source, 2, "panic")
@@ -752,14 +750,14 @@ fn runtime_worker_limit_is_shared_by_sources_and_released_only_after_join() {
     first_events_rx.recv_timeout(DEADLINE).unwrap();
     assert!(matches!(
         connect(&runtime, &server, &second, 2, "second"),
-        Err(XllError::Overloaded)
+        Err(__err) if __err.is_overloaded()
     ));
     assert_eq!(starts.load(Ordering::SeqCst), 0);
     server.disconnect(TopicId(1)).unwrap();
     first_events_rx.recv_timeout(DEADLINE).unwrap();
     assert!(matches!(
         connect(&runtime, &server, &second, 2, "second"),
-        Err(XllError::Overloaded)
+        Err(__err) if __err.is_overloaded()
     ));
 
     // A source-level join releases the shared worker reservation; per-topic
@@ -794,14 +792,14 @@ fn source_join_preflight_failure_retains_worker_owner_and_is_terminal_for_close(
     runtime
         .fail_source_shutdown_preflight
         .store(true, Ordering::Release);
-    assert!(matches!(runtime.close(), Err(XllError::Overloaded)));
+    assert!(matches!(runtime.close(), Err(__err) if __err.is_overloaded()));
     assert!(sender.is_closed());
     assert!(matches!(
         runtime.termination_coordinator.phase(),
         crate::subscription::termination::TerminationPhase::Failed,
     ));
     assert!(ChannelBudget::try_worker(&runtime.services.channel_budget).is_err());
-    assert!(matches!(runtime.close(), Err(XllError::Overloaded)));
+    assert!(matches!(runtime.close(), Err(__err) if __err.is_overloaded()));
     assert!(ChannelBudget::try_worker(&runtime.services.channel_budget).is_err());
 
     // The unused dispatch closure did not consume the source's unique worker
@@ -841,7 +839,7 @@ fn close_racing_admitted_setup_prevents_late_worker_start_and_revokes_partial_ch
     entered_rx.recv_timeout(DEADLINE).unwrap();
     runtime.close().unwrap();
     assert!(stopped_rx.recv_timeout(DEADLINE).unwrap());
-    assert!(matches!(connecting.join().unwrap(), Err(XllError::Closing)));
+    assert!(matches!(connecting.join().unwrap(), Err(__err) if __err.is_closing()));
     assert_eq!(starts.load(Ordering::SeqCst), 0);
     assert_eq!(runtime.services.active_quota.used(), 0);
     drop(ChannelBudget::try_worker(&runtime.services.channel_budget).unwrap());
@@ -885,7 +883,7 @@ fn blocking_and_multiplexed_adapters_share_the_runtime_worker_budget() {
     let blocking_sender = blocking_rx.recv_timeout(DEADLINE).unwrap();
     assert!(matches!(
         connect(&runtime, &server, &multiplexed, 2, "multiplexed"),
-        Err(XllError::Overloaded),
+        Err(__err) if __err.is_overloaded(),
     ));
     server.disconnect(TopicId(1)).unwrap();
     assert!(blocking_sender.is_closed());
@@ -893,7 +891,7 @@ fn blocking_and_multiplexed_adapters_share_the_runtime_worker_budget() {
     events_rx.recv_timeout(DEADLINE).unwrap();
     assert!(matches!(
         connect(&runtime, &server, &blocking, 3, "blocking-again"),
-        Err(XllError::Overloaded),
+        Err(__err) if __err.is_overloaded(),
     ));
     runtime.close().unwrap();
 }
@@ -912,7 +910,7 @@ fn first_registration_exists_before_an_immediately_completing_producer_runs() {
             observed_tx.send(registered).unwrap();
             match outcome {
                 0 => Ok(()),
-                1 => Err(XllError::Overloaded),
+                1 => Err(XllError::OVERLOADED),
                 _ => panic!("immediate source initialization failure"),
             }
         })
@@ -976,7 +974,7 @@ fn initial_worker_budget_rejection_returns_the_only_source_slot_for_retry() {
     first_events_rx.recv_timeout(DEADLINE).unwrap();
     assert!(matches!(
         connect(&runtime, &server, &second, 2, "second"),
-        Err(XllError::Overloaded)
+        Err(__err) if __err.is_overloaded()
     ));
     assert!(second_shared.state.lock().active.is_empty());
     assert!(second_shared.state.lock().events.is_empty());
@@ -1036,7 +1034,7 @@ fn spawn_failure_preserves_capture_until_disposal_outside_source_mutexes() {
         crate::subscription::tests::connected_sink::<i32>(None, "spawn-failure");
     source.fail_spawn.store(true, Ordering::Release);
     let result = source.subscribe(&RtdTopic::single("spawn-failure").unwrap(), sink);
-    assert!(matches!(result, Err(XllError::Native { .. })));
+    assert!(matches!((result).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::Native { .. })));
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     assert!(matches!(*source.worker.state.lock(), Worker::Unstarted(_)));
     assert!(source.worker.shared.state.lock().active.is_empty());
@@ -1070,7 +1068,7 @@ fn miri_multiplex_spawn_failure_retries_the_same_job_without_a_stale_event() {
         crate::subscription::tests::connected_sink::<i32>(None, "multiplex-retry");
     source.fail_spawn.store(true, Ordering::Relaxed);
     let first = source.subscribe(&RtdTopic::single("abandoned").unwrap(), sink.clone());
-    assert!(matches!(first, Err(XllError::Native { .. })));
+    assert!(matches!((first).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::Native { .. })));
     assert!(!source.worker.shared.closed.load(Ordering::Acquire));
     {
         let state = source.worker.shared.state.lock();

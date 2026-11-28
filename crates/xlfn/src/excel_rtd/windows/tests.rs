@@ -1198,8 +1198,7 @@ fn failed_server_start_is_retired_without_server_terminate_before_retry() {
     // until the failed COM method has left its server admission.
     assert!(matches!(
         ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))),
-        Err(XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     assert_eq!(callback_drops.load(Ordering::Acquire), 0);
     drop(operation);
 
@@ -2312,7 +2311,7 @@ fn notification_worker_is_drained_before_callback_retirement() {
         let _retain_until_worker_exit = &worker_tail;
         let _operation = operations
             .enter_notification()
-            .ok_or(crate::XllError::Closing)?;
+            .ok_or(crate::XllError::CLOSING)?;
         entered.send(()).unwrap();
         wait.recv_timeout(Duration::from_secs(2)).unwrap();
         Ok(())
@@ -2750,7 +2749,7 @@ fn direct_refresh_conversion_failure_keeps_outputs_empty_after_partial_fill() {
 fn topic_key_limits_reject_extreme_bounds_and_oversized_strings() {
     assert!(matches!(
         checked_topic_part_count(1, 0),
-        Err(XllError::InvalidHandle)
+        Err(__err) if __err.is_invalid_handle()
     ));
     assert_eq!(
         checked_topic_part_count(0, 252).unwrap(),
@@ -4350,7 +4349,7 @@ fn sta_subscription_shutdown_dispatches_during_each_disconnect_barrier() {
         }
         fn disconnect_and_wait(self) -> XllResult<()> {
             let _ = self.request.send(());
-            crate::panic_boundary::contain_panic(self.worker.join()).map_err(|_| XllError::Panic)
+            crate::panic_boundary::contain_panic(self.worker.join()).map_err(|_| XllError::PANIC)
         }
     }
     struct ComSource(u32);
@@ -4468,7 +4467,7 @@ fn sta_failed_connect_dispatches_during_rollback_and_rejected_install() {
         fn disconnect_and_wait(self) -> XllResult<()> {
             let _ = self.request.send(());
             let result = crate::panic_boundary::contain_panic(self.worker.join())
-                .map_err(|_| XllError::Panic);
+                .map_err(|_| XllError::PANIC);
             self.disconnected.store(true, Ordering::Release);
             result
         }
@@ -5161,7 +5160,7 @@ fn temporary_registration_rejects_contention_before_entering_host_callbacks() {
     });
     discard_unpublished_server(ensured.active.pointer, true);
     drop(ensured);
-    assert!(matches!(early, Ok(Err(XllError::ReentrantCall))));
+    assert!(matches!(early, Ok(Err(__err)) if __err.is_reentrant_call()));
 }
 
 #[test]
@@ -5421,9 +5420,8 @@ fn registration_mutex_timeout_is_bounded_and_does_not_release_other_owner() {
     let waiter = thread::spawn(move || {
         let started = std::time::Instant::now();
         let result = CrossProcessRegistrationGuard::acquire_named_with_timeout(&waiter_name, 20);
-        assert!(matches!(
-            result,
-            Err(XllError::WindowsApi {
+        assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::WindowsApi {
                 function: "CoWaitForMultipleHandles(RTD registration mutex)",
                 code: crate::win32::RPC_S_CALLPENDING,
                 ..
@@ -5730,7 +5728,7 @@ fn foreign_subscription_key_is_rejected_before_server_allocation() {
     let host = crate::host_api::ExcelHost::new(&callbacks);
     assert!(matches!(
         super::excel_rtd::observe_subscription(&subscriptions, &foreign_key, host),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
     assert!(ACTIVE_SERVER.lock().is_none());
     shutdown_subscriptions(&subscriptions).unwrap();
@@ -5754,8 +5752,7 @@ fn observation_admission_detects_reentrant_failed_start_recovery() {
     drop(start);
     assert!(matches!(
         ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))),
-        Err(XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     // Recovery must return rather than wait for this same thread's observation.
     drop(observation);
     assert!(ACTIVE_SERVER.lock().is_none());

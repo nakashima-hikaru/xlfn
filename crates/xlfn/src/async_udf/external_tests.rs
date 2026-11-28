@@ -25,7 +25,7 @@ impl AsyncExecutor for HoldingExecutor {
     }
     fn reserve(&self) -> XllResult<()> {
         if self.0.reject.load(Ordering::Relaxed) {
-            Err(XllError::Overloaded)
+            Err(XllError::OVERLOADED)
         } else {
             Ok(())
         }
@@ -43,7 +43,7 @@ impl AsyncExecutor for HoldingExecutor {
         );
         self.0.stops.fetch_add(1, Ordering::Relaxed);
         if self.0.stop_failure.load(Ordering::Relaxed) {
-            Err(XllError::Panic)
+            Err(XllError::PANIC)
         } else {
             Ok(())
         }
@@ -67,8 +67,7 @@ fn external_reservation_rejection_precedes_framework_task_registration() {
         .unwrap();
     assert!(matches!(
         runtime.reserve(CalculationEpoch::INITIAL),
-        Err(XllError::Overloaded)
-    ));
+        Err(__err) if __err.is_overloaded()));
     assert_eq!(runtime.registry().active_tasks.load(Ordering::Acquire), 0);
     assert_eq!(runtime.registry().next_task_id(), 1);
     assert!(runtime.close().unwrap().issues.is_empty());
@@ -124,12 +123,11 @@ fn external_shutdown_failure_withholds_stop_certificate_and_can_retry() {
     runtime
         .start(HoldingExecutor(Arc::clone(&state)), AsyncTaskLimit::DEFAULT)
         .unwrap();
-    assert!(matches!(runtime.close(), Err(XllError::Panic)));
+    assert!(matches!(runtime.close(), Err(__err) if __err.is_panic()));
     assert!(!runtime.is_stopped());
     assert!(matches!(
         runtime.reserve(runtime.current_epoch()),
-        Err(XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     assert!(!runtime.advance_calculation());
     state.stop_failure.store(false, Ordering::Relaxed);
     assert!(runtime.close().is_ok());
@@ -350,7 +348,7 @@ fn registry_task_limit_is_atomic_across_external_executor_reservations() {
         .into_iter()
         .map(|thread| thread.join().unwrap())
         .filter(|result| {
-            assert!(result.is_ok() || matches!(result, Err(XllError::Overloaded)));
+            assert!(result.is_ok() || matches!(result, Err(__err) if __err.is_overloaded()));
             result.is_ok()
         })
         .count();

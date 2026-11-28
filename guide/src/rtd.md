@@ -210,7 +210,7 @@ topic updates awaiting refresh, and 4,096 distinct live source identities.
 Configure limits during `Addin::open` with
 `RuntimeConfig::new().with_rtd(RtdConfig::new().with_limits(limits))`.
 Use `RtdCapacity::bounded` or `RtdCapacity::disabled` for each resource class;
-zero never means unlimited. Exceeding a limit returns `XllError::Overloaded`
+zero never means unlimited. Exceeding a limit returns `XllError::OVERLOADED`
 (or a topic input error for an invalid topic).
 
 Adapter buffering and worker limits are separate from dirty refresh topics:
@@ -339,7 +339,7 @@ are bounded by the runtime's active-stream limit; a stalled cleanup delays later
 cleanups. Runtime close requests every shared source to stop, finishes
 subscription cleanup, and joins shared source workers before stopping the
 publisher or reclaiming sources. A source context's `recv_timeout` wakes with
-`XllError::Closing` after stop. Shared jobs must observe cancellation and return;
+`XllError::CLOSING` after stop. Shared jobs must observe cancellation and return;
 arbitrarily blocked user I/O cannot be forcibly terminated safely.
 Cleanup failures are diagnosed and retained for shutdown. The
 `RtdSubscription::disconnect_and_wait` lifetime barrier remains synchronous.

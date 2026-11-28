@@ -102,7 +102,7 @@ impl HandleReadDomain {
                 _permit: permit,
                 _maintenance: BorrowedReaderMaintenance(self),
             })
-            .map_err(|_| XllError::Closing)
+            .map_err(|_| XllError::CLOSING)
     }
 
     /// Enters the handle read domain and acquires an owned reader permit.
@@ -125,7 +125,7 @@ impl HandleReadDomain {
                     _permit: permit,
                     maintenance: OwnedReaderMaintenance(NonNull::from(self)),
                 })
-                .map_err(|_| XllError::Closing)
+                .map_err(|_| XllError::CLOSING)
         }
     }
 

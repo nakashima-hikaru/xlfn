@@ -90,7 +90,7 @@ impl<F: Future, C: PanicContext> Future for NoUnwindFuture<F, C> {
 impl<F, C: PanicContext> Drop for NoUnwindFuture<F, C> {
     fn drop(&mut self) {
         if self.destroy_with_message().is_err() {
-            crate::diagnostics::report_no_unwind(self.context.udf_id(), &crate::XllError::Panic);
+            crate::diagnostics::report_no_unwind(self.context.udf_id(), &crate::XllError::PANIC);
         }
     }
 }

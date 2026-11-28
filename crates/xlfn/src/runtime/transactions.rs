@@ -70,7 +70,7 @@ where
         }
     };
     if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
-        return Err(transaction.failure(XllError::Closing));
+        return Err(transaction.failure(XllError::CLOSING));
     }
     #[cfg(feature = "rtd")]
     let Some(generation) = deps.protocol_generation() else {
@@ -92,7 +92,7 @@ where
     );
     let transaction = initialize_addin::<A>(context, transaction)?;
     if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
-        return Err(transaction.failure(XllError::Closing));
+        return Err(transaction.failure(XllError::CLOSING));
     }
     transaction.register_prepared_host(registrar, &prepared_set)
 }
@@ -119,7 +119,7 @@ impl<'runtime, A: Addin> OpeningTxn<'runtime, A, PreparedGeneration<A>> {
             }
         }
         if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
-            return Err(transaction.failure(XllError::Closing));
+            return Err(transaction.failure(XllError::CLOSING));
         }
         let registration_result = {
             let host = RegistrationHost::new(transaction.callbacks_mut());
@@ -136,7 +136,7 @@ impl<'runtime, A: Addin> OpeningTxn<'runtime, A, PreparedGeneration<A>> {
         // state. Either operation can still lose to a nested close.
         transaction.retain_journal(registrations.take_journal());
         if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
-            return Err(transaction.failure(XllError::Closing));
+            return Err(transaction.failure(XllError::CLOSING));
         }
         Ok((transaction, registrations))
     }
@@ -240,7 +240,7 @@ where
     let success = match close_result {
         Ok(success) => success,
         Err(_) => {
-            let error = XllError::Panic;
+            let error = XllError::PANIC;
             report_boundary_error("xlAutoRemove boundary", &error);
             quarantine_runtime(runtime);
             return 1;
@@ -431,7 +431,7 @@ where
         let host = RegistrationHost::new(callbacks);
         shutdown_deps.host().cleanup_registrations(&host)
     }))
-    .map_err(|_| XllError::Panic)
+    .map_err(|_| XllError::PANIC)
     .and_then(std::convert::identity);
     match cleanup {
         Ok(outcome) => {

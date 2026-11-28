@@ -12,9 +12,7 @@ pub(crate) fn validate_number(value: f64) -> XllResult<f64> {
     if value.is_finite() {
         Ok(value)
     } else {
-        Err(XllError::Domain {
-            code: DomainErrorCode::InvalidInput,
-        })
+        Err(XllError::domain(DomainErrorCode::InvalidInput))
     }
 }
 

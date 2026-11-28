@@ -6,10 +6,10 @@ struct CustomRate(f64);
 
 impl<'call> FromExcel<'call> for CustomRate {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        value.as_f64().map(Self).map_err(|error| match error {
-            XllError::Input { reason, .. } => XllError::Input { argument, reason },
-            other => other,
-        })
+        value
+            .as_f64()
+            .map(Self)
+            .map_err(|error| error.with_argument(argument))
     }
 }
 

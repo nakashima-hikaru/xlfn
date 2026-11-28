@@ -93,7 +93,7 @@ unsafe fn run_async_boundary<A: crate::Addin>(
     }));
 
     if result.is_err() {
-        crate::diagnostics::report_no_unwind(udf_id, &XllError::Panic);
+        crate::diagnostics::report_no_unwind(udf_id, &XllError::PANIC);
     }
 
     drop(call);
@@ -129,7 +129,7 @@ unsafe fn reject_async_admission(
         );
     }));
     if result.is_err() {
-        crate::diagnostics::report_no_unwind(udf_id, &XllError::Panic);
+        crate::diagnostics::report_no_unwind(udf_id, &XllError::PANIC);
     }
 }
 
@@ -305,7 +305,7 @@ pub(super) fn report_panic(
             message,
         );
     } else {
-        crate::diagnostics::report_no_unwind(udf_id, &XllError::Panic);
+        crate::diagnostics::report_no_unwind(udf_id, &XllError::PANIC);
     }
 }
 
@@ -548,7 +548,7 @@ mod numeric_launch_tests {
                     handle,
                     |_, _, _| {
                         first.set(numeric_siblings(runtime));
-                        Err::<std::future::Ready<XllResult<f64>>, _>(XllError::Overloaded)
+                        Err::<std::future::Ready<XllResult<f64>>, _>(XllError::OVERLOADED)
                     },
                 );
             }
@@ -648,7 +648,7 @@ mod numeric_launch_tests {
                     handle,
                     |_, _, _| {
                         first.set(numeric_siblings(runtime));
-                        Err::<UnusedHandleBuilder, _>(XllError::Overloaded)
+                        Err::<UnusedHandleBuilder, _>(XllError::OVERLOADED)
                     },
                 );
             }

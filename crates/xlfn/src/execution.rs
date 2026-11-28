@@ -493,7 +493,7 @@ pub(crate) fn exit_layers<G: UdfLayerGuard>(guards: G, outcome: &CallOutcome<'_>
 }
 
 pub(crate) fn safe_enter<L: UdfLayer>(layer: &L, metadata: &CallMetadata) -> XllResult<L::Guard> {
-    catch_no_unwind(AssertUnwindSafe(|| layer.enter(metadata))).unwrap_or(Err(XllError::Panic))
+    catch_no_unwind(AssertUnwindSafe(|| layer.enter(metadata))).unwrap_or(Err(XllError::PANIC))
 }
 
 pub(crate) fn safe_exit<G: UdfLayerGuard>(guard: G, outcome: &CallOutcome<'_>) {
@@ -620,15 +620,16 @@ impl_udf_layers!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14
 impl_udf_layers!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15; 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15; T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14; T15);
 
 pub(crate) fn classify_error(error: &XllError) -> (UdfErrorKind, Option<i32>) {
-    match error {
-        XllError::Input { .. } => (UdfErrorKind::Input, None),
-        XllError::Domain { .. } => (UdfErrorKind::Domain, None),
-        XllError::Native { code, .. } => (UdfErrorKind::Vendor, Some(*code)),
-        XllError::ExcelValue(_) | XllError::Custom { .. } | XllError::Application { .. } => {
+    use crate::error::construct::{ErrorView, view};
+    match view(error) {
+        ErrorView::Input { .. } => (UdfErrorKind::Input, None),
+        ErrorView::Domain { .. } => (UdfErrorKind::Domain, None),
+        ErrorView::Native { code, .. } => (UdfErrorKind::Vendor, Some(code)),
+        ErrorView::ExcelValue(_) | ErrorView::Custom { .. } | ErrorView::Application { .. } => {
             (UdfErrorKind::ExcelValue, None)
         }
-        XllError::Panic => (UdfErrorKind::Panic, None),
-        XllError::Closing => (UdfErrorKind::Closing, None),
+        ErrorView::Panic => (UdfErrorKind::Panic, None),
+        ErrorView::Closing => (UdfErrorKind::Closing, None),
         _ => (UdfErrorKind::Internal, None),
     }
 }
@@ -713,7 +714,7 @@ mod tests {
     #[test]
     fn intentional_worksheet_errors_are_classified_separately_from_internal_failures() {
         let errors = [
-            XllError::ExcelValue(crate::ExcelError::NotAvailable),
+            XllError::excel_value(crate::ExcelError::NotAvailable),
             XllError::custom(crate::ExcelError::Number, "value outside application range"),
         ];
         for error in &errors {
@@ -723,7 +724,7 @@ mod tests {
             assert_eq!(completion.vendor_code(), None);
         }
         assert_eq!(
-            classify_error(&XllError::Panic),
+            classify_error(&XllError::PANIC),
             (UdfErrorKind::Panic, None)
         );
     }
@@ -759,7 +760,7 @@ mod tests {
         fn enter(&self, _metadata: &CallMetadata) -> XllResult<Self::Guard> {
             self.order.lock().push(self.name);
             if self.reject {
-                Err(XllError::Overloaded)
+                Err(XllError::OVERLOADED)
             } else {
                 Ok(OrderedGuard {
                     name: self.name,
@@ -858,7 +859,7 @@ mod tests {
         );
         assert!(matches!(
             crate::execution::enter_layers(&layers, &metadata(), |err| (err, Duration::ZERO)),
-            Err((XllError::Overloaded, _))
+            Err((error, _)) if error.is_overloaded()
         ));
         assert_eq!(order.lock().as_slice(), ["enter-a", "reject", "exit-a"]);
     }
@@ -889,7 +890,7 @@ mod tests {
                     .lock()
                     .push((self.name, "enter", Duration::ZERO));
                 if self.fail_entry {
-                    Err(XllError::Overloaded)
+                    Err(XllError::OVERLOADED)
                 } else {
                     Ok(Self {
                         events: Arc::clone(&self.events),
@@ -963,7 +964,7 @@ mod tests {
                 Rejection {
                     cause,
                     delivery,
-                    delivery_error: XllError::Closing,
+                    delivery_error: XllError::CLOSING,
                     duration: Duration::from_millis(3),
                 }
             });
@@ -974,10 +975,7 @@ mod tests {
             let outcome = finalized.outcome();
             assert!(matches!(
                 outcome.completion,
-                UdfCompletionOutcome::Error {
-                    error: XllError::Overloaded,
-                    ..
-                }
+                UdfCompletionOutcome::Error { error, .. } if error.is_overloaded()
             ));
             let label = outcome.delivery.trace_label();
             assert_eq!(

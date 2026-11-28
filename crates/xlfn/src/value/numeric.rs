@@ -260,9 +260,8 @@ mod tests {
             // SAFETY: the header is live. Invalid dimensions must be rejected
             // before the declared one-element payload is traversed.
             let result = unsafe { NumericMatrixRef::from_raw(&raw, "observations") };
-            assert!(matches!(
-                result,
-                Err(XllError::Input {
+            assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
                     argument: "observations",
                     ..
                 })
@@ -281,13 +280,13 @@ mod tests {
         };
         // SAFETY: the live header is rejected before its payload is read.
         let error = unsafe { NumericMatrixRef::from_raw(&raw, "observations") }.unwrap_err();
-        assert!(matches!(error, XllError::Input {
+        assert!(matches!(crate::error::construct::view(&(error)), crate::error::construct::ErrorView::Input {
             argument: "observations",
             reason: InputError::TooLarge {
                 limit: super::super::MAX_ARRAY_BYTES,
                 actual,
             },
-        } if actual == usize::try_from((1_u64 << 32) * 8).unwrap_or(usize::MAX)));
+        } if *actual == usize::try_from((1_u64 << 32) * 8).unwrap_or(usize::MAX)));
 
         let over_byte_cap_columns = (super::super::MAX_ARRAY_BYTES / (8192 * 8)) + 1;
         let over_bytes = xlfn_sys::FP12 {
@@ -298,15 +297,14 @@ mod tests {
         // SAFETY: the live header is rejected before its payload is read.
         let byte_error =
             unsafe { NumericMatrixRef::from_raw(&over_bytes, "observations") }.unwrap_err();
-        assert!(matches!(
-            byte_error,
-            XllError::Input {
+        assert!(matches!(crate::error::construct::view(&(byte_error)),
+            crate::error::construct::ErrorView::Input {
                 argument: "observations",
                 reason: InputError::TooLarge {
                     limit: super::super::MAX_ARRAY_BYTES,
                     actual,
                 },
-            } if actual == 8192 * over_byte_cap_columns * 8
+            } if *actual == 8192 * over_byte_cap_columns * 8
         ));
     }
 
@@ -321,9 +319,8 @@ mod tests {
         // SAFETY: the deliberately misaligned pointer must be rejected before
         // the header or payload is accessed.
         let error = unsafe { NumericMatrixRef::from_raw(pointer, "observations") }.unwrap_err();
-        assert!(matches!(
-            error,
-            XllError::Input {
+        assert!(matches!(crate::error::construct::view(&(error)),
+            crate::error::construct::ErrorView::Input {
                 argument: "observations",
                 reason: InputError::Malformed("misaligned numeric matrix pointer"),
             }
@@ -342,9 +339,8 @@ mod tests {
             };
             // SAFETY: the header and its single initialized double are live.
             let result = unsafe { NumericMatrixRef::from_raw(&raw, "matrix") };
-            assert!(matches!(
-                result,
-                Err(XllError::Input {
+            assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
                     argument: "matrix",
                     reason: InputError::NonFinite,
                 })
@@ -378,9 +374,8 @@ mod tests {
                     let result = unsafe {
                         NumericMatrixRef::from_raw(std::ptr::from_ref(&raw).cast(), "matrix")
                     };
-                    assert!(matches!(
-                        result,
-                        Err(XllError::Input {
+                    assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+                        Err(crate::error::construct::ErrorView::Input {
                             argument: "matrix",
                             reason: InputError::NonFinite,
                         })

@@ -66,9 +66,7 @@ impl RtdValue {
 
     pub(crate) fn validate(&self) -> XllResult<()> {
         match self {
-            Self::Number(value) if !value.is_finite() => Err(XllError::Domain {
-                code: crate::error::DomainErrorCode::InvalidInput,
-            }),
+            Self::Number(value) if !value.is_finite() => Err(XllError::domain(crate::error::DomainErrorCode::InvalidInput)),
             Self::String(value) => validate_rtd_string(value),
             _ => Ok(()),
         }
@@ -142,9 +140,7 @@ impl IntoRtdValue for f64 {
         if self.is_finite() {
             Ok(RtdValue::Number(self))
         } else {
-            Err(XllError::Domain {
-                code: crate::error::DomainErrorCode::InvalidInput,
-            })
+            Err(XllError::domain(crate::error::DomainErrorCode::InvalidInput))
         }
     }
 }
@@ -167,9 +163,7 @@ impl IntoRtdValue for i64 {
         if (-EXACT_LIMIT..=EXACT_LIMIT).contains(&self) {
             Ok(RtdValue::Number(self as f64))
         } else {
-            Err(XllError::Domain {
-                code: crate::error::DomainErrorCode::Overflow,
-            })
+            Err(XllError::domain(crate::error::DomainErrorCode::Overflow))
         }
     }
 }
@@ -286,9 +280,8 @@ mod tests {
             ),
         ];
         for (raw, expected) in cases {
-            assert!(matches!(
-                decode(&raw),
-                Err(XllError::Input { argument: "RTD value", reason }) if reason == expected
+            assert!(matches!((decode(&raw)).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input { argument: "RTD value", reason }) if *reason == expected
             ));
         }
     }
@@ -307,9 +300,8 @@ mod tests {
             xltype: XLTYPE_MULTI,
         };
         let raw = XlValueRef::from_array_cell(&raw).unwrap();
-        assert!(matches!(
-            ExcelValue::from_excel(raw, "RTD value"),
-            Err(XllError::Input {
+        assert!(matches!((ExcelValue::from_excel(raw, "RTD value")).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::NonFinite,
                 ..
             })
@@ -354,29 +346,25 @@ mod tests {
             observe(XLOPER12::integer(-7), XLRET_SUCCESS, XLRET_SUCCESS).unwrap(),
             RtdValue::Number(-7.0)
         );
-        assert!(matches!(
-            observe(XLOPER12::number(f64::NAN), XLRET_SUCCESS, XLRET_FAILED),
-            Err(XllError::Input {
+        assert!(matches!((observe(XLOPER12::number(f64::NAN), XLRET_SUCCESS, XLRET_FAILED)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::NonFinite,
                 ..
             })
         ));
-        assert!(matches!(
-            observe(multi, XLRET_SUCCESS, XLRET_SUCCESS),
-            Err(XllError::Application { message, .. }) if message == "invalid RTD value"
+        assert!(matches!((observe(multi, XLRET_SUCCESS, XLRET_SUCCESS)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Application { message, .. }) if message == "invalid RTD value"
         ));
-        assert!(matches!(
-            observe(multi, XLRET_SUCCESS, XLRET_FAILED),
-            Err(XllError::ExcelApi {
+        assert!(matches!((observe(multi, XLRET_SUCCESS, XLRET_FAILED)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::ExcelApi {
                 function: ExcelApiFunction::Free,
                 failure: ExcelApiFailure::Status(ExcelCallbackStatus::Failed(XLRET_FAILED)),
                 ..
             })
         ));
         for status in [XLRET_ABORT, XLRET_FAILED] {
-            assert!(matches!(
-                observe(multi, status, XLRET_SUCCESS),
-                Err(XllError::ExcelApi {
+            assert!(matches!((observe(multi, status, XLRET_SUCCESS)).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::ExcelApi {
                     function: ExcelApiFunction::Rtd,
                     failure: ExcelApiFailure::Status(actual), .. }) if actual == crate::error::callback_status_from_raw(status)
             ));

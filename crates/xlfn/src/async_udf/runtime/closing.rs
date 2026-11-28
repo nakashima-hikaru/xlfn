@@ -69,7 +69,7 @@ impl<E: AsyncExecutor> ExecutorClose<'_, E, ExecutorTasksDrained<'_>> {
         crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
             self.owner.get().executor.shutdown()
         }))
-        .unwrap_or(Err(XllError::Panic))?;
+        .unwrap_or(Err(XllError::PANIC))?;
         let Self { state, owner } = self;
         state.registry.finish();
         let RetiringExecutor { runtime, executor } = owner.complete();
@@ -81,7 +81,7 @@ impl<E: AsyncExecutor> ExecutorClose<'_, E, ExecutorTasksDrained<'_>> {
             vec![crate::shutdown::CleanupIssue {
                 component: "async executor",
                 kind: crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                error: XllError::Panic,
+                error: XllError::PANIC,
             }]
         } else {
             Vec::new()
@@ -185,8 +185,7 @@ mod tests {
                 // mask this race; inspect the owner handoff before that call.
                 assert!(matches!(
                     runtime.registry().preflight_available(),
-                    Err(XllError::Closing)
-                ));
+                    Err(__err) if __err.is_closing()));
                 closing.drain_readers().unwrap().wait().shutdown().unwrap();
             });
             waiting_rx.recv().unwrap();

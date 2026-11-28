@@ -316,7 +316,7 @@ mod tests {
                 .ensure_event(CalculationEvent::Ended, |_, _| {
                     RegistrationMutation::Applied {
                         value: 19,
-                        cleanup: Err(XllError::Closing),
+                        cleanup: Err(XllError::CLOSING),
                     }
                 })
                 .is_err()
@@ -337,7 +337,7 @@ mod tests {
             module
                 .ensure_event(CalculationEvent::Ended, |_, _| {
                     RegistrationMutation::Rejected {
-                        error: XllError::Closing,
+                        error: XllError::CLOSING,
                     }
                 })
                 .is_err()
@@ -353,7 +353,7 @@ mod tests {
                     .ensure_event(CalculationEvent::Ended, |_, _| {
                         RegistrationMutation::Indeterminate {
                             status,
-                            error: XllError::Closing,
+                            error: XllError::CLOSING,
                         }
                     })
                     .is_err()

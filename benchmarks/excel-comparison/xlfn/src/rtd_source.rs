@@ -231,7 +231,7 @@ impl BenchRtdSource {
     fn ensure_worker(&self) -> XllResult<()> {
         let mut worker = self.worker.lock().unwrap_or_else(|p| p.into_inner());
         if self.shared.stop.load(Ordering::Acquire) {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         if worker.is_none() {
             let shared = self.shared.clone();
@@ -247,7 +247,7 @@ impl BenchRtdSource {
         // locks. No caller may observe an empty slot before the join finishes.
         let mut worker = self.worker.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(worker) = worker.take() {
-            worker.join().map_err(|_| XllError::Panic)?;
+            worker.join().map_err(|_| XllError::PANIC)?;
         }
         Ok(())
     }
@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(Arc::strong_count(&shared), 2);
         RtdSource::request_stop(source.as_ref());
         RtdSource::shutdown_and_wait(source.as_ref()).unwrap();
-        assert!(matches!(source.ensure_worker(), Err(XllError::Closing)));
+        assert!(matches!(source.ensure_worker(), Err(__err) if __err.is_closing()));
         assert!(source.worker.lock().unwrap().is_none());
     }
 
@@ -361,7 +361,7 @@ mod tests {
             RtdSource::shutdown_and_wait(&source).unwrap();
             assert!(shared.stop.load(Ordering::Acquire));
             assert!(source.worker.lock().unwrap().is_none());
-            assert!(matches!(source.ensure_worker(), Err(XllError::Closing)));
+            assert!(matches!(source.ensure_worker(), Err(__err) if __err.is_closing()));
         }
     }
 

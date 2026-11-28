@@ -184,7 +184,7 @@ fn terminal_snapshot_observes_live_diagnostics_and_pending_delivery() {
                 resume: Mutex::new(resume_rx),
             })
             .unwrap();
-            crate::diagnostics::report_no_unwind("terminal observer", &crate::XllError::Panic);
+            crate::diagnostics::report_no_unwind("terminal observer", &crate::XllError::PANIC);
             started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         },
         |runtime, proof| {

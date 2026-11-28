@@ -1113,9 +1113,8 @@ mod tests {
             XLOPER12::number(1.0),
         ] {
             let result = ExcelCallbackValue::from_raw_for_test(raw);
-            assert!(matches!(
-                read_applied_bool(&result, ExcelApiFunction::Unregister),
-                Err(XllError::ExcelApi {
+            assert!(matches!((read_applied_bool(&result, ExcelApiFunction::Unregister)).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::ExcelApi {
                     function: ExcelApiFunction::Unregister,
                     failure: ExcelApiFailure::UnexpectedResult,
                     ..
@@ -1170,7 +1169,7 @@ mod tests {
     #[test]
     fn successful_decode_failure_is_indeterminate_for_mutations() {
         let invocation = HostInvocation::<RegistrationId>::Decoded {
-            decoded: Err(XllError::Closing),
+            decoded: Err(XllError::CLOSING),
             cleanup: Ok(()),
         };
         assert!(matches!(

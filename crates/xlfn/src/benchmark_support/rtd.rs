@@ -335,7 +335,7 @@ impl RtdPrepareBenchmark {
                 std::hint::black_box(prepared.id());
                 prepared.rollback();
             }
-            Err(crate::XllError::Overloaded) => {
+            Err(__err) if __err.is_overloaded() => {
                 assert!(expect_overloaded, "reusable topic was rejected");
             }
             Err(error) => panic!("unexpected probe error: {error}"),

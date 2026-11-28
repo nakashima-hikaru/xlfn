@@ -82,8 +82,8 @@ fn executor_starts_once_and_rejects_publication_after_shutdown() {
     assert!(executor.reserve().is_ok());
     executor.shutdown().unwrap();
     executor.shutdown().unwrap();
-    assert!(matches!(executor.start(), Err(XllError::Closing)));
-    assert!(matches!(executor.reserve(), Err(XllError::Closing)));
+    assert!(matches!(executor.start(), Err(__err) if __err.is_closing()));
+    assert!(matches!(executor.reserve(), Err(__err) if __err.is_closing()));
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn partial_poller_start_failure_rolls_back_before_returning() {
     for fail_at in [0, 2] {
         let executor =
             BuiltinAsyncExecutor::with_start_failure(BuiltinExecutorConfig::new(), fail_at);
-        assert!(matches!(executor.start(), Err(XllError::Internal { .. })));
+        assert!(matches!(executor.start(), Err(__err) if __err.diagnostic_id().is_some()));
         assert!(executor.shared.get().is_none());
         assert!(executor.reserve().is_err());
         executor.shutdown().unwrap();
@@ -142,7 +142,7 @@ fn last_poller_panic_drops_queued_tasks_and_retains_arbitrary_payload() {
     assert!(executor.reserve().is_err());
     executor.submit(late_reservation, pending_task(&drops));
     assert_eq!(drops.load(Ordering::Acquire), 9);
-    assert!(matches!(executor.shutdown(), Err(XllError::Panic)));
+    assert!(matches!(executor.shutdown(), Err(__err) if __err.is_panic()));
     assert_eq!(payload_drops.load(Ordering::Acquire), 0);
 }
 
@@ -228,8 +228,7 @@ fn shutdown_waits_for_scheduler_task_destruction_and_final_callback_release() {
     scheduling.join().unwrap();
     assert!(matches!(
         closed_rx.recv_timeout(TIMEOUT).unwrap(),
-        Err(XllError::Panic)
-    ));
+        Err(__err) if __err.is_panic()));
     closing.join().unwrap();
 }
 
@@ -287,7 +286,7 @@ fn miri_last_executor_owner_can_be_destroyed_by_its_own_poller() {
         executor.reserve().unwrap(),
         task(async move {
             resume_rx.recv().unwrap();
-            assert!(matches!(owned.shutdown(), Err(XllError::Internal { .. })));
+            assert!(matches!(owned.shutdown(), Err(__err) if __err.diagnostic_id().is_some()));
             drop(owned);
             dropped_tx.send(()).unwrap();
             exit_rx.recv().unwrap();

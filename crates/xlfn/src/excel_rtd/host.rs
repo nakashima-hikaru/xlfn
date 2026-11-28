@@ -64,7 +64,7 @@ impl SubscriptionHost for RtdSubscriptionHost {
         };
         let (guard, result) = ingress
             .enter_with_result(operation)
-            .map_err(|_| XllError::Closing)?;
+            .map_err(|_| XllError::CLOSING)?;
         Ok((RtdAdmissionGuard::Production { _ingress: guard }, result))
     }
 

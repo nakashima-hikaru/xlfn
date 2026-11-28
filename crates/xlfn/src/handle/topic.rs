@@ -315,7 +315,7 @@ impl TopicTable {
         let permit = self
             .read_domain
             .enter_current_thread()
-            .map_err(|_| XllError::Closing)?;
+            .map_err(|_| XllError::CLOSING)?;
         Ok(TopicReadLease {
             _permit: permit,
             maintenance: TopicReaderMaintenance(self),
@@ -364,11 +364,11 @@ impl TopicTable {
     ) -> XllResult<PrepareDecision> {
         let state = self.state.read();
         if state.closed {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         if let Some(initialization) = state.initializing.get(&key) {
             if initialization.owner == owner {
-                return Err(XllError::ReentrantCall);
+                return Err(XllError::REENTRANT_CALL);
             }
             return Ok(PrepareDecision::Wait {
                 initialization: initialization.clone(),
@@ -385,11 +385,11 @@ impl TopicTable {
 
         let mut state = self.state.write();
         if state.closed {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         if let Some(initialization) = state.initializing.get(&key) {
             if initialization.owner == owner {
-                return Err(XllError::ReentrantCall);
+                return Err(XllError::REENTRANT_CALL);
             }
             return Ok(PrepareDecision::Wait {
                 initialization: initialization.clone(),
@@ -420,19 +420,19 @@ impl TopicTable {
     ) -> XllResult<HandleTopicKey> {
         let mut state = self.state.write();
         if state.closed {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         let key = state
             .by_lifetime_key
             .get(lifetime_key)
             .copied()
-            .ok_or(XllError::StaleHandle)?;
-        let topic = state.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
+            .ok_or(XllError::STALE_HANDLE)?;
+        let topic = state.by_key.get_mut(&key).ok_or(XllError::STALE_HANDLE)?;
         if topic
             .lifetime_generation
             .is_some_and(|existing| existing != lifetime_generation)
         {
-            return Err(XllError::InvalidHandle);
+            return Err(XllError::INVALID_HANDLE);
         }
         topic.lifetime_generation = Some(lifetime_generation);
         Ok(key)
@@ -447,35 +447,35 @@ impl TopicTable {
     ) -> XllResult<(HandleTopicKey, String, bool)> {
         let mut state = self.state.write();
         if state.closed {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         let key = state
             .by_lifetime_key
             .get(lifetime_key)
             .copied()
-            .ok_or(XllError::StaleHandle)?;
+            .ok_or(XllError::STALE_HANDLE)?;
         if state
             .by_observer_id
             .get(&owner)
             .is_some_and(|existing| existing != &key)
         {
-            return Err(XllError::InvalidHandle);
+            return Err(XllError::INVALID_HANDLE);
         }
         let (token, created) = {
-            let topic = state.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
+            let topic = state.by_key.get_mut(&key).ok_or(XllError::STALE_HANDLE)?;
             if topic
                 .lifetime_generation
                 .is_some_and(|existing| existing != lifetime_generation)
             {
-                return Err(XllError::InvalidHandle);
+                return Err(XllError::INVALID_HANDLE);
             }
             topic.lifetime_generation = Some(lifetime_generation);
             let created = if let Some(existing) = topic.observer {
                 if existing != owner {
-                    return Err(XllError::InvalidHandle);
+                    return Err(XllError::INVALID_HANDLE);
                 }
                 if !topic.observer_committed {
-                    return Err(XllError::Overloaded);
+                    return Err(XllError::OVERLOADED);
                 }
                 false
             } else {
@@ -497,14 +497,14 @@ impl TopicTable {
     ) -> XllResult<()> {
         let mut state = self.state.write();
         if state.closed {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         if state.by_observer_id.get(&owner) != Some(&key) {
-            return Err(XllError::StaleHandle);
+            return Err(XllError::STALE_HANDLE);
         }
-        let topic = state.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
+        let topic = state.by_key.get_mut(&key).ok_or(XllError::STALE_HANDLE)?;
         if topic.observer != Some(owner) {
-            return Err(XllError::StaleHandle);
+            return Err(XllError::STALE_HANDLE);
         }
         topic.observer_committed = true;
         Ok(())
@@ -542,7 +542,7 @@ impl TopicTable {
     ) -> XllResult<PublishedTopicPtr> {
         let mut state = self.state.write();
         if state.closed || state.generation != generation {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         let state = &mut *state;
         let entry = match state.by_key.entry(key) {
@@ -615,7 +615,7 @@ impl TopicTable {
     ) -> XllResult<()> {
         let state = self.state.read();
         if state.closed || state.generation != generation {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         if state
             .by_key
@@ -624,7 +624,7 @@ impl TopicTable {
         {
             Ok(())
         } else {
-            Err(XllError::StaleHandle)
+            Err(XllError::STALE_HANDLE)
         }
     }
 
@@ -881,7 +881,6 @@ pub(crate) enum PrepareDecision {
 #[cfg(test)]
 mod tests {
     use super::{PublishedTopic, TopicTable, ownership};
-    use crate::XllError;
     use crate::handle::runtime::FormulaHandleService;
     use crate::handle::{ExcelHandleObject, formula::test_topic_key};
     use std::sync::atomic::Ordering;
@@ -941,7 +940,7 @@ mod tests {
                 Ok(())
             },
         );
-        assert!(matches!(result, Err(XllError::StaleHandle)));
+        assert!(matches!(result, Err(__err) if __err.is_stale_handle()));
         // The production warm path has released its final read lease. No
         // further delete, prepare, explicit maintenance or close is needed.
         assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 0);
@@ -1033,7 +1032,7 @@ mod tests {
         runtime.terminate_all_topics();
         assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 1);
         release_tx.send(()).unwrap();
-        assert!(matches!(reader.join().unwrap(), Err(XllError::StaleHandle)));
+        assert!(matches!(reader.join().unwrap(), Err(__err) if __err.is_stale_handle()));
         assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 0);
         assert_eq!(
             runtime.topics.maintenance_requests.load(Ordering::Relaxed),

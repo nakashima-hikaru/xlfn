@@ -275,13 +275,13 @@ impl<G> GateEntry<G> {
     fn with_host<A>(self, host: A) -> XllResult<PublishAdmissions<A, G>> {
         let gates = match self {
             Self::Admitted(gates) => gates,
-            Self::RuntimeClosing => return Err(XllError::Closing),
+            Self::RuntimeClosing => return Err(XllError::CLOSING),
             Self::ServerClosing(runtime) => {
                 // The runtime must stay live through host cleanup even when
                 // server admission failed.
                 drop(host);
                 drop(runtime);
-                return Err(XllError::Closing);
+                return Err(XllError::CLOSING);
             }
         };
         Ok(PublishAdmissions {
@@ -413,7 +413,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         if self.lifecycle.load(Ordering::Acquire) == SERVER_LIFECYCLE_OPEN {
             Ok(())
         } else {
-            Err(XllError::Closing)
+            Err(XllError::CLOSING)
         }
     }
 
@@ -617,7 +617,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             // SAFETY: `active_quota` is the quota coupled to this core at
             // construction, and the runtime reclaims it after its servers.
             let permit = unsafe { Quota::try_acquire_detached(self.active_quota()) }
-                .map_err(|_| XllError::Overloaded)?;
+                .map_err(|_| XllError::OVERLOADED)?;
             topic_entry.insert(topic_id);
             shard.active_by_topic.insert(
                 topic_id,
@@ -648,10 +648,10 @@ impl<H: SubscriptionHost> PublishCore<H> {
         let mut shard = self.shards[shard_index].lock();
         self.ensure_open()?;
         let Some(active) = shard.active_by_topic.get_mut(&topic_id) else {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         };
         if active.generation != generation {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
 
         let latest = active
@@ -691,10 +691,10 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 ..
             } = &mut *shard;
             let Some(active) = active_by_topic.get_mut(&topic_id) else {
-                return Err(XllError::Closing);
+                return Err(XllError::CLOSING);
             };
             if active.generation != generation {
-                return Err(XllError::Closing);
+                return Err(XllError::CLOSING);
             }
             let was_committed = active.committed;
             if let Some(obs) = observed_sequence {
@@ -839,7 +839,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 .active_by_topic
                 .get(&topic_id)
                 .filter(|active| active.generation == generation)
-                .ok_or(XllError::Closing)?;
+                .ok_or(XllError::CLOSING)?;
             Ok(
                 matches!(active.latest_value(), Some(StoredRtdValue::String(latest))
                 if latest.as_ref() == value),
@@ -907,7 +907,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             let active = active_by_topic
                 .get_mut(&topic_id)
                 .filter(|active| active.generation == generation)
-                .ok_or(XllError::Closing)?;
+                .ok_or(XllError::CLOSING)?;
             if let Some(ValueSlot::Resident(latest)) = active.latest_slot_state()
                 && latest.value == value
             {
@@ -929,7 +929,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
                     // SAFETY: the runtime-owned queue quota outlives this
                     // publish core and every queued-update permit.
                     let permit = unsafe { Quota::try_acquire_detached(self.queued_update_quota()) }
-                        .map_err(|_| XllError::Overloaded)?;
+                        .map_err(|_| XllError::OVERLOADED)?;
                     entry.insert(QueuedUpdate {
                         connection_generation: conn_gen,
                         sequence,
@@ -1254,7 +1254,6 @@ impl<H: SubscriptionHost> PublishCore<H> {
 #[cfg(all(test, feature = "rtd"))]
 mod tests {
     use super::{GateEntry, OperationDropTrace, with_operation_drop_trace};
-    use crate::XllError;
     use crate::subscription::runtime::SubscriptionRuntime;
     use triomphe::Arc;
     use xlfn_kernel::operation_gate::OperationGate;
@@ -1306,7 +1305,7 @@ mod tests {
 
         assert_eq!(publish.queued_update_count(), 1);
         assert_eq!(publish.pending_update_count(), 1);
-        assert!(matches!(sink.publish(43), Err(XllError::Closing)));
+        assert!(matches!(sink.publish(43), Err(__err) if __err.is_closing()));
         refresh.complete(RefreshOutcome::Delivered).unwrap();
         assert_eq!(publish.queued_update_count(), 0);
         assert_eq!(publish.pending_update_count(), 0);
@@ -1370,7 +1369,6 @@ mod tests {
 
     #[test]
     fn interrupted_termination_wait_preserves_undrained_publish_storage() {
-        use crate::XllError;
         use crate::excel_rtd::RtdSubscriptionHost;
         use crate::subscription::delivery::SERVER_LIFECYCLE_CLOSING;
         use crate::subscription::server::TerminationAdmission;
@@ -1425,9 +1423,8 @@ mod tests {
             super::PANIC_BEFORE_TERMINATION_WAIT.set(true);
             assert!(matches!(
                 owner.request_cancel().finish(),
-                Err(XllError::Panic)
-            ));
-            assert!(matches!(waiter.join().unwrap(), Err(XllError::Panic)));
+                Err(__err) if __err.is_panic()));
+            assert!(matches!(waiter.join().unwrap(), Err(__err) if __err.is_panic()));
         });
 
         assert_eq!(
@@ -1439,9 +1436,9 @@ mod tests {
             server.test_server().termination_coordinator.phase(),
             TerminationPhase::Failed
         );
-        assert!(matches!(server.terminate(), Err(XllError::Panic)));
+        assert!(matches!(server.terminate(), Err(__err) if __err.is_panic()));
         drop(admitted);
-        assert!(matches!(runtime.close(), Err(XllError::Panic)));
+        assert!(matches!(runtime.close(), Err(__err) if __err.is_panic()));
     }
 
     #[test]
@@ -1684,7 +1681,7 @@ mod tests {
         sink.publish(2).unwrap();
         assert_eq!(notifier.calls.load(Ordering::Acquire), 1);
         server.terminate().unwrap();
-        assert!(matches!(sink.publish(3), Err(crate::XllError::Closing)));
+        assert!(matches!(sink.publish(3), Err(__err) if __err.is_closing()));
     }
 
     #[test]
@@ -1721,8 +1718,7 @@ mod tests {
             server.terminate().unwrap();
             assert!(matches!(
                 server.begin_refresh(),
-                Err(crate::XllError::Closing)
-            ));
+                Err(__err) if __err.is_closing()));
             assert_eq!(publish.refresh.lock().recycled_updates.capacity(), 0);
             assert_eq!(server.test_server().subscriptions.lock().capacity(), 0);
             for shard in &publish.shards {
@@ -1810,8 +1806,7 @@ mod tests {
         let entry = GateEntry::acquire(|| runtime.enter(), || server.enter());
         assert!(matches!(
             entry.with_host(HostProbe(&runtime)),
-            Err(XllError::Closing)
-        ));
+            Err(__err) if __err.is_closing()));
         assert_eq!(runtime.active(), 0);
         assert_eq!(server.active(), 0);
     }
@@ -1835,7 +1830,7 @@ mod tests {
         );
         let server = runtime.register_test_server(1);
         let publish = &server.test_server().publish;
-        assert!(matches!(publish.enter_operation(), Err(XllError::Closing)));
+        assert!(matches!(publish.enter_operation(), Err(__err) if __err.is_closing()));
         assert_eq!(publish.runtime_gate().active(), 0);
         assert_eq!(publish.server_gate.active(), 0);
 
@@ -1846,7 +1841,7 @@ mod tests {
         assert_eq!(publish.server_gate.active(), 1);
 
         INGRESS.begin_close_with(|| {});
-        assert!(matches!(publish.enter_operation(), Err(XllError::Closing)));
+        assert!(matches!(publish.enter_operation(), Err(__err) if __err.is_closing()));
         assert_eq!(INGRESS.active_calls(), 1);
         assert_eq!(publish.runtime_gate().active(), 1);
         assert_eq!(publish.server_gate.active(), 1);

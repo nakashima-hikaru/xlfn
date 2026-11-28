@@ -76,17 +76,13 @@ pub struct ExcelArrayBuilder {
 impl ExcelArrayBuilder {
     /// Allocates an array builder after validating positive dimensions and payload limits.
     pub fn new(rows: usize, columns: usize) -> XllResult<Self> {
-        let len = rows.checked_mul(columns).ok_or(XllError::Domain {
-            code: DomainErrorCode::Overflow,
-        })?;
+        let len = rows.checked_mul(columns).ok_or(XllError::domain(DomainErrorCode::Overflow))?;
 
         validate_matrix_dimensions(rows, columns, len)?;
 
         let cell_bytes =
             len.checked_mul(std::mem::size_of::<XLOPER12>())
-                .ok_or(XllError::Domain {
-                    code: DomainErrorCode::Overflow,
-                })?;
+                .ok_or(XllError::domain(DomainErrorCode::Overflow))?;
 
         if cell_bytes > MAX_ARRAY_BYTES {
             return Err(XllError::input(
@@ -171,20 +167,14 @@ impl ExcelArrayBuilder {
         )?;
         let string_bytes = utf16_length
             .checked_add(1)
-            .ok_or(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })?
+            .ok_or(XllError::domain(DomainErrorCode::Overflow))?
             .checked_mul(std::mem::size_of::<u16>())
-            .ok_or(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })?;
+            .ok_or(XllError::domain(DomainErrorCode::Overflow))?;
 
         let next_bytes = self
             .payload_bytes
             .checked_add(string_bytes)
-            .ok_or(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            })?;
+            .ok_or(XllError::domain(DomainErrorCode::Overflow))?;
 
         if next_bytes > MAX_ARRAY_BYTES {
             return Err(XllError::input(
@@ -236,12 +226,12 @@ impl ExcelArrayBuilder {
         let expected = self.rows * self.columns;
 
         if self.initialized != expected {
-            return Err(XllError::ElementCountMismatch {
-                rows: self.rows,
-                columns: self.columns,
+            return Err(XllError::element_count_mismatch(
+                self.rows,
+                self.columns,
                 expected,
-                actual: self.initialized,
-            });
+                self.initialized,
+            ));
         }
 
         // SAFETY: initialized == cells.len() so every element is written.
@@ -325,17 +315,15 @@ mod tests {
             panic!("dimensions must be validated before reading values")
         });
         assert!(ExcelArrayOutput::from_iter(0, 1, invalid_shape).is_err());
-        assert!(matches!(
-            ExcelArrayOutput::from_iter(1, 2, ["written"]),
-            Err(XllError::ElementCountMismatch {
+        assert!(matches!((ExcelArrayOutput::from_iter(1, 2, ["written"])).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::ElementCountMismatch {
                 expected: 2,
                 actual: 1,
                 ..
             })
         ));
-        assert!(matches!(
-            ExcelArrayOutput::from_iter(1, 1, ["written", "extra"]),
-            Err(XllError::Input {
+        assert!(matches!((ExcelArrayOutput::from_iter(1, 1, ["written", "extra"])).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::Malformed("too many array cells"),
                 ..
             })
@@ -345,9 +333,8 @@ mod tests {
         let values = ["written", overlong.as_str()]
             .into_iter()
             .chain(std::iter::from_fn(|| panic!("reads must stop on error")));
-        assert!(matches!(
-            ExcelArrayOutput::from_iter(1, 3, values),
-            Err(XllError::Input {
+        assert!(matches!((ExcelArrayOutput::from_iter(1, 3, values)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge { .. },
                 ..
             })
@@ -384,9 +371,7 @@ mod tests {
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(matches!(
                 builder.push_f64(value),
-                Err(XllError::Domain {
-                    code: DomainErrorCode::InvalidInput,
-                })
+                Err(__err) if __err.domain_code() == Some(DomainErrorCode::InvalidInput)
             ));
         }
         assert_eq!(builder.initialized, 1);
@@ -394,13 +379,10 @@ mod tests {
         // Number validation precedes capacity rejection, including on a full builder.
         assert!(matches!(
             builder.push_f64(f64::NAN),
-            Err(XllError::Domain {
-                code: DomainErrorCode::InvalidInput,
-            })
+            Err(__err) if __err.domain_code() == Some(DomainErrorCode::InvalidInput)
         ));
-        assert!(matches!(
-            builder.push_f64(1.0),
-            Err(XllError::Input {
+        assert!(matches!((builder.push_f64(1.0)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::Malformed("too many array cells"),
                 ..
             })
@@ -415,17 +397,14 @@ mod tests {
 
     #[test]
     fn numeric_slice_encoding_rejects_shape_and_non_finite_values() {
-        assert!(matches!(
-            ExcelArrayBuilder::from_f64(1, 2, &[1.0]),
-            Err(XllError::ElementCountMismatch { .. })
+        assert!(matches!((ExcelArrayBuilder::from_f64(1, 2, &[1.0])).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::ElementCountMismatch { .. })
         ));
         assert!(ExcelArrayBuilder::from_f64(0, 1, &[]).is_err());
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(matches!(
                 ExcelArrayBuilder::from_f64(1, 2, &[1.0, value]),
-                Err(XllError::Domain {
-                    code: DomainErrorCode::InvalidInput
-                })
+                Err(__err) if __err.domain_code() == Some(DomainErrorCode::InvalidInput)
             ));
         }
         let valid = ExcelArrayBuilder::from_f64(1, 2, &[1.0, 2.0]).unwrap();

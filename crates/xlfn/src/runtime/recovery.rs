@@ -92,7 +92,7 @@ pub(crate) fn quarantine_runtime_resources<A: Addin>(
             // generation roots remain in terminal quarantine; never retry it
             // from recovery, Drop, or a later host lifecycle hint.
             if !epoch.is_current() {
-                fail_stop_invariant("retained module epoch changed", &XllError::Closing);
+                fail_stop_invariant("retained module epoch changed", &XllError::CLOSING);
             }
             return;
         }

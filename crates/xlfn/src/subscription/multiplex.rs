@@ -82,7 +82,7 @@ impl<T, D: RtdDeliveryPolicy> RtdSourceContext<T, D> {
             timeout,
         );
         if state.closed {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         let event = state.events.pop_front();
         if matches!(event, Some(ControlEvent::Unsubscribe { .. })) {
@@ -280,7 +280,7 @@ impl StartedWorker {
         // caller treats any returned error or unwind as a completed barrier.
         let joined = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| handle.join()))
             .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-        let result = crate::panic_boundary::contain_panic(joined).map_err(|_| XllError::Panic);
+        let result = crate::panic_boundary::contain_panic(joined).map_err(|_| XllError::PANIC);
         drop(permit);
         result
     }
@@ -405,9 +405,9 @@ impl<T, D: RtdDeliveryPolicy> Shared<T, D> {
     fn register(&self, topic: &RtdTopic, sender: RtdSender<T, D>) -> XllResult<RtdSubscriptionId> {
         let mut state = self.state.lock();
         if state.closed {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
-        let next_id = state.next_id.checked_add(1).ok_or(XllError::Overloaded)?;
+        let next_id = state.next_id.checked_add(1).ok_or(XllError::OVERLOADED)?;
         // Each retained subscription needs at most its subscribe event and
         // one future removal. Reserve both before making registration visible;
         // disconnect cannot fail or allocate when transferring its permit.
@@ -417,16 +417,16 @@ impl<T, D: RtdDeliveryPolicy> Shared<T, D> {
             .checked_add(state.removals)
             .and_then(|used| used.checked_add(1))
             .and_then(|used| used.checked_mul(2))
-            .ok_or(XllError::Overloaded)?;
+            .ok_or(XllError::OVERLOADED)?;
         let additional = controls.saturating_sub(state.events.len());
         state
             .events
             .try_reserve(additional)
-            .map_err(|_| XllError::Overloaded)?;
+            .map_err(|_| XllError::OVERLOADED)?;
         state
             .active
             .try_reserve(1)
-            .map_err(|_| XllError::Overloaded)?;
+            .map_err(|_| XllError::OVERLOADED)?;
         let id = RtdSubscriptionId(next_id);
         state.next_id = next_id;
         state.active.insert(
@@ -522,7 +522,7 @@ impl<T, D: RtdDeliveryPolicy> Shared<T, D> {
         // before it failed. Cancellation's Closing is a normal completion.
         if active.is_empty()
             && let Err(error) = &result
-            && !(stopping && matches!(error, XllError::Closing))
+            && !(stopping && matches!(error, __err if __err.is_closing()))
         {
             crate::diagnostics::report_no_unwind("RTD shared producer", error);
         }
@@ -674,7 +674,7 @@ where
         }
         let mut worker = self.worker.state.lock();
         if self.worker.shared.closed.load(Ordering::Acquire) {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         let starting = match std::mem::replace(&mut *worker, Worker::Joining) {
             Worker::Unstarted(producer) => UnstartedWorker::new(&mut worker, producer),
@@ -684,7 +684,7 @@ where
             }
             closed @ (Worker::Joining | Worker::Joined(_)) => {
                 *worker = closed;
-                return Err(XllError::Closing);
+                return Err(XllError::CLOSING);
             }
         };
         // Reserve before registering control events: a rejected first worker
@@ -703,7 +703,7 @@ where
             };
             let result =
                 crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| producer(context)))
-                    .unwrap_or(Err(XllError::Panic));
+                    .unwrap_or(Err(XllError::PANIC));
             shared.complete(result, policy);
         };
         #[cfg(test)]
@@ -731,10 +731,10 @@ where
         // The failed registration was never delivered, so no removal event
         // is needed. Return its capacity after revoking its sink.
         drop(pending);
-        Err(XllError::Native {
-            code: error.raw_os_error().unwrap_or(0),
-            message: format!("failed to start RTD source worker: {error}"),
-        })
+        Err(XllError::native(
+            error.raw_os_error().unwrap_or(0),
+            format!("failed to start RTD source worker: {error}"),
+        ))
     }
 }
 
@@ -765,7 +765,7 @@ impl<T, P, D: RtdDeliveryPolicy> WorkerOwner<T, P, D> {
         let result = match retiring {
             RetiringWorker::Unstarted(producer) => {
                 crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| drop(producer)))
-                    .map_err(|_| XllError::Panic)
+                    .map_err(|_| XllError::PANIC)
             }
             RetiringWorker::Running(started) => started.join(),
         };

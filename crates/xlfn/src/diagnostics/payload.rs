@@ -101,14 +101,13 @@ struct DisplayError<'a>(&'a XllError);
 
 impl fmt::Display for DisplayError<'_> {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            XllError::Application {
+        use crate::error::construct::{ErrorView, view};
+        match view(self.0) {
+            ErrorView::Application {
                 message, source, ..
             } => {
                 output.write_str(message)?;
-                let mut cause = source
-                    .as_deref()
-                    .map(|source| source as &dyn std::error::Error);
+                let mut cause = source.map(|source| source as &dyn std::error::Error);
                 while let Some(current) = cause {
                     write!(output, ": {current}")?;
                     cause = current.source();
@@ -116,7 +115,7 @@ impl fmt::Display for DisplayError<'_> {
                 Ok(())
             }
 
-            XllError::Input {
+            ErrorView::Input {
                 argument,
                 reason: InputError::UnknownEnum { actual, expected },
             } => {
@@ -126,7 +125,7 @@ impl fmt::Display for DisplayError<'_> {
                     actual.len()
                 )
             }
-            XllError::RtdProducerFailure { topic, source, .. } => {
+            ErrorView::RtdProducerFailure { topic, source } => {
                 write!(
                     output,
                     "RTD producer failed for topic ({} bytes, redacted): {}",
@@ -134,12 +133,11 @@ impl fmt::Display for DisplayError<'_> {
                     DisplayError(source)
                 )
             }
-            XllError::RtdSubscriptionShutdown {
+            ErrorView::RtdSubscriptionShutdown {
                 server_generation,
                 topic_id,
                 key,
                 source,
-                ..
             } => {
                 write!(
                     output,
@@ -147,7 +145,7 @@ impl fmt::Display for DisplayError<'_> {
                     DisplayError(source)
                 )
             }
-            other => fmt::Display::fmt(other, output),
+            _ => fmt::Display::fmt(self.0, output),
         }
     }
 }
@@ -156,8 +154,9 @@ struct DebugError<'a>(&'a XllError);
 
 impl fmt::Debug for DebugError<'_> {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            XllError::Input {
+        use crate::error::construct::{ErrorView, view};
+        match view(self.0) {
+            ErrorView::Input {
                 argument,
                 reason: InputError::UnknownEnum { actual, expected },
             } => output
@@ -165,35 +164,34 @@ impl fmt::Debug for DebugError<'_> {
                 .field("argument", &DebugText(argument))
                 .field("reason", &DebugUnknownEnum { actual, expected })
                 .finish(),
-            XllError::Custom { excel, message } => output
+            ErrorView::Custom { excel, message } => output
                 .debug_struct("Custom")
-                .field("excel", excel)
+                .field("excel", &excel)
                 .field("message", &DebugText(message))
                 .finish(),
-            XllError::Native { code, message } => output
+            ErrorView::Native { code, message } => output
                 .debug_struct("Native")
-                .field("code", code)
+                .field("code", &code)
                 .field("message", &DebugText(message))
                 .finish(),
-            XllError::RtdProducerFailure { topic, source, .. } => output
+            ErrorView::RtdProducerFailure { topic, source } => output
                 .debug_struct("RtdProducerFailure")
                 .field("topic_bytes", &topic.len())
                 .field("source", &DebugError(source))
                 .finish(),
-            XllError::RtdSubscriptionShutdown {
+            ErrorView::RtdSubscriptionShutdown {
                 server_generation,
                 topic_id,
                 key,
                 source,
-                ..
             } => output
                 .debug_struct("RtdSubscriptionShutdown")
-                .field("server_generation", server_generation)
-                .field("topic_id", topic_id)
+                .field("server_generation", &server_generation)
+                .field("topic_id", &topic_id)
                 .field("key", &DebugText(key))
                 .field("source", &DebugError(source))
                 .finish(),
-            other => fmt::Debug::fmt(other, output),
+            _ => fmt::Debug::fmt(self.0, output),
         }
     }
 }
@@ -205,10 +203,11 @@ mod tests {
     #[test]
     fn custom_errors_charge_only_owned_messages_and_bound_tracing_text() {
         use crate::error::ExcelError;
+        let boxed_size = crate::error::construct::boxed_error_size();
         let borrowed = XllError::custom(ExcelError::NotAvailable, "static application detail");
         let owned = XllError::custom(ExcelError::NotAvailable, "owned detail".to_owned());
-        assert_eq!(clone_bytes(&borrowed), Some(0));
-        assert_eq!(clone_bytes(&owned), Some(12));
+        assert_eq!(clone_bytes(&borrowed), Some(boxed_size));
+        assert_eq!(clone_bytes(&owned), Some(boxed_size + 12));
         assert_eq!(format!("{}", TracedError(&owned)), owned.to_string());
         assert_eq!(format!("{:?}", TracedError(&owned)), format!("{owned:?}"));
 
@@ -232,6 +231,7 @@ mod tests {
 
     #[test]
     fn enum_errors_charge_owned_input_and_bound_escaped_tracing() {
+        let boxed_size = crate::error::construct::boxed_error_size();
         let small = XllError::input(
             "mode",
             InputError::UnknownEnum {
@@ -239,7 +239,10 @@ mod tests {
                 expected: "[\"Fast\", \"Slow\"]",
             },
         );
-        assert_eq!(clone_bytes(&small), Some("unknown\n\"value".len()));
+        assert_eq!(
+            clone_bytes(&small),
+            Some(boxed_size + "unknown\n\"value".len())
+        );
         for text in [
             format!("{}", TracedError(&small)),
             format!("{:?}", TracedError(&small)),
@@ -278,6 +281,7 @@ mod tests {
 
     #[test]
     fn clone_budget_counts_owned_lengths_boxes_and_paths() {
+        let boxed_size = crate::error::construct::boxed_error_size();
         let mut message = String::with_capacity(4096);
         message.push_str("abc");
         let error = crate::error::construct::rtd_producer_failure(
@@ -286,28 +290,29 @@ mod tests {
                 1,
                 2,
                 "key".to_owned(),
-                Box::new(XllError::Native { code: 1, message }),
+                Box::new(XllError::native(1, message)),
             )),
         );
-        assert_eq!(clone_bytes(&error), Some(11 + 2 * size_of::<XllError>()));
+        assert_eq!(clone_bytes(&error), Some(11 + 3 * boxed_size));
         let path = std::path::PathBuf::from("native/日本語.dll");
         let bytes = path.as_os_str().as_encoded_bytes().len();
         assert_eq!(
             clone_bytes(&crate::error::construct::library_load(path, 1)),
-            Some(bytes)
+            Some(boxed_size + bytes)
         );
-        assert_eq!(clone_bytes(&XllError::Panic), Some(0));
+        assert_eq!(clone_bytes(&XllError::PANIC), Some(0));
     }
 
     #[test]
     fn deep_structured_errors_are_rejected_before_recursive_clone() {
-        let mut error = XllError::Panic;
+        let boxed_size = crate::error::construct::boxed_error_size();
+        let mut error = XllError::PANIC;
         for _ in 1..MAX_ERROR_DEPTH {
             error = crate::error::construct::rtd_producer_failure(String::new(), Box::new(error));
         }
         assert_eq!(
             clone_bytes(&error),
-            Some((MAX_ERROR_DEPTH - 1) * size_of::<XllError>())
+            Some((MAX_ERROR_DEPTH - 1) * boxed_size)
         );
         error = crate::error::construct::rtd_producer_failure(String::new(), Box::new(error));
         assert_eq!(clone_bytes(&error), None);
@@ -315,16 +320,10 @@ mod tests {
 
     #[test]
     fn tracing_preserves_ordinary_text_and_bounds_both_large_representations() {
-        let small = XllError::Native {
-            code: 7,
-            message: "日本語 quoted \"text\"".to_owned(),
-        };
+        let small = XllError::native(7, "日本語 quoted \"text\"");
         assert_eq!(format!("{}", TracedError(&small)), small.to_string());
         assert_eq!(format!("{:?}", TracedError(&small)), format!("{small:?}"));
-        let large = XllError::Native {
-            code: 1,
-            message: "語".repeat(super::super::DIAGNOSTIC_TEXT_MAX_BYTES),
-        };
+        let large = XllError::native(1, "語".repeat(super::super::DIAGNOSTIC_TEXT_MAX_BYTES));
         for text in [
             format!("{}", TracedError(&large)),
             format!("{:?}", TracedError(&large)),

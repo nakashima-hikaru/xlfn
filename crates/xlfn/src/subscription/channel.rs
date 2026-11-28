@@ -299,8 +299,8 @@ impl<T> RtdBatchSendError<T> {
     pub fn into_error(self) -> XllError {
         match self {
             Self::Invalid(error) => error,
-            Self::Full(_) => XllError::Overloaded,
-            Self::Closed(_) => XllError::Closing,
+            Self::Full(_) => XllError::OVERLOADED,
+            Self::Closed(_) => XllError::CLOSING,
         }
     }
 }
@@ -384,8 +384,8 @@ impl<T> RtdSendError<T> {
     pub fn into_error(self) -> XllError {
         match self {
             RtdSendError::Invalid(error) => error,
-            RtdSendError::Full(_) => XllError::Overloaded,
-            RtdSendError::Closed(_) => XllError::Closing,
+            RtdSendError::Full(_) => XllError::OVERLOADED,
+            RtdSendError::Closed(_) => XllError::CLOSING,
         }
     }
 }
@@ -760,7 +760,7 @@ impl PublisherPool {
 
     pub(super) fn queue(&self) -> XllResult<Arc<PublisherQueue>> {
         if self.stopped.load(Ordering::Acquire) {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         if let Some(queue) = self.queue.get() {
             return Ok(Arc::clone(queue));
@@ -771,7 +771,7 @@ impl PublisherPool {
                 return Ok(Arc::clone(&running.pending.get().queue));
             }
             PublisherWorker::Joining(_) | PublisherWorker::Joined(_) => {
-                return Err(XllError::Closing);
+                return Err(XllError::CLOSING);
             }
             PublisherWorker::Dormant => {}
         }
@@ -1148,7 +1148,7 @@ impl<D: RtdDeliveryPolicy> Channel<D> {
                 };
                 sink.publish_batch(batch, &this.stopping)
             }))
-            .unwrap_or(Err(XllError::Panic));
+            .unwrap_or(Err(XllError::PANIC));
             if result.is_err() {
                 publication.result = result;
                 publication.sink = None;
@@ -1184,7 +1184,7 @@ impl<D: RtdDeliveryPolicy> Channel<D> {
         let mut failure = result.err();
         {
             let mut state = this.state.lock();
-            if state.stopping && matches!(failure, Some(XllError::Closing)) {
+            if state.stopping && failure.as_ref().is_some_and(XllError::is_closing) {
                 failure = None;
             }
             state.accepting = false;
@@ -1325,7 +1325,7 @@ impl RunningProducer {
         let require_join = std::mem::DropGuard::new((), |()| xlfn_kernel::invariant::fail_stop());
         let result = handle.join();
         std::mem::DropGuard::dismiss(require_join);
-        crate::panic_boundary::contain_panic(result).map_err(|_| XllError::Panic)
+        crate::panic_boundary::contain_panic(result).map_err(|_| XllError::PANIC)
     }
 }
 
@@ -1418,7 +1418,7 @@ impl<D: RtdDeliveryPolicy> PreparingLocalChannel<D> {
             let result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
                 producer(sender.clone())
             }))
-            .unwrap_or(Err(XllError::Panic));
+            .unwrap_or(Err(XllError::PANIC));
             sender.complete(&topic, result, error_policy);
         });
         std::mem::DropGuard::dismiss(require_outcome);
@@ -1486,7 +1486,8 @@ impl RtdChannelSubscription {
         self.subscription_permit.take();
         for result in [publisher, producer] {
             match result {
-                Ok(()) | Err(XllError::Closing) => {}
+                Ok(()) => {}
+                Err(error) if error.is_closing() => {}
                 Err(error) => return Err(error),
             }
         }
@@ -1535,10 +1536,10 @@ where
 }
 
 fn spawn_error(error: std::io::Error) -> XllError {
-    XllError::Native {
-        code: error.raw_os_error().unwrap_or(0),
-        message: format!("failed to start RTD worker: {error}"),
-    }
+    XllError::native(
+        error.raw_os_error().unwrap_or(0),
+        format!("failed to start RTD worker: {error}"),
+    )
 }
 
 #[cfg(test)]
@@ -1659,7 +1660,7 @@ mod tests {
         Channel::producer_completed(
             &channel,
             &RtdTopic::single("latest-terminal").unwrap(),
-            Err(XllError::Overloaded),
+            Err(XllError::OVERLOADED),
             RtdProducerErrorPolicy::PublishError(ExcelError::NotAvailable),
         );
         let state = channel.state.lock();
@@ -1736,7 +1737,7 @@ mod tests {
         assert!(Channel::sender::<i32>(first_subscription.channel.fifo()).wait_closed(DEADLINE));
         assert!(matches!(
             second.subscribe(&topic, sink.clone()),
-            Err(XllError::Overloaded)
+            Err(__err) if __err.is_overloaded()
         ));
         assert_eq!(second_calls.load(Ordering::Relaxed), 0);
         first_subscription.finish().unwrap();
@@ -1755,7 +1756,7 @@ mod tests {
         let source_calls = StdArc::clone(&calls);
         let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), move |_| {
             if source_calls.fetch_add(1, Ordering::Relaxed) == 0 {
-                return Err(XllError::Overloaded);
+                return Err(XllError::OVERLOADED);
             }
             Ok(|_: RtdSender<i32>| Ok(()))
         })
@@ -1766,7 +1767,7 @@ mod tests {
         let topic = RtdTopic::single("factory-error-budget").unwrap();
         assert!(matches!(
             source.subscribe(&topic, sink.clone()),
-            Err(XllError::Overloaded)
+            Err(__err) if __err.is_overloaded()
         ));
         let mut subscription = source.subscribe(&topic, sink).unwrap();
         subscription.finish().unwrap();
@@ -1799,12 +1800,10 @@ mod tests {
             }
             let source_reserved = matches!(
                 ChannelBudget::try_worker(&source_budget),
-                Err(XllError::Overloaded)
-            );
+                Err(__err) if __err.is_overloaded());
             let runtime_reserved = matches!(
                 ChannelBudget::try_worker(&runtime_budget),
-                Err(XllError::Overloaded)
-            );
+                Err(__err) if __err.is_overloaded());
             let sink_retained = publication.sink.is_some();
             drop(publication);
             assert!(attempt.join().unwrap().is_err());
@@ -1848,7 +1847,8 @@ mod tests {
             fn report(&self, event: &crate::diagnostics::DiagnosticEvent<'_>) {
                 // Other tests may fail their own producers while this
                 // process-wide test sink is installed.
-                if let XllError::RtdProducerFailure { topic, .. } = event.error()
+                if let crate::error::construct::ErrorView::RtdProducerFailure { topic, .. } =
+                    crate::error::construct::view(event.error())
                     && topic.contains("diagnostic-channel-")
                 {
                     self.0.send(event.error().clone()).unwrap();
@@ -1903,7 +1903,7 @@ mod tests {
                                 sender.try_send(42).unwrap();
                                 sender_tx.send(sender).unwrap();
                                 assert!(!panic, "injected producer failure");
-                                Err(XllError::Overloaded)
+                                Err(XllError::OVERLOADED)
                             })
                         })
                         .with_error_policy(policy);
@@ -1912,14 +1912,16 @@ mod tests {
                     let sender = sender_rx.recv_timeout(DEADLINE).unwrap();
                     assert!(sender.wait_closed(DEADLINE));
                     let event = events.recv_timeout(DEADLINE).unwrap();
-                    let XllError::RtdProducerFailure { topic, source, .. } = event else {
+                    let crate::error::construct::ErrorView::RtdProducerFailure { topic, source } =
+                        crate::error::construct::view(&event)
+                    else {
                         panic!("missing producer diagnostic context");
                     };
                     assert_eq!(topic, r#"["diagnostic-channel-policy", "引用\"\n"]"#);
                     if panic {
-                        assert!(matches!(*source, XllError::Panic));
+                        assert!(source.is_panic());
                     } else {
-                        assert!(matches!(*source, XllError::Overloaded));
+                        assert!(source.is_overloaded());
                     }
                     wait_drained_shared(&subscription.channel);
                     let batch = server.begin_refresh().unwrap();
@@ -1959,7 +1961,7 @@ mod tests {
         Channel::producer_completed(
             &channel,
             &RtdTopic::single("full-queue-failure").unwrap(),
-            Err(XllError::Overloaded),
+            Err(XllError::OVERLOADED),
             RtdProducerErrorPolicy::PublishError(ExcelError::NotAvailable),
         );
         for expected in [
@@ -1989,7 +1991,7 @@ mod tests {
                 Ok(move |sender: RtdSender<i32>| {
                     sender_tx.send(sender.clone()).unwrap();
                     sender.wait_closed(DEADLINE);
-                    Err(XllError::Closing)
+                    Err(XllError::CLOSING)
                 })
             })
             .with_error_policy(RtdProducerErrorPolicy::PublishError(
@@ -2008,7 +2010,7 @@ mod tests {
             cancelled.complete(RefreshOutcome::Delivered).unwrap();
 
             let source = RtdChannelSource::new(crate::rtd::RtdFifo::new(capacity()), |_| {
-                Ok(|_: RtdSender<i32>| Err(XllError::Closing))
+                Ok(|_: RtdSender<i32>| Err(XllError::CLOSING))
             })
             .with_error_policy(RtdProducerErrorPolicy::PublishError(
                 ExcelError::NotAvailable,
@@ -2021,8 +2023,9 @@ mod tests {
                 .unwrap();
             let event = events.recv_timeout(DEADLINE).unwrap();
             assert!(matches!(
-                event,
-                XllError::RtdProducerFailure { source, .. } if matches!(*source, XllError::Closing)
+                crate::error::construct::view(&event),
+                crate::error::construct::ErrorView::RtdProducerFailure { source, .. }
+                    if source.is_closing()
             ));
             wait_drained_shared(&subscription.channel);
             let failure = server.begin_refresh().unwrap();
@@ -2081,7 +2084,7 @@ mod tests {
         assert_eq!(source.max_producers().get(), 1);
         assert!(matches!(
             source.subscribe(&topic, sink.clone()),
-            Err(XllError::Overloaded)
+            Err(__err) if __err.is_overloaded()
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         first.disconnect_and_wait().unwrap();
@@ -2099,7 +2102,7 @@ mod tests {
             if let Some(queue) = queue {
                 assert!(queue.ready.lock().stopping);
             }
-            assert!(matches!(pool.queue(), Err(XllError::Closing)));
+            assert!(matches!(pool.queue(), Err(__err) if __err.is_closing()));
             assert!(matches!(pool.stop(), JoinedPublisher::Clean));
         }
     }
@@ -2125,7 +2128,7 @@ mod tests {
                 .worker
                 .try_lock()
                 .is_some_and(|worker| matches!(*worker, PublisherWorker::Joining(_)));
-            let queue_sealed = matches!(pool.queue(), Err(XllError::Closing));
+            let queue_sealed = matches!(pool.queue(), Err(__err) if __err.is_closing());
             let second = scope.spawn(|| pool.stop());
 
             // Release the worker even if shutdown failed to transition.
@@ -2138,7 +2141,7 @@ mod tests {
             }
         });
         assert!(matches!(pool.stop(), JoinedPublisher::Panicked));
-        assert!(matches!(pool.queue(), Err(XllError::Closing)));
+        assert!(matches!(pool.queue(), Err(__err) if __err.is_closing()));
     }
 
     #[test]
@@ -2208,8 +2211,7 @@ mod tests {
         wait_drained(&first);
         assert!(matches!(
             first_sub.disconnect_and_wait(),
-            Err(XllError::Panic)
-        ));
+            Err(__err) if __err.is_panic()));
         Channel::sender::<i32>(&second).try_send(42).unwrap();
         second.producer_finished();
         wait_drained(&second);
@@ -2243,7 +2245,7 @@ mod tests {
         Channel::producer_completed(
             &latest,
             &RtdTopic::single("mixed-policy").unwrap(),
-            Err(XllError::Overloaded),
+            Err(XllError::OVERLOADED),
             RtdProducerErrorPolicy::PublishError(ExcelError::Number),
         );
         let first = queue.ready.lock().channels.pop_front().unwrap();
@@ -2744,7 +2746,7 @@ mod tests {
                     if panic {
                         panic!("injected factory panic");
                     }
-                    Err(XllError::Overloaded)
+                    Err(XllError::OVERLOADED)
                 },
             )
             .with_max_producers(NonZeroUsize::new(1).unwrap());
@@ -2754,7 +2756,7 @@ mod tests {
             if panic {
                 assert!(result.is_err());
             } else {
-                assert!(matches!(result, Ok(Err(XllError::Overloaded))));
+                assert!(matches!(result, Ok(Err(__err)) if __err.is_overloaded()));
             }
             // Error and unwind must release their pre-factory reservation.
             let retry = source
@@ -2900,7 +2902,7 @@ mod tests {
             let sender_tx = sender_tx.clone();
             Ok(move |sender| {
                 sender_tx.send(sender).unwrap();
-                Err(XllError::Overloaded)
+                Err(XllError::OVERLOADED)
             })
         });
         let subscription = source
@@ -2981,12 +2983,12 @@ mod tests {
                 if unwind {
                     panic!("injected failure before producer starts");
                 }
-                Err::<(), _>(XllError::Overloaded)
+                Err::<(), _>(XllError::OVERLOADED)
             }));
             if unwind {
                 assert!(result.is_err());
             } else {
-                assert!(matches!(result, Ok(Err(XllError::Overloaded))));
+                assert!(matches!(result, Ok(Err(__err)) if __err.is_overloaded()));
             }
             assert!(sender.is_closed());
             // The publisher's owning channel reference has been released

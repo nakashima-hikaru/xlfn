@@ -21,7 +21,7 @@ pub(crate) use xlfn_services::rtd::PreparationFinish;
 pub(crate) fn map_entry_error(error: EntryError) -> XllError {
     let diagnostic_id = match error {
         EntryError::ActiveKeyDuplicate => crate::diagnostics::catalog::ACTIVE_KEY_DUPLICATE,
-        EntryError::Closing => return XllError::Closing,
+        EntryError::Closing => return XllError::CLOSING,
         EntryError::ReservationOverflow => crate::diagnostics::catalog::RESERVATION_OVERFLOW,
         EntryError::ServerGenerationMismatch => {
             crate::diagnostics::catalog::SERVER_GENERATION_MISMATCH
@@ -92,7 +92,7 @@ impl SubscriptionCatalog {
                 limits.max_pending.get(),
                 limits.max_total_topic_bytes.get(),
             )
-            .ok_or(XllError::Overloaded)?;
+            .ok_or(XllError::OVERLOADED)?;
         let raw_id = self.next_subscription_id;
         let next_subscription_id =
             raw_id

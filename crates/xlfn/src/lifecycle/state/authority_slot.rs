@@ -185,7 +185,7 @@ mod tests {
         #[cfg(feature = "async")]
         type AsyncExecutor = <() as crate::Addin>::AsyncExecutor;
         fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
-            Err(crate::XllError::Closing)
+            Err(crate::XllError::CLOSING)
         }
     }
 
@@ -239,7 +239,7 @@ mod tests {
         #[cfg(feature = "async")]
         type AsyncExecutor = <() as crate::Addin>::AsyncExecutor;
         fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
-            Err(crate::XllError::Closing)
+            Err(crate::XllError::CLOSING)
         }
     }
 

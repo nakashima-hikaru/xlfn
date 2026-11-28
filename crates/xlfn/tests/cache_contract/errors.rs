@@ -10,9 +10,7 @@ fn compute_err_is_not_cached() {
     );
 
     let res = cache.get_or_try_insert_with("err_key".to_string(), || {
-        Err(XllError::Domain {
-            code: DomainErrorCode::Overflow,
-        })
+        Err(XllError::domain(DomainErrorCode::Overflow))
     });
     assert!(res.is_err());
     assert_eq!(cache.len(), 0);

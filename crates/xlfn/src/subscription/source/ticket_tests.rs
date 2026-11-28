@@ -249,7 +249,7 @@ fn stale_source_handle_cannot_reach_a_new_generation_adapter() {
             &old_handle,
             RtdTopic::single("stale-source").unwrap().borrowed()
         ),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
     assert_eq!(counts.subscribed.load(Ordering::Acquire), 0);
     drop(old_arena);
@@ -276,7 +276,7 @@ unsafe impl RtdSubscription for FailingSubscription {
         self.counts.disconnected.fetch_add(1, Ordering::Relaxed);
         match self.failure {
             DisconnectFailure::None => Ok(()),
-            DisconnectFailure::Error => Err(XllError::Overloaded),
+            DisconnectFailure::Error => Err(XllError::OVERLOADED),
             DisconnectFailure::Panic => panic!("injected by-value owner disconnect panic"),
         }
     }
@@ -329,7 +329,7 @@ fn miri_by_value_source_owner_consuming_barrier_never_retries() {
         match failure {
             DisconnectFailure::None => assert!(matches!(result, Ok(Ok(())))),
             DisconnectFailure::Error => {
-                assert!(matches!(result, Ok(Err(XllError::Overloaded))));
+                assert!(matches!(result, Ok(Err(__err)) if __err.is_overloaded()));
             }
             DisconnectFailure::Panic => assert!(result.is_err()),
         }

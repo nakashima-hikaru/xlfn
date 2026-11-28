@@ -91,8 +91,8 @@ pub(crate) enum DiagnosticTerminalCloseError {
 impl IntoXllError for DiagnosticTerminalCloseError {
     fn into_xll_error(self) -> XllError {
         match self {
-            Self::WorkerPanicked => XllError::Panic,
-            Self::ReentrantShutdown => XllError::ReentrantCall,
+            Self::WorkerPanicked => XllError::PANIC,
+            Self::ReentrantShutdown => XllError::REENTRANT_CALL,
             Self::InvariantViolation => {
                 crate::error::construct::internal(crate::diagnostics::catalog::DIAGNOSTICS_CLOSE)
             }
@@ -242,7 +242,7 @@ impl DiagnosticRouter {
                 self.observer
                     .record(crate::shutdown_trace::ShutdownEvent::RecordCleanupIssue);
                 if let Some(sink) = self.sink.read_if_ready() {
-                    sink.report(&XllError::Panic, || DiagnosticEventMetadata {
+                    sink.report(&XllError::PANIC, || DiagnosticEventMetadata {
                         udf_id: "diagnostic sink replacement",
                         argument: None,
                         diagnostic_id: crate::diagnostics::id::from_u64(
@@ -590,7 +590,7 @@ pub(crate) fn failed_diagnostic_writes() -> u64 {
 pub(crate) fn report_udf_failure_no_unwind(udf_id: &'static str, error: &XllError) {
     // A preserved worksheet error has no diagnostic detail. Instrumentation
     // still receives its ExcelValue completion; Custom carries reportable text.
-    if !matches!(error, XllError::ExcelValue(_)) {
+    if error.excel_value_error().is_none() {
         report_no_unwind(udf_id, error);
     }
 }
@@ -604,7 +604,7 @@ pub(crate) fn report_udf_failure_with_history_no_unwind(
     error: &XllError,
     include_excel_value: bool,
 ) {
-    if !include_excel_value && matches!(error, XllError::ExcelValue(_)) {
+    if !include_excel_value && error.excel_value_error().is_some() {
         return;
     }
     let diagnostic_id = crate::diagnostics::id::from_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
@@ -641,10 +641,10 @@ pub(crate) fn report_udf_panic_with_history_no_unwind(
             calculation_id,
             timestamp,
         },
-        &XllError::Panic,
+        &XllError::PANIC,
         Some(message),
     );
-    report_with_id_no_unwind(udf_id, &XllError::Panic, diagnostic_id, || timestamp);
+    report_with_id_no_unwind(udf_id, &XllError::PANIC, diagnostic_id, || timestamp);
 }
 
 /// Reports framework and application failures, including diagnostic identity.
@@ -660,10 +660,7 @@ fn report_with_id_no_unwind(
     diagnostic_id: DiagnosticId,
     timestamp: impl FnOnce() -> SystemTime,
 ) {
-    let argument = match error {
-        XllError::Input { argument, .. } => Some(*argument),
-        _ => None,
-    };
+    let argument = error.input_details().map(|(argument, _)| argument);
     let _ = catch_no_unwind(AssertUnwindSafe(|| {
         tracing::event!(
             tracing::Level::ERROR,
@@ -716,14 +713,14 @@ mod tests {
         };
         report_with_id_no_unwind(
             "sinkless_timestamp",
-            &XllError::Panic,
+            &XllError::PANIC,
             crate::diagnostics::id::from_u64(1),
             sample,
         );
         assert_eq!(samples.get(), 0);
         // Exercise the public framework reporter too: Linux Miri isolation
         // rejects wall-clock reads, so this catches an eager real timestamp.
-        report_no_unwind("sinkless_real_timestamp", &XllError::Panic);
+        report_no_unwind("sinkless_real_timestamp", &XllError::PANIC);
 
         struct TimestampSink(std::sync::mpsc::Sender<SystemTime>);
         impl DiagnosticSink for TimestampSink {
@@ -739,7 +736,7 @@ mod tests {
         std::thread::spawn(|| {
             report_with_id_no_unwind(
                 "unrelated_timestamp",
-                &XllError::Panic,
+                &XllError::PANIC,
                 crate::diagnostics::id::from_u64(3),
                 || SystemTime::UNIX_EPOCH,
             );
@@ -748,7 +745,7 @@ mod tests {
         .unwrap();
         report_with_id_no_unwind(
             "delivered_timestamp",
-            &XllError::Panic,
+            &XllError::PANIC,
             crate::diagnostics::id::from_u64(2),
             sample,
         );
@@ -790,7 +787,7 @@ mod tests {
             let dispatch = tracing::Dispatch::new(subscriber);
             let _guard = tracing::dispatcher::set_default(&dispatch);
             let result = catch_unwind(AssertUnwindSafe(|| {
-                report_no_unwind("panicking_subscriber_test", &XllError::Panic)
+                report_no_unwind("panicking_subscriber_test", &XllError::PANIC)
             }));
             assert!(
                 result.is_ok(),
@@ -842,7 +839,7 @@ mod tests {
         impl DiagnosticSink for FullSink {
             fn report(&self, event: &DiagnosticEvent<'_>) {
                 if event.udf_id() == "traced-error"
-                    && let XllError::Native { message, .. } = event.error()
+                    && let Some((_, message)) = event.error().native_details()
                 {
                     self.0.send(message.len()).unwrap();
                 }
@@ -852,14 +849,8 @@ mod tests {
         set_diagnostic_sink(FullSink(sender)).unwrap();
         let records = Arc::new(Mutex::new(Vec::new()));
         let dispatch = tracing::Dispatch::new(Subscriber(Arc::clone(&records)));
-        let small = XllError::Native {
-            code: 7,
-            message: "ordinary 日本語".to_owned(),
-        };
-        let large = XllError::Native {
-            code: 8,
-            message: "x".repeat(1024 * 1024),
-        };
+        let small = XllError::native(7, "ordinary 日本語".to_owned());
+        let large = XllError::native(8, "x".repeat(1024 * 1024));
         tracing::dispatcher::with_default(&dispatch, || {
             report_no_unwind("traced-error", &small);
             report_no_unwind("traced-error", &large);
@@ -959,7 +950,7 @@ mod tests {
         set_diagnostic_sink(ReentrantClearSink { reports }).unwrap();
 
         for udf in ["reentrant_test", "preserved_after_reentrant_clear"] {
-            let id = report_no_unwind(udf, &XllError::Panic);
+            let id = report_no_unwind(udf, &XllError::PANIC);
             let observed = received
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap();
@@ -1009,7 +1000,7 @@ mod tests {
             "reentrant_replace_test",
             "preserved_after_reentrant_replace",
         ] {
-            let id = report_no_unwind(udf, &XllError::Panic);
+            let id = report_no_unwind(udf, &XllError::PANIC);
             assert_eq!(
                 received
                     .recv_timeout(std::time::Duration::from_secs(5))
@@ -1169,7 +1160,7 @@ mod tests {
 
     #[test]
     fn custom_sink_panic_is_contained() {
-        let error = XllError::Panic;
+        let error = XllError::PANIC;
         let event = DiagnosticEvent {
             udf_id: "test",
             argument: None,
@@ -1207,7 +1198,7 @@ mod tests {
             .unwrap(),
         );
         for id in 1..=3 {
-            sink.report(&XllError::Panic, || DiagnosticEventMetadata {
+            sink.report(&XllError::PANIC, || DiagnosticEventMetadata {
                 udf_id: "panic payload delivery",
                 argument: None,
                 diagnostic_id: crate::diagnostics::id::from_u64(id),
@@ -1283,17 +1274,17 @@ mod tests {
         set_diagnostic_sink(WorksheetErrorSink(Arc::clone(&reports))).unwrap();
         report_udf_failure_no_unwind(
             "worksheet_error",
-            &XllError::ExcelValue(crate::ExcelError::Number),
+            &XllError::excel_value(crate::ExcelError::Number),
         );
         // The lease isolates fixture setup, not reporting on other threads.
-        std::thread::spawn(|| report_no_unwind("unrelated_worksheet_report", &XllError::Panic))
+        std::thread::spawn(|| report_no_unwind("unrelated_worksheet_report", &XllError::PANIC))
             .join()
             .unwrap();
         report_udf_failure_no_unwind(
             "custom_error",
             &XllError::custom(crate::ExcelError::Number, "calculation rejected"),
         );
-        report_udf_failure_no_unwind("panic_error", &XllError::Panic);
+        report_udf_failure_no_unwind("panic_error", &XllError::PANIC);
         clear_diagnostic_sink().unwrap();
         assert_eq!(reports.lock().as_slice(), ["custom_error", "panic_error"]);
     }
@@ -1362,7 +1353,7 @@ mod tests {
         let _dispatch = tracing::dispatcher::set_default(&dispatch);
         let delivered = Arc::new(Mutex::new(Vec::new()));
         set_diagnostic_sink(CapturingSink(Arc::clone(&delivered), Arc::clone(&history))).unwrap();
-        let error = XllError::ExcelValue(crate::ExcelError::NotAvailable);
+        let error = XllError::excel_value(crate::ExcelError::NotAvailable);
         report_udf_failure_with_history_no_unwind(&history, "q_result", None, None, &error, false);
         assert!(
             history
@@ -1413,7 +1404,7 @@ mod tests {
         owners.reserve(16);
         let sink = Box::new(owners.pop().unwrap());
         for id in 1..=8 {
-            sink.report(&XllError::Panic, || DiagnosticEventMetadata {
+            sink.report(&XllError::PANIC, || DiagnosticEventMetadata {
                 udf_id: "observer ownership",
                 argument: None,
                 diagnostic_id: crate::diagnostics::id::from_u64(id),
@@ -1445,7 +1436,7 @@ mod tests {
             .read_if_ready()
             .as_ref()
             .unwrap()
-            .report(&XllError::Panic, || DiagnosticEventMetadata {
+            .report(&XllError::PANIC, || DiagnosticEventMetadata {
                 udf_id: "reload",
                 argument: None,
                 diagnostic_id: crate::diagnostics::id::from_u64(1),
@@ -1463,7 +1454,7 @@ mod tests {
             .read_if_ready()
             .as_ref()
             .unwrap()
-            .report(&XllError::Panic, || DiagnosticEventMetadata {
+            .report(&XllError::PANIC, || DiagnosticEventMetadata {
                 udf_id: "reload",
                 argument: None,
                 diagnostic_id: crate::diagnostics::id::from_u64(2),
@@ -1514,7 +1505,7 @@ mod tests {
             .read_if_ready()
             .as_ref()
             .unwrap()
-            .report(&XllError::Panic, || DiagnosticEventMetadata {
+            .report(&XllError::PANIC, || DiagnosticEventMetadata {
                 udf_id: "retiring",
                 argument: None,
                 diagnostic_id: crate::diagnostics::id::from_u64(1),
@@ -1573,7 +1564,7 @@ mod tests {
         // opened as a log file. No file construction should be attempted.
         let result = install_file_diagnostic_sink_at(directory.path().to_path_buf());
         assert!(matches!(result, Err(DiagnosticInitError::AlreadyInstalled)));
-        report_no_unwind("failed_file_sink_construction_preserved", &XllError::Panic);
+        report_no_unwind("failed_file_sink_construction_preserved", &XllError::PANIC);
         clear_diagnostic_sink().unwrap();
         assert_eq!(delivered.load(Ordering::Relaxed), 1);
 
@@ -1632,7 +1623,7 @@ mod tests {
             file::open_file_sink(path.clone(), DiagnosticFileConfig::new()).unwrap(),
             path
         );
-        report_no_unwind("accepted_file_sink", &XllError::Panic);
+        report_no_unwind("accepted_file_sink", &XllError::PANIC);
         clear_diagnostic_sink().unwrap();
         let log = fs::read_to_string(&path).unwrap();
         // Unrelated tests may report while the process-wide sink is active.
@@ -1657,7 +1648,7 @@ mod tests {
                 LOG_GENERATIONS,
             )),
         };
-        let error = XllError::Panic;
+        let error = XllError::PANIC;
         sink.report(&DiagnosticEvent {
             udf_id: "failed_write",
             argument: None,
@@ -1676,13 +1667,13 @@ mod tests {
         let sink = FileDiagnosticSink {
             log: Mutex::new(RotatingLog::open(path.clone()).unwrap()),
         };
-        let error = XllError::Native {
-            code: 17,
-            message: format!(
+        let error = XllError::native(
+            17,
+            format!(
                 "first line\nsecond\tline \"quoted\" {}",
                 "x".repeat(32 * 1024)
             ),
-        };
+        );
 
         sink.report(&DiagnosticEvent {
             udf_id: "native_failure",
@@ -1760,7 +1751,7 @@ mod tests {
             .read_if_ready()
             .as_ref()
             .unwrap()
-            .report(&XllError::Panic, || DiagnosticEventMetadata {
+            .report(&XllError::PANIC, || DiagnosticEventMetadata {
                 udf_id: "terminal-close-race",
                 argument: None,
                 diagnostic_id: crate::diagnostics::id::from_u64(1),
@@ -1950,7 +1941,7 @@ mod tests {
         );
         let before = diagnostic_stats().dropped_events;
 
-        sink.report(&XllError::Panic, || DiagnosticEventMetadata {
+        sink.report(&XllError::PANIC, || DiagnosticEventMetadata {
             udf_id: "bounded",
             argument: None,
             diagnostic_id: crate::diagnostics::id::from_u64(1),
@@ -1958,7 +1949,7 @@ mod tests {
         });
         started_rx.recv().unwrap();
         for diagnostic_id in 2..=(DIAGNOSTIC_QUEUE_CAPACITY as u64 + 2) {
-            sink.report(&XllError::Panic, || DiagnosticEventMetadata {
+            sink.report(&XllError::PANIC, || DiagnosticEventMetadata {
                 udf_id: "bounded",
                 argument: None,
                 diagnostic_id: crate::diagnostics::id::from_u64(diagnostic_id),
@@ -1967,7 +1958,7 @@ mod tests {
         }
         assert!(dropped_diagnostic_events() > before);
         assert!(diagnostic_stats().dropped_events > before);
-        sink.report(&XllError::Panic, || {
+        sink.report(&XllError::PANIC, || {
             panic!("a full queue must not build the dropped event")
         });
 
@@ -1988,7 +1979,7 @@ mod tests {
             .unwrap(),
         );
         let report = || {
-            sink.report(&XllError::Panic, || DiagnosticEventMetadata {
+            sink.report(&XllError::PANIC, || DiagnosticEventMetadata {
                 udf_id: "reservation rollback",
                 argument: None,
                 diagnostic_id: crate::diagnostics::id::from_u64(1),
@@ -2002,7 +1993,7 @@ mod tests {
         }
         assert!(
             catch_unwind(AssertUnwindSafe(|| {
-                sink.report(&XllError::Panic, || {
+                sink.report(&XllError::PANIC, || {
                     panic!("injected event construction panic")
                 });
             }))
@@ -2010,7 +2001,7 @@ mod tests {
         );
         report();
         assert_eq!(sink.pending(), DIAGNOSTIC_QUEUE_CAPACITY as u64 + 1);
-        sink.report(&XllError::Panic, || {
+        sink.report(&XllError::PANIC, || {
             panic!("the restored capacity must now be fully reserved")
         });
         release_tx.send(()).unwrap();

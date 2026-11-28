@@ -49,7 +49,7 @@ impl CallScratch {
             .get()
             .checked_add(bytes)
             .filter(|&total| total <= MAX_CALL_SCRATCH_BYTES)
-            .ok_or(crate::XllError::Overloaded)?;
+            .ok_or(crate::XllError::OVERLOADED)?;
         self.requested_bytes.set(total);
         Ok(())
     }
@@ -93,7 +93,7 @@ impl CallScratch {
         let strings = if self.large_collection.get() {
             if self.strings.get().is_none() {
                 let arena = bumpalo::Bump::try_with_capacity(LARGE_COLLECTION_TEXT_CAPACITY)
-                    .map_err(|_| crate::XllError::Overloaded)?;
+                    .map_err(|_| crate::XllError::OVERLOADED)?;
                 let _ = self.strings.set(Box::new(arena));
             }
             self.strings
@@ -105,7 +105,7 @@ impl CallScratch {
         };
         let output = strings
             .try_alloc_slice_fill_with(decoder.utf8_len(), |_| std::mem::MaybeUninit::uninit())
-            .map_err(|_| crate::XllError::Overloaded)?;
+            .map_err(|_| crate::XllError::OVERLOADED)?;
         decoder.decode_into(output, argument)
     }
 
@@ -116,7 +116,7 @@ impl CallScratch {
     ) -> XllResult<&[T]> {
         self.charge(
             len.checked_mul(std::mem::size_of::<T>())
-                .ok_or(crate::XllError::Overloaded)?,
+                .ok_or(crate::XllError::OVERLOADED)?,
         )?;
         if len.saturating_mul(std::mem::size_of::<T>()) >= LARGE_TYPED_COLLECTION_BYTES {
             self.large_collection.set(true);
@@ -124,7 +124,7 @@ impl CallScratch {
         let mut values = std::vec::Vec::new_in(BumpAllocator(&self.arena.0));
         values
             .try_reserve_exact(len)
-            .map_err(|_| crate::XllError::Overloaded)?;
+            .map_err(|_| crate::XllError::OVERLOADED)?;
         for index in 0..len {
             values.push(build(index)?);
         }
@@ -511,7 +511,7 @@ mod scratch_tests {
             let actual = scratch.decode_utf16(&units, "text");
             match String::from_utf16(&units) {
                 Ok(expected) => proptest::prop_assert_eq!(actual.unwrap(), expected),
-                Err(_) => proptest::prop_assert!(matches!(actual, Err(crate::XllError::Input {
+                Err(_) => proptest::prop_assert!(matches!((actual).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::Input {
                     argument: "text", reason: crate::error::InputError::InvalidUtf16,
                 })), "invalid UTF-16 must retain its argument and error kind"),
             }
@@ -535,7 +535,7 @@ mod scratch_budget_tests {
         scratch.charge(MAX_CALL_SCRATCH_BYTES - 1).unwrap();
         assert!(matches!(
             scratch.collect_copy::<u16>(1, |_| panic!("must reject before conversion")),
-            Err(crate::XllError::Overloaded)
+            Err(__err) if __err.is_overloaded()
         ));
         assert_eq!(scratch.allocated_bytes(), 0);
     }

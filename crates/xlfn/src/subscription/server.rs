@@ -354,7 +354,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     reason = "RtdNotifier contains drop types on Windows/test configurations but may be uninhabited on non-Windows production"
 )]
 pub(crate) fn drop_notifier_no_unwind<N>(notifier: Option<N>) -> XllResult<()> {
-    catch_no_unwind(AssertUnwindSafe(|| drop(notifier))).map_err(|_| XllError::Panic)
+    catch_no_unwind(AssertUnwindSafe(|| drop(notifier))).map_err(|_| XllError::PANIC)
 }
 
 thread_local! {
@@ -402,7 +402,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             if catch_no_unwind(AssertUnwindSafe(|| subscription.request_cancel())).is_err()
                 && first_error.is_none()
             {
-                first_error = Some(XllError::Panic);
+                first_error = Some(XllError::PANIC);
             }
         }
         first_error.map_or(Ok(()), Err)
@@ -425,7 +425,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Dro
         self.runtime
             .record_cleanup_result(disconnect_all_no_unwind(subscriptions.into_values()));
         if self.owner.is_some() {
-            self.runtime.record_cleanup_result(Err(XllError::Panic));
+            self.runtime.record_cleanup_result(Err(XllError::PANIC));
         }
     }
 }
@@ -531,7 +531,7 @@ impl<'a, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 // An interrupted wait cannot certify quiescence. Keep the
                 // publish tables and late source owners intact for quarantine;
                 // release captured subscriptions before waking failed waiters.
-                let error = first_error.unwrap_or(XllError::Panic);
+                let error = first_error.unwrap_or(XllError::PANIC);
                 resources.runtime.record_cleanup_result(Err(error.clone()));
                 let owner = resources.owner.take().expect("live termination owner");
                 drop(resources);

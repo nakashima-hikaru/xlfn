@@ -55,7 +55,7 @@ impl ModuleCallbackAdmission {
             return if self.callbacks.active() == 0 {
                 Ok(())
             } else {
-                Err(crate::XllError::Closing)
+                Err(crate::XllError::CLOSING)
             };
         }
         // Opening can run on Excel's lifecycle thread with the canonical
@@ -64,7 +64,7 @@ impl ModuleCallbackAdmission {
             .callbacks
             .control()
             .try_drained()
-            .map_err(|_| crate::XllError::Closing)?;
+            .map_err(|_| crate::XllError::CLOSING)?;
         drop(drained.reopen());
         self.phase
             .store(ModuleCallbackLifecycle::Open as u8, Ordering::Release);
@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(gate.lifecycle(), ModuleCallbackLifecycle::Closing);
         assert_eq!(gate.active(), 1);
         assert!(!gate.is_closed_and_quiescent());
-        assert!(matches!(gate.try_reopen(), Err(crate::XllError::Closing)));
+        assert!(matches!(gate.try_reopen(), Err(__err) if __err.is_closing()));
         assert!(gate.enter().is_err());
         drop(callback);
         assert!(gate.is_closed_and_quiescent());

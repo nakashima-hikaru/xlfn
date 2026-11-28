@@ -137,7 +137,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SubscriptionServiceSlot<
                         RuntimeShutdownOutcome::PublisherPanicked => vec![CleanupIssue {
                             component: "RTD publisher",
                             kind: CleanupIssueKind::WorkerPanickedAfterJoin,
-                            error: crate::XllError::Panic,
+                            error: crate::XllError::PANIC,
                         }],
                     };
                     Ok(StopOutcome {
@@ -237,8 +237,7 @@ mod tests {
         assert!(slot.is_none());
         assert!(matches!(
             slot.read(RtdSubscriptionHost::detached()),
-            Err(crate::XllError::Closing)
-        ));
+            Err(__err) if __err.is_closing()));
     }
 
     #[test]
@@ -262,7 +261,7 @@ mod tests {
             stopped.issues[0].kind,
             CleanupIssueKind::WorkerPanickedAfterJoin
         );
-        assert!(matches!(stopped.issues[0].error, crate::XllError::Panic));
+        assert!(stopped.issues[0].error.is_panic());
         assert!(slot.is_none());
     }
 
@@ -298,8 +297,7 @@ mod tests {
         let slot = SubscriptionServiceSlot::<()>::new();
         assert!(matches!(
             slot.read(RtdSubscriptionHost::detached()),
-            Err(crate::XllError::Closing)
-        ));
+            Err(__err) if __err.is_closing()));
 
         slot.arm(
             generation(),

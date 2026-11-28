@@ -261,9 +261,8 @@ fn batched_publish_overflow_keeps_the_accepted_prefix_deliverable() {
             .collect(),
         &AtomicBool::new(false),
     );
-    assert!(matches!(
-        result,
-        Err(XllError::Internal {
+    assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::REFERENCE_OVERFLOW,
             ..
         })
@@ -505,7 +504,7 @@ fn runtime_close_blocks_all_servers_immediately() {
     }
 
     let sink_b = sink_b.lock().clone().unwrap();
-    assert!(matches!(sink_b.publish(42.0), Err(XllError::Closing)));
+    assert!(matches!(sink_b.publish(42.0), Err(__err) if __err.is_closing()));
 
     unblock_callback_tx.send(()).unwrap();
     publish_handle.join().unwrap();
@@ -918,12 +917,11 @@ fn borrowed_string_validates_the_utf16_limit_before_admission() {
     sink.publish_str(&exact).unwrap();
 
     let assert_oversized = || {
-        assert!(matches!(
-            sink.publish_str(&oversized),
-            Err(XllError::Input {
+        assert!(matches!((sink.publish_str(&oversized)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 argument: "RTD value",
                 reason: InputError::TooLarge { limit, actual },
-            }) if limit == EXCEL_STRING_LIMIT && actual == EXCEL_STRING_LIMIT + 1
+            }) if *limit == EXCEL_STRING_LIMIT && *actual == EXCEL_STRING_LIMIT + 1
         ));
     };
     assert_oversized();
@@ -938,7 +936,7 @@ fn borrowed_string_validates_the_utf16_limit_before_admission() {
 
     server.test_server().publish.mark_closing_for_test();
     assert_oversized();
-    assert!(matches!(sink.publish_str("valid"), Err(XllError::Closing)));
+    assert!(matches!(sink.publish_str("valid"), Err(__err) if __err.is_closing()));
 }
 
 #[test]
@@ -1304,7 +1302,7 @@ fn stale_sink_returns_closing() {
 
     server_a.terminate().unwrap();
 
-    assert!(matches!(sink_a.publish(1.0), Err(XllError::Closing)));
+    assert!(matches!(sink_a.publish(1.0), Err(__err) if __err.is_closing()));
 
     let prep_b = runtime
         .prepare(&source_b, RtdTopic::single("b").unwrap().borrowed())
@@ -1385,7 +1383,7 @@ fn global_quota_enforcement() {
         sink.publish(1.0).unwrap();
     }
 
-    assert!(matches!(sinks_b[4].publish(1.0), Err(XllError::Overloaded)));
+    assert!(matches!(sinks_b[4].publish(1.0), Err(__err) if __err.is_overloaded()));
 
     let batch_a = server_a.begin_refresh().unwrap();
     batch_a.complete(RefreshOutcome::Delivered).unwrap();
@@ -1411,13 +1409,13 @@ fn key_binding_concurrency_rejection() {
         .unwrap();
     assert!(matches!(
         runtime.connect_transaction(&server_b, TopicId(1), id),
-        Err(XllError::Internal { .. })
+        Err(__err) if __err.diagnostic_id().is_some()
     ));
 
     conn_a.commit().unwrap();
     assert!(matches!(
         runtime.connect_transaction(&server_b, TopicId(1), id),
-        Err(XllError::Internal { .. })
+        Err(__err) if __err.diagnostic_id().is_some()
     ));
 }
 
@@ -1519,8 +1517,7 @@ fn inflight_register_waits_for_close() {
     let server = reg_res.unwrap();
     assert!(matches!(
         server.test_server().enter_operation(),
-        Err(XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
 }
 
 #[test]
@@ -1674,18 +1671,15 @@ fn server_lifecycle_rejects_mutations_when_closing() {
 
     assert!(matches!(
         server.attach_update_notifier(RtdNotifier::for_test(Arc::new(TestNotifierState::new()))),
-        Err(XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     assert!(matches!(
         server.pulse_notification(),
-        Err(XllError::Closing)
-    ));
-    assert!(matches!(server.begin_refresh(), Err(XllError::Closing)));
-    assert!(matches!(server.claim(id), Err(XllError::Closing)));
+        Err(__err) if __err.is_closing()));
+    assert!(matches!(server.begin_refresh(), Err(__err) if __err.is_closing()));
+    assert!(matches!(server.claim(id), Err(__err) if __err.is_closing()));
     assert!(matches!(
         server.disconnect(TopicId(1)),
-        Err(XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
 }
 
 pub(crate) struct FailingDisconnectSubscription;
@@ -1740,19 +1734,17 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
     let res_owner = server.terminate();
     let res_waiter = handle.join().unwrap();
 
-    assert!(matches!(
-        res_owner,
-        Err(XllError::Internal {
+    assert!(matches!((res_owner).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
             ..
-        }) | Err(XllError::Panic)
+        }) | Err(crate::error::construct::ErrorView::Panic)
     ));
-    assert!(matches!(
-        res_waiter,
-        Err(XllError::Internal {
+    assert!(matches!((res_waiter).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
             ..
-        }) | Err(XllError::Panic)
+        }) | Err(crate::error::construct::ErrorView::Panic)
     ));
 }
 
@@ -1776,10 +1768,10 @@ fn server_terminate_callback_drop_failure_reaches_waiter() {
 
     let owner = owner.request_cancel();
     let res_owner = owner.finish();
-    assert!(matches!(res_owner, Err(XllError::Panic)));
+    assert!(matches!(res_owner, Err(__err) if __err.is_panic()));
 
     let res_waiter = handle.join().unwrap();
-    assert!(matches!(res_waiter, Err(XllError::Panic)));
+    assert!(matches!(res_waiter, Err(__err) if __err.is_panic()));
 }
 
 #[test]
@@ -1801,7 +1793,7 @@ fn server_terminate_owner_unwind_notifies_waiter() {
     assert!(res_owner.is_err(), "owner finish should have panicked");
 
     let res_waiter = handle.join().unwrap();
-    assert!(matches!(res_waiter, Err(XllError::Panic)));
+    assert!(matches!(res_waiter, Err(__err) if __err.is_panic()));
 }
 
 #[test]
@@ -1826,9 +1818,8 @@ fn disconnect_propagates_subscription_cleanup_error() {
     conn.commit().unwrap();
 
     let error = server.disconnect(TopicId(1)).unwrap_err();
-    assert!(matches!(
-        error,
-        XllError::Internal {
+    assert!(matches!(crate::error::construct::view(&(error)),
+        crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
             ..
         }
@@ -1857,9 +1848,8 @@ fn rollback_records_subscription_cleanup_error() {
 
     conn.rollback();
 
-    assert!(matches!(
-        runtime.cleanup_result(),
-        Err(XllError::Internal {
+    assert!(matches!((runtime.cleanup_result()).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
             ..
         })
@@ -1926,9 +1916,8 @@ fn miri_connection_unwind_allows_reentrant_cleanup_before_releasing_admission() 
     assert!(server.test_server().subscriptions.lock().is_empty());
     prepared.rollback();
     assert!(runtime.catalog.lock().entries.is_empty());
-    assert!(matches!(
-        runtime.cleanup_result(),
-        Err(XllError::Internal {
+    assert!(matches!((runtime.cleanup_result()).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::PANIC_DISCONNECT,
             ..
         })
@@ -2007,7 +1996,7 @@ fn request_cancel_panic_propagates_to_termination() {
     }
 
     let res = server.terminate();
-    assert!(matches!(res, Err(XllError::Panic)));
+    assert!(matches!(res, Err(__err) if __err.is_panic()));
     assert_eq!(phases.load(Ordering::Acquire), 4);
     assert_eq!(payload_drops.load(Ordering::Acquire), 0);
 }
@@ -2025,7 +2014,7 @@ fn notifier_drop_retains_panicking_payload() {
 
     let payload_drops = Arc::new(AtomicUsize::new(0));
     let result = super::server::drop_notifier_no_unwind(Some(Notifier(Arc::clone(&payload_drops))));
-    assert!(matches!(result, Err(XllError::Panic)));
+    assert!(matches!(result, Err(__err) if __err.is_panic()));
     assert_eq!(payload_drops.load(Ordering::Acquire), 0);
 }
 
@@ -2091,17 +2080,15 @@ fn install_failure_during_closing_propagates_cleanup_error() {
     tx_close.send(()).unwrap();
 
     let res = handle.join().unwrap();
-    assert!(matches!(
-        res,
-        Err(XllError::Internal {
+    assert!(matches!((res).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
             ..
         })
     ));
 
-    assert!(matches!(
-        runtime.cleanup_result(),
-        Err(XllError::Internal {
+    assert!(matches!((runtime.cleanup_result()).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
             ..
         })
@@ -2222,11 +2209,11 @@ fn fresh_preparation_gets_a_new_incarnation_while_old_quota_is_retained() {
         assert_ne!(fresh.key(), old.key());
         assert!(matches!(
             runtime.claim_server(next.generation(), stale),
-            Err(XllError::Closing)
+            Err(__err) if __err.is_closing()
         ));
         assert!(matches!(
             runtime.connect_transaction(&next, TopicId(1), stale),
-            Err(XllError::Closing)
+            Err(__err) if __err.is_closing()
         ));
 
         {
@@ -2382,7 +2369,7 @@ fn failed_pending_admission_rolls_back_new_source_identity() {
 
     assert!(matches!(
         runtime.prepare(&source, RtdTopic::single("blocked").unwrap().borrowed()),
-        Err(XllError::Overloaded)
+        Err(__err) if __err.is_overloaded()
     ));
 
     assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 0);
@@ -2453,7 +2440,7 @@ fn source_limit_rejects_a_second_live_source() {
             &source_b,
             RtdTopic::single("second-source").unwrap().borrowed()
         ),
-        Err(XllError::Overloaded)
+        Err(__err) if __err.is_overloaded()
     ));
 
     let catalog = runtime.catalog.lock();
@@ -2558,9 +2545,8 @@ fn identity_lookup_reports_orphaned_candidate() {
             1,
         )
         .unwrap();
-    assert!(matches!(
-        catalog.find_identity(SourceId(source.id), &topic.borrowed()),
-        Err(XllError::Internal {
+    assert!(matches!((catalog.find_identity(SourceId(source.id), &topic.borrowed())).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::RTD_INDEX_ORPHAN,
             ..
         })
@@ -2758,9 +2744,9 @@ fn miri_rejected_topic_admission_never_reads_parts_to_copy_them() {
         reads.set(0);
         let result = runtime.prepare(&source, topic);
         assert!(if case == "id" {
-            matches!(result, Err(XllError::Internal { .. }))
+            matches!(result, Err(__err) if __err.diagnostic_id().is_some())
         } else {
-            matches!(result, Err(XllError::Overloaded))
+            matches!(result, Err(__err) if __err.is_overloaded())
         });
         assert_eq!(reads.get(), 0, "rejected topic reached owned conversion");
         let catalog = runtime.catalog.lock();
@@ -2791,7 +2777,7 @@ fn existing_topic_reuse_precedes_all_new_admission_limits() {
     reused.commit();
     assert!(matches!(
         runtime.prepare(&source, BorrowedTopicParts::new(&["new"]).unwrap()),
-        Err(XllError::Overloaded)
+        Err(__err) if __err.is_overloaded()
     ));
     runtime.catalog.lock().assert_identity_invariants();
 }
@@ -2811,7 +2797,7 @@ fn borrowed_admission_rejection_preserves_counts_and_runtime_checks() {
     let next = runtime.catalog.lock().next_subscription_id;
     assert!(matches!(
         runtime.prepare(&source, BorrowedTopicParts::new(&["b"]).unwrap()),
-        Err(XllError::Overloaded)
+        Err(__err) if __err.is_overloaded()
     ));
     assert_eq!(runtime.catalog.lock().next_subscription_id, next);
     runtime.catalog.lock().assert_identity_invariants();
@@ -2823,7 +2809,7 @@ fn borrowed_admission_rejection_preserves_counts_and_runtime_checks() {
     runtime.close().unwrap();
     assert!(matches!(
         runtime.prepare(&source, BorrowedTopicParts::new(&["a"]).unwrap()),
-        Err(XllError::Closing)
+        Err(__err) if __err.is_closing()
     ));
     runtime.catalog.lock().assert_identity_invariants();
     let stale_runtime = SubscriptionRuntime::with_host(
@@ -2834,7 +2820,7 @@ fn borrowed_admission_rejection_preserves_counts_and_runtime_checks() {
     );
     assert!(matches!(
         stale_runtime.prepare(&source, BorrowedTopicParts::new(&["a"]).unwrap()),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
 }
 
@@ -3021,11 +3007,11 @@ fn server_notification_retry_sequence_eventually_succeeds() {
     state
         .outcomes
         .lock()
-        .push_back(TestNotifyOutcome::Error(XllError::Panic));
+        .push_back(TestNotifyOutcome::Error(XllError::PANIC));
     state
         .outcomes
         .lock()
-        .push_back(TestNotifyOutcome::Error(XllError::Panic));
+        .push_back(TestNotifyOutcome::Error(XllError::PANIC));
     state.outcomes.lock().push_back(TestNotifyOutcome::Success);
 
     server
@@ -3144,7 +3130,7 @@ fn server_notification_heartbeat_recovers_after_bounded_retries() {
         state
             .outcomes
             .lock()
-            .push_back(TestNotifyOutcome::Error(XllError::Panic));
+            .push_back(TestNotifyOutcome::Error(XllError::PANIC));
     }
     state.outcomes.lock().push_back(TestNotifyOutcome::Success);
 
@@ -3207,7 +3193,7 @@ fn concurrent_heartbeat_does_not_duplicate_notification_retry() {
         state
             .outcomes
             .lock()
-            .push_back(TestNotifyOutcome::Error(XllError::Panic));
+            .push_back(TestNotifyOutcome::Error(XllError::PANIC));
     }
     server
         .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
@@ -3410,7 +3396,7 @@ fn subscribe_reentrant_disconnect_revokes_the_provisional_connection() {
 
         assert!(matches!(
             server.connect_transaction(TopicId(1), id),
-            Err(XllError::Closing)
+            Err(__err) if __err.is_closing()
         ));
         assert!(disconnected.load(Ordering::Acquire));
         assert!(sink_slot.lock().is_none());
@@ -3506,8 +3492,7 @@ fn concurrent_provisional_disconnect_preserves_a_replacement_connection() {
             .unwrap();
         assert!(matches!(
             old_sink.lock().as_ref().unwrap().publish(2),
-            Err(XllError::Closing)
-        ));
+            Err(__err) if __err.is_closing()));
         assert!(!runtime.catalog.lock().entries.contains_key(&old_id));
         assert_eq!(runtime.services.active_quota.used(), 0);
         assert_eq!(runtime.disconnects.retained_source_count(), 1);
@@ -3526,7 +3511,7 @@ fn concurrent_provisional_disconnect_preserves_a_replacement_connection() {
             .commit()
             .unwrap();
         release_before_join.send(()).unwrap();
-        assert!(matches!(connection.join().unwrap(), Err(XllError::Closing)));
+        assert!(matches!(connection.join().unwrap(), Err(__err) if __err.is_closing()));
 
         assert!(old_disconnected.load(Ordering::Acquire));
         assert!(old_sink.lock().is_none());
@@ -3582,7 +3567,7 @@ fn connection_notification_reentrant_disconnect_cannot_resurrect_connection() {
     prepared.commit();
     let connection = server.connect_transaction(TopicId(1), id).unwrap();
     sink_slot.lock().as_ref().unwrap().publish(42).unwrap();
-    assert!(matches!(connection.commit(), Err(XllError::Closing)));
+    assert!(matches!(connection.commit(), Err(__err) if __err.is_closing()));
     assert!(disconnected.load(Ordering::Acquire));
     assert!(sink_slot.lock().is_none());
     assert!(!runtime.catalog.lock().entries.contains_key(&id));
@@ -3599,13 +3584,12 @@ fn runtime_close_causes_fail_closed_on_server() {
 
     assert!(matches!(
         server.test_server().enter_operation(),
-        Err(XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     assert!(matches!(
         // SAFETY: the runtime was closed above, so this call can only fail
         // before minting an owned operation and the server remains allocated.
         unsafe { server.test_server().enter_owned_operation() },
-        Err(XllError::Closing)
+        Err(__err) if __err.is_closing()
     ));
     assert!(matches!(
         server.test_server().publish.publish(
@@ -3613,7 +3597,7 @@ fn runtime_close_causes_fail_closed_on_server() {
             ConnectionGeneration::ONE,
             RtdValue::Number(1.0).into_stored().unwrap(),
         ),
-        Err(XllError::Closing)
+        Err(__err) if __err.is_closing()
     ));
 }
 
@@ -3669,7 +3653,7 @@ fn runtime_close_and_publish_race() {
     }
     close_handle.join().unwrap();
 
-    assert!(matches!(sink.publish(999.0), Err(XllError::Closing)));
+    assert!(matches!(sink.publish(999.0), Err(__err) if __err.is_closing()));
 }
 
 #[test]
@@ -3852,8 +3836,7 @@ fn resolve_transport_key_validates_runtime_identity() {
     // 2. Key from another runtime fails with StaleHandle
     assert!(matches!(
         runtime_b.resolve_transport_key(key),
-        Err(XllError::StaleHandle)
-    ));
+        Err(__err) if __err.is_stale_handle()));
 
     // 3. Round-trip transport string
     let transport = key.to_transport();
@@ -3873,11 +3856,11 @@ fn server_handle_cannot_cross_subscription_runtime_boundary() {
             TopicId(1),
             SubscriptionId(std::num::NonZeroU64::MIN),
         ),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
     assert!(matches!(
         runtime_b.disconnect(&server_a, TopicId(1)),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
 }
 
@@ -3892,7 +3875,7 @@ fn preparation_rejects_missing_source_without_catalog_reservation() {
             &source,
             RtdTopic::single("missing-source").unwrap().borrowed()
         ),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
@@ -3926,7 +3909,7 @@ fn rejected_connection_source_leaves_preparation_pending() {
 
     assert!(matches!(
         runtime.connect_transaction(&server, TopicId(1), id),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
     {
         let mut catalog = runtime.catalog.lock();
@@ -4284,7 +4267,7 @@ fn miri_runtime_drop_disconnects_subscriptions_before_reclaiming_sources() {
     unsafe impl RtdSubscription for PublishOnCancel {
         fn request_cancel(&self) {
             self.rejected.store(
-                matches!(self.sink.publish(99), Err(XllError::Closing)),
+                matches!(self.sink.publish(99), Err(__err) if __err.is_closing()),
                 Ordering::Release,
             );
             self.inner.request_cancel();
@@ -4437,8 +4420,7 @@ fn closing_disconnect_leaves_subscription_for_termination_to_join() {
 
     assert!(matches!(
         server.disconnect(TopicId(1)),
-        Err(XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     runtime.set_operation_enter_hook(None);
     assert!(!disconnected.load(Ordering::Acquire));
     server.terminate().unwrap();
@@ -4889,7 +4871,7 @@ fn runtime_close_reclaims_all_inflight_slots() {
         Err(std::sync::mpsc::TryRecvError::Empty)
     ));
     assert_eq!(check_inflight_count(), 5);
-    assert!(matches!(server.begin_refresh(), Err(XllError::Closing)));
+    assert!(matches!(server.begin_refresh(), Err(__err) if __err.is_closing()));
 
     drop(held_batch);
     closed_rx
@@ -4992,7 +4974,7 @@ fn active_topics_keep_their_byte_charge_until_removal() {
     assert_eq!(runtime.catalog.lock().quota.topic_bytes(), 6);
     assert!(matches!(
         runtime.prepare(&source, BorrowedTopicParts::new(&["next"]).unwrap()),
-        Err(XllError::Overloaded)
+        Err(__err) if __err.is_overloaded()
     ));
     runtime.terminate_server(ServerGeneration::ONE).unwrap();
     assert_eq!(runtime.catalog.lock().quota.topic_bytes(), 0);

@@ -413,13 +413,12 @@ mod tests {
                 OwnedDeliveryOutcome::Delivered
             ));
             match (&completion.completion, self.expected) {
-                (OwnedCompletionOutcome::Error(XllError::Internal { .. }), Failure::Internal)
-                | (
-                    OwnedCompletionOutcome::Error(XllError::Panic)
-                    | OwnedCompletionOutcome::Panic(_),
-                    Failure::Panic,
-                )
-                | (OwnedCompletionOutcome::Error(XllError::Overloaded), Failure::Overloaded) => {}
+                (OwnedCompletionOutcome::Error(error), Failure::Internal)
+                    if error.diagnostic_id().is_some() => {}
+                (OwnedCompletionOutcome::Error(error), Failure::Panic) if error.is_panic() => {}
+                (OwnedCompletionOutcome::Panic(_), Failure::Panic) => {}
+                (OwnedCompletionOutcome::Error(error), Failure::Overloaded)
+                    if error.is_overloaded() => {}
                 _ => panic!("wrong launch completion cause"),
             }
             self.completions.set(self.completions.get() + 1);
@@ -472,7 +471,7 @@ mod tests {
             ),
         );
         if reserved_failure {
-            body.fail(XllError::Overloaded);
+            body.fail(XllError::OVERLOADED);
         } else {
             drop(body);
         }

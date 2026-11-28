@@ -119,7 +119,7 @@ impl<'registry> ValidatedBinding<'registry> {
 impl ReservedBinding<'_> {
     fn publish(self) -> XllResult<PublishedBinding> {
         if !self.validated.registry.is_open() {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         #[cfg(test)]
         self.validated
@@ -304,10 +304,10 @@ impl HandleRegistry {
 
     fn validate_binding(&self, object: ObjectBinding) -> XllResult<ValidatedBinding<'_>> {
         if !self.is_open() {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         if !self.owns_object_arena(object.arena()) {
-            return Err(XllError::StaleHandle);
+            return Err(XllError::STALE_HANDLE);
         }
         Ok(ValidatedBinding {
             registry: self,
@@ -346,17 +346,17 @@ impl HandleRegistry {
             .codec
             .parse(std::ptr::from_ref(self).addr(), HandleToken::new(token))?;
         if !self.is_open() {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         let lease = self.bindings.read_standalone(verified.id)?;
         let record = lease.record();
         if record.state() != BindingState::Live {
-            return Err(XllError::StaleHandle);
+            return Err(XllError::STALE_HANDLE);
         }
         let value = record
             .object()
             .typed_projection::<T>()
-            .ok_or(XllError::InvalidHandle)?;
+            .ok_or(XllError::INVALID_HANDLE)?;
         // SAFETY: lease ensures the binding and object cell remain alive for this read.
         let object_ref = unsafe { value.as_ref_unchecked() };
         Ok(object_ref.clone())
@@ -374,7 +374,7 @@ impl HandleRegistry {
             .codec
             .parse(std::ptr::from_ref(self).addr(), HandleToken::new(token))?;
         if !self.is_open() {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         let witness = context.enter_handle_domain(self.bindings.read_domain())?;
         let binding = self.bindings.read_scoped(verified.id, witness)?;
@@ -402,7 +402,7 @@ impl HandleRegistry {
             .parse(std::ptr::from_ref(self).addr(), HandleToken::new(token))?;
         let removal = self.bindings.begin_removal(verified.id)?;
         if removal.object().typed_projection::<T>().is_none() {
-            return Err(XllError::InvalidHandle);
+            return Err(XllError::INVALID_HANDLE);
         }
         removal.commit();
         #[cfg(any(test, feature = "refinement"))]
@@ -420,7 +420,7 @@ impl HandleRegistry {
             .codec
             .parse(std::ptr::from_ref(self).addr(), HandleToken::new(token))?;
         if !self.is_open() {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         let removal = self.bindings.begin_removal(verified.id)?;
         let reusable = removal.commit();
@@ -475,7 +475,7 @@ impl HandleRegistry {
 
     pub(super) fn seal(&self) -> XllResult<HandleRegistrySealed<'_>> {
         if self.bindings.read_domain().is_reclaiming_here() {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         loop {
             let phase = self.phase();
@@ -483,7 +483,7 @@ impl HandleRegistry {
                 HandleRegistryPhase::Closed => {
                     return Ok(HandleRegistrySealed { registry: self });
                 }
-                HandleRegistryPhase::Sealing => return Err(XllError::Closing),
+                HandleRegistryPhase::Sealing => return Err(XllError::CLOSING),
                 HandleRegistryPhase::Open | HandleRegistryPhase::Closing => {
                     if self
                         .phase
@@ -611,9 +611,7 @@ mod tests {
         let observation = Arc::new(DropObservation::default());
         assert!(matches!(
             pending(&registry, &observation).publish(),
-            Err(XllError::Domain {
-                code: crate::error::DomainErrorCode::Overflow
-            })
+            Err(__err) if __err.domain_code() == Some(crate::error::DomainErrorCode::Overflow)
         ));
         assert_released(&observation);
 
@@ -628,7 +626,7 @@ mod tests {
             reached.recv().unwrap();
             registry.begin_close();
             resume.send(()).unwrap();
-            assert!(matches!(publishing.join().unwrap(), Err(XllError::Closing)));
+            assert!(matches!(publishing.join().unwrap(), Err(__err) if __err.is_closing()));
         });
         assert_eq!(registry.len(), 0);
         assert_released(&observation);

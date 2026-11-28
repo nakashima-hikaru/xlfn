@@ -153,7 +153,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         self.services
             .runtime_gate
             .enter()
-            .map_err(|_| XllError::Closing)
+            .map_err(|_| XllError::CLOSING)
     }
 
     /// Registers a server generation and returns a server handle.
@@ -173,7 +173,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             .services
             .runtime_gate
             .enter()
-            .map_err(|_| XllError::Closing)?;
+            .map_err(|_| XllError::CLOSING)?;
         #[cfg(test)]
         if let Some(hook) = self.test_enter_hook.lock().as_ref().cloned() {
             hook();
@@ -241,13 +241,13 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             .services
             .runtime_gate
             .enter()
-            .map_err(|_| XllError::Closing)?;
+            .map_err(|_| XllError::CLOSING)?;
         #[cfg(test)]
         if let Some(hook) = self.test_enter_hook.lock().as_ref().cloned() {
             hook();
         }
         if source.id.generation != self.generation || self.sources.resolve(source.id).is_none() {
-            return Err(XllError::StaleHandle);
+            return Err(XllError::STALE_HANDLE);
         }
         let mut catalog = self.catalog.lock();
 
@@ -303,7 +303,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
 
     pub(crate) fn resolve_transport_key(&self, key: SubscriptionKey) -> XllResult<SubscriptionId> {
         key.validate_runtime(self.runtime_id)
-            .ok_or(XllError::StaleHandle)
+            .ok_or(XllError::STALE_HANDLE)
     }
 
     pub(crate) fn claim_server(
@@ -316,7 +316,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             .with_entry(id, |state| {
                 state.claim_server(generation).map_err(map_entry_error)
             })
-            .ok_or(XllError::Closing)??;
+            .ok_or(XllError::CLOSING)??;
         Ok(())
     }
 
@@ -371,11 +371,11 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             // Resolve the immutable arena entry before acquiring any catalog
             // connection obligation. A rejected source must leave the pending
             // subscription available for rollback or retry.
-            let entry = catalog.entries.get(&id).ok_or(XllError::Closing)?;
+            let entry = catalog.entries.get(&id).ok_or(XllError::CLOSING)?;
             let source = runtime
                 .sources
                 .resolve(entry.source_id.0)
-                .ok_or(XllError::StaleHandle)?;
+                .ok_or(XllError::STALE_HANDLE)?;
             let topic = entry.topic.clone();
             let ticket = catalog
                 .with_entry(id, |state| {
@@ -383,7 +383,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                         .begin_connection(server.generation, conn_gen)
                         .map_err(map_entry_error)
                 })
-                .ok_or(XllError::Closing)??;
+                .ok_or(XllError::CLOSING)??;
             (source, topic, ticket)
         };
         let transaction = ConnectionTransaction::new(
@@ -455,7 +455,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 .with_entry(id, |state| state.finish_connection(ticket))
                 .unwrap_or(false)
             {
-                return Err(XllError::Closing);
+                return Err(XllError::CLOSING);
             }
         }
 
@@ -632,7 +632,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         id: SubscriptionId,
     ) -> XllResult<SubscriptionConnection<H, E, C>> {
         if !handle.belongs_to(self) {
-            return Err(XllError::StaleHandle);
+            return Err(XllError::STALE_HANDLE);
         }
         Self::connect_from_handle(handle, topic, id)
     }
@@ -643,7 +643,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         topic: TopicId,
     ) -> XllResult<()> {
         if !handle.belongs_to(self) {
-            return Err(XllError::StaleHandle);
+            return Err(XllError::STALE_HANDLE);
         }
         Self::disconnect_from_handle(handle, topic)
     }
@@ -699,7 +699,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             .fail_source_shutdown_preflight
             .swap(false, Ordering::Relaxed)
         {
-            return Err(XllError::Overloaded);
+            return Err(XllError::OVERLOADED);
         }
         #[cfg(windows)]
         {
@@ -718,7 +718,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     }
 
     pub(crate) fn terminate_server(&self, generation: ServerGeneration) -> XllResult<()> {
-        let server = self.resolve_server(generation).ok_or(XllError::Closing)?;
+        let server = self.resolve_server(generation).ok_or(XllError::CLOSING)?;
         run_shutdown_with_dispatch(|| server.begin_termination(self).request_cancel().finish())
     }
 }
@@ -1020,7 +1020,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 if let Some(error) = cleanup_result.err().or_else(|| rollback_result.err()) {
                     return Err(error);
                 }
-                return Err(XllError::Closing);
+                return Err(XllError::CLOSING);
             }
         };
         Ok(self.transition(InstalledConnection {

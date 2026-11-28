@@ -13,8 +13,8 @@ use xlfn_kernel::published_owner::PublishedOwner;
     reason = "transfers an exact Global allocation into its typed box"
 )]
 pub(super) fn try_uninit_boxed_slice<T>(len: usize) -> XllResult<Box<[MaybeUninit<T>]>> {
-    let layout = Layout::array::<MaybeUninit<T>>(len).map_err(|_| XllError::Overloaded)?;
-    let allocation = Global.allocate(layout).map_err(|_| XllError::Overloaded)?;
+    let layout = Layout::array::<MaybeUninit<T>>(len).map_err(|_| XllError::OVERLOADED)?;
+    let allocation = Global.allocate(layout).map_err(|_| XllError::OVERLOADED)?;
     let slice = NonNull::slice_from_raw_parts(allocation.cast(), len);
     // SAFETY: Global supplied this owned allocation for the boxed slice's
     // exact layout. MaybeUninit permits any initialized or uninitialized bytes.
@@ -68,7 +68,7 @@ impl ReturnStorage {
                         u16::from(bytes[index - 1])
                     }
                 })
-                .map_err(|_| XllError::Overloaded)?;
+                .map_err(|_| XllError::OVERLOADED)?;
             return Ok(units.as_mut_ptr());
         }
         // UTF-8 uses at most three bytes per UTF-16 unit. Equality proves
@@ -88,7 +88,7 @@ impl ReturnStorage {
                             | u16::from(third & 0x3f)
                     }
                 })
-                .map_err(|_| XllError::Overloaded)?;
+                .map_err(|_| XllError::OVERLOADED)?;
             return Ok(units.as_mut_ptr());
         }
         let mut encoded = text.encode_utf16();
@@ -103,7 +103,7 @@ impl ReturnStorage {
                         .expect("the UTF-16 length was counted before allocation")
                 }
             })
-            .map_err(|_| XllError::Overloaded)?;
+            .map_err(|_| XllError::OVERLOADED)?;
         debug_assert!(encoded.next().is_none());
         Ok(units.as_mut_ptr())
     }
@@ -195,8 +195,7 @@ mod tests {
     fn boxed_slice_layout_overflow_is_recoverable() {
         assert!(matches!(
             try_uninit_boxed_slice::<u16>(usize::MAX),
-            Err(XllError::Overloaded)
-        ));
+            Err(__err) if __err.is_overloaded()));
     }
 
     proptest::proptest! {

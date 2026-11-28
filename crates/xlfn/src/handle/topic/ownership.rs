@@ -95,14 +95,14 @@ pub(super) fn commit_publication(
 ) -> XllResult<()> {
     let mut state = table.state.write();
     if state.closed || state.generation != generation {
-        return Err(XllError::Closing);
+        return Err(XllError::CLOSING);
     }
     if state.initializing.get(&key) != Some(initialization) {
-        return Err(XllError::StaleHandle);
+        return Err(XllError::STALE_HANDLE);
     }
-    let topic = state.by_key.get_mut(&key).ok_or(XllError::StaleHandle)?;
+    let topic = state.by_key.get_mut(&key).ok_or(XllError::STALE_HANDLE)?;
     if PublishedTopicPtr::from_ref(topic.publication.as_ref()) != publication {
-        return Err(XllError::StaleHandle);
+        return Err(XllError::STALE_HANDLE);
     }
     TopicPublication {
         target: &table.published,

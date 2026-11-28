@@ -190,17 +190,17 @@ impl TokenCodec {
             || bytes[32] != b':'
             || bytes[49] != b':'
         {
-            return Err(XllError::InvalidHandle);
+            return Err(XllError::INVALID_HANDLE);
         }
         // The formatter and parser share one canonical, lowercase ASCII
         // grammar. Byte slices also reject non-ASCII input without risking
         // UTF-8 boundary panics on fixed-position string slicing.
-        let session = decode_hex(&bytes[7..23]).ok_or(XllError::InvalidHandle)?;
-        let slot = decode_hex(&bytes[24..32]).ok_or(XllError::InvalidHandle)? as u32;
+        let session = decode_hex(&bytes[7..23]).ok_or(XllError::INVALID_HANDLE)?;
+        let slot = decode_hex(&bytes[24..32]).ok_or(XllError::INVALID_HANDLE)? as u32;
         let generation = decode_hex(&bytes[33..49])
             .and_then(BindingGeneration::try_new)
-            .ok_or(XllError::InvalidHandle)?;
-        let tag = decode_tag(&bytes[50..]).ok_or(XllError::InvalidHandle)?;
+            .ok_or(XllError::INVALID_HANDLE)?;
+        let tag = decode_tag(&bytes[50..]).ok_or(XllError::INVALID_HANDLE)?;
         Ok(ParsedHandleToken {
             session,
             id: HandleId { slot, generation },
@@ -213,7 +213,7 @@ impl TokenCodec {
         if parsed.session != self.session
             || !constant_time_eq::constant_time_eq(&parsed.tag, &expected)
         {
-            return Err(XllError::InvalidHandle);
+            return Err(XllError::INVALID_HANDLE);
         }
         Ok(VerifiedHandleToken { id: parsed.id })
     }
@@ -250,7 +250,7 @@ pub(crate) fn with_utf16_handle_token<R>(
             }
             *byte = unit as u8;
         }
-        let token = std::str::from_utf8(&bytes).map_err(|_| XllError::InvalidHandle)?;
+        let token = std::str::from_utf8(&bytes).map_err(|_| XllError::INVALID_HANDLE)?;
         return operation(token);
     }
     let token = crate::utf16::decode_owned(units, argument)?;
@@ -394,18 +394,17 @@ mod tests {
             let result = with_utf16_handle_token(&units, "handle", |decoded| {
                 looked_up = true;
                 assert_eq!(decoded, String::from_utf16(&units).unwrap());
-                Err::<(), _>(XllError::InvalidHandle)
+                Err::<(), _>(XllError::INVALID_HANDLE)
             });
             match String::from_utf16(&units) {
                 Ok(_) => {
                     assert!(looked_up);
-                    assert!(matches!(result, Err(XllError::InvalidHandle)));
+                    assert!(matches!(result, Err(__err) if __err.is_invalid_handle()));
                 }
                 Err(_) => {
                     assert!(!looked_up);
-                    assert!(matches!(
-                        result,
-                        Err(XllError::Input {
+                    assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+                        Err(crate::error::construct::ErrorView::Input {
                             argument: "handle",
                             reason: crate::error::InputError::InvalidUtf16,
                         })

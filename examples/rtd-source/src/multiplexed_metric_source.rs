@@ -37,7 +37,7 @@ fn produce_metrics(context: RtdSourceContext<RtdValue, RtdLatest>) -> XllResult<
             let event = match context.recv_timeout(timeout) {
                 Ok(Some(event)) => event,
                 Ok(None) => break,
-                Err(XllError::Closing) if context.is_closed() => return Ok(()),
+                Err(__err) if __err.is_closing() && (context.is_closed()) => return Ok(()),
                 Err(error) => return Err(error),
             };
             match event {

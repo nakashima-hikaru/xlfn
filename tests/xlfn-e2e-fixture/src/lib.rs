@@ -68,9 +68,7 @@ pub async fn async_add(x: f64, y: f64) -> XllResult<f64> {
     if result.is_finite() {
         Ok(result)
     } else {
-        Err(XllError::Domain {
-            code: xlfn::error::DomainErrorCode::InvalidInput,
-        })
+        Err(XllError::domain(xlfn::error::DomainErrorCode::InvalidInput))
     }
 }
 
@@ -87,11 +85,11 @@ impl FixtureCore {
                 xlfn::error::InputError::OutOfRange,
             ));
         }
-        let sinks = self.sinks.lock().map_err(|_| XllError::Panic)?;
+        let sinks = self.sinks.lock().map_err(|_| XllError::PANIC)?;
         let batch = (1..=topic_count)
             .map(|topic_id| sinks.get(&format!("topic-{topic_id}")).cloned())
             .collect::<Option<Vec<_>>>()
-            .ok_or(XllError::ExcelValue(ExcelError::NotAvailable))?;
+            .ok_or(XllError::excel_value(ExcelError::NotAvailable))?;
         drop(sinks);
 
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
@@ -102,10 +100,8 @@ impl FixtureCore {
     }
 
     fn active_topics(&self) -> XllResult<i32> {
-        let count = self.sinks.lock().map_err(|_| XllError::Panic)?.len();
-        i32::try_from(count).map_err(|_| XllError::Domain {
-            code: xlfn::error::DomainErrorCode::Overflow,
-        })
+        let count = self.sinks.lock().map_err(|_| XllError::PANIC)?.len();
+        i32::try_from(count).map_err(|_| XllError::domain(xlfn::error::DomainErrorCode::Overflow))
     }
 }
 
@@ -145,11 +141,11 @@ unsafe impl RtdSource for RtdFixtureSource {
             .parts()
             .next()
             .map(str::to_owned)
-            .ok_or(XllError::InvalidHandle)?;
+            .ok_or(XllError::INVALID_HANDLE)?;
         self.core()
             .sinks
             .lock()
-            .map_err(|_| XllError::Panic)?
+            .map_err(|_| XllError::PANIC)?
             .insert(key.clone(), sink);
         Ok(RtdFixtureSubscription {
             core: self.core,
@@ -188,7 +184,7 @@ unsafe impl RtdSubscription for RtdFixtureSubscription {
         self.core()
             .sinks
             .lock()
-            .map_err(|_| XllError::Panic)?
+            .map_err(|_| XllError::PANIC)?
             .remove(&self.key);
         Ok(())
     }

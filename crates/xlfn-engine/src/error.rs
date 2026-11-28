@@ -123,7 +123,7 @@ impl std::error::Error for ExcelError {}
 
 impl From<ExcelError> for XllError {
     fn from(error: ExcelError) -> Self {
-        Self::ExcelValue(error)
+        Self::excel_value(error)
     }
 }
 
@@ -135,10 +135,7 @@ impl IntoXllError for ExcelError {
 
 impl From<io::Error> for XllError {
     fn from(error: io::Error) -> Self {
-        Self::Native {
-            code: error.raw_os_error().unwrap_or(0),
-            message: error.to_string(),
-        }
+        Self::native(error.raw_os_error().unwrap_or(0), error.to_string())
     }
 }
 
@@ -156,8 +153,8 @@ impl From<crate::error::DiagnosticInitError> for XllError {
             | DiagnosticInitError::AlreadyInstalled) => {
                 Self::custom(ExcelError::Value, error.to_string())
             }
-            DiagnosticInitError::ReentrantMutation => Self::ReentrantCall,
-            DiagnosticInitError::RouterClosed => Self::Closing,
+            DiagnosticInitError::ReentrantMutation => Self::REENTRANT_CALL,
+            DiagnosticInitError::RouterClosed => Self::CLOSING,
         }
     }
 }
@@ -477,14 +474,14 @@ fn bounded_error_text(arguments: std::fmt::Arguments<'_>, limit: usize) -> Strin
 
 impl From<UdfError> for XllError {
     fn from(error: UdfError) -> Self {
-        Self::Application {
-            excel: error.excel,
-            message: bounded_error_text(format_args!("{}", error.message), 4096),
-            source: error
+        internal::application(
+            error.excel,
+            bounded_error_text(format_args!("{}", error.message), 4096),
+            error
                 .source
                 .as_deref()
                 .map(|source| Box::new(ErrorCause::snapshot(source, 8))),
-        }
+        )
     }
 }
 
@@ -511,215 +508,344 @@ impl From<InvalidLimit> for UdfError {
     }
 }
 
-/// A calculation or framework failure with a safe worksheet representation.
-///
-/// [`Self::to_excel_error`] selects the value returned to Excel. The full error is
-/// available to diagnostics. Framework-owned variants are non-exhaustive so
-/// applications can inspect their context without constructing internal failures.
-#[derive(Clone, Debug, thiserror::Error)]
+/// Coarse category of an [`XllError`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[non_exhaustive]
-pub enum XllError {
+pub enum XllErrorKind {
     /// Bounded application failure copied at the worksheet boundary.
-    #[non_exhaustive]
-    #[error("{message}")]
-    Application {
-        /// Worksheet representation selected by the application.
-        excel: ExcelError,
-        /// Bounded primary diagnostic text.
-        message: String,
-        /// Bounded cause chain; original error objects are not retained.
-        #[source]
-        source: Option<Box<ErrorCause>>,
-    },
-
+    Application,
     /// A named worksheet argument failed validation or conversion.
-    #[error("invalid argument {argument}: {reason}")]
-    Input {
-        /// The argument name declared by the worksheet function.
-        argument: &'static str,
-        /// The validation or conversion failure.
-        reason: InputError,
-    },
+    Input,
     /// An array's dimensions differ from the required dimensions.
-    #[error(
-        "shape mismatch: expected {}x{}, got {}x{}",
-        .expected.rows,
-        .expected.columns,
-        .actual.rows,
-        .actual.columns
-    )]
-    Shape {
-        /// The required dimensions.
-        expected: Shape,
-        /// The supplied dimensions.
-        actual: Shape,
-    },
+    Shape,
     /// The flat storage length differs from the matrix dimensions' product.
-    #[error(
-        "element count mismatch for {rows}x{columns} matrix: expected {expected}, got {actual}"
-    )]
-    ElementCountMismatch {
-        /// The declared row count.
-        rows: usize,
-        /// The declared column count.
-        columns: usize,
-        /// The required number of elements.
-        expected: usize,
-        /// The supplied number of elements.
-        actual: usize,
-    },
+    ElementCountMismatch,
     /// A calculation failed within its mathematical or numeric domain.
-    #[error("domain error: {code:?}")]
-    Domain {
-        /// A stable category for the calculation failure.
-        code: DomainErrorCode,
-    },
+    Domain,
     /// An application-selected worksheet error with diagnostic-only text.
-    ///
-    /// Construct this with [`Self::custom`]. The message is never returned as a
-    /// worksheet string; it is included in diagnostic Display and Debug output.
-    #[error("{message}")]
-    Custom {
-        /// The worksheet error returned to Excel.
-        excel: ExcelError,
-        /// Application diagnostic detail.
-        message: Cow<'static, str>,
-    },
+    Custom,
     /// An Excel C API callback failed or violated its result contract.
-    #[non_exhaustive]
-    #[error("Excel API {function} failed: {failure}")]
-    ExcelApi {
-        /// The callback that failed.
-        function: ExcelApiFunction,
-        /// The returned status or detected protocol violation.
-        failure: ExcelApiFailure,
-    },
+    ExcelApi,
     /// A framework Windows API operation failed.
-    #[non_exhaustive]
-    #[error("Windows API {function} failed with {code}")]
-    WindowsApi {
-        /// The Windows API operation.
-        function: &'static str,
-        /// Its error code or HRESULT.
-        code: i32,
-    },
+    WindowsApi,
     /// A registration would overwrite an existing Excel name.
-    #[non_exhaustive]
-    #[error("Excel name {name} is already registered")]
-    RegistrationConflict {
-        /// The conflicting name.
-        name: &'static str,
-    },
+    RegistrationConflict,
     /// Registration cleanup found that an Excel name's binding changed.
-    #[non_exhaustive]
-    #[error("Excel name {name} no longer refers to the expected registration")]
-    MetadataDebtBindingChanged {
-        /// The name whose binding no longer belongs to this registration.
-        name: &'static str,
-    },
+    MetadataDebtBindingChanged,
     /// The framework could not load a required native library.
-    #[non_exhaustive]
-    #[error("failed to load {} (OS error {os_error})", path.display())]
-    LibraryLoad {
-        /// The requested library path.
-        path: PathBuf,
-        /// The operating system's loader error code.
-        os_error: u32,
-    },
+    LibraryLoad,
     /// A required export was absent from a native library.
-    #[non_exhaustive]
-    #[error("missing symbol {symbol}")]
-    MissingSymbol {
-        /// The missing export name.
-        symbol: &'static str,
-    },
+    MissingSymbol,
     /// A native component's ABI version differs from the required version.
-    #[non_exhaustive]
-    #[error("ABI mismatch: expected {expected}, got {actual}")]
-    AbiMismatch {
-        /// The required ABI version.
-        expected: u32,
-        /// The reported ABI version.
-        actual: u32,
-    },
+    AbiMismatch,
     /// An application or operating-system operation failed.
-    ///
-    /// `std::io::Error` converts to this variant, retaining its raw OS code or
-    /// zero when the error has no raw code, and its formatted diagnostic text.
-    #[error("native error {code}: {message}")]
-    Native {
-        /// An application or raw operating-system error code.
-        code: i32,
-        /// Diagnostic text describing the failure.
-        message: String,
-    },
+    Native,
     /// Framework cleanup could not quiesce an RTD subscription.
-    #[non_exhaustive]
-    #[error(
-        "RTD subscription shutdown failed for server generation {server_generation}, topic {topic_id}, key {key}: {source}"
-    )]
-    RtdSubscriptionShutdown {
-        /// The server generation owning the subscription.
-        server_generation: u64,
-        /// The Excel topic identifier.
-        topic_id: i32,
-        /// The source-specific subscription key.
-        key: String,
-        /// The subscription's cleanup failure.
-        #[source]
-        source: Box<XllError>,
-    },
+    RtdSubscriptionShutdown,
     /// An RTD producer stopped with a failure.
-    #[non_exhaustive]
-    #[error("RTD producer failed for topic {topic}: {source}")]
-    RtdProducerFailure {
-        /// The failing producer's topic.
-        topic: String,
-        /// The original producer failure.
-        #[source]
-        source: Box<XllError>,
-    },
+    RtdProducerFailure,
     /// An intentional worksheet error or preserved input Excel error.
-    #[error("Excel error value {0}")]
-    ExcelValue(ExcelError),
+    ExcelValue,
     /// An incoming handle does not have a valid identity or type.
-    #[error("invalid handle")]
     InvalidHandle,
     /// A handle's object or generation is no longer live.
-    #[error("stale handle")]
     StaleHandle,
     /// The add-in or requested service is closing or closed.
-    #[error("add-in is closing")]
     Closing,
     /// A bounded runtime service cannot admit more work.
-    #[error("runtime capacity is exhausted")]
     Overloaded,
     /// A reentrant operation would block waiting for itself.
-    #[error("reentrant call would wait for itself")]
     ReentrantCall,
     /// The framework caught a panic before it could cross the XLL boundary.
-    #[error("panic was caught at the XLL boundary")]
     Panic,
     /// An internal invariant or environmental failure has a correlation code.
-    #[non_exhaustive]
-    #[error("internal error (diagnostic {diagnostic_id:016x})")]
-    Internal {
-        /// The framework diagnostic identifier for the failure.
-        diagnostic_id: DiagnosticId,
+    Internal,
+}
+
+#[derive(Clone)]
+enum XllErrorRepr {
+    // Inline variants: zero allocation, OOM-safe, const-constructible.
+    Domain(DomainErrorCode),
+    ExcelApi {
+        function: ExcelApiFunction,
+        failure: ExcelApiFailure,
+    },
+    AbiMismatch {
+        expected: u32,
+        actual: u32,
+    },
+    ExcelValue(ExcelError),
+    InvalidHandle,
+    StaleHandle,
+    Closing,
+    Overloaded,
+    ReentrantCall,
+    Panic,
+    Internal(DiagnosticId),
+    // Boxed variants: keep XllError at 16 bytes so XllResult<T> stays compact.
+    Boxed(Box<BoxedXllError>),
+}
+
+#[derive(Clone, Debug)]
+enum BoxedXllError {
+    Application {
+        excel: ExcelError,
+        message: String,
+        source: Option<Box<ErrorCause>>,
+    },
+    Input {
+        argument: &'static str,
+        reason: InputError,
+    },
+    Shape {
+        expected: Shape,
+        actual: Shape,
+    },
+    ElementCountMismatch {
+        rows: usize,
+        columns: usize,
+        expected: usize,
+        actual: usize,
+    },
+    Custom {
+        excel: ExcelError,
+        message: Cow<'static, str>,
+    },
+    WindowsApi {
+        function: &'static str,
+        code: i32,
+    },
+    RegistrationConflict {
+        name: &'static str,
+    },
+    MetadataDebtBindingChanged {
+        name: &'static str,
+    },
+    LibraryLoad {
+        path: PathBuf,
+        os_error: u32,
+    },
+    MissingSymbol {
+        symbol: &'static str,
+    },
+    Native {
+        code: i32,
+        message: String,
+    },
+    RtdSubscriptionShutdown {
+        server_generation: u64,
+        topic_id: i32,
+        key: String,
+        source: XllError,
+    },
+    RtdProducerFailure {
+        topic: String,
+        source: XllError,
     },
 }
 
+/// A calculation or framework failure with a safe worksheet representation.
+///
+/// [`Self::to_excel_error`] selects the value returned to Excel. The full error is
+/// available to diagnostics. Lightweight framework errors (such as closing,
+/// overload, panic, and Excel error values) are stored inline without heap
+/// allocation, while detailed diagnostics are boxed so `XllResult<T>` stays compact.
+#[derive(Clone)]
+pub struct XllError(XllErrorRepr);
+
+const _: () = assert!(size_of::<XllError>() == 16);
+
+impl fmt::Debug for XllError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            XllErrorRepr::Domain(code) => f.debug_struct("Domain").field("code", code).finish(),
+            XllErrorRepr::ExcelApi { function, failure } => f
+                .debug_struct("ExcelApi")
+                .field("function", function)
+                .field("failure", failure)
+                .finish(),
+            XllErrorRepr::AbiMismatch { expected, actual } => f
+                .debug_struct("AbiMismatch")
+                .field("expected", expected)
+                .field("actual", actual)
+                .finish(),
+            XllErrorRepr::ExcelValue(error) => f.debug_tuple("ExcelValue").field(error).finish(),
+            XllErrorRepr::InvalidHandle => f.write_str("InvalidHandle"),
+            XllErrorRepr::StaleHandle => f.write_str("StaleHandle"),
+            XllErrorRepr::Closing => f.write_str("Closing"),
+            XllErrorRepr::Overloaded => f.write_str("Overloaded"),
+            XllErrorRepr::ReentrantCall => f.write_str("ReentrantCall"),
+            XllErrorRepr::Panic => f.write_str("Panic"),
+            XllErrorRepr::Internal(diagnostic_id) => f
+                .debug_struct("Internal")
+                .field("diagnostic_id", diagnostic_id)
+                .finish(),
+            XllErrorRepr::Boxed(boxed) => fmt::Debug::fmt(boxed.as_ref(), f),
+        }
+    }
+}
+
+impl fmt::Display for XllError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            XllErrorRepr::Domain(code) => write!(f, "domain error: {code:?}"),
+            XllErrorRepr::ExcelApi { function, failure } => {
+                write!(f, "Excel API {function} failed: {failure}")
+            }
+            XllErrorRepr::AbiMismatch { expected, actual } => {
+                write!(f, "ABI mismatch: expected {expected}, got {actual}")
+            }
+            XllErrorRepr::ExcelValue(error) => write!(f, "Excel error value {error}"),
+            XllErrorRepr::InvalidHandle => f.write_str("invalid handle"),
+            XllErrorRepr::StaleHandle => f.write_str("stale handle"),
+            XllErrorRepr::Closing => f.write_str("add-in is closing"),
+            XllErrorRepr::Overloaded => f.write_str("runtime capacity is exhausted"),
+            XllErrorRepr::ReentrantCall => f.write_str("reentrant call would wait for itself"),
+            XllErrorRepr::Panic => f.write_str("panic was caught at the XLL boundary"),
+            XllErrorRepr::Internal(diagnostic_id) => {
+                write!(f, "internal error (diagnostic {diagnostic_id:016x})")
+            }
+            XllErrorRepr::Boxed(boxed) => match boxed.as_ref() {
+                BoxedXllError::Application { message, .. } => f.write_str(message),
+                BoxedXllError::Input { argument, reason } => {
+                    write!(f, "invalid argument {argument}: {reason}")
+                }
+                BoxedXllError::Shape { expected, actual } => write!(
+                    f,
+                    "shape mismatch: expected {}x{}, got {}x{}",
+                    expected.rows, expected.columns, actual.rows, actual.columns
+                ),
+                BoxedXllError::ElementCountMismatch {
+                    rows,
+                    columns,
+                    expected,
+                    actual,
+                } => write!(
+                    f,
+                    "element count mismatch for {rows}x{columns} matrix: expected {expected}, got {actual}"
+                ),
+                BoxedXllError::Custom { message, .. } => f.write_str(message),
+                BoxedXllError::WindowsApi { function, code } => {
+                    write!(f, "Windows API {function} failed with {code}")
+                }
+                BoxedXllError::RegistrationConflict { name } => {
+                    write!(f, "Excel name {name} is already registered")
+                }
+                BoxedXllError::MetadataDebtBindingChanged { name } => {
+                    write!(
+                        f,
+                        "Excel name {name} no longer refers to the expected registration"
+                    )
+                }
+                BoxedXllError::LibraryLoad { path, os_error } => {
+                    write!(f, "failed to load {} (OS error {os_error})", path.display())
+                }
+                BoxedXllError::MissingSymbol { symbol } => write!(f, "missing symbol {symbol}"),
+                BoxedXllError::Native { code, message } => {
+                    write!(f, "native error {code}: {message}")
+                }
+                BoxedXllError::RtdSubscriptionShutdown {
+                    server_generation,
+                    topic_id,
+                    key,
+                    source,
+                } => write!(
+                    f,
+                    "RTD subscription shutdown failed for server generation {server_generation}, topic {topic_id}, key {key}: {source}"
+                ),
+                BoxedXllError::RtdProducerFailure { topic, source } => {
+                    write!(f, "RTD producer failed for topic {topic}: {source}")
+                }
+            },
+        }
+    }
+}
+
+impl std::error::Error for XllError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.0 {
+            XllErrorRepr::Boxed(boxed) => match boxed.as_ref() {
+                BoxedXllError::Application { source, .. } => source
+                    .as_deref()
+                    .map(|source| source as &dyn std::error::Error),
+                BoxedXllError::RtdSubscriptionShutdown { source, .. }
+                | BoxedXllError::RtdProducerFailure { source, .. } => Some(source),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
 impl XllError {
+    /// An incoming handle does not have a valid identity or type.
+    pub const INVALID_HANDLE: Self = Self(XllErrorRepr::InvalidHandle);
+    /// A handle's object or generation is no longer live.
+    pub const STALE_HANDLE: Self = Self(XllErrorRepr::StaleHandle);
+    /// The add-in or requested service is closing or closed.
+    pub const CLOSING: Self = Self(XllErrorRepr::Closing);
+    /// A bounded runtime service cannot admit more work.
+    pub const OVERLOADED: Self = Self(XllErrorRepr::Overloaded);
+    /// A reentrant operation would block waiting for itself.
+    pub const REENTRANT_CALL: Self = Self(XllErrorRepr::ReentrantCall);
+    /// The framework caught a panic before it could cross the XLL boundary.
+    pub const PANIC: Self = Self(XllErrorRepr::Panic);
+
+    /// Creates an intentional worksheet error or preserved input Excel error.
+    #[must_use]
+    pub const fn excel_value(error: ExcelError) -> Self {
+        Self(XllErrorRepr::ExcelValue(error))
+    }
+
     /// Creates a domain error with the corresponding worksheet `#NUM!` value.
     #[must_use]
     pub const fn domain(code: DomainErrorCode) -> Self {
-        Self::Domain { code }
+        Self(XllErrorRepr::Domain(code))
     }
 
     /// Creates a validation error associated with a worksheet argument.
     #[must_use]
-    pub const fn input(argument: &'static str, reason: InputError) -> Self {
-        Self::Input { argument, reason }
+    pub fn input(argument: &'static str, reason: InputError) -> Self {
+        Self(XllErrorRepr::Boxed(Box::new(BoxedXllError::Input {
+            argument,
+            reason,
+        })))
+    }
+
+    /// Creates an array dimension mismatch error.
+    #[must_use]
+    pub fn shape(expected: Shape, actual: Shape) -> Self {
+        Self(XllErrorRepr::Boxed(Box::new(BoxedXllError::Shape {
+            expected,
+            actual,
+        })))
+    }
+
+    /// Creates a matrix element count mismatch error.
+    #[must_use]
+    pub fn element_count_mismatch(
+        rows: usize,
+        columns: usize,
+        expected: usize,
+        actual: usize,
+    ) -> Self {
+        Self(XllErrorRepr::Boxed(Box::new(
+            BoxedXllError::ElementCountMismatch {
+                rows,
+                columns,
+                expected,
+                actual,
+            },
+        )))
+    }
+
+    /// Creates an application or operating-system native error.
+    #[must_use]
+    pub fn native(code: i32, message: impl Into<String>) -> Self {
+        Self(XllErrorRepr::Boxed(Box::new(BoxedXllError::Native {
+            code,
+            message: message.into(),
+        })))
     }
 
     /// Reports validation of a named resource rather than a worksheet parameter.
@@ -737,58 +863,231 @@ impl XllError {
 
     /// Attaches the caller's parameter name to an input validation failure.
     /// Other error categories retain their existing context.
-    pub fn with_argument(self, argument: &'static str) -> Self {
-        match self {
-            Self::Input { reason, .. } => Self::input(argument, reason),
-            error => error,
+    pub fn with_argument(mut self, argument: &'static str) -> Self {
+        if let XllErrorRepr::Boxed(boxed) = &mut self.0
+            && let BoxedXllError::Input { argument: slot, .. } = boxed.as_mut()
+        {
+            *slot = argument;
         }
+        self
     }
 
     /// Creates an application error with a chosen worksheet value and diagnostic text.
     ///
-    /// Borrowed static text is retained without allocation. Owned messages are
-    /// subject to the same bounded diagnostic queue and tracing limits as other
+    /// Borrowed static text is retained without an extra string copy. Owned messages
+    /// are subject to the same bounded diagnostic queue and tracing limits as other
     /// errors. The worksheet receives only `excel`.
     #[must_use]
     pub fn custom(excel: ExcelError, message: impl Into<Cow<'static, str>>) -> Self {
-        Self::Custom {
+        Self(XllErrorRepr::Boxed(Box::new(BoxedXllError::Custom {
             excel,
             message: message.into(),
+        })))
+    }
+
+    /// Returns the coarse category of this failure.
+    #[must_use]
+    pub fn kind(&self) -> XllErrorKind {
+        match &self.0 {
+            XllErrorRepr::Domain(_) => XllErrorKind::Domain,
+            XllErrorRepr::ExcelApi { .. } => XllErrorKind::ExcelApi,
+            XllErrorRepr::AbiMismatch { .. } => XllErrorKind::AbiMismatch,
+            XllErrorRepr::ExcelValue(_) => XllErrorKind::ExcelValue,
+            XllErrorRepr::InvalidHandle => XllErrorKind::InvalidHandle,
+            XllErrorRepr::StaleHandle => XllErrorKind::StaleHandle,
+            XllErrorRepr::Closing => XllErrorKind::Closing,
+            XllErrorRepr::Overloaded => XllErrorKind::Overloaded,
+            XllErrorRepr::ReentrantCall => XllErrorKind::ReentrantCall,
+            XllErrorRepr::Panic => XllErrorKind::Panic,
+            XllErrorRepr::Internal(_) => XllErrorKind::Internal,
+            XllErrorRepr::Boxed(boxed) => match boxed.as_ref() {
+                BoxedXllError::Application { .. } => XllErrorKind::Application,
+                BoxedXllError::Input { .. } => XllErrorKind::Input,
+                BoxedXllError::Shape { .. } => XllErrorKind::Shape,
+                BoxedXllError::ElementCountMismatch { .. } => XllErrorKind::ElementCountMismatch,
+                BoxedXllError::Custom { .. } => XllErrorKind::Custom,
+                BoxedXllError::WindowsApi { .. } => XllErrorKind::WindowsApi,
+                BoxedXllError::RegistrationConflict { .. } => XllErrorKind::RegistrationConflict,
+                BoxedXllError::MetadataDebtBindingChanged { .. } => {
+                    XllErrorKind::MetadataDebtBindingChanged
+                }
+                BoxedXllError::LibraryLoad { .. } => XllErrorKind::LibraryLoad,
+                BoxedXllError::MissingSymbol { .. } => XllErrorKind::MissingSymbol,
+                BoxedXllError::Native { .. } => XllErrorKind::Native,
+                BoxedXllError::RtdSubscriptionShutdown { .. } => {
+                    XllErrorKind::RtdSubscriptionShutdown
+                }
+                BoxedXllError::RtdProducerFailure { .. } => XllErrorKind::RtdProducerFailure,
+            },
+        }
+    }
+
+    /// Returns whether this error indicates an invalid handle.
+    #[must_use]
+    pub const fn is_invalid_handle(&self) -> bool {
+        matches!(self.0, XllErrorRepr::InvalidHandle)
+    }
+
+    /// Returns whether this error indicates a stale handle.
+    #[must_use]
+    pub const fn is_stale_handle(&self) -> bool {
+        matches!(self.0, XllErrorRepr::StaleHandle)
+    }
+
+    /// Returns whether this error indicates that the add-in or service is closing.
+    #[must_use]
+    pub const fn is_closing(&self) -> bool {
+        matches!(self.0, XllErrorRepr::Closing)
+    }
+
+    /// Returns whether this error indicates runtime capacity exhaustion.
+    #[must_use]
+    pub const fn is_overloaded(&self) -> bool {
+        matches!(self.0, XllErrorRepr::Overloaded)
+    }
+
+    /// Returns whether this error indicates a reentrant call conflict.
+    #[must_use]
+    pub const fn is_reentrant_call(&self) -> bool {
+        matches!(self.0, XllErrorRepr::ReentrantCall)
+    }
+
+    /// Returns whether this error indicates a caught panic.
+    #[must_use]
+    pub const fn is_panic(&self) -> bool {
+        matches!(self.0, XllErrorRepr::Panic)
+    }
+
+    /// Returns the domain error code if this is a domain error.
+    #[must_use]
+    pub const fn domain_code(&self) -> Option<DomainErrorCode> {
+        match self.0 {
+            XllErrorRepr::Domain(code) => Some(code),
+            _ => None,
+        }
+    }
+
+    /// Returns the worksheet error value if this is an `ExcelValue` error.
+    #[must_use]
+    pub const fn excel_value_error(&self) -> Option<ExcelError> {
+        match self.0 {
+            XllErrorRepr::ExcelValue(error) => Some(error),
+            _ => None,
+        }
+    }
+
+    /// Returns the argument name and reason if this is an input validation error.
+    #[must_use]
+    pub fn input_details(&self) -> Option<(&'static str, &InputError)> {
+        match &self.0 {
+            XllErrorRepr::Boxed(boxed) => match boxed.as_ref() {
+                BoxedXllError::Input { argument, reason } => Some((*argument, reason)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Returns `(expected, actual)` if this is a shape mismatch error.
+    #[must_use]
+    pub fn shape_details(&self) -> Option<(Shape, Shape)> {
+        match &self.0 {
+            XllErrorRepr::Boxed(boxed) => match boxed.as_ref() {
+                BoxedXllError::Shape { expected, actual } => Some((*expected, *actual)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Returns `(code, message)` if this is a native error.
+    #[must_use]
+    pub fn native_details(&self) -> Option<(i32, &str)> {
+        match &self.0 {
+            XllErrorRepr::Boxed(boxed) => match boxed.as_ref() {
+                BoxedXllError::Native { code, message } => Some((*code, message.as_str())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Returns `(function, code)` if this is a Windows API error.
+    #[must_use]
+    pub fn windows_api_details(&self) -> Option<(&'static str, i32)> {
+        match &self.0 {
+            XllErrorRepr::Boxed(boxed) => match boxed.as_ref() {
+                BoxedXllError::WindowsApi { function, code } => Some((*function, *code)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Returns `(function, failure)` if this is an Excel API error.
+    #[must_use]
+    pub const fn excel_api_details(&self) -> Option<(ExcelApiFunction, ExcelApiFailure)> {
+        match self.0 {
+            XllErrorRepr::ExcelApi { function, failure } => Some((function, failure)),
+            _ => None,
+        }
+    }
+
+    /// Returns `(excel, message)` if this is a custom application error.
+    #[must_use]
+    pub fn custom_details(&self) -> Option<(ExcelError, &Cow<'static, str>)> {
+        match &self.0 {
+            XllErrorRepr::Boxed(boxed) => match boxed.as_ref() {
+                BoxedXllError::Custom { excel, message } => Some((*excel, message)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Returns the diagnostic ID if this is an internal framework error.
+    #[must_use]
+    pub const fn diagnostic_id(&self) -> Option<DiagnosticId> {
+        match self.0 {
+            XllErrorRepr::Internal(id) => Some(id),
+            _ => None,
         }
     }
 
     /// Returns the safe worksheet error for this failure.
     #[must_use]
-    pub const fn to_excel_error(&self) -> ExcelError {
-        match self {
-            Self::RtdProducerFailure { source, .. } => source.to_excel_error(),
-            Self::Domain { .. } => ExcelError::Number,
-            Self::Input {
-                reason: InputError::NumericOverflow,
-                ..
-            } => ExcelError::Number,
-            Self::InvalidHandle
-            | Self::StaleHandle
-            | Self::Closing
-            | Self::Overloaded
-            | Self::ReentrantCall => ExcelError::NotAvailable,
-            Self::ExcelValue(error)
-            | Self::Custom { excel: error, .. }
-            | Self::Application { excel: error, .. } => *error,
-            Self::Input { .. }
-            | Self::Shape { .. }
-            | Self::ElementCountMismatch { .. }
-            | Self::ExcelApi { .. }
-            | Self::WindowsApi { .. }
-            | Self::RegistrationConflict { .. }
-            | Self::MetadataDebtBindingChanged { .. }
-            | Self::LibraryLoad { .. }
-            | Self::MissingSymbol { .. }
-            | Self::AbiMismatch { .. }
-            | Self::Native { .. }
-            | Self::RtdSubscriptionShutdown { .. }
-            | Self::Panic
-            | Self::Internal { .. } => ExcelError::Value,
+    pub fn to_excel_error(&self) -> ExcelError {
+        match &self.0 {
+            XllErrorRepr::Domain(_) => ExcelError::Number,
+            XllErrorRepr::InvalidHandle
+            | XllErrorRepr::StaleHandle
+            | XllErrorRepr::Closing
+            | XllErrorRepr::Overloaded
+            | XllErrorRepr::ReentrantCall => ExcelError::NotAvailable,
+            XllErrorRepr::ExcelValue(error) => *error,
+            XllErrorRepr::ExcelApi { .. }
+            | XllErrorRepr::AbiMismatch { .. }
+            | XllErrorRepr::Panic
+            | XllErrorRepr::Internal(_) => ExcelError::Value,
+            XllErrorRepr::Boxed(boxed) => match boxed.as_ref() {
+                BoxedXllError::RtdProducerFailure { source, .. } => source.to_excel_error(),
+                BoxedXllError::Input {
+                    reason: InputError::NumericOverflow,
+                    ..
+                } => ExcelError::Number,
+                BoxedXllError::Custom { excel: error, .. }
+                | BoxedXllError::Application { excel: error, .. } => *error,
+                BoxedXllError::Input { .. }
+                | BoxedXllError::Shape { .. }
+                | BoxedXllError::ElementCountMismatch { .. }
+                | BoxedXllError::WindowsApi { .. }
+                | BoxedXllError::RegistrationConflict { .. }
+                | BoxedXllError::MetadataDebtBindingChanged { .. }
+                | BoxedXllError::LibraryLoad { .. }
+                | BoxedXllError::MissingSymbol { .. }
+                | BoxedXllError::Native { .. }
+                | BoxedXllError::RtdSubscriptionShutdown { .. } => ExcelError::Value,
+            },
         }
     }
 }
@@ -804,24 +1103,21 @@ mod tests {
             ExcelError::Value
         );
         assert_eq!(
-            XllError::Shape {
-                expected: Shape {
+            XllError::shape(
+                Shape {
                     rows: 1,
                     columns: 1,
                 },
-                actual: Shape {
+                Shape {
                     rows: 2,
                     columns: 1,
                 },
-            }
+            )
             .to_excel_error(),
             ExcelError::Value
         );
         assert_eq!(
-            XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            }
-            .to_excel_error(),
+            XllError::domain(DomainErrorCode::Overflow).to_excel_error(),
             ExcelError::Number
         );
         assert_eq!(
@@ -829,7 +1125,7 @@ mod tests {
             ExcelError::Number
         );
         assert_eq!(
-            XllError::StaleHandle.to_excel_error(),
+            XllError::STALE_HANDLE.to_excel_error(),
             ExcelError::NotAvailable
         );
     }
@@ -858,17 +1154,15 @@ mod tests {
     fn io_conversion_preserves_os_code_and_message_without_a_synthetic_code() {
         let original = io::Error::from_raw_os_error(42);
         let text = original.to_string();
-        let XllError::Native { code, message } = XllError::from(original) else {
+        let error = XllError::from(original);
+        let Some((code, message)) = error.native_details() else {
             panic!("I/O errors must preserve their native context");
         };
         assert_eq!(code, 42);
         assert_eq!(message, text);
 
         let error = io::Error::other("application I/O failure").into_xll_error();
-        assert!(matches!(
-            error,
-            XllError::Native { code: 0, ref message } if message == "application I/O failure"
-        ));
+        assert_eq!(error.native_details(), Some((0, "application I/O failure")));
         assert_eq!(error.to_excel_error(), ExcelError::Value);
     }
 
@@ -878,14 +1172,8 @@ mod tests {
             XllError::from(DiagnosticInitError::AlreadyInstalled).to_excel_error(),
             ExcelError::Value
         );
-        assert!(matches!(
-            DiagnosticInitError::ReentrantMutation.into_xll_error(),
-            XllError::ReentrantCall
-        ));
-        assert!(matches!(
-            XllError::from(DiagnosticInitError::RouterClosed),
-            XllError::Closing
-        ));
+        assert!(DiagnosticInitError::ReentrantMutation.into_xll_error().is_reentrant_call());
+        assert!(XllError::from(DiagnosticInitError::RouterClosed).is_closing());
         let error = XllError::from(DiagnosticInitError::WorkerSpawn(io::Error::other(
             "worker resource limit",
         )));
@@ -902,19 +1190,16 @@ mod tests {
         assert_eq!(error.to_excel_error(), ExcelError::NotAvailable);
         assert_eq!(error.to_string(), "market data unavailable");
         assert!(matches!(
-            error,
-            XllError::Custom {
-                message: Cow::Borrowed(_),
-                ..
-            }
+            error.custom_details(),
+            Some((_, Cow::Borrowed(_)))
         ));
-        let error = XllError::RtdProducerFailure {
-            topic: "last:EXAMPLE".to_owned(),
-            source: Box::new(XllError::custom(
+        let error = internal::rtd_producer_failure(
+            "last:EXAMPLE".to_owned(),
+            Box::new(XllError::custom(
                 ExcelError::Reference,
                 "upstream reference",
             )),
-        };
+        );
         assert_eq!(error.to_excel_error(), ExcelError::Reference);
     }
 
@@ -939,12 +1224,12 @@ mod tests {
 
     #[test]
     fn rtd_shutdown_error_preserves_owner_and_source_context() {
-        let error = XllError::RtdSubscriptionShutdown {
-            server_generation: 7,
-            topic_id: 42,
-            key: "stream:test".to_owned(),
-            source: Box::new(XllError::Panic),
-        };
+        let error = internal::rtd_subscription_shutdown(
+            7,
+            42,
+            "stream:test".to_owned(),
+            Box::new(XllError::PANIC),
+        );
         let message = error.to_string();
         assert!(message.contains("server generation 7"));
         assert!(message.contains("topic 42"));
@@ -953,10 +1238,190 @@ mod tests {
     }
 }
 
-/// Version-coupled construction used by the framework crates, not the facade.
+/// Version-coupled construction and inspection used by the framework crates, not the facade.
 #[doc(hidden)]
 pub mod internal {
     use super::*;
+
+    /// Borrowed view of all [`XllError`] variants for internal diagnostics and classification.
+    #[derive(Clone, Copy, Debug)]
+    pub enum ErrorView<'a> {
+        Application {
+            excel: ExcelError,
+            message: &'a str,
+            source: Option<&'a ErrorCause>,
+        },
+        Input {
+            argument: &'static str,
+            reason: &'a InputError,
+        },
+        Shape {
+            expected: Shape,
+            actual: Shape,
+        },
+        ElementCountMismatch {
+            rows: usize,
+            columns: usize,
+            expected: usize,
+            actual: usize,
+        },
+        Domain {
+            code: DomainErrorCode,
+        },
+        Custom {
+            excel: ExcelError,
+            message: &'a Cow<'static, str>,
+        },
+        ExcelApi {
+            function: ExcelApiFunction,
+            failure: ExcelApiFailure,
+        },
+        WindowsApi {
+            function: &'static str,
+            code: i32,
+        },
+        RegistrationConflict {
+            name: &'static str,
+        },
+        MetadataDebtBindingChanged {
+            name: &'static str,
+        },
+        LibraryLoad {
+            path: &'a PathBuf,
+            os_error: u32,
+        },
+        MissingSymbol {
+            symbol: &'static str,
+        },
+        AbiMismatch {
+            expected: u32,
+            actual: u32,
+        },
+        Native {
+            code: i32,
+            message: &'a str,
+        },
+        RtdSubscriptionShutdown {
+            server_generation: u64,
+            topic_id: i32,
+            key: &'a str,
+            source: &'a XllError,
+        },
+        RtdProducerFailure {
+            topic: &'a str,
+            source: &'a XllError,
+        },
+        ExcelValue(ExcelError),
+        InvalidHandle,
+        StaleHandle,
+        Closing,
+        Overloaded,
+        ReentrantCall,
+        Panic,
+        Internal {
+            diagnostic_id: DiagnosticId,
+        },
+    }
+
+    pub fn view(error: &XllError) -> ErrorView<'_> {
+        match &error.0 {
+            XllErrorRepr::Domain(code) => ErrorView::Domain { code: *code },
+            XllErrorRepr::ExcelApi { function, failure } => ErrorView::ExcelApi {
+                function: *function,
+                failure: *failure,
+            },
+            XllErrorRepr::AbiMismatch { expected, actual } => ErrorView::AbiMismatch {
+                expected: *expected,
+                actual: *actual,
+            },
+            XllErrorRepr::ExcelValue(error) => ErrorView::ExcelValue(*error),
+            XllErrorRepr::InvalidHandle => ErrorView::InvalidHandle,
+            XllErrorRepr::StaleHandle => ErrorView::StaleHandle,
+            XllErrorRepr::Closing => ErrorView::Closing,
+            XllErrorRepr::Overloaded => ErrorView::Overloaded,
+            XllErrorRepr::ReentrantCall => ErrorView::ReentrantCall,
+            XllErrorRepr::Panic => ErrorView::Panic,
+            XllErrorRepr::Internal(diagnostic_id) => ErrorView::Internal {
+                diagnostic_id: *diagnostic_id,
+            },
+            XllErrorRepr::Boxed(boxed) => match boxed.as_ref() {
+                BoxedXllError::Application {
+                    excel,
+                    message,
+                    source,
+                } => ErrorView::Application {
+                    excel: *excel,
+                    message: message.as_str(),
+                    source: source.as_deref(),
+                },
+                BoxedXllError::Input { argument, reason } => ErrorView::Input {
+                    argument: *argument,
+                    reason,
+                },
+                BoxedXllError::Shape { expected, actual } => ErrorView::Shape {
+                    expected: *expected,
+                    actual: *actual,
+                },
+                BoxedXllError::ElementCountMismatch {
+                    rows,
+                    columns,
+                    expected,
+                    actual,
+                } => ErrorView::ElementCountMismatch {
+                    rows: *rows,
+                    columns: *columns,
+                    expected: *expected,
+                    actual: *actual,
+                },
+                BoxedXllError::Custom { excel, message } => ErrorView::Custom {
+                    excel: *excel,
+                    message,
+                },
+                BoxedXllError::WindowsApi { function, code } => ErrorView::WindowsApi {
+                    function: *function,
+                    code: *code,
+                },
+                BoxedXllError::RegistrationConflict { name } => {
+                    ErrorView::RegistrationConflict { name: *name }
+                }
+                BoxedXllError::MetadataDebtBindingChanged { name } => {
+                    ErrorView::MetadataDebtBindingChanged { name: *name }
+                }
+                BoxedXllError::LibraryLoad { path, os_error } => ErrorView::LibraryLoad {
+                    path,
+                    os_error: *os_error,
+                },
+                BoxedXllError::MissingSymbol { symbol } => {
+                    ErrorView::MissingSymbol { symbol: *symbol }
+                }
+                BoxedXllError::Native { code, message } => ErrorView::Native {
+                    code: *code,
+                    message: message.as_str(),
+                },
+                BoxedXllError::RtdSubscriptionShutdown {
+                    server_generation,
+                    topic_id,
+                    key,
+                    source,
+                } => ErrorView::RtdSubscriptionShutdown {
+                    server_generation: *server_generation,
+                    topic_id: *topic_id,
+                    key: key.as_str(),
+                    source,
+                },
+                BoxedXllError::RtdProducerFailure { topic, source } => {
+                    ErrorView::RtdProducerFailure {
+                        topic: topic.as_str(),
+                        source,
+                    }
+                }
+            },
+        }
+    }
+
+    pub const fn boxed_error_size() -> usize {
+        size_of::<BoxedXllError>()
+    }
 
     /// Requested dynamic storage of a clone, excluding the fixed channel envelope.
     /// String cloning copies length, not spare capacity. Every nested Box is charged
@@ -965,56 +1430,59 @@ pub mod internal {
         let mut current = error;
         let mut bytes = 0_usize;
         for _ in 0..max_depth {
-            let (local, source) = match current {
-                XllError::Native { message, .. } => (message.len(), None),
-                XllError::Application {
-                    message, source, ..
-                } => (
-                    message
-                        .len()
-                        .checked_add(source.as_ref().map_or(0, |source| source.retained_bytes()))?,
-                    None,
-                ),
-                XllError::Custom { message, .. } => (
-                    match message {
-                        Cow::Borrowed(_) => 0,
-                        Cow::Owned(message) => message.len(),
-                    },
-                    None,
-                ),
-                XllError::LibraryLoad { path, .. } => {
-                    (path.as_os_str().as_encoded_bytes().len(), None)
+            let (local, source) = match &current.0 {
+                XllErrorRepr::Domain(_)
+                | XllErrorRepr::ExcelApi { .. }
+                | XllErrorRepr::AbiMismatch { .. }
+                | XllErrorRepr::ExcelValue(_)
+                | XllErrorRepr::InvalidHandle
+                | XllErrorRepr::StaleHandle
+                | XllErrorRepr::Closing
+                | XllErrorRepr::Overloaded
+                | XllErrorRepr::ReentrantCall
+                | XllErrorRepr::Panic
+                | XllErrorRepr::Internal(_) => (0, None),
+                XllErrorRepr::Boxed(boxed) => {
+                    let (extra, source) = match boxed.as_ref() {
+                        BoxedXllError::Native { message, .. } => (message.len(), None),
+                        BoxedXllError::Application {
+                            message, source, ..
+                        } => (
+                            message.len().checked_add(
+                                source.as_ref().map_or(0, |source| source.retained_bytes()),
+                            )?,
+                            None,
+                        ),
+                        BoxedXllError::Custom { message, .. } => (
+                            match message {
+                                Cow::Borrowed(_) => 0,
+                                Cow::Owned(message) => message.len(),
+                            },
+                            None,
+                        ),
+                        BoxedXllError::LibraryLoad { path, .. } => {
+                            (path.as_os_str().as_encoded_bytes().len(), None)
+                        }
+                        BoxedXllError::RtdSubscriptionShutdown { key, source, .. } => {
+                            (key.len(), Some(source))
+                        }
+                        BoxedXllError::RtdProducerFailure { topic, source } => {
+                            (topic.len(), Some(source))
+                        }
+                        BoxedXllError::Input {
+                            reason: InputError::UnknownEnum { actual, .. },
+                            ..
+                        } => (actual.len(), None),
+                        BoxedXllError::Input { .. }
+                        | BoxedXllError::Shape { .. }
+                        | BoxedXllError::ElementCountMismatch { .. }
+                        | BoxedXllError::WindowsApi { .. }
+                        | BoxedXllError::RegistrationConflict { .. }
+                        | BoxedXllError::MetadataDebtBindingChanged { .. }
+                        | BoxedXllError::MissingSymbol { .. } => (0, None),
+                    };
+                    (size_of::<BoxedXllError>().checked_add(extra)?, source)
                 }
-                XllError::RtdSubscriptionShutdown { key, source, .. } => (
-                    key.len().checked_add(size_of::<XllError>())?,
-                    Some(&**source),
-                ),
-                XllError::RtdProducerFailure { topic, source } => (
-                    topic.len().checked_add(size_of::<XllError>())?,
-                    Some(&**source),
-                ),
-                XllError::Input {
-                    reason: InputError::UnknownEnum { actual, .. },
-                    ..
-                } => (actual.len(), None),
-                XllError::Input { .. }
-                | XllError::Shape { .. }
-                | XllError::ElementCountMismatch { .. }
-                | XllError::Domain { .. }
-                | XllError::ExcelApi { .. }
-                | XllError::WindowsApi { .. }
-                | XllError::RegistrationConflict { .. }
-                | XllError::MetadataDebtBindingChanged { .. }
-                | XllError::MissingSymbol { .. }
-                | XllError::AbiMismatch { .. }
-                | XllError::ExcelValue(_)
-                | XllError::InvalidHandle
-                | XllError::StaleHandle
-                | XllError::Closing
-                | XllError::Overloaded
-                | XllError::ReentrantCall
-                | XllError::Panic
-                | XllError::Internal { .. } => (0, None),
             };
             bytes = bytes.checked_add(local)?;
             if bytes > max_bytes {
@@ -1033,31 +1501,51 @@ pub mod internal {
         message: String,
         source: Option<Box<ErrorCause>>,
     ) -> XllError {
-        XllError::Application {
+        XllError(XllErrorRepr::Boxed(Box::new(BoxedXllError::Application {
             excel,
             message,
             source,
-        }
+        })))
     }
 
-    pub fn excel_api(function: ExcelApiFunction, failure: ExcelApiFailure) -> XllError {
-        XllError::ExcelApi { function, failure }
+    pub const fn excel_api(function: ExcelApiFunction, failure: ExcelApiFailure) -> XllError {
+        XllError(XllErrorRepr::ExcelApi { function, failure })
     }
 
     pub fn windows_api(function: &'static str, code: i32) -> XllError {
-        XllError::WindowsApi { function, code }
+        XllError(XllErrorRepr::Boxed(Box::new(BoxedXllError::WindowsApi {
+            function,
+            code,
+        })))
     }
 
     pub fn registration_conflict(name: &'static str) -> XllError {
-        XllError::RegistrationConflict { name }
+        XllError(XllErrorRepr::Boxed(Box::new(
+            BoxedXllError::RegistrationConflict { name },
+        )))
     }
 
     pub fn metadata_debt_binding_changed(name: &'static str) -> XllError {
-        XllError::MetadataDebtBindingChanged { name }
+        XllError(XllErrorRepr::Boxed(Box::new(
+            BoxedXllError::MetadataDebtBindingChanged { name },
+        )))
     }
 
     pub fn library_load(path: PathBuf, os_error: u32) -> XllError {
-        XllError::LibraryLoad { path, os_error }
+        XllError(XllErrorRepr::Boxed(Box::new(BoxedXllError::LibraryLoad {
+            path,
+            os_error,
+        })))
+    }
+
+    pub fn missing_symbol(symbol: &'static str) -> XllError {
+        XllError(XllErrorRepr::Boxed(Box::new(BoxedXllError::MissingSymbol {
+            symbol,
+        })))
+    }
+
+    pub const fn abi_mismatch(expected: u32, actual: u32) -> XllError {
+        XllError(XllErrorRepr::AbiMismatch { expected, actual })
     }
 
     pub fn rtd_subscription_shutdown(
@@ -1066,19 +1554,26 @@ pub mod internal {
         key: String,
         source: Box<XllError>,
     ) -> XllError {
-        XllError::RtdSubscriptionShutdown {
-            server_generation,
-            topic_id,
-            key,
-            source,
-        }
+        XllError(XllErrorRepr::Boxed(Box::new(
+            BoxedXllError::RtdSubscriptionShutdown {
+                server_generation,
+                topic_id,
+                key,
+                source: *source,
+            },
+        )))
     }
 
     pub fn rtd_producer_failure(topic: String, source: Box<XllError>) -> XllError {
-        XllError::RtdProducerFailure { topic, source }
+        XllError(XllErrorRepr::Boxed(Box::new(
+            BoxedXllError::RtdProducerFailure {
+                topic,
+                source: *source,
+            },
+        )))
     }
 
     pub const fn internal(diagnostic_id: DiagnosticId) -> XllError {
-        XllError::Internal { diagnostic_id }
+        XllError(XllErrorRepr::Internal(diagnostic_id))
     }
 }

@@ -6,7 +6,8 @@ pub(crate) use xlfn_engine::error::internal as construct;
 #[doc(inline)]
 pub use xlfn_engine::error::{
     DomainErrorCode, ErrorCause, ExcelApiFailure, ExcelApiFunction, ExcelCallbackStatus,
-    ExcelError, InputError, IntoXllError, InvalidLimit, UdfError, UdfResult, XllError, XllResult,
+    ExcelError, InputError, IntoXllError, InvalidLimit, UdfError, UdfResult, XllError,
+    XllErrorKind, XllResult,
 };
 
 macro_rules! assert_excel_error_codes {
@@ -39,10 +40,10 @@ pub(crate) fn map_service_slot_error(
     error: xlfn_kernel::service_slot::ServiceSlotError<XllError>,
 ) -> XllError {
     match error {
-        xlfn_kernel::service_slot::ServiceSlotError::Closed => XllError::Closing,
+        xlfn_kernel::service_slot::ServiceSlotError::Closed => XllError::CLOSING,
         xlfn_kernel::service_slot::ServiceSlotError::Fault(fault) => match fault {
             xlfn_kernel::service_slot::ServiceFault::Error(error) => error,
-            xlfn_kernel::service_slot::ServiceFault::Panicked => XllError::Panic,
+            xlfn_kernel::service_slot::ServiceFault::Panicked => XllError::PANIC,
         },
     }
 }

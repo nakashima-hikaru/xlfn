@@ -187,7 +187,7 @@ impl<H: SubscriptionHost> CommittedRefresh<'_, H> {
         let mut result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
             batch.finish_protocol(RefreshOutcome::Delivered)
         }))
-        .unwrap_or(Err(XllError::Panic));
+        .unwrap_or(Err(XllError::PANIC));
         // Admission is still held while the issuer's cleanup ledger is touched.
         if result.is_err() {
             let _ = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
@@ -200,7 +200,7 @@ impl<H: SubscriptionHost> CommittedRefresh<'_, H> {
         // Once handoff committed, a guard Drop panic cannot invalidate or free
         // the transferred array. Do not touch runtime services after release.
         if crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| drop(batch))).is_err() {
-            result = Err(XllError::Panic);
+            result = Err(XllError::PANIC);
         }
         result
     }

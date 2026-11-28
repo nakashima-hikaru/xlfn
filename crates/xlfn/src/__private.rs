@@ -821,16 +821,8 @@ pub mod v1 {
             raw: *mut xlfn_sys::XLOPER12,
         ) -> XllResult<PreparedParameter<'call, T, M>> {
             // SAFETY: Excel owns raw for the duration of this synchronous call.
-            let borrowed =
-                unsafe { crate::value::XlValueRef::from_raw(raw) }.map_err(
-                    |error| match error {
-                        XllError::Input { reason, .. } => XllError::Input {
-                            argument: name,
-                            reason,
-                        },
-                        other => other,
-                    },
-                )?;
+            let borrowed = unsafe { crate::value::XlValueRef::from_raw(raw) }
+                .map_err(|error| error.with_argument(name))?;
             self.arguments.prepare(index, name, borrowed)
         }
 
@@ -905,16 +897,8 @@ pub mod v1 {
             T: crate::handle::ExcelHandleObject,
         {
             // SAFETY: raw is supplied by Excel for this call.
-            let borrowed =
-                unsafe { crate::value::XlValueRef::from_raw(raw) }.map_err(
-                    |error| match error {
-                        XllError::Input { reason, .. } => XllError::Input {
-                            argument: name,
-                            reason,
-                        },
-                        other => other,
-                    },
-                )?;
+            let borrowed = unsafe { crate::value::XlValueRef::from_raw(raw) }
+                .map_err(|error| error.with_argument(name))?;
             self.arguments
                 .decode_pending_handle(index, name, borrowed, lease.generation())
         }
@@ -1568,7 +1552,7 @@ pub mod v1 {
 
             fn open(_: &OpenContext<Self>) -> Result<Opened<()>, XllError> {
                 OPEN_CALLS.fetch_add(1, Ordering::Relaxed);
-                Err(XllError::Overloaded)
+                Err(XllError::OVERLOADED)
             }
 
             fn quiesce(_: &mut (), _: &mut ()) -> Result<(), XllError> {
@@ -1643,7 +1627,7 @@ pub mod v1 {
                     Ok(_) => panic!("application initialization must fail"),
                     Err(failure) => failure,
                 };
-                assert!(matches!(failure.recover(&lifecycle), XllError::Overloaded));
+                assert!(matches!(failure.recover(&lifecycle), __err if __err.is_overloaded()));
                 assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
                 assert_eq!(QUIESCE_CALLS.load(Ordering::Relaxed), quiesces_before);
 
@@ -1889,10 +1873,10 @@ mod tests {
             Mode::Fast
         );
         let error = decode_mode("unknown日本語".encode_utf16().collect()).unwrap_err();
-        let crate::XllError::Input { argument, reason } = &error else {
+        let Some((argument, reason)) = error.input_details() else {
             panic!("enum failures must retain input classification");
         };
-        assert_eq!(*argument, "mode");
+        assert_eq!(argument, "mode");
         assert!(matches!(
             reason,
             crate::error::InputError::UnknownEnum { actual, expected }
@@ -1905,10 +1889,7 @@ mod tests {
     #[test]
     fn enum_diagnostics_bound_unicode_prefix_and_still_reject_invalid_utf16() {
         let error = decode_mode("日".repeat(1000).encode_utf16().collect()).unwrap_err();
-        let crate::XllError::Input {
-            reason: crate::error::InputError::UnknownEnum { actual, .. },
-            ..
-        } = error
+        let Some((_, crate::error::InputError::UnknownEnum { actual, .. })) = error.input_details()
         else {
             panic!("unknown enum diagnostic expected");
         };
@@ -1923,9 +1904,8 @@ mod tests {
 
         let mut invalid = vec![u16::from(b'x'); 2000];
         invalid.push(0xd800);
-        assert!(matches!(
-            decode_mode(invalid),
-            Err(crate::XllError::Input {
+        assert!(matches!((decode_mode(invalid)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 reason: crate::error::InputError::InvalidUtf16,
                 ..
             })

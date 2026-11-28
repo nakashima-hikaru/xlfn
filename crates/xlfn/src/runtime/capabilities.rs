@@ -125,7 +125,7 @@ impl<'runtime, A: Addin> TakenLifecycle<'runtime, A> {
         match crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(value))) {
             Ok(()) => Ok(empty),
             Err(_) => Err(LifecycleFailure {
-                error: crate::XllError::Panic,
+                error: crate::XllError::PANIC,
                 _authority: RetainedLifecycle::Empty(empty),
             }),
         }
@@ -138,7 +138,7 @@ impl<'runtime, A: Addin> EmptyLifecycle<'runtime, A> {
             .with(|fail| assert!(!fail.replace(false), "injected binding release unwind"));
         #[cfg(test)]
         if FAIL_BINDING_RELEASE.with(|fail| fail.replace(false)) {
-            return Err(LifecycleFailure::disposed(crate::XllError::Panic, self));
+            return Err(LifecycleFailure::disposed(crate::XllError::PANIC, self));
         }
         match self.binding.release() {
             Ok(_) => Ok(()),

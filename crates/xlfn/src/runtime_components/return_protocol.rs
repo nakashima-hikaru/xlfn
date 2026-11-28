@@ -454,6 +454,6 @@ mod tests {
         protocol.reopen_admission().unwrap();
         let _leaked = protocol.test_enter_producer().unwrap();
         let err = protocol.close_admission().wait().err().unwrap();
-        assert!(matches!(err, crate::XllError::Internal { .. }));
+        assert!(matches!(err, __err if __err.diagnostic_id().is_some()));
     }
 }

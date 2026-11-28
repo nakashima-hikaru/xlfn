@@ -186,12 +186,12 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> ServerObservation<E, C> 
             .as_ref()
             .is_some_and(|entry| entry.pointer == pointer as usize)
         {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         // SAFETY: ensured owns a live COM reference through the guard's drop;
         // the owned admission is dropped before that reference.
         let operation =
-            unsafe { (*pointer).operations.enter_observation() }.ok_or(XllError::Closing)?;
+            unsafe { (*pointer).operations.enter_observation() }.ok_or(XllError::CLOSING)?;
         // SAFETY: ensured retains the server and ACTIVE_SERVER serializes
         // observation admission with the last observer's retirement decision.
         unsafe {
@@ -658,7 +658,7 @@ pub(super) fn discard_unpublished_server<E: RtdSubscription, C: crate::RtdSource
     if joined.worker_panicked() {
         crate::diagnostics::report_no_unwind(
             "IRtdServer::deferred termination join",
-            &XllError::Panic,
+            &XllError::PANIC,
         );
     }
 
@@ -726,7 +726,7 @@ pub(crate) fn shutdown<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
             .join_worker()
             .unwrap_or_else(|_| std::process::abort());
         if joined.worker_panicked() {
-            let error = XllError::Panic;
+            let error = XllError::PANIC;
             crate::diagnostics::report_no_unwind("IRtdServer::deferred termination join", &error);
             shutdown_error = Some(error);
         }
@@ -812,7 +812,7 @@ pub(crate) fn shutdown_subscriptions<E: crate::RtdSubscription, C: crate::RtdSou
             .join_worker()
             .unwrap_or_else(|_| std::process::abort());
         if joined.worker_panicked() {
-            let error = XllError::Panic;
+            let error = XllError::PANIC;
             crate::diagnostics::report_no_unwind("IRtdServer::deferred termination join", &error);
             shutdown_error = Some(error);
         }
@@ -870,7 +870,7 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     loop {
         let mut active = ACTIVE_SERVER.lock();
         if !super::server_type::is_registered::<E, C>() {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
 
         if let Some(existing) = active.as_ref() {
@@ -902,7 +902,7 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
                 let access = match unsafe { reference.drain_access::<E, C>() } {
                     Ok(termination) => termination,
                     Err(_) => {
-                        return Err(XllError::Closing);
+                        return Err(XllError::CLOSING);
                     }
                 };
 
@@ -911,14 +911,14 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
                     Err(_) => {
                         // A coordinator reentering ensure_server leaves reaping
                         // to an external thread; the scope releases its lease.
-                        return Err(XllError::Closing);
+                        return Err(XllError::CLOSING);
                     }
                 };
                 let worker_panicked = joined.worker_panicked();
                 if worker_panicked {
                     crate::diagnostics::report_no_unwind(
                         "IRtdServer::deferred termination join",
-                        &XllError::Panic,
+                        &XllError::PANIC,
                     );
                 }
 
@@ -936,7 +936,7 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
                     ));
                 }
                 if worker_panicked {
-                    return Err(XllError::Panic);
+                    return Err(XllError::PANIC);
                 }
                 continue;
             }
@@ -1640,7 +1640,7 @@ unsafe fn disconnect_data_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E
         };
         match subscription_server.disconnect_deferred(crate::subscription::TopicId(topic_id), lease)
         {
-            Err(error) if !matches!(error, crate::XllError::Closing) => {
+            Err(error) if !matches!(error, __err if __err.is_closing()) => {
                 crate::diagnostics::report_no_unwind("IRtdServer::DisconnectData", &error);
                 return E_FAIL;
             }
@@ -1822,7 +1822,7 @@ impl<'server, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 .map_or(Ok(()), BackendSubscriptionServer::terminate)
         })) {
             Ok(outcome) => outcome,
-            Err(_) => Err(XllError::Panic),
+            Err(_) => Err(XllError::PANIC),
         };
         if let Err(error) = terminated {
             // The backend may still own a notifier tied to this server.

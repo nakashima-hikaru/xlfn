@@ -131,17 +131,18 @@ impl StoredMessage {
         if let Some(message) = message {
             return Some(Self::Text(try_text(format_args!("{message}"))?));
         }
-        Some(match error {
-            XllError::Domain { code } => Self::Domain(*code),
-            XllError::ExcelValue(error) => Self::ExcelValue(*error),
-            XllError::InvalidHandle => Self::InvalidHandle,
-            XllError::StaleHandle => Self::StaleHandle,
-            XllError::Closing => Self::Closing,
-            XllError::Overloaded => Self::Overloaded,
-            XllError::ReentrantCall => Self::ReentrantCall,
-            XllError::Panic => Self::Panic,
-            XllError::Internal { diagnostic_id, .. } => Self::Internal(*diagnostic_id),
-            XllError::Custom {
+        use crate::error::construct::{ErrorView, view};
+        Some(match view(error) {
+            ErrorView::Domain { code } => Self::Domain(code),
+            ErrorView::ExcelValue(error) => Self::ExcelValue(error),
+            ErrorView::InvalidHandle => Self::InvalidHandle,
+            ErrorView::StaleHandle => Self::StaleHandle,
+            ErrorView::Closing => Self::Closing,
+            ErrorView::Overloaded => Self::Overloaded,
+            ErrorView::ReentrantCall => Self::ReentrantCall,
+            ErrorView::Panic => Self::Panic,
+            ErrorView::Internal { diagnostic_id } => Self::Internal(diagnostic_id),
+            ErrorView::Custom {
                 message: Cow::Borrowed(message),
                 ..
             } => Self::Static(message),
@@ -161,14 +162,14 @@ impl StoredMessage {
 
     fn try_text(&self) -> Option<String> {
         let error = match self {
-            Self::Domain(code) => XllError::Domain { code: *code },
-            Self::ExcelValue(error) => XllError::ExcelValue(*error),
-            Self::InvalidHandle => XllError::InvalidHandle,
-            Self::StaleHandle => XllError::StaleHandle,
-            Self::Closing => XllError::Closing,
-            Self::Overloaded => XllError::Overloaded,
-            Self::ReentrantCall => XllError::ReentrantCall,
-            Self::Panic => XllError::Panic,
+            Self::Domain(code) => XllError::domain(*code),
+            Self::ExcelValue(error) => XllError::excel_value(*error),
+            Self::InvalidHandle => XllError::INVALID_HANDLE,
+            Self::StaleHandle => XllError::STALE_HANDLE,
+            Self::Closing => XllError::CLOSING,
+            Self::Overloaded => XllError::OVERLOADED,
+            Self::ReentrantCall => XllError::REENTRANT_CALL,
+            Self::Panic => XllError::PANIC,
             Self::Internal(diagnostic_id) => crate::error::construct::internal(*diagnostic_id),
             Self::Static(text) => return try_text(format_args!("{text}")),
             Self::Text(text) => return try_text(format_args!("{text}")),
@@ -431,10 +432,7 @@ impl DiagnosticHistory {
             metadata,
             error_kind: crate::execution::classify_error(error).0,
             excel_error: error.to_excel_error(),
-            argument: match error {
-                XllError::Input { argument, .. } => Some(argument),
-                _ => None,
-            },
+            argument: error.input_details().map(|(argument, _)| argument),
             message: StoredMessage::new(error, message)?,
         })
     }
@@ -514,9 +512,9 @@ mod tests {
             max_bytes: 4096,
         });
         let second = DiagnosticHistory::new();
-        record(&first, 1, &XllError::Panic);
-        record(&first, 2, &XllError::Closing);
-        record(&second, 10, &XllError::Overloaded);
+        record(&first, 1, &XllError::PANIC);
+        record(&first, 2, &XllError::CLOSING);
+        record(&second, 10, &XllError::OVERLOADED);
         let mut a = first.history_reader();
         let mut b = first.history_reader();
         let mut other = second.history_reader();
@@ -529,7 +527,7 @@ mod tests {
         let page = a.next_page(10);
         assert!(page.errors.is_empty());
         assert_eq!(page.missed_events, 0);
-        record(&first, 3, &XllError::Panic);
+        record(&first, 3, &XllError::PANIC);
         assert_eq!(a.next_page(10).errors[0].diagnostic_id.as_u64(), 3);
     }
 
@@ -544,7 +542,7 @@ mod tests {
         record(
             &history,
             42,
-            &XllError::ExcelValue(ExcelError::NotAvailable),
+            &XllError::excel_value(ExcelError::NotAvailable),
         );
         let page = history.errors_since(DiagnosticCursor::START, 100);
         assert_eq!(page.errors.len(), 2);
@@ -566,29 +564,23 @@ mod tests {
     fn compact_failures_keep_canonical_messages_without_owned_recording_text() {
         let history = DiagnosticHistory::new();
         let errors = [
-            XllError::Domain {
-                code: DomainErrorCode::InvalidInput,
-            },
-            XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            },
-            XllError::Domain {
-                code: DomainErrorCode::NativeFailure,
-            },
-            XllError::ExcelValue(ExcelError::Null),
-            XllError::ExcelValue(ExcelError::DivisionByZero),
-            XllError::ExcelValue(ExcelError::Value),
-            XllError::ExcelValue(ExcelError::Reference),
-            XllError::ExcelValue(ExcelError::Name),
-            XllError::ExcelValue(ExcelError::Number),
-            XllError::ExcelValue(ExcelError::NotAvailable),
-            XllError::ExcelValue(ExcelError::GettingData),
-            XllError::InvalidHandle,
-            XllError::StaleHandle,
-            XllError::Closing,
-            XllError::Overloaded,
-            XllError::ReentrantCall,
-            XllError::Panic,
+            XllError::domain(DomainErrorCode::InvalidInput),
+            XllError::domain(DomainErrorCode::Overflow),
+            XllError::domain(DomainErrorCode::NativeFailure),
+            XllError::excel_value(ExcelError::Null),
+            XllError::excel_value(ExcelError::DivisionByZero),
+            XllError::excel_value(ExcelError::Value),
+            XllError::excel_value(ExcelError::Reference),
+            XllError::excel_value(ExcelError::Name),
+            XllError::excel_value(ExcelError::Number),
+            XllError::excel_value(ExcelError::NotAvailable),
+            XllError::excel_value(ExcelError::GettingData),
+            XllError::INVALID_HANDLE,
+            XllError::STALE_HANDLE,
+            XllError::CLOSING,
+            XllError::OVERLOADED,
+            XllError::REENTRANT_CALL,
+            XllError::PANIC,
             crate::error::construct::internal(crate::diagnostics::id::from_u64(0x1a2b)),
             XllError::custom(ExcelError::Number, "static application detail"),
         ];
@@ -618,7 +610,7 @@ mod tests {
                 calculation_id: None,
                 timestamp: SystemTime::UNIX_EPOCH,
             },
-            &XllError::Panic,
+            &XllError::PANIC,
             Some(&detail),
         );
         detail.clear();
@@ -686,7 +678,7 @@ mod tests {
             max_records: 1,
             max_bytes: size_of::<StoredRecord>(),
         });
-        record(&history, 1, &XllError::Panic);
+        record(&history, 1, &XllError::PANIC);
         record(
             &history,
             2,
@@ -697,7 +689,7 @@ mod tests {
         assert_eq!(first.errors[0].diagnostic_id.as_u64(), 1);
         assert_eq!(first.missed_events, 1);
         assert_eq!(history.stats().retained_bytes, size_of::<StoredRecord>());
-        record(&history, 3, &XllError::Closing);
+        record(&history, 3, &XllError::CLOSING);
         let next = history.errors_since(first.next_cursor, 10);
         assert_eq!(next.errors.len(), 1);
         assert_eq!(next.errors[0].diagnostic_id.as_u64(), 3);
@@ -712,7 +704,7 @@ mod tests {
             max_bytes: 4096,
         });
         for id in 1..=4 {
-            record(&history, id, &XllError::Panic);
+            record(&history, id, &XllError::PANIC);
         }
         let first = history.errors_since(DiagnosticCursor::START, 1);
         assert_eq!(first.errors[0].diagnostic_id.as_u64(), 3);
@@ -742,7 +734,7 @@ mod tests {
             max_records: 1024,
             max_bytes: 4 * size_of::<StoredRecord>(),
         });
-        record(&history, 1, &XllError::Closing);
+        record(&history, 1, &XllError::CLOSING);
         record(
             &history,
             2,
@@ -761,13 +753,13 @@ mod tests {
             max_records: 2,
             max_bytes: 1024,
         });
-        record(&history, 1, &XllError::Panic);
+        record(&history, 1, &XllError::PANIC);
         record(
             &history,
             2,
             &XllError::custom(ExcelError::Value, "x".repeat(2048)),
         );
-        record(&history, 3, &XllError::Closing);
+        record(&history, 3, &XllError::CLOSING);
         let page = history.errors_since(DiagnosticCursor::START, 10);
         assert_eq!(page.errors.len(), 2);
         assert_eq!(page.errors[0].diagnostic_id.as_u64(), 1);
@@ -813,8 +805,8 @@ mod tests {
             max_records: 0,
             max_bytes: 0,
         });
-        record(&history, 1, &XllError::Panic);
-        record(&history, 2, &XllError::Panic);
+        record(&history, 1, &XllError::PANIC);
+        record(&history, 2, &XllError::PANIC);
         let page = history.errors_since(DiagnosticCursor::START, 10);
         assert!(page.errors.is_empty());
         assert_eq!(page.missed_events, 2);
@@ -844,7 +836,7 @@ mod tests {
                 let history = Arc::clone(&history);
                 std::thread::spawn(move || {
                     for index in 0..100 {
-                        record(&history, worker * 100 + index, &XllError::Panic);
+                        record(&history, worker * 100 + index, &XllError::PANIC);
                     }
                 })
             })

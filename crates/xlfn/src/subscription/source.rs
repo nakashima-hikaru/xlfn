@@ -208,7 +208,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceArena<E, C> {
                 if catch_no_unwind(AssertUnwindSafe(|| entry.request_stop())).is_err()
                     && first_error.is_none()
                 {
-                    first_error = Some(XllError::Panic);
+                    first_error = Some(XllError::PANIC);
                 }
             }
         }
@@ -220,7 +220,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceArena<E, C> {
             let catalog = storage.as_ref();
             for entry in crate::source_catalog::CatalogEntry::all(catalog) {
                 let result = catch_no_unwind(AssertUnwindSafe(|| entry.shutdown_and_wait()))
-                    .unwrap_or(Err(XllError::Panic));
+                    .unwrap_or(Err(XllError::PANIC));
                 if let Err(error) = result
                     && first_error.is_none()
                 {
@@ -531,7 +531,7 @@ struct SourceTicket<E: RtdSubscription>(E);
 impl<E: RtdSubscription> Rollback for SourceTicket<E> {
     fn rollback(self) {
         let result = catch_no_unwind(AssertUnwindSafe(|| self.0.disconnect_and_wait()))
-            .unwrap_or(Err(XllError::Panic));
+            .unwrap_or(Err(XllError::PANIC));
         if let Err(error) = result {
             crate::diagnostics::report_no_unwind("RTD source ticket drop", &error);
         }

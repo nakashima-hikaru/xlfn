@@ -41,7 +41,5 @@ pub fn one() -> i32 {
 pub fn reference_area_count(
     #[excel_arg(reference, description = "Cell or range reference.")] reference: ExcelReference<'_>,
 ) -> XllResult<i32> {
-    i32::try_from(reference.areas().len()).map_err(|_| XllError::Domain {
-        code: xlfn::error::DomainErrorCode::Overflow,
-    })
+    i32::try_from(reference.areas().len()).map_err(|_| XllError::domain(xlfn::error::DomainErrorCode::Overflow))
 }

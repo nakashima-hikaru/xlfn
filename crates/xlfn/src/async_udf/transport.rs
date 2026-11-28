@@ -23,7 +23,7 @@ struct PendingResponse {
 impl Rollback for PendingResponse {
     fn rollback(self) {
         let Self { udf_id, mut handle } = self;
-        let error = XllError::ExcelValue(crate::ExcelError::NotAvailable);
+        let error = XllError::excel_value(crate::ExcelError::NotAvailable);
         // SAFETY: the copied handle remains live and uniquely owned here.
         let delivery = unsafe { return_error(&mut handle, &error) };
         if let OwnedDeliveryOutcome::Failed(delivery_error) = delivery {
@@ -152,7 +152,7 @@ mod tests {
             let responder =
                 unsafe { ExcelAsyncResponder::from_raw("DELIVERY.ONCE", &mut raw) }.unwrap();
             // SAFETY: the responder owns the copied handle through the callback.
-            let result = unsafe { responder.deliver_error(&XllError::Closing) };
+            let result = unsafe { responder.deliver_error(&XllError::CLOSING) };
             assert_eq!(result.is_err(), rejected);
             // Delivery consumes fallback authority even on callback failure.
             assert_eq!(crate::test_callback::async_return_calls(), 1);
@@ -174,7 +174,7 @@ mod tests {
             // accessed; the aligned non-null operand is live and initialized.
             assert!(unsafe { ExcelAsyncResponder::from_raw("MALFORMED", raw) }.is_err());
             // SAFETY: same rejected shapes must never be forwarded to Excel.
-            let delivery = unsafe { return_error(raw, &XllError::Panic) };
+            let delivery = unsafe { return_error(raw, &XllError::PANIC) };
             assert!(matches!(delivery, OwnedDeliveryOutcome::Unobserved));
         }
         assert_eq!(crate::test_callback::async_return_calls(), 0);

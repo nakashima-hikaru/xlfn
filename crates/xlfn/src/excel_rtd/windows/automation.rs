@@ -721,7 +721,7 @@ const REQUIRED_RTD_TOPIC_PARTS: usize = 1;
 
 pub(super) fn checked_topic_part_count(lower: i32, upper: i32) -> XllResult<usize> {
     if upper < lower {
-        return Err(XllError::InvalidHandle);
+        return Err(XllError::INVALID_HANDLE);
     }
     let count = i64::from(upper)
         .checked_sub(i64::from(lower))
@@ -777,13 +777,13 @@ pub(super) fn topic_element_type(features: u16, element_size: u32) -> XllResult<
     match i32::from(features) & ELEMENT_FLAGS {
         FADF_BSTR if bytes == size_of::<*mut u16>() => Ok(VT_BSTR),
         FADF_VARIANT if bytes == size_of::<VARIANT>() => Ok(VT_VARIANT),
-        _ => Err(XllError::InvalidHandle),
+        _ => Err(XllError::INVALID_HANDLE),
     }
 }
 
 pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> XllResult<String> {
     let Some(strings) = NonNull::new(strings) else {
-        return Err(XllError::InvalidHandle);
+        return Err(XllError::INVALID_HANDLE);
     };
 
     // SAFETY: `strings` is a validated non-null pointer to the SAFEARRAY pointer
@@ -791,7 +791,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
     let array = unsafe { *strings.as_ptr() };
 
     let Some(array) = NonNull::new(array) else {
-        return Err(XllError::InvalidHandle);
+        return Err(XllError::INVALID_HANDLE);
     };
 
     let array_ptr = array.as_ptr();
@@ -800,7 +800,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
     let dim = unsafe { SafeArrayGetDim(array_ptr) };
 
     if dim != 1 {
-        return Err(XllError::InvalidHandle);
+        return Err(XllError::INVALID_HANDLE);
     }
 
     // SAFETY: COM retains the live array descriptor for this call. Its
@@ -808,7 +808,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
     let descriptor = unsafe { array.as_ptr().read() };
     let element_type = topic_element_type(descriptor.fFeatures, descriptor.cbElements)?;
     if descriptor.pvData.is_null() {
-        return Err(XllError::InvalidHandle);
+        return Err(XllError::INVALID_HANDLE);
     }
 
     let mut lower = 0;
@@ -823,11 +823,11 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
     let upper_status = unsafe { SafeArrayGetUBound(array_ptr, 1, &mut upper) };
 
     if lower_status < 0 || upper_status < 0 {
-        return Err(XllError::InvalidHandle);
+        return Err(XllError::INVALID_HANDLE);
     }
     let count = checked_topic_part_count(lower, upper)?;
     if count != REQUIRED_RTD_TOPIC_PARTS || descriptor.rgsabound[0].cElements as usize != count {
-        return Err(XllError::InvalidHandle);
+        return Err(XllError::INVALID_HANDLE);
     }
 
     let mut vt = 0u16;
@@ -837,7 +837,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
     let vt_status = unsafe { SafeArrayGetVartype(array_ptr, &mut vt) };
 
     if vt_status < 0 || vt != element_type {
-        return Err(XllError::InvalidHandle);
+        return Err(XllError::INVALID_HANDLE);
     }
 
     // The validated cardinality is exactly one, so its only index is the
@@ -851,11 +851,11 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
             // `bstr_ptr` points to writable storage. For a VT_BSTR array,
             // SafeArrayGetElement returns a copied BSTR owned by the caller.
             if unsafe { SafeArrayGetElement(array_ptr, &index, (&raw mut bstr_ptr).cast()) } < 0 {
-                return Err(XllError::InvalidHandle);
+                return Err(XllError::INVALID_HANDLE);
             }
 
             let Some(bstr) = NonNull::new(bstr_ptr) else {
-                return Err(XllError::InvalidHandle);
+                return Err(XllError::INVALID_HANDLE);
             };
 
             let _bstr_guard = BstrGuard(bstr);
@@ -879,7 +879,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
             // `value` points to initialized writable VARIANT storage. On
             // success VariantGuard clears the copied value exactly once.
             if unsafe { SafeArrayGetElement(array_ptr, &index, (&raw mut value).cast()) } < 0 {
-                return Err(XllError::InvalidHandle);
+                return Err(XllError::INVALID_HANDLE);
             }
 
             let value = VariantGuard(value);
@@ -889,13 +889,13 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
             let variant = unsafe { value.0.Anonymous.Anonymous };
 
             if variant.vt != VT_BSTR {
-                return Err(XllError::InvalidHandle);
+                return Err(XllError::INVALID_HANDLE);
             }
 
             // SAFETY: the VARIANT discriminant was checked to be VT_BSTR,
             // so `bstrVal` is the active union member.
             let Some(bstr) = NonNull::new(unsafe { variant.Anonymous.bstrVal as *mut u16 }) else {
-                return Err(XllError::InvalidHandle);
+                return Err(XllError::INVALID_HANDLE);
             };
 
             // SAFETY: `bstr` is owned by the live VARIANT and remains valid
@@ -910,7 +910,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
             String::from_utf16(units)
                 .map_err(|_| XllError::validation("RTD topic", InputError::InvalidUtf16))
         }
-        _ => Err(XllError::InvalidHandle),
+        _ => Err(XllError::INVALID_HANDLE),
     }
 }
 

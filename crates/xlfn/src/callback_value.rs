@@ -435,7 +435,7 @@ mod tests {
             failed_free,
         );
         let error = result.release().unwrap_err();
-        assert!(matches!(error, XllError::ExcelApi { .. }));
+        assert!(matches!(crate::error::construct::view(&(error)), crate::error::construct::ErrorView::ExcelApi { .. }));
         assert_eq!(
             FREE_CALLS.load(Ordering::Relaxed),
             1,

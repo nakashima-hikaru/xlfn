@@ -72,7 +72,7 @@ impl<'service> HandleInitializationGuard<'service> {
             let mut active = active.borrow_mut();
             let identity = (std::ptr::from_ref(service), key);
             if active.contains(&identity) {
-                return Err(XllError::ReentrantCall);
+                return Err(XllError::REENTRANT_CALL);
             }
             active.push(identity);
             Ok(Self {
@@ -245,7 +245,7 @@ impl FormulaHandleService {
     {
         let key = key.into();
         let _active_initialization = HandleInitializationGuard::enter(self, key)?;
-        let _prepare = self.prepares.try_enter().ok_or(XllError::Closing)?;
+        let _prepare = self.prepares.try_enter().ok_or(XllError::CLOSING)?;
         let _refinement_prepare = self.refinement.observe_prepare();
         let observe = match self.prepare_warm(key, observe)? {
             WarmOutcome::Hit(preparation) => return Ok(preparation),
@@ -352,11 +352,11 @@ impl FormulaHandleService {
             }
             PublishedTopicState::Closing => {
                 self.refinement.observe_abandon_warm_read(reader_id);
-                Err(XllError::Closing)
+                Err(XllError::CLOSING)
             }
             PublishedTopicState::Provisional | PublishedTopicState::Stale => {
                 self.refinement.observe_abandon_warm_read(reader_id);
-                Err(XllError::StaleHandle)
+                Err(XllError::STALE_HANDLE)
             }
         };
         drop(lease);
@@ -809,7 +809,7 @@ impl<'call> FormulaHandleServiceResolver<'call> {
             (issuer, read)
         });
         if *slot != issuer {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         result.as_deref().map_err(Clone::clone)
     }

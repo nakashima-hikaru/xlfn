@@ -65,7 +65,7 @@ fn com_boundary_with_admission<T: Copy>(
     })) {
         Ok(status) => status,
         Err(_) => {
-            crate::diagnostics::report_no_unwind(operation, &XllError::Panic);
+            crate::diagnostics::report_no_unwind(operation, &XllError::PANIC);
             failure
         }
     }

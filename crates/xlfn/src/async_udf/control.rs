@@ -144,7 +144,7 @@ impl<'registry> CloseClaim<'registry> {
         let claim;
         let mut control = registry.control.lock();
         if matches!(control.state, State::CloseClaimed) {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         control.state = State::CloseClaimed;
         claim = Self {
@@ -234,7 +234,7 @@ impl TaskRegistry {
         let transition = self.transition.lock();
         let control = self.control.lock();
         if !matches!(control.state, State::Stopped) {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         // Control excludes a concurrent change of the published epoch, but
         // snapshots need only publication and can proceed during allocation.
@@ -247,7 +247,7 @@ impl TaskRegistry {
             drop(control);
             drop(transition);
             drop(candidate);
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         let activity = self.activity.control().seal().wait();
         Ok(RegistryPreparedStart {
@@ -289,8 +289,7 @@ mod tests {
         assert_eq!(registry.current.load(Ordering::Acquire), original);
         assert!(matches!(
             registry.preflight_available(),
-            Err(XllError::Closing)
-        ));
+            Err(__err) if __err.is_closing()));
         registry
             .prepare_start(crate::AsyncTaskLimit::DEFAULT)
             .unwrap()
@@ -343,8 +342,7 @@ mod tests {
         drop(closing);
         assert!(matches!(
             registry.preflight_available(),
-            Err(XllError::Closing)
-        ));
+            Err(__err) if __err.is_closing()));
         registry.request_close().unwrap().cancel().wait().finish();
         registry
             .prepare_start(crate::AsyncTaskLimit::DEFAULT)

@@ -33,7 +33,7 @@ unsafe impl RtdSource for Source {
     fn shutdown_and_wait(&self) -> XllResult<()> {
         self.joined.fetch_add(1, Ordering::Relaxed);
         if self.join_fails {
-            Err(XllError::Overloaded)
+            Err(XllError::OVERLOADED)
         } else {
             Ok(())
         }
@@ -90,7 +90,7 @@ fn miri_failed_runtime_server_owner_keeps_publish_core_through_fallback_disconne
         fn request_cancel(&self) {}
 
         fn disconnect_and_wait(self) -> XllResult<()> {
-            assert!(matches!(self.sink.publish(99), Err(XllError::Closing)));
+            assert!(matches!(self.sink.publish(99), Err(__err) if __err.is_closing()));
             self.disconnected.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -208,7 +208,7 @@ fn production_disconnect_releases_export_admission_after_source_stop() {
             self.entered.send(()).unwrap();
             self.stop
                 .recv_timeout(Duration::from_secs(5))
-                .map_err(|_| XllError::Closing)
+                .map_err(|_| XllError::CLOSING)
         }
     }
     // SAFETY: subscribe retains no sink; the returned subscription owns every
@@ -298,9 +298,9 @@ fn miri_executed_source_barriers_preserve_errors_without_skipping_later_sources(
         );
         let result = finished.finish();
         if stop_panics {
-            assert!(matches!(result, Err(XllError::Panic)));
+            assert!(matches!(result, Err(__err) if __err.is_panic()));
         } else {
-            assert!(matches!(result, Err(XllError::Overloaded)));
+            assert!(matches!(result, Err(__err) if __err.is_overloaded()));
         }
         assert_eq!(
             runtime.termination_coordinator.phase(),
@@ -333,7 +333,7 @@ fn miri_publisher_panic_preserves_the_joined_runtime_and_reports_cleanup_failure
         runtime.termination_coordinator.phase(),
         TerminationPhase::Terminated
     );
-    assert!(matches!(runtime.close(), Err(XllError::Panic)));
+    assert!(matches!(runtime.close(), Err(__err) if __err.is_panic()));
 }
 
 #[test]
@@ -343,14 +343,13 @@ fn miri_publisher_panic_does_not_override_other_cleanup_failures() {
 
     assert!(matches!(
         runtime.close_for_shutdown(),
-        Err(XllError::Overloaded)
-    ));
+        Err(__err) if __err.is_overloaded()));
     assert_eq!(joined.load(Ordering::Relaxed), 2);
     assert_eq!(
         runtime.termination_coordinator.phase(),
         TerminationPhase::Terminated
     );
-    assert!(matches!(runtime.close(), Err(XllError::Overloaded)));
+    assert!(matches!(runtime.close(), Err(__err) if __err.is_overloaded()));
 }
 
 #[test]
@@ -364,15 +363,14 @@ fn miri_source_dispatch_preflight_failure_never_certifies_executed_barriers() {
             .request_stop()
             .drain_sink_users()
             .join_workers(),
-        Err(XllError::Overloaded)
-    ));
+        Err(__err) if __err.is_overloaded()));
     assert_eq!(stopped.load(Ordering::Relaxed), 2);
     assert_eq!(joined.load(Ordering::Relaxed), 0);
     assert_eq!(
         runtime.termination_coordinator.phase(),
         TerminationPhase::Failed
     );
-    assert!(matches!(runtime.close(), Err(XllError::Overloaded)));
+    assert!(matches!(runtime.close(), Err(__err) if __err.is_overloaded()));
     assert_eq!(joined.load(Ordering::Relaxed), 0);
 }
 
@@ -415,7 +413,7 @@ fn miri_runtime_stage_drop_or_panic_never_publishes_success() {
                 runtime.termination_coordinator.phase(),
                 TerminationPhase::Failed
             );
-            assert!(matches!(runtime.close(), Err(XllError::Panic)));
+            assert!(matches!(runtime.close(), Err(__err) if __err.is_panic()));
         }
     }
 }

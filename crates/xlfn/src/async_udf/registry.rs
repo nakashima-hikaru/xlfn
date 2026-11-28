@@ -329,7 +329,7 @@ impl TaskRegistry {
 
     pub(crate) fn preflight_available(&self) -> XllResult<bool> {
         if self.closing.load(Ordering::Acquire) {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         Ok(self.active_tasks.load(Ordering::Relaxed) < self.limit.load(Ordering::Relaxed))
     }
@@ -348,7 +348,7 @@ impl TaskRegistry {
     #[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
     pub(crate) fn reserve(&self, epoch: CalculationEpoch) -> XllResult<TaskReservation<'_>> {
         if self.closing.load(Ordering::Acquire) {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         let snapshot = self.snapshot();
         if snapshot.epoch() != epoch {
@@ -369,14 +369,14 @@ impl TaskRegistry {
         TaskRegistrationId,
     )> {
         if self.closing.load(Ordering::Acquire) {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         // Advance/cancel seals the old state before publishing its successor.
         // Retaining a snapshot keeps the allocation alive, but never grants
         // admission to a retired calculation.
         let admission = current.enter_admission().map_err(|_| {
             if self.closing.load(Ordering::Acquire) {
-                XllError::Closing
+                XllError::CLOSING
             } else {
                 cancelled_calculation_error()
             }
@@ -392,7 +392,7 @@ impl TaskRegistry {
         let id = self
             .next_id
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .map_err(|_| XllError::Overloaded)?;
+            .map_err(|_| XllError::OVERLOADED)?;
         Ok((admission, active, TaskRegistrationId(id)))
     }
 
@@ -523,7 +523,7 @@ impl TaskRegistry {
 }
 
 pub(crate) fn cancelled_calculation_error() -> XllError {
-    XllError::ExcelValue(crate::ExcelError::NotAvailable)
+    XllError::excel_value(crate::ExcelError::NotAvailable)
 }
 
 pub(crate) fn cancel_tasks(tasks: TaskControlBatch) {

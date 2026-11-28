@@ -907,7 +907,7 @@ impl<'call, A: Addin> AsyncContext<'call, A> {
     /// Returns `#N/A` when this invocation has been cancelled.
     pub fn check_cancelled(&self) -> XllResult<()> {
         if self.cancellation.is_cancelled() {
-            Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+            Err(XllError::excel_value(crate::ExcelError::NotAvailable))
         } else {
             Ok(())
         }
@@ -1616,9 +1616,8 @@ mod tests {
                             crate::host_api::ExcelHost::new(&callbacks),
                         ),
                     );
-                    assert!(matches!(
-                        context.rtd().subscribe(&source, &topic),
-                        Err(crate::XllError::ExcelApi {
+                    assert!(matches!((context.rtd().subscribe(&source, &topic)).as_ref().map_err(crate::error::construct::view),
+                        Err(crate::error::construct::ErrorView::ExcelApi {
                             function: crate::ExcelApiFunction::Rtd,
                             failure: crate::ExcelApiFailure::Status(
                                 crate::ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED,)
@@ -1690,7 +1689,7 @@ mod tests {
         assert!(std::ptr::eq(context.diagnostics(), &diagnostics));
         assert!(matches!(
             context.check_cancelled(),
-            Err(crate::XllError::ExcelValue(crate::ExcelError::NotAvailable))
+            Err(__err) if __err.excel_value_error() == Some(crate::ExcelError::NotAvailable)
         ));
     }
 

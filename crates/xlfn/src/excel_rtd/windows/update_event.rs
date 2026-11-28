@@ -131,7 +131,7 @@ impl RetainedUpdateCallback {
     ) -> XllResult<Self> {
         let raw_cookie = cookie.raw();
         let pump = NotificationPump::start_with_state(WorkerGit::default, move |worker| {
-            let _operation = operations.enter_notification().ok_or(XllError::Closing)?;
+            let _operation = operations.enter_notification().ok_or(XllError::CLOSING)?;
             worker.notify(raw_cookie)
         })?;
         Ok(Self {
@@ -378,7 +378,7 @@ impl RtdNotifier {
             // SAFETY: operations points to the ServerOperationBarrier owned by RtdServer for the server lifetime.
             let _operation = unsafe { self.operations.as_ref() }
                 .enter_notification()
-                .ok_or(XllError::Closing)?;
+                .ok_or(XllError::CLOSING)?;
             // SAFETY: callback.0 points to RetainedUpdateCallback pinned in ServerCallbacks.records.
             unsafe { self.callback.0.as_ref() }.notify()
         }
@@ -392,7 +392,7 @@ impl RtdNotifier {
                     // SAFETY: operations points to the ServerOperationBarrier owned by RtdServer for the server lifetime.
                     let _operation = unsafe { operations.as_ref() }
                         .enter_notification()
-                        .ok_or(XllError::Closing)?;
+                        .ok_or(XllError::CLOSING)?;
                     // SAFETY: callback.0 points to RetainedUpdateCallback pinned in ServerCallbacks.records.
                     unsafe { callback.0.as_ref() }.notify()
                 }

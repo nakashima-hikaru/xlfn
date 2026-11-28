@@ -28,7 +28,7 @@ impl<'a, E: AsyncExecutor> StartupClaim<'a, E> {
         {
             let mut state = runtime.state.lock();
             if !matches!(*state, ExecutorSlot::Stopped) {
-                return Err(XllError::Closing);
+                return Err(XllError::CLOSING);
             }
             *state = ExecutorSlot::Starting;
         }
@@ -45,7 +45,7 @@ impl<'a, E: AsyncExecutor> StartupClaim<'a, E> {
         crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
             owner.get().0.executor.start()
         }))
-        .unwrap_or(Err(XllError::Panic))?;
+        .unwrap_or(Err(XllError::PANIC))?;
         Ok(ExecutorStarted { owner })
     }
 
@@ -115,7 +115,7 @@ impl<E: AsyncExecutor> Rollback for StartingExecutor<'_, E> {
         let stopped = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
             self.0.executor.shutdown()
         }))
-        .unwrap_or(Err(XllError::Panic))
+        .unwrap_or(Err(XllError::PANIC))
         .is_ok();
         self.0.restore_slot(stopped);
     }
@@ -168,7 +168,7 @@ mod tests {
                 assert!(runtime.registry().control.try_lock().is_some());
             }
             if self.0.stop_fails.load(Ordering::Relaxed) {
-                Err(XllError::Panic)
+                Err(XllError::PANIC)
             } else {
                 Ok(())
             }
@@ -225,8 +225,7 @@ mod tests {
         assert!(runtime.is_stopped());
         assert!(matches!(
             runtime.registry().preflight_available(),
-            Err(XllError::Closing)
-        ));
+            Err(__err) if __err.is_closing()));
         assert_eq!(events.drops.load(Ordering::Acquire), 1);
         // An aborted start leaves a genuinely restartable stopped registry.
         runtime
@@ -274,7 +273,7 @@ mod tests {
                     Executor(Arc::clone(&events)),
                     crate::AsyncTaskLimit::DEFAULT
                 ),
-                Err(XllError::Panic)
+                Err(__err) if __err.is_panic()
             ));
             assert!(runtime.publication.load(Ordering::Acquire).is_null());
             assert_eq!(events.stops.load(Ordering::Relaxed), 1);

@@ -845,7 +845,7 @@ mod bounded_text_tests {
         let sink = FileDiagnosticSink {
             log: Mutex::new(RotatingLog::open(path.clone()).unwrap()),
         };
-        let error = crate::XllError::Panic;
+        let error = crate::XllError::PANIC;
         let event = DiagnosticEvent {
             udf_id: "contended_event",
             argument: None,
@@ -902,7 +902,7 @@ mod bounded_text_tests {
         for unit in ["x", "é", "日", "🦀"] {
             for extra in 0..8 {
                 let message = unit.repeat(DIAGNOSTIC_TEXT_MAX_BYTES / unit.len() + extra);
-                let error = crate::XllError::Native { code: 17, message };
+                let error = crate::XllError::native(17, message);
                 assert_eq!(
                     bounded_diagnostic_error(&error),
                     bounded_diagnostic_text(&error.to_string()),
@@ -917,10 +917,7 @@ mod bounded_text_tests {
             bounded_diagnostic_text("udf"),
             Cow::Borrowed("udf")
         ));
-        let error = crate::XllError::Native {
-            code: 17,
-            message: "a\n\u{0085}日本🦀".repeat(DIAGNOSTIC_TEXT_MAX_BYTES),
-        };
+        let error = crate::XllError::native(17, "a\n\u{0085}日本🦀".repeat(DIAGNOSTIC_TEXT_MAX_BYTES));
         let expected: String = bounded_diagnostic_text(&error.to_string())
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })

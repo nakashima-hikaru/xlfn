@@ -73,7 +73,7 @@ unsafe impl RtdSource for LifecycleSource {
     fn shutdown_and_wait(&self) -> XllResult<()> {
         self.events.lock().push(Event::Join(self.id));
         match self.failure {
-            Failure::JoinError => Err(XllError::Overloaded),
+            Failure::JoinError => Err(XllError::OVERLOADED),
             Failure::JoinPanic => panic!("injected source shutdown panic"),
             Failure::None | Failure::StopPanic => Ok(()),
         }
@@ -153,8 +153,8 @@ fn source_lifecycle_failures_do_not_skip_later_cancellation_or_join_hooks() {
 
         let result = runtime.close();
         match failure {
-            Failure::JoinError => assert!(matches!(result, Err(XllError::Overloaded))),
-            _ => assert!(matches!(result, Err(XllError::Panic))),
+            Failure::JoinError => assert!(matches!(result, Err(__err) if __err.is_overloaded())),
+            _ => assert!(matches!(result, Err(__err) if __err.is_panic())),
         }
         assert_eq!(
             *events.lock(),
@@ -204,7 +204,7 @@ unsafe impl RtdSubscription for StopDependentSubscription {
             Ok(())
         } else {
             // A timeout turns an ordering regression into a bounded failure.
-            Err(XllError::Overloaded)
+            Err(XllError::OVERLOADED)
         }
     }
 }
@@ -320,9 +320,9 @@ fn miri_static_catalog_stops_every_source_before_join_despite_each_failure() {
         let result = runtime.close();
         match failure {
             Failure::None => result.unwrap(),
-            Failure::JoinError => assert!(matches!(result, Err(XllError::Overloaded))),
+            Failure::JoinError => assert!(matches!(result, Err(__err) if __err.is_overloaded())),
             Failure::StopPanic | Failure::JoinPanic => {
-                assert!(matches!(result, Err(XllError::Panic)))
+                assert!(matches!(result, Err(__err) if __err.is_panic()))
             }
         }
         let observed = events.lock().clone();
@@ -425,7 +425,7 @@ fn erased_sources_share_identity_without_weakening_generation_or_shutdown_barrie
         .unwrap();
     assert!(matches!(
         runtime.prepare(&foreign, topic.borrowed()),
-        Err(XllError::StaleHandle)
+        Err(__err) if __err.is_stale_handle()
     ));
     runtime.close().unwrap();
     let events = events.lock();

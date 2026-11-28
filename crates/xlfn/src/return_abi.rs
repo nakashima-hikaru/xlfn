@@ -98,19 +98,13 @@ impl PreparedReturn {
         let total_bytes = encoded
             .payload_bytes
             .checked_add(std::mem::size_of::<ReturnBlock>())
-            .ok_or(XllError::Domain {
-                code: crate::error::DomainErrorCode::Overflow,
-            })?;
+            .ok_or(XllError::domain(crate::error::DomainErrorCode::Overflow))?;
 
         enforce_return_limit(total_bytes)?;
 
-        let rows = i32::try_from(encoded.rows).map_err(|_| XllError::Domain {
-            code: crate::error::DomainErrorCode::Overflow,
-        })?;
+        let rows = i32::try_from(encoded.rows).map_err(|_| XllError::domain(crate::error::DomainErrorCode::Overflow))?;
 
-        let columns = i32::try_from(encoded.columns).map_err(|_| XllError::Domain {
-            code: crate::error::DomainErrorCode::Overflow,
-        })?;
+        let columns = i32::try_from(encoded.columns).map_err(|_| XllError::domain(crate::error::DomainErrorCode::Overflow))?;
 
         // Establish the non-retagging owner before deriving the ABI pointer:
         // PreparedReturn and ReturnBlock both move after cells are published.
@@ -218,9 +212,7 @@ fn base_allocation_payload_bytes(array_cells: usize) -> XllResult<usize> {
     array_cells
         .checked_mul(std::mem::size_of::<XLOPER12>())
         .and_then(|array_bytes| array_bytes.checked_add(std::mem::size_of::<ReturnBlock>()))
-        .ok_or(XllError::Domain {
-            code: crate::error::DomainErrorCode::Overflow,
-        })
+        .ok_or(XllError::domain(crate::error::DomainErrorCode::Overflow))
 }
 
 impl Drop for ReturnBlock {
@@ -284,7 +276,7 @@ pub(crate) fn closing_error_pointer() -> *mut XLOPER12 {
     // Use a process-wide static singleton to prevent memory leaks on repeated late calls.
     CLOSING_ERROR
         .get_or_init(|| {
-            detached_scalar::permanent(XLOPER12::error(XllError::Closing.to_excel_error().code()))
+            detached_scalar::permanent(XLOPER12::error(XllError::CLOSING.to_excel_error().code()))
         })
         .pointer()
 }
@@ -353,7 +345,7 @@ where
     })) {
         Ok(Ok(prepared)) => prepared,
         Ok(Err(error)) => PreparedReturn::error(&error),
-        Err(_) => PreparedReturn::error(&XllError::Panic),
+        Err(_) => PreparedReturn::error(&XllError::PANIC),
     };
     ownership::commit_publication(|| prepared.publish_owned_excel(producer)).unwrap()
 }
@@ -554,7 +546,7 @@ where
     {
         Ok(ingress) => ingress,
         Err(_) => {
-            report_sync_failure::<A, B>(runtime, udf_id, None, calculation_id, &XllError::Closing);
+            report_sync_failure::<A, B>(runtime, udf_id, None, calculation_id, &XllError::CLOSING);
             return B::rejected();
         }
     };
@@ -567,7 +559,7 @@ where
         }
     };
     let Some(producer) = runtime.enter_return_producer() else {
-        report_sync_failure::<A, B>(runtime, udf_id, None, calculation_id, &XllError::Closing);
+        report_sync_failure::<A, B>(runtime, udf_id, None, calculation_id, &XllError::CLOSING);
         return B::rejected();
     };
     let producer = ReturnPublicationTxn::new(producer);
@@ -588,7 +580,7 @@ where
         Ok(pointer) => pointer,
         Err(message) => {
             report_sync_panic(runtime, udf_id, call_id, calculation_id, &message);
-            B::error(&XllError::Panic)
+            B::error(&XllError::PANIC)
         }
     };
     // No recovery path retains this producer after publication starts. A
@@ -632,7 +624,7 @@ where
             Ok(result) => result,
             Err(message) => {
                 report_sync_panic(runtime, udf_id, call_id, calculation_id, &message);
-                return B::error(&XllError::Panic);
+                return B::error(&XllError::PANIC);
             }
         };
         return match result {
@@ -660,7 +652,7 @@ where
         Ok(result) => (result, false),
         Err(message) => {
             report_sync_panic(runtime, udf_id, call_id, calculation_id, &message);
-            (Err(XllError::Panic), true)
+            (Err(XllError::PANIC), true)
         }
     };
     let outcome = match &result {
@@ -790,12 +782,7 @@ mod tests {
 
         fn assert_numeric_error(error: XllError) {
             assert!(
-                matches!(
-                    error,
-                    XllError::Domain {
-                        code: DomainErrorCode::InvalidInput
-                    }
-                ),
+                error.domain_code() == Some(DomainErrorCode::InvalidInput),
                 "output errors must not acquire input-argument metadata: {error}"
             );
             assert_eq!(error.to_excel_error(), ExcelError::Number);
@@ -1228,10 +1215,10 @@ mod tests {
         let ingress = crate::module_runtime::ingress()
             .enter_with(|| {})
             .into_admitted()
-            .map_err(|_| XllError::Closing)?;
+            .map_err(|_| XllError::CLOSING)?;
         let _call = runtime.enter(&ingress)?;
         let producer =
-            ReturnPublicationTxn::new(runtime.enter_return_producer().ok_or(XllError::Closing)?);
+            ReturnPublicationTxn::new(runtime.enter_return_producer().ok_or(XllError::CLOSING)?);
         allocate_excel_owned(value, producer)
     }
 
@@ -2065,7 +2052,7 @@ mod tests {
         let tracker = &TRACKER;
         tracker.reopen_admission().unwrap();
         let transaction = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
-        let publication = transaction.prepare(PreparedReturn::error(&XllError::Panic));
+        let publication = transaction.prepare(PreparedReturn::error(&XllError::PANIC));
         assert_eq!(tracker.outstanding_obligations(), 1);
         drop(publication);
         assert_eq!(tracker.outstanding_obligations(), 0);
@@ -2091,7 +2078,7 @@ mod tests {
         let prepared = catch_no_unwind(AssertUnwindSafe(|| -> PreparedReturn {
             panic!("injected return preparation panic");
         }))
-        .unwrap_or_else(|_| PreparedReturn::error(&XllError::Panic));
+        .unwrap_or_else(|_| PreparedReturn::error(&XllError::PANIC));
         assert_eq!(TRACKER.outstanding_obligations(), 1);
         let publication = prepared.publish_excel(producer);
         assert!(matches!(publication, ValuePublication::Scalar(_)));
@@ -2114,7 +2101,7 @@ mod tests {
             PANIC_ON_RETURN_PUBLICATION.store(true, Ordering::Release);
             let _ = catch_no_unwind(AssertUnwindSafe(|| {
                 ownership::commit_publication(|| {
-                    PreparedReturn::error(&XllError::Panic)
+                    PreparedReturn::error(&XllError::PANIC)
                         .publish_owned_excel(producer)
                         .unwrap()
                 });
@@ -2273,10 +2260,8 @@ mod tests {
         let runtime = fixture.runtime();
         let errors = [
             XllError::input("spot", crate::error::InputError::NonFinite),
-            XllError::ExcelValue(ExcelError::NotAvailable),
-            XllError::Domain {
-                code: crate::error::DomainErrorCode::InvalidInput,
-            },
+            XllError::excel_value(ExcelError::NotAvailable),
+            XllError::domain(crate::error::DomainErrorCode::InvalidInput),
         ];
         for error in errors {
             let pointer =
@@ -2324,7 +2309,7 @@ mod tests {
         assert!(!success.is_null());
         assert_eq!(runtime.diagnostics().stats().retained_records, before);
         let q = udf_boundary_named(runtime, "q_error", "Q.ERROR", |_, _| {
-            Err::<ReturnPayload, _>(XllError::ExcelValue(ExcelError::NotAvailable))
+            Err::<ReturnPayload, _>(XllError::excel_value(ExcelError::NotAvailable))
         });
         // SAFETY: q is the live scalar returned above, tagged as an error.
         let q = unsafe { &*q };
@@ -2417,7 +2402,7 @@ mod tests {
         let entered = runtime.calculation_id();
         let pointer = udf_boundary_numeric_named(runtime, "epoch", "EPOCH", |_, _| {
             runtime.finish_calculation();
-            Err::<numeric::NumericArrayOutput, _>(XllError::ExcelValue(ExcelError::NotAvailable))
+            Err::<numeric::NumericArrayOutput, _>(XllError::excel_value(ExcelError::NotAvailable))
         });
         assert!(pointer.is_null());
         let page = runtime

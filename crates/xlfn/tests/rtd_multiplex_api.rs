@@ -28,7 +28,7 @@ fn multiplexed_source_accepts_an_owned_non_sync_job_without_starting_it() {
         if topic.part(0) == Some("metric") {
             Ok(())
         } else {
-            Err(XllError::Overloaded)
+            Err(XllError::OVERLOADED)
         }
     })
     .with_limits(
@@ -61,7 +61,7 @@ fn serve(context: RtdSourceContext<i32, RtdLatest>, initial: i32) -> XllResult<(
                 let _identity = id;
             }
             Ok(_) => {}
-            Err(XllError::Closing) if context.is_closed() => return Ok(()),
+            Err(__err) if __err.is_closing() && (context.is_closed()) => return Ok(()),
             Err(error) => return Err(error),
         }
     }

@@ -94,9 +94,9 @@ impl NotificationPump {
                 let result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
                     notify(&mut dispatch)
                 }))
-                .unwrap_or(Err(XllError::Panic));
+                .unwrap_or(Err(XllError::PANIC));
                 if let Err(error) = &result {
-                    if !matches!(error, XllError::Closing) && !reported_failure {
+                    if !matches!(error, __err if __err.is_closing()) && !reported_failure {
                         crate::diagnostics::report_no_unwind(
                             "RTD asynchronous UpdateNotify",
                             error,
@@ -107,7 +107,7 @@ impl NotificationPump {
                     reported_failure = false;
                 }
                 state = worker_shared.state.lock();
-                if matches!(result, Err(XllError::Closing | XllError::Panic)) {
+                if matches!(result, Err(error) if error.is_closing() || error.is_panic()) {
                     state.stopping = true;
                     state.pending = None;
                 } else if state.pending == sequence {
@@ -118,9 +118,11 @@ impl NotificationPump {
             }
         });
         std::mem::DropGuard::dismiss(require_spawn_result);
-        let worker = spawn_result.map_err(|error| XllError::Native {
-            code: error.raw_os_error().unwrap_or(0),
-            message: format!("failed to start RTD notification worker: {error}"),
+        let worker = spawn_result.map_err(|error| {
+            XllError::native(
+                error.raw_os_error().unwrap_or(0),
+                format!("failed to start RTD notification worker: {error}"),
+            )
         })?;
         Ok(Self {
             shared,
@@ -131,13 +133,13 @@ impl NotificationPump {
     pub(super) fn request(&self) -> XllResult<()> {
         let mut state = self.shared.state.lock();
         if state.stopping {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         let next = state
             .sequence
             .checked_add(1)
             .and_then(NonZeroU64::new)
-            .ok_or(XllError::Overloaded)?;
+            .ok_or(XllError::OVERLOADED)?;
         state.sequence = next.get();
         state.pending = Some(next);
         // Coalesce requests without postponing an already scheduled retry.
@@ -316,9 +318,9 @@ mod tests {
                 calls += 1;
                 sent.send(Instant::now()).unwrap();
                 Err(if calls == 1 {
-                    XllError::Overloaded
+                    XllError::OVERLOADED
                 } else {
-                    XllError::Closing
+                    XllError::CLOSING
                 })
             },
             Duration::from_millis(20),
@@ -329,7 +331,7 @@ mod tests {
         let second = received.recv_timeout(DEADLINE).unwrap();
         assert!(second.duration_since(first) >= Duration::from_millis(20));
         pump.stop();
-        assert!(matches!(pump.request(), Err(XllError::Closing)));
+        assert!(matches!(pump.request(), Err(__err) if __err.is_closing()));
         assert!(received.try_recv().is_err());
     }
 
@@ -365,7 +367,7 @@ mod tests {
                 *calls += 1;
                 sent.send((*calls, thread::current().id())).unwrap();
                 if *calls == 1 {
-                    Err(XllError::Overloaded)
+                    Err(XllError::OVERLOADED)
                 } else {
                     Ok(())
                 }
@@ -411,7 +413,7 @@ mod tests {
         let (stopped, joined) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             pump.stop();
-            assert!(matches!(pump.request(), Err(XllError::Closing)));
+            assert!(matches!(pump.request(), Err(__err) if __err.is_closing()));
             stopped.send(()).unwrap();
         });
         assert_eq!(

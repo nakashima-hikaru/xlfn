@@ -224,7 +224,7 @@ fn discard_open_inputs<I>(inputs: I) -> bool {
     if crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(inputs)))
         .is_err()
     {
-        crate::boundary::report_boundary_error("xlAutoOpen service inputs", &XllError::Panic);
+        crate::boundary::report_boundary_error("xlAutoOpen service inputs", &XllError::PANIC);
         false
     } else {
         true
@@ -720,7 +720,7 @@ impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
                     }
                 }
                 Err(_) => {
-                    report_boundary_error("xlAutoOpen rollback", &XllError::Panic);
+                    report_boundary_error("xlAutoOpen rollback", &XllError::PANIC);
                     recovery.quarantine(None);
                 }
             }
@@ -750,7 +750,7 @@ fn check_open_acquire_fault(point: u8) -> XllResult<()> {
     FAIL_OPEN_ACQUIRE.with(|fault| {
         if fault.get() == point {
             fault.set(0);
-            Err(XllError::Closing)
+            Err(XllError::CLOSING)
         } else {
             Ok(())
         }
@@ -763,7 +763,7 @@ fn check_open_commit_fault(point: u8) -> XllResult<()> {
         if stage == point {
             fault.set((0, false));
             assert!(!unwinding, "injected open commit panic at stage {point}");
-            Err(XllError::Closing)
+            Err(XllError::CLOSING)
         } else {
             Ok(())
         }
@@ -1251,11 +1251,11 @@ impl<'runtime, A: crate::Addin> CommitHandoff<'runtime, A> {
             // Keep this opening attempt responsible until destruction has
             // completed. The close waiter cannot advance to module teardown.
             if !discard_open_inputs(services) {
-                return Err(XllError::Panic);
+                return Err(XllError::PANIC);
             }
             let UncommittedModule { context, module } = self.0.complete();
             context.reject(|| module.rollback(|| {}));
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         drop(control);
         #[cfg(test)]
@@ -1391,14 +1391,14 @@ impl<'runtime, A: crate::Addin> PublicationReady<'runtime, A> {
     fn reject_interrupted(self) -> XllResult<GenerationPublished<'runtime, A>> {
         let (epoch, disposed) = self.0.complete().dispose_services();
         if !disposed {
-            return Err(XllError::Panic);
+            return Err(XllError::PANIC);
         }
         let UnpublishedEpoch {
             context,
             module_epoch,
         } = epoch.complete();
         context.reject(|| module_epoch.begin_close(|| {}));
-        Err(XllError::Closing)
+        Err(XllError::CLOSING)
     }
 }
 
@@ -1665,7 +1665,7 @@ mod owner_tests {
             let runtime = Runtime::<()>::new();
             let other = Runtime::<()>::new();
             FAIL_OPEN_ACQUIRE.with(|fault| fault.set(point));
-            assert!(matches!(runtime.begin_open(), Err(XllError::Closing)));
+            assert!(matches!(runtime.begin_open(), Err(__err) if __err.is_closing()));
             FAIL_OPEN_ACQUIRE.with(|fault| assert_eq!(fault.get(), 0));
             assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
             assert_eq!(other.phase(), LifecyclePhase::Closed);
@@ -1761,7 +1761,7 @@ mod owner_tests {
                 if unwind {
                     assert!(failed.is_err());
                 } else {
-                    assert!(matches!(failed, Ok(Err(XllError::Closing))));
+                    assert!(matches!(failed, Ok(Err(__err)) if __err.is_closing()));
                 }
                 FAIL_OPEN_COMMIT.with(|fault| assert_eq!(fault.get(), (0, false)));
                 let control = runtime.lifecycle.access();
@@ -1817,7 +1817,7 @@ mod owner_tests {
             .publish(opening, (), ())
             .stage_host_journal(HostMutationJournal::default());
         FAIL_OPEN_COMMIT.with(|fault| fault.set((5, false)));
-        assert!(matches!(opening.commit(), Err(XllError::Closing)));
+        assert!(matches!(opening.commit(), Err(__err) if __err.is_closing()));
         assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
         assert_eq!(runtime.last_committed_generation(), Some(first));
     }
@@ -1926,7 +1926,7 @@ mod owner_tests {
             type Value = i32;
             type Subscription = ();
             fn subscribe(&self, _: &RtdTopic, _: RtdSink<i32>) -> XllResult<()> {
-                Err(XllError::Closing)
+                Err(XllError::CLOSING)
             }
         }
 
@@ -1948,7 +1948,7 @@ mod owner_tests {
         let (deps, HostMutated { core, host }, binding) = opening.into_parts();
         let ready = prepare_commit(deps, core, host, binding).unwrap().ready();
         runtime.lifecycle.access().request_closing_for_test();
-        assert!(matches!(ready.publish(), Err(XllError::Closing)));
+        assert!(matches!(ready.publish(), Err(__err) if __err.is_closing()));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         let control = runtime.lifecycle.access();
         assert_eq!(control.phase(), LifecyclePhase::Closing);
@@ -1989,7 +1989,7 @@ mod owner_tests {
             type Value = i32;
             type Subscription = ();
             fn subscribe(&self, _: &RtdTopic, _: RtdSink<i32>) -> XllResult<()> {
-                Err(XllError::Closing)
+                Err(XllError::CLOSING)
             }
         }
 
@@ -2121,7 +2121,7 @@ mod owner_tests {
         };
         assert!(runtime.has_opening_generation());
         let lifecycle = runtime.bind_addin_lifecycle().unwrap();
-        assert!(matches!(failure.recover(&lifecycle), XllError::Closing));
+        assert!(matches!(failure.recover(&lifecycle), __err if __err.is_closing()));
         assert_eq!(runtime.phase(), LifecyclePhase::Closing);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         assert_eq!(crate::boundary::host::host_auto_remove(&runtime), 1);

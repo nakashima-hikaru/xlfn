@@ -3,7 +3,6 @@ use super::super::{
     TransitionEffect,
 };
 use super::OpenStart;
-use crate::XllError;
 use crate::generation::{RemovalAttemptId, RemovalEpoch};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use std::num::NonZeroU64;
@@ -95,9 +94,8 @@ fn miri_closed_finalization_cannot_be_mistaken_for_idle_before_start() {
     let error = OpenStart::acquire(&coordinator, RemovalEpoch::new(3))
         .err()
         .expect("a finalizing removal still owns the closed lifecycle");
-    assert!(matches!(
-        error,
-        XllError::Internal {
+    assert!(matches!(crate::error::construct::view(&(error)),
+        crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::OPEN_PHASE,
             ..
         }
@@ -161,9 +159,8 @@ fn miri_stale_removal_epoch_is_rejected_without_starting_or_consuming_an_attempt
     let error = OpenStart::acquire(&coordinator, RemovalEpoch::new(11))
         .err()
         .expect("a stale epoch cannot start a new invocation");
-    assert!(matches!(
-        error,
-        XllError::Internal {
+    assert!(matches!(crate::error::construct::view(&(error)),
+        crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::OPEN_PHASE,
             ..
         }
@@ -186,9 +183,8 @@ fn miri_attempt_exhaustion_preserves_closed_intent_and_canonical_state() {
     let error = OpenStart::acquire(&coordinator, RemovalEpoch::new(5))
         .err()
         .expect("exhausted identities cannot start an invocation");
-    assert!(matches!(
-        error,
-        XllError::Internal {
+    assert!(matches!(crate::error::construct::view(&(error)),
+        crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::ATTEMPT_OVERFLOW,
             ..
         }

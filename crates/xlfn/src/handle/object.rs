@@ -39,7 +39,7 @@ impl FreshObject<'_> {
         let pointer = owner.as_non_null();
         let mut state = self.arena.state(self.id).lock();
         if state.sealed {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
         state.objects.insert(
             self.id,
@@ -160,9 +160,7 @@ impl ObjectArena {
                 next.checked_add(1)
             })
             .map(|sequence| ObjectId::new(session, sequence))
-            .map_err(|_| XllError::Domain {
-                code: crate::error::DomainErrorCode::Overflow,
-            })?;
+            .map_err(|_| XllError::domain(crate::error::DomainErrorCode::Overflow))?;
         Ok(FreshObject { arena, id })
     }
 
@@ -181,15 +179,13 @@ impl ObjectArena {
     fn duplicate_binding(&self, id: ObjectId, cell: NonNull<ObjectCell>) -> XllResult<()> {
         let mut state = self.state(id).lock();
         if state.sealed {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
-        let entry = state.objects.get_mut(&id).ok_or(XllError::StaleHandle)?;
+        let entry = state.objects.get_mut(&id).ok_or(XllError::STALE_HANDLE)?;
         if entry.cell.as_non_null() != cell {
-            return Err(XllError::StaleHandle);
+            return Err(XllError::STALE_HANDLE);
         }
-        entry.bindings = entry.bindings.checked_add(1).ok_or(XllError::Domain {
-            code: crate::error::DomainErrorCode::Overflow,
-        })?;
+        entry.bindings = entry.bindings.checked_add(1).ok_or(XllError::domain(crate::error::DomainErrorCode::Overflow))?;
         Ok(())
     }
 
@@ -201,18 +197,14 @@ impl ObjectArena {
     ) -> XllResult<RawObjectLeaseGuard> {
         let mut state = self.state(id).lock();
         if state.sealed {
-            return Err(XllError::Closing);
+            return Err(XllError::CLOSING);
         }
-        let active_pins = state.active_pins.checked_add(1).ok_or(XllError::Domain {
-            code: crate::error::DomainErrorCode::Overflow,
-        })?;
-        let entry = state.objects.get_mut(&id).ok_or(XllError::StaleHandle)?;
+        let active_pins = state.active_pins.checked_add(1).ok_or(XllError::domain(crate::error::DomainErrorCode::Overflow))?;
+        let entry = state.objects.get_mut(&id).ok_or(XllError::STALE_HANDLE)?;
         if entry.cell.as_non_null() != cell {
-            return Err(XllError::StaleHandle);
+            return Err(XllError::STALE_HANDLE);
         }
-        entry.pins = entry.pins.checked_add(1).ok_or(XllError::Domain {
-            code: crate::error::DomainErrorCode::Overflow,
-        })?;
+        entry.pins = entry.pins.checked_add(1).ok_or(XllError::domain(crate::error::DomainErrorCode::Overflow))?;
         state.active_pins = active_pins;
         drop(state);
         #[cfg(any(test, feature = "refinement"))]
@@ -307,7 +299,7 @@ impl ObjectArena {
         // The specialized owner recovers the exact allocation layout, whose
         // Box cleanup frees storage even when user destruction unwinds.
         if catch_no_unwind(AssertUnwindSafe(|| drop(cell))).is_err() {
-            let error = XllError::Panic;
+            let error = XllError::PANIC;
             crate::diagnostics::report_no_unwind("handle object final drop", &error);
             self.cleanup.record(error);
         }
@@ -493,7 +485,7 @@ impl<'registry, T: Send + Sync + 'static> PendingObjectBinding<'registry, T> {
         // while duplicating the binding count.
         let binding = alias.binding().duplicate_object_binding()?;
         if !registry.owns_object_arena(binding.arena()) {
-            return Err(XllError::StaleHandle);
+            return Err(XllError::STALE_HANDLE);
         }
         Ok(Self {
             binding,
@@ -817,9 +809,7 @@ mod tests {
         arena.next_object_id.store(u64::MAX, Ordering::Relaxed);
         assert!(matches!(
             ObjectArena::reserve(&arena, 7),
-            Err(XllError::Domain {
-                code: crate::error::DomainErrorCode::Overflow
-            })
+            Err(__err) if __err.domain_code() == Some(crate::error::DomainErrorCode::Overflow)
         ));
         assert!(arena.finish_quiescence().is_ok());
     }
@@ -866,13 +856,12 @@ mod tests {
         let pin = bindings[OBJECT_SHARD_COUNT - 1].acquire_lease().unwrap();
         arena.seal();
         for binding in &bindings {
-            assert!(matches!(binding.duplicate(), Err(XllError::Closing)));
-            assert!(matches!(binding.acquire_lease(), Err(XllError::Closing)));
+            assert!(matches!(binding.duplicate(), Err(__err) if __err.is_closing()));
+            assert!(matches!(binding.acquire_lease(), Err(__err) if __err.is_closing()));
         }
         drop(bindings);
-        assert!(matches!(
-            arena.finish_quiescence(),
-            Err(XllError::Internal {
+        assert!(matches!((arena.finish_quiescence()).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Internal {
                 diagnostic_id: crate::diagnostics::catalog::HANDLE_PINS,
                 ..
             })
@@ -1039,9 +1028,8 @@ mod tests {
             assert!(state.objects.is_empty());
             assert_eq!((state.active_pins, state.active_releases), (0, 1));
         }
-        assert!(matches!(
-            arena.finish_quiescence(),
-            Err(XllError::Internal {
+        assert!(matches!((arena.finish_quiescence()).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Internal {
                 diagnostic_id: crate::diagnostics::catalog::HANDLE_OBJECTS,
                 ..
             })
@@ -1249,7 +1237,7 @@ mod tests {
             assert_eq!(drops.load(Ordering::Relaxed), 1);
             assert_eq!(field_drops.load(Ordering::Relaxed), 1);
             if panic {
-                assert!(matches!(arena.cleanup_result(), Err(XllError::Panic)));
+                assert!(matches!(arena.cleanup_result(), Err(__err) if __err.is_panic()));
                 arena.finish_quiescence().unwrap();
             } else {
                 arena.finish_quiescence().unwrap();
@@ -1276,7 +1264,7 @@ mod tests {
         let result = unsafe {
             ObjectArena::insert(&arena, ObjectId::new(1, 1), DropProbe(Arc::clone(&drops)))
         };
-        assert!(matches!(result, Err(XllError::Closing)));
+        assert!(matches!(result, Err(__err) if __err.is_closing()));
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         arena.finish_quiescence().unwrap();
     }
@@ -1416,9 +1404,8 @@ mod tests {
                         self.release_depth,
                     );
                 }
-                assert!(matches!(
-                    arena.finish_quiescence(),
-                    Err(XllError::Internal {
+                assert!(matches!((arena.finish_quiescence()).as_ref().map_err(crate::error::construct::view),
+                    Err(crate::error::construct::ErrorView::Internal {
                         diagnostic_id: crate::diagnostics::catalog::HANDLE_OBJECTS,
                         ..
                     })
@@ -1513,7 +1500,7 @@ mod tests {
                 assert_eq!((state.active_pins, state.active_releases), (0, 0));
             }
             if panic {
-                assert!(matches!(arena.cleanup_result(), Err(XllError::Panic)));
+                assert!(matches!(arena.cleanup_result(), Err(__err) if __err.is_panic()));
                 arena.finish_quiescence().unwrap();
             } else {
                 assert!(arena.finish_quiescence().is_ok());
@@ -1548,9 +1535,7 @@ mod tests {
             drop(state);
             assert!(matches!(
                 result,
-                Err(XllError::Domain {
-                    code: crate::error::DomainErrorCode::Overflow,
-                })
+                Err(__err) if __err.domain_code() == Some(crate::error::DomainErrorCode::Overflow)
             ));
             assert_eq!(total, if entry_overflow { 0 } else { usize::MAX });
             assert_eq!(
@@ -1587,9 +1572,7 @@ mod tests {
         assert_eq!(previous, ObjectBindingCount::MAX);
         assert!(matches!(
             result,
-            Err(XllError::Domain {
-                code: crate::error::DomainErrorCode::Overflow
-            })
+            Err(__err) if __err.domain_code() == Some(crate::error::DomainErrorCode::Overflow)
         ));
         drop(binding);
         assert!(arena.state(ObjectId::new(1, 1)).lock().objects.is_empty());

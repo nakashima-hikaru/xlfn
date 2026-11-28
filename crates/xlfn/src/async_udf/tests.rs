@@ -230,7 +230,7 @@ fn rejected_spawn_drops_future_after_releasing_lifecycle_state() {
 
     assert!(matches!(
         result_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        Err(__err) if __err.excel_value_error() == Some(crate::ExcelError::NotAvailable)
     ));
     dropped_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     spawning.join().unwrap();
@@ -272,7 +272,7 @@ fn spawn_handle_snapshot_is_revalidated_after_generation_advance() {
 
     assert!(matches!(
         result_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        Err(__err) if __err.excel_value_error() == Some(crate::ExcelError::NotAvailable)
     ));
     assert!(token.is_cancelled());
     spawning.join().unwrap();
@@ -410,8 +410,7 @@ fn close_rejects_a_spawn_using_a_snapshot_handle() {
     release_tx.send(()).unwrap();
     assert!(matches!(
         result_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-        Err(XllError::Closing)
-    ));
+        Err(__err) if __err.is_closing()));
     assert!(token.is_cancelled());
     spawning.join().unwrap();
     assert!(
@@ -544,7 +543,7 @@ fn close_allows_aborted_future_drop_to_reenter_runtime() {
     );
     assert!(matches!(
         runtime.start_async(builtin(1), AsyncTaskLimit::DEFAULT),
-        Err(XllError::Closing)
+        Err(__err) if __err.is_closing()
     ));
     release_tx.send(()).unwrap();
 
@@ -717,7 +716,7 @@ fn cancelled_calculation_rejects_late_spawn_and_next_generation_accepts_work() {
             std::future::pending(),
             test_cancellation_source(),
         ),
-        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        Err(__err) if __err.excel_value_error() == Some(crate::ExcelError::NotAvailable)
     ));
 
     let next = const { CalculationEpoch::try_new(2).unwrap() };
@@ -728,7 +727,7 @@ fn cancelled_calculation_rejects_late_spawn_and_next_generation_accepts_work() {
             std::future::pending(),
             test_cancellation_source(),
         ),
-        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        Err(__err) if __err.excel_value_error() == Some(crate::ExcelError::NotAvailable)
     ));
     lifecycle
         .submit(next, async {}, test_cancellation_source())
@@ -791,7 +790,7 @@ fn spawn_and_cancel_are_linearized_by_generation_admission() {
 
     match spawn_result {
         Ok(()) => assert!(token.is_cancelled()),
-        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable)) => {
+        Err(error) if error.excel_value_error() == Some(crate::ExcelError::NotAvailable) => {
             assert!(token.is_cancelled());
         }
         Err(error) => panic!("unexpected spawn result: {error}"),
@@ -802,7 +801,7 @@ fn spawn_and_cancel_are_linearized_by_generation_admission() {
             std::future::pending(),
             test_cancellation_source(),
         ),
-        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        Err(__err) if __err.excel_value_error() == Some(crate::ExcelError::NotAvailable)
     ));
     assert!(lifecycle.close().unwrap().issues.is_empty());
 }
@@ -913,7 +912,7 @@ fn pending_task_limit_is_reserved_atomically() {
             std::future::pending(),
             test_cancellation_source(),
         ),
-        Err(XllError::Overloaded)
+        Err(__err) if __err.is_overloaded()
     ));
     lifecycle.cancel_calculation(TEST_CALCULATION);
     lifecycle
@@ -940,9 +939,8 @@ fn timed_close_retains_executor_until_blocking_poll_returns() {
         )
         .unwrap();
     started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    assert!(matches!(
-        lifecycle.close_with_timeout(Duration::from_millis(10)),
-        Err(XllError::Internal {
+    assert!(matches!((lifecycle.close_with_timeout(Duration::from_millis(10))).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::ASYNC_TIME,
             ..
         })
@@ -1020,7 +1018,7 @@ fn async_handle_preserves_opaque_token_with_nonzero_size() {
     let copied = unsafe { big_data.handle.data };
     assert_eq!(copied, original);
     assert_eq!(big_data.byte_count, std::mem::size_of::<usize>() as i32);
-    let result = AsyncReturnValue::error(&XllError::Closing);
+    let result = AsyncReturnValue::error(&XllError::CLOSING);
     // SAFETY: the test callback owns the async-return boundary and both
     // pointers remain live for the duration of the call.
     unsafe { owned.deliver(result) }.unwrap();
@@ -1608,10 +1606,7 @@ fn async_boundary_reports_handler_failures_to_layers() {
             &mut handle,
             |_, _, _| {
                 Ok(async {
-                    Err::<f64, _>(XllError::Native {
-                        code: 73,
-                        message: "injected async failure".to_owned(),
-                    })
+                    Err::<f64, _>(XllError::native(73, "injected async failure".to_owned()))
                 })
             },
         );
@@ -1637,10 +1632,7 @@ fn async_boundary_records_delivery_rejection_as_failure() {
             if metadata.udf_id == "test_async_layer_rejection" {
                 // Give the call clock a predictable, positive elapsed value.
                 std::thread::sleep(Duration::from_millis(1));
-                return Err(XllError::Native {
-                    code: 75,
-                    message: "injected layer admission failure".to_owned(),
-                });
+                return Err(XllError::native(75, "injected layer admission failure".to_owned()));
             }
             Ok(())
         }
@@ -1774,10 +1766,7 @@ fn async_boundary_records_delivery_rejection_as_failure() {
             &mut handle,
             |_, _, _| {
                 Ok(async {
-                    Err::<f64, _>(XllError::Native {
-                        code: 73,
-                        message: "injected computation failure".to_owned(),
-                    })
+                    Err::<f64, _>(XllError::native(73, "injected computation failure".to_owned()))
                 })
             },
         );
@@ -1823,10 +1812,7 @@ fn async_boundary_records_delivery_rejection_as_failure() {
                             runtime.async_runtime().cancel_current_calculation();
                             Ok(std::future::ready(Ok::<_, XllError>(42.0)))
                         } else {
-                            Err(XllError::Native {
-                                code: 74,
-                                message: "injected synchronous preparation failure".to_owned(),
-                            })
+                            Err(XllError::native(74, "injected synchronous preparation failure".to_owned()))
                         }
                     },
                 );
@@ -2142,7 +2128,7 @@ fn old_calculation_retained_entry_rejected_on_spawn() {
     let res = lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source2);
     assert!(matches!(
         res,
-        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        Err(__err) if __err.excel_value_error() == Some(crate::ExcelError::NotAvailable)
     ));
     assert!(token2.is_cancelled());
     assert!(lifecycle.close().unwrap().issues.is_empty());
@@ -2162,10 +2148,9 @@ fn rejection_priority_old_calculation_over_max_pending() {
     // whose canceled source slot may be reused by another parallel test.
     assert!(matches!(
         lifecycle.preflight_submit(TEST_CALCULATION),
-        Err(XllError::Overloaded)
-    ));
+        Err(__err) if __err.is_overloaded()));
     let res_curr = lifecycle.reserve(TEST_CALCULATION).map(drop);
-    assert!(matches!(res_curr, Err(XllError::Overloaded)));
+    assert!(matches!(res_curr, Err(__err) if __err.is_overloaded()));
 
     assert!(lifecycle.advance_calculation());
     let gen2 = const { CalculationEpoch::try_new(2).unwrap() };
@@ -2177,14 +2162,14 @@ fn rejection_priority_old_calculation_over_max_pending() {
 
     assert!(matches!(
         lifecycle.preflight_submit(TEST_CALCULATION),
-        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        Err(__err) if __err.excel_value_error() == Some(crate::ExcelError::NotAvailable)
     ));
 
     let (source_old, token_old) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
     let res_old = lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source_old);
     assert!(matches!(
         res_old,
-        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        Err(__err) if __err.excel_value_error() == Some(crate::ExcelError::NotAvailable)
     ));
     assert!(token_old.is_cancelled());
 
@@ -2251,7 +2236,7 @@ fn miri_spawn_and_advance_linearization_case_a_advance_closes_before_admission()
         .unwrap();
     assert!(matches!(
         spawn_res,
-        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        Err(__err) if __err.excel_value_error() == Some(crate::ExcelError::NotAvailable)
     ));
     assert!(token.is_cancelled());
 
@@ -2329,8 +2314,7 @@ fn task_id_exhaustion_releases_reservation_without_reusing_identity() {
         reader.exhaust_task_ids();
         assert!(matches!(
             reader.reserve(TEST_CALCULATION),
-            Err(XllError::Overloaded)
-        ));
+            Err(__err) if __err.is_overloaded()));
         assert_eq!(reader.active_tasks.load(Ordering::Acquire), 0);
         let control = reader.control.lock();
         let generation = control.calculations().get(&TEST_CALCULATION).unwrap();
@@ -2525,7 +2509,7 @@ fn spawn_and_cancel_linearization_case_b_cancel_closed_first() {
     let res = lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source);
     assert!(matches!(
         res,
-        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+        Err(__err) if __err.excel_value_error() == Some(crate::ExcelError::NotAvailable)
     ));
     assert!(token.is_cancelled());
     assert!(lifecycle.close().unwrap().issues.is_empty());

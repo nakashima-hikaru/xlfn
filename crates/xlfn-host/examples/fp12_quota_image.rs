@@ -45,10 +45,14 @@ pub extern "C" fn fp12_fixture_probe(bytes: usize) -> i32 {
             drop(reserved);
             1
         }
-        Err(XllError::Input {
-            reason: InputError::TooLarge { .. },
-            ..
-        }) => 0,
+        Err(error)
+            if matches!(
+                error.input_details(),
+                Some((_, InputError::TooLarge { .. }))
+            ) =>
+        {
+            0
+        }
         Err(_) => -1,
     }
 }

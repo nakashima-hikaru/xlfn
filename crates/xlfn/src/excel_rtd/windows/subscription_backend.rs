@@ -274,7 +274,7 @@ mod tests {
                         |_, result| write_bstr_variant(result, "rollback-owned-bstr"),
                         |()| {
                             assert!(!panics, "injected commit panic");
-                            Err(crate::XllError::Overloaded)
+                            Err(crate::XllError::OVERLOADED)
                         },
                     )
                 }

@@ -208,7 +208,7 @@ impl ChannelBudget {
             ..Usage::default()
         };
         if !this.0.acquire(amount) {
-            return Err(XllError::Overloaded);
+            return Err(XllError::OVERLOADED);
         }
         Ok(SubscriptionPermit(Arc::clone(this)))
     }
@@ -219,7 +219,7 @@ impl ChannelBudget {
             ..Usage::default()
         };
         if !this.0.acquire(amount) {
-            return Err(XllError::Overloaded);
+            return Err(XllError::OVERLOADED);
         }
         Ok(WorkerPermit(Arc::clone(this)))
     }

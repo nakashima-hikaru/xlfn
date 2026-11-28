@@ -139,7 +139,7 @@ impl Future for Inner<'_> {
                 Poll::Ready(Ok(42.0))
             }
             Mode::Ready | Mode::DropPanic => Poll::Ready(Ok(42.0)),
-            Mode::Error => Poll::Ready(Err(XllError::Overloaded)),
+            Mode::Error => Poll::Ready(Err(XllError::OVERLOADED)),
             Mode::PollPanic => panic!("injected scoped poll panic"),
             Mode::Pending => Poll::Pending,
             Mode::BuildPanic | Mode::BuildPanicAfterBind => unreachable!(),

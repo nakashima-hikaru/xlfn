@@ -50,18 +50,14 @@ impl XlScalarOutput {
             .checked_add(1)
             .and_then(|units| units.checked_mul(std::mem::size_of::<u16>()))
         else {
-            return Err(XllError::Domain {
-                code: crate::error::DomainErrorCode::Overflow,
-            });
+            return Err(XllError::domain(crate::error::DomainErrorCode::Overflow));
         };
         // A scalar has no separately allocated array cells. Avoid planning
         // an empty array and constructing errors on the ordinary text path.
         let Some(allocation_bytes) =
             std::mem::size_of::<super::ReturnBlock>().checked_add(string_bytes)
         else {
-            return Err(XllError::Domain {
-                code: crate::error::DomainErrorCode::Overflow,
-            });
+            return Err(XllError::domain(crate::error::DomainErrorCode::Overflow));
         };
         super::enforce_return_limit(allocation_bytes)?;
         let (storage, pointer) = ScalarStringStorage::new(
@@ -212,9 +208,7 @@ mod tests {
                 if self.1 {
                     Ok(ExcelCellOutput::String("custom".to_owned()))
                 } else {
-                    Err(XllError::Domain {
-                        code: crate::error::DomainErrorCode::NativeFailure,
-                    })
+                    Err(XllError::domain(crate::error::DomainErrorCode::NativeFailure))
                 }
             }
         }
@@ -224,9 +218,7 @@ mod tests {
         assert_eq!(text(&output), "custom");
         assert!(matches!(
             XlScalarOutput::encode(Converted(&calls, false)),
-            Err(XllError::Domain {
-                code: crate::error::DomainErrorCode::NativeFailure,
-            })
+            Err(__err) if __err.domain_code() == Some(crate::error::DomainErrorCode::NativeFailure)
         ));
         assert_eq!(calls.get(), 2);
     }
@@ -242,9 +234,8 @@ mod tests {
                 Ok(())
             }
         }
-        assert!(matches!(
-            XlScalarOutput::encode(Empty),
-            Err(XllError::Input {
+        assert!(matches!((XlScalarOutput::encode(Empty)).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 argument: "<return>",
                 reason: InputError::Malformed("scalar conversion produced no cell"),
             })
@@ -259,9 +250,8 @@ mod tests {
             .as_ref()
             .unwrap()
             .allocated_bytes();
-        assert!(matches!(
-            sink.push_str(&"x".repeat(crate::utf16::EXCEL_STRING_LIMIT)),
-            Err(XllError::Input {
+        assert!(matches!((sink.push_str(&"x".repeat(crate::utf16::EXCEL_STRING_LIMIT))).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Input {
                 argument: "<return>",
                 reason: InputError::Malformed("scalar conversion produced multiple cells"),
             })
@@ -300,9 +290,7 @@ mod tests {
             ] {
                 assert!(matches!(
                     result,
-                    Err(XllError::Domain {
-                        code: crate::error::DomainErrorCode::InvalidInput
-                    })
+                    Err(__err) if __err.domain_code() == Some(crate::error::DomainErrorCode::InvalidInput)
                 ));
             }
         }
@@ -312,9 +300,9 @@ mod tests {
         assert_eq!(text(&output), at_limit);
         for text in ["x".repeat(limit + 1), "日".repeat(limit + 1)] {
             assert!(
-                matches!(XlScalarOutput::encode(text.as_str()), Err(XllError::Input {
+                matches!((XlScalarOutput::encode(text.as_str())).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::Input {
                 argument: "<return>", reason: InputError::TooLarge { limit: actual_limit, actual }
-            }) if actual_limit == limit && actual == limit + 1)
+            }) if *actual_limit == limit && *actual == limit + 1)
             );
         }
     }

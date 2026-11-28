@@ -82,7 +82,7 @@ mod tests {
         fn quiesce(shared: &mut usize, lifecycle: &mut usize) -> Result<(), Self::Error> {
             *shared += 1;
             *lifecycle += 1;
-            Err(crate::XllError::Closing)
+            Err(crate::XllError::CLOSING)
         }
     }
 
@@ -114,7 +114,7 @@ mod tests {
         let (mut shared, mut lifecycle) = (0, 0);
         assert!(matches!(
             logical.quiesce_addin(&mut shared, &mut lifecycle),
-            Err(crate::XllError::Closing)
+            Err(__err) if __err.is_closing()
         ));
         assert_eq!((shared, lifecycle), (1, 1));
 

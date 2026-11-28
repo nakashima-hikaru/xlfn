@@ -262,9 +262,8 @@ mod tests {
                 excel_name: name,
                 ..test_descriptor()
             };
-            assert!(matches!(
-                preflight_registration(&[descriptor]),
-                Err(XllError::Internal {
+            assert!(matches!((preflight_registration(&[descriptor])).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Internal {
                     diagnostic_id: crate::diagnostics::catalog::REGISTRY,
                     ..
                 })
@@ -307,9 +306,8 @@ mod tests {
             else {
                 panic!("registration replaced a bound name");
             };
-            assert!(matches!(
-                *error.source,
-                XllError::RegistrationConflict { name: NAME, .. }
+            assert!(matches!(crate::error::construct::view(&(*error.source)),
+                crate::error::construct::ErrorView::RegistrationConflict { name: NAME, .. }
             ));
             script.assert_calls(&[XLF_EVALUATE]);
         }
@@ -330,7 +328,7 @@ mod tests {
                 let attempt = attempts.get() + 1;
                 attempts.set(attempt);
                 if attempt == 3 {
-                    Err(RegistrationTransactionError::new(XllError::Closing))
+                    Err(RegistrationTransactionError::new(XllError::CLOSING))
                 } else {
                     Ok(RegistrationId {
                         id: attempt as f64,
@@ -378,7 +376,7 @@ mod tests {
                     error.journal.mark_unknown(UnknownRegistrationState {
                         export_name: "second_export",
                         excel_name: descriptor,
-                        recovery_error: XllError::Closing,
+                        recovery_error: XllError::CLOSING,
                     });
                     Err(error)
                 } else {
@@ -417,7 +415,7 @@ mod tests {
         let result = registration_release_failure(
             &host,
             registration,
-            XllError::Closing,
+            XllError::CLOSING,
             |_host, registrations| {
                 let mut result = UnregisterResult::new(registrations.len());
                 result.failed.push((
@@ -452,7 +450,7 @@ mod tests {
                 crate::error::ExcelApiFunction::Register,
                 crate::error::ExcelApiFailure::UnexpectedResult,
             ),
-            |_host, _name| Err(RegistrationTransactionError::new(XllError::Closing)),
+            |_host, _name| Err(RegistrationTransactionError::new(XllError::CLOSING)),
             |_host, _registrations| panic!("unknown registration must not be unregistered"),
         );
 
@@ -476,7 +474,7 @@ mod tests {
             let error = reconcile_malformed_registration_result_with(
                 &host,
                 descriptor,
-                XllError::Closing,
+                XllError::CLOSING,
                 |_host, excel_name| Ok(Some(RegistrationId { id, excel_name })),
                 |_host, registrations| {
                     unregistered.set(Some(registrations[0].registration().id));
@@ -524,9 +522,8 @@ mod tests {
             assert!(outcome.failed.is_empty());
             assert!(outcome.succeeded.is_empty());
             assert_eq!(outcome.metadata_debt.len(), 1);
-            assert!(matches!(
-                outcome.metadata_debt[0].last_error(),
-                XllError::MetadataDebtBindingChanged {
+            assert!(matches!(crate::error::construct::view(&(outcome.metadata_debt[0].last_error())),
+                crate::error::construct::ErrorView::MetadataDebtBindingChanged {
                     name: "TEST.OWNED",
                     ..
                 }

@@ -413,13 +413,7 @@ impl InputIdentityEncoder {
     }
 
     pub(crate) fn fail(&mut self, error: XllError) {
-        let error = match error {
-            XllError::Input { reason, .. } => XllError::Input {
-                argument: self.argument,
-                reason,
-            },
-            other => other,
-        };
+        let error = error.with_argument(self.argument);
         if self.error.is_none() {
             self.error = Some(error);
         }
@@ -622,9 +616,8 @@ mod tests {
                 ))));
             assert!(encoder.f64_sequence(values).is_err());
             encoder.f64(42.0);
-            assert!(matches!(
-                encoder.finish_into(&mut blake3::Hasher::new()),
-                Err(XllError::Input {
+            assert!(matches!((encoder.finish_into(&mut blake3::Hasher::new())).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
                     argument: "values",
                     reason: InputError::NonFinite,
                 })

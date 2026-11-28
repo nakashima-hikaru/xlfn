@@ -68,7 +68,7 @@ fn batch_conversion_and_length_errors_never_admit_a_prefix() {
             if self.0 {
                 Ok(RtdValue::Integer(1))
             } else {
-                Err(XllError::Closing)
+                Err(XllError::CLOSING)
             }
         }
     }
@@ -76,7 +76,7 @@ fn batch_conversion_and_length_errors_never_admit_a_prefix() {
     let sender = Channel::sender(&channel);
     assert!(matches!(
         sender.try_send_batch([Input(true), Input(false), Input(true)]),
-        Err(RtdBatchSendError::Invalid(XllError::Closing))
+        Err(RtdBatchSendError::Invalid(error)) if error.is_closing()
     ));
     assert!(channel.state.lock().values.is_empty());
     let integers = Channel::sender::<i32>(&channel);
@@ -251,5 +251,5 @@ fn miri_publisher_queue_warm_access_does_not_take_the_worker_lock() {
         assert!(Arc::ptr_eq(&queue, &result.unwrap().unwrap()));
     });
     assert!(matches!(pool.stop(), JoinedPublisher::Clean));
-    assert!(matches!(pool.queue(), Err(XllError::Closing)));
+    assert!(matches!(pool.queue(), Err(__err) if __err.is_closing()));
 }

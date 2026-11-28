@@ -74,10 +74,7 @@ pub(super) fn grid<'call, S: GridShapePolicy>(
         )?;
     }
     if let Some(expected) = S::expected(rows, columns) {
-        return Err(XllError::Shape {
-            expected,
-            actual: Shape { rows, columns },
-        });
+        return Err(XllError::shape(expected, Shape { rows, columns }));
     }
     Ok(grid)
 }
@@ -304,9 +301,8 @@ mod tests {
             } else {
                 column::<()>(value, "values", |_, _| panic!("empty column cell")).unwrap_err()
             };
-            assert!(matches!(
-                error,
-                XllError::Input {
+            assert!(matches!(crate::error::construct::view(&(error)),
+                crate::error::construct::ErrorView::Input {
                     argument: "values",
                     reason: InputError::Malformed("matrix dimensions must be non-zero"),
                 }
@@ -362,9 +358,8 @@ mod tests {
             panic!("allocation budget must be checked first")
         })
         .unwrap_err();
-        assert!(matches!(
-            error,
-            XllError::Input {
+        assert!(matches!(crate::error::construct::view(&(error)),
+            crate::error::construct::ErrorView::Input {
                 argument: "values",
                 reason: InputError::TooLarge {
                     limit: MAX_ARRAY_BYTES,
@@ -376,9 +371,8 @@ mod tests {
             panic!("element limit must be checked first")
         })
         .unwrap_err();
-        assert!(matches!(
-            error,
-            XllError::Input {
+        assert!(matches!(crate::error::construct::view(&(error)),
+            crate::error::construct::ErrorView::Input {
                 argument: "values",
                 reason: InputError::Malformed(_)
             }

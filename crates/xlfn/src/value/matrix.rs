@@ -512,12 +512,9 @@ pub(super) fn validate_matrix_dimensions_for_argument(
 ) -> XllResult<()> {
     let expected = matrix_element_count(rows, columns, argument)?;
     if expected != actual {
-        return Err(XllError::ElementCountMismatch {
-            rows,
-            columns,
-            expected,
-            actual,
-        });
+        return Err(XllError::element_count_mismatch(
+            rows, columns, expected, actual,
+        ));
     }
     Ok(())
 }
