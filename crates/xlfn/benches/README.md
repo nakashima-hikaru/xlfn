@@ -18,14 +18,13 @@ the repository does not keep results from individual machines.
 
 | Targets | Coverage |
 | --- | --- |
-| `argument_ingress`, `formula_revision` | Scalar and matrix conversion, input identity, prepared inputs, and formula reuse |
-| `array_numeric_output`, `array_string_output`, `value_boundary_allocations` | Numeric/string returns and conversion allocation traffic |
-| `registration`, `formula_caller`, `sync_boundary` | Registration preparation, caller resolution, and UDF boundary overhead |
-| `handle_prepare`, `handle_lookup`, `handle_call_resolution` | Handle publication, lookup, and multi-argument resolution |
-| `object_lease` | Shared-object pins and final pin release |
-| `cache_registry`, `cache_miss_concurrency`, `cache_reclamation` | Endpoint lookup, concurrent misses, eviction, and lease reclamation |
-| `async_spawn`, `async_task_drain`, `async_task_drain_allocations`, `async_pending_allocations` | Task spawning, rescheduling, cancellation, and drain allocation budgets |
-| `rtd_prepare`, `rtd_prepare_allocations`, `rtd_connection_allocations`, `rtd_publish`, `rtd_publish_allocations`, `rtd_refresh` | Subscription admission, owner storage, publication, and refresh |
+| `argument_ingress` | Scalar and matrix conversion, native vs `Q` ABI admission, input identity, and prepared inputs |
+| `array_numeric_output`, `array_string_output`, `value_boundary_allocations` | Numeric/string returns and conversion/registration allocation budgets |
+| `sync_boundary` | Synchronous UDF admission, return, and error boundary overhead |
+| `handle_prepare`, `handle_lookup` | Handle publication and token lookup |
+| `cache_registry`, `cache_miss_concurrency` | Endpoint lookup, borrowed keys, and concurrent single-flight misses |
+| `async_spawn`, `async_task_drain_allocations`, `async_pending_allocations` | Task spawning, rescheduling, cancellation, and drain allocation budgets |
+| `rtd_prepare_allocations`, `rtd_connection_allocations`, `rtd_publish`, `rtd_publish_allocations`, `rtd_refresh` | Subscription allocation budgets, publication, and refresh |
 
 Run one maintained target with its required features:
 

@@ -15,7 +15,7 @@ use crate::cancellation::CancellationGuarantee;
 use crate::cancellation::CancellationSource;
 use crate::value::{ExcelParameter, Matrix};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Shared Criterion measurement policy for all production-path benchmarks.
@@ -34,17 +34,13 @@ pub fn benchmark_measurement_time() -> Duration {
 
 use crate::handle::{
     ExcelHandleObject, FormulaCaller, FormulaHandleService, FormulaRevisionKey, HandleTopicKey,
-    resolve_formula_caller,
 };
-use crate::host_callback::HostCallbackSession;
 use crate::input_identity::InputFingerprint;
 
 mod async_spawn;
 #[cfg(feature = "cache")]
 mod cache;
-mod call_resolution;
 mod formula;
-mod formula_caller;
 mod handle;
 mod ingress;
 mod lookup;
@@ -60,9 +56,6 @@ pub use crate::excel_rtd::RtdObservationArgumentsBenchmark;
 pub use crate::excel_rtd::benchmark_rtd_bstr;
 mod sync_boundary;
 
-#[cfg(feature = "async")]
-pub use crate::handle::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
-
 #[cfg(feature = "async-builtin")]
 pub use crate::async_udf::AsyncPendingTaskBenchmark;
 #[cfg(feature = "async")]
@@ -73,12 +66,7 @@ pub use crate::cancellation::benchmark::CancellationLifecycleBenchmark;
 pub use async_spawn::{AsyncSpawnBenchmark, AsyncSpawnKind, RescheduleFuture, SpawnBatchResult};
 #[cfg(feature = "cache")]
 pub use cache::RegistryCacheBenchmark;
-pub use call_resolution::{ConcurrentHandleResolutionBenchmark, MultiHandleCallBenchmark};
-pub use formula::{
-    BenchmarkInputIdentity, FormulaRevisionBenchmark, SemanticIdentityBenchmark,
-    Utf16IdentityBenchmark,
-};
-pub use formula_caller::{FormulaCallerBenchCase, FormulaCallerBenchmark, FormulaCallerWorkerPool};
+pub use formula::{BenchmarkInputIdentity, SemanticIdentityBenchmark, Utf16IdentityBenchmark};
 pub use handle::{
     BenchHandleObject, HandleColdBatch, HandleColdGrowthBenchmark, HandleRevisionChurnBenchmark,
     HandleWarmBenchmark,

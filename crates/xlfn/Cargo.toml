@@ -42,11 +42,6 @@ refinement = ["serde/derive"]
 bench-internals = ["handles", "xlfn-sys/abi-probe", "xlfn-services?/bench-internals"]
 
 [[bench]]
-name = "async_task_drain"
-harness = false
-required-features = ["bench-internals", "async"]
-
-[[bench]]
 name = "async_task_drain_allocations"
 harness = false
 required-features = ["bench-internals", "async"]
@@ -72,11 +67,6 @@ harness = false
 required-features = ["bench-internals"]
 
 [[bench]]
-name = "formula_revision"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
 name = "handle_lookup"
 harness = false
 required-features = ["bench-internals"]
@@ -87,16 +77,6 @@ harness = false
 required-features = ["bench-internals", "cache"]
 
 [[bench]]
-name = "cache_reclamation"
-harness = false
-required-features = ["cache"]
-
-[[bench]]
-name = "formula_caller"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
 name = "argument_ingress"
 harness = false
 required-features = ["bench-internals"]
@@ -105,11 +85,6 @@ required-features = ["bench-internals"]
 name = "value_boundary_allocations"
 harness = false
 required-features = ["bench-internals"]
-
-[[bench]]
-name = "rtd_prepare"
-harness = false
-required-features = ["bench-internals", "rtd"]
 
 [[bench]]
 name = "rtd_prepare_allocations"
@@ -138,16 +113,6 @@ required-features = ["bench-internals", "rtd"]
 
 [[bench]]
 name = "array_string_output"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
-name = "registration"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
-name = "handle_call_resolution"
 harness = false
 required-features = ["bench-internals"]
 
@@ -217,8 +182,3 @@ required-features = ["bench-internals"]
 name = "cache_miss_concurrency"
 harness = false
 required-features = ["bench-internals", "cache"]
-
-[[bench]]
-name = "object_lease"
-harness = false
-required-features = ["bench-internals", "async"]

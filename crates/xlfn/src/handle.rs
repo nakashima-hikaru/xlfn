@@ -6,8 +6,6 @@ mod domain;
 mod formula;
 #[allow(unsafe_code, reason = "Stable typed object pointers are audited here")]
 mod object;
-#[cfg(all(feature = "bench-internals", feature = "async"))]
-pub use object::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
 mod prepare;
 mod publication;
 #[cfg(any(test, feature = "refinement"))]
@@ -41,8 +39,6 @@ pub(crate) use formula::HandleTopicKey;
 #[cfg(feature = "handles")]
 pub(crate) use formula::formula_revision_key;
 pub(crate) use formula::fresh_invocation_inputs;
-#[cfg(feature = "bench-internals")]
-pub(crate) use formula::resolve_formula_caller;
 #[cfg(all(test, feature = "handles"))]
 pub(crate) use formula::test_topic_key;
 pub(crate) use prepare::HandlePrepareState;

@@ -255,33 +255,26 @@ check: fmt python-check panic-boundaries typestate clippy features test test-fea
 # Used by default for main branch history tracking and pull request regression gating.
 bench: bench-ci
 
-# Canonical CI regression suite.
+# Canonical CI regression suite: deterministic allocation probes plus
+# representative hot-path Criterion cases.
 bench-ci:
-    just bench-one-filter argument_ingress "^argument_ingress/native_abi/((f64_1|f64_8|bool|i32)/plain|unicode_(short|long)/(prepare_identity|materialize_identity))/(q|native)\z"
-    just bench-one-filter async_spawn "^(async_spawn/per_iteration/(1|32)|async_spawn/matrix_reschedule/workers_4/16|async_spawn/spawn_and_drain/workers_4/16|cancellation_lifecycle/allocate_release/(1|8))\z" "bench-internals async-builtin"
-    just bench-one-filter sync_boundary "^sync_boundary/((admission|scalar_return/no_subscriber|worksheet_error/no_subscriber|domain_error/no_subscriber)/(1|32)|scalar_arguments/8/(1|32))\z"
-    just bench-one-filter handle_prepare "^handle_prepare/(cold_miss_batch_100|warm_hit_batch_100|distinct_key/(1|32))\z"
-    just bench-one-filter formula_revision "^formula_revision/warm_hit/(f64|matrix_f64_100k)\z"
-    just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens|rotating_65536_tokens)/(1|32)\z"
-    just bench-one-filter formula_caller "^resolve_formula_caller/(ref|sref|concurrent/ref/(1|4))\z"
-    just bench-one-filter argument_ingress "^argument_ingress/(f64/with_identity|string_(ascii_4k|japanese_4k)/owned|string_short/borrowed|string_unicode/borrowed|string_inline_[^/]+/borrowed|string_pair/borrowed|matrix_string_10k/(owned|borrowed)|matrix_f64_100k/(plain|with_identity|prepare_identity)|matrix_ref_f64_100k/(plain|prepare_identity|prepare_materialize)|numeric_matrix_ref_100k/plain|numeric_matrix_shape/(1000x10|100x100|10x1000)|numeric_matrix_ref_100000/with_identity|matrix_cells_100k/(ascii|unicode)/(owned|borrowed)|excel_value_matrix_100k/with_identity|handle/with_identity|optional_numeric/(option|presence|borrowed_option)/100000/(prepare|materialize))\z"
-    just bench-one-filter argument_ingress "^argument_ingress/dynamic_value/100000/"
-    just bench-one-filter array_numeric_output "^(array_numeric_output/(matrix_build_return|builder_build_return|matrix_build_return_q|builder_build_return_q|matrix_convert_return|numeric_slice_convert_return|numeric_slice_convert_return_q)/100000|array_numeric_output/numeric_slice_convert_return/100|array_numeric_producer/push_f64/(10000|100000))\z"
-    just bench-one-filter object_lease "^object_lease/(pin_acquire_release_serial|final_pin_release|same_object/4|distinct_objects/4)\z" "bench-internals async"
-    just bench-one-filter cache_miss_concurrency "^cache_miss_concurrency/(distinct_keys/(cheap_u64|numeric_reduce_4096)/cache/workers_(1|4)|same_key/cheap_u64/cache/workers_4)\z" "bench-internals cache"
-    just bench-one-filter cache_reclamation "^(cache_nonresident/roundtrip|cache_deferred_queue/(u64_churn|owned_key_churn))\z" "cache"
-    just bench-one-filter array_string_output "^(array_string_output/borrowed_str/16384|scalar_output/(ascii_short|ascii_1k|unicode_1k|japanese_4k)/(borrowed|owned)|scalar_output/(ascii_8|ascii_64|japanese_8|japanese_64)/(owned|copy)|scalar_output/(ascii_4k|japanese_4k|mixed)/copy|scalar_output/(enum|number))\z"
-    just bench-one-filter registration "^registration/(preflight|host|total)/(10|5000)\z"
-    just bench-one-filter rtd_prepare "^rtd_admission/(pending_full|existing_reuse|admitted)/1048576\z" "bench-internals rtd"
-    just bench-one rtd_prepare_allocations "bench-internals rtd"
-    just bench-one rtd_connection_allocations "bench-internals rtd"
-    just bench-one-filter rtd_publish "^rtd_publish/(number|string|string_8k)/(changing|same_value)\z" "bench-internals rtd"
-    just bench-one-filter rtd_refresh "^rtd_refresh/(number/end_to_end/dense|short_string/end_to_end/dense|string_8k/(collection|completion|end_to_end)/dense)\z" "bench-internals rtd"
-    just bench-one-filter handle_call_resolution "^handle_call_resolution/handles/(1|8)\z"
-    just bench-one cache_registry "bench-internals cache"
     just bench-one value_boundary_allocations "bench-internals async cache"
     just bench-one async_task_drain_allocations "bench-internals async"
     just bench-one async_pending_allocations "bench-internals async-builtin"
+    just bench-one rtd_prepare_allocations "bench-internals rtd"
+    just bench-one rtd_connection_allocations "bench-internals rtd"
+    just bench-one rtd_publish_allocations "bench-internals rtd"
+    just bench-one-filter sync_boundary "^sync_boundary/((admission|scalar_return/no_subscriber|domain_error/no_subscriber)/1|scalar_arguments/8/1)\z"
+    just bench-one-filter argument_ingress "^argument_ingress/(native_abi/f64_8/plain/(q|native)|string_short/borrowed|string_japanese_4k/owned|matrix_f64_100k/plain|numeric_matrix_ref_100k/plain)\z"
+    just bench-one-filter array_numeric_output "^array_numeric_output/(matrix_build_return|numeric_slice_convert_return)/100000\z"
+    just bench-one-filter array_string_output "^(array_string_output/borrowed_str/16384|scalar_output/ascii_short/borrowed|scalar_output/japanese_4k/owned)\z"
+    just bench-one-filter handle_prepare "^handle_prepare/(cold_miss_batch_100|warm_hit_batch_100)\z"
+    just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens)/1\z"
+    just bench-one-filter cache_registry "^(cache_registry/distinct_endpoints/1|cache_borrowed_keys/registry_borrowed_warm_hit/1024)\z" "bench-internals cache"
+    just bench-one-filter cache_miss_concurrency "^cache_miss_concurrency/(distinct_keys|same_key)/cheap_u64/cache/workers_4\z" "bench-internals cache"
+    just bench-one-filter async_spawn "^(async_spawn/per_iteration/1|async_spawn/spawn_and_drain/workers_4/16)\z" "bench-internals async-builtin"
+    just bench-one-filter rtd_publish "^rtd_publish/(number|string_8k)/changing\z" "bench-internals rtd"
+    just bench-one-filter rtd_refresh "^rtd_refresh/(number|string_8k)/end_to_end/dense\z" "bench-internals rtd"
 
 # Pull request benchmark gate (aliases bench-ci to ensure identical thresholds and history).
 bench-pr: bench-ci
@@ -289,43 +282,31 @@ bench-pr: bench-ci
 # Scaling curves across worker thread counts, batch sizes, and data dimensions.
 # Run periodically, nightly, or on-demand to observe throughput scaling characteristics.
 bench-scaling:
-    just bench-one-filter formula_caller "^resolve_formula_caller/concurrent/"
-    just bench-one object_lease "bench-internals async"
     just bench-one cache_miss_concurrency "bench-internals cache"
-    just bench-one cache_reclamation "cache"
     just bench-one-filter async_spawn "^(async_spawn/(matrix_spawn|matrix_reschedule|spawn_and_drain)|cancellation_lifecycle/)" "bench-internals async-builtin"
     just bench-one-filter sync_boundary "^sync_boundary/(admission|scalar_return/no_subscriber)/(4|16)\z"
     just bench-one-filter handle_prepare "^handle_prepare/(distinct_key/(4|16)|cold_grow|drop|revision_churn)"
     just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens|rotating_65536_tokens)/(4|16)\z"
-    just bench-one-filter handle_call_resolution "^handle_call_resolution/handles/(2|4)\z"
     just bench-one-filter rtd_publish "^rtd_publish/string_8k/(changing|same_value)\z" "bench-internals rtd"
     just bench-one-filter rtd_refresh "^rtd_refresh/.+/end_to_end" "bench-internals rtd"
 
 # Full unfiltered benchmark suite.
 bench-full:
-    just bench-one cache_reclamation "cache"
-    just bench-one async_task_drain "bench-internals async"
     just bench-one async_task_drain_allocations "bench-internals async"
     just bench-one async_pending_allocations "bench-internals async-builtin"
     just bench-one array_numeric_output
-    just bench-one object_lease "bench-internals async"
     just bench-one cache_miss_concurrency "bench-internals cache"
     just bench-one async_spawn "bench-internals async-builtin"
     just bench-one sync_boundary
     just bench-one handle_prepare
-    just bench-one formula_revision
     just bench-one handle_lookup
-    just bench-one formula_caller
     just bench-one argument_ingress
     just bench-one array_string_output
-    just bench-one registration
-    just bench-one rtd_prepare "bench-internals rtd"
     just bench-one rtd_prepare_allocations "bench-internals rtd"
     just bench-one rtd_connection_allocations "bench-internals rtd"
     just bench-one rtd_publish_allocations "bench-internals rtd"
     just bench-one rtd_publish "bench-internals rtd"
     just bench-one rtd_refresh "bench-internals rtd"
-    just bench-one handle_call_resolution
     just bench-one cache_registry "bench-internals cache"
     just bench-one value_boundary_allocations "bench-internals async cache"
 

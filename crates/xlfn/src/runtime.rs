@@ -47,10 +47,8 @@ mod unload;
 
 pub use unload::{LogicalUnload, PhysicalUnload, UnloadPolicy};
 
-#[cfg(any(feature = "bench-internals", test,))]
-use crate::runtime_components::GenerationServices;
 #[cfg(test)]
-use crate::runtime_components::SealedGenerationServices;
+use crate::runtime_components::{GenerationServices, SealedGenerationServices};
 use crate::runtime_components::{
     HostLedger, ModuleResidency, QuarantineReason, QuarantineVault, ReturnProtocol,
 };
@@ -727,7 +725,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
             .ok_or(XllError::CLOSING)?
     }
 
-    #[cfg(any(feature = "bench-internals", all(test, feature = "rtd")))]
+    #[cfg(all(test, feature = "rtd"))]
     pub(crate) fn with_generation_services<R>(
         &self,
         operation: impl FnOnce(

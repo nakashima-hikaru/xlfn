@@ -541,7 +541,7 @@ pub(crate) fn begin_open() -> crate::XllResult<ModuleOpening> {
     MODULE_RUNTIME.begin_open_internal()
 }
 
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(test)]
 pub(crate) fn reset_callbacks_for_test() {
     MODULE_RUNTIME.callback_admission.try_reopen().unwrap();
 }
