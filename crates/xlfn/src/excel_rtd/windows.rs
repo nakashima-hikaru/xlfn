@@ -3,8 +3,6 @@
     reason = "Windows COM/VARIANT FFI operations are audited as compound ABI operations"
 )]
 
-#[cfg(test)]
-use crate::XllError;
 #[cfg(all(test, feature = "handles"))]
 use crate::handle::FormulaHandleService;
 #[cfg(test)]

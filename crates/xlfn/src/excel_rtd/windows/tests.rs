@@ -4349,7 +4349,8 @@ fn sta_subscription_shutdown_dispatches_during_each_disconnect_barrier() {
         }
         fn disconnect_and_wait(self) -> XllResult<()> {
             let _ = self.request.send(());
-            crate::panic_boundary::contain_panic(self.worker.join()).map_err(|_| XllError::PANIC)
+            crate::panic_boundary::contain_panic(self.worker.join())
+                .map_err(|_| crate::XllError::PANIC)
         }
     }
     struct ComSource(u32);
@@ -4467,7 +4468,7 @@ fn sta_failed_connect_dispatches_during_rollback_and_rejected_install() {
         fn disconnect_and_wait(self) -> XllResult<()> {
             let _ = self.request.send(());
             let result = crate::panic_boundary::contain_panic(self.worker.join())
-                .map_err(|_| XllError::PANIC);
+                .map_err(|_| crate::XllError::PANIC);
             self.disconnected.store(true, Ordering::Release);
             result
         }

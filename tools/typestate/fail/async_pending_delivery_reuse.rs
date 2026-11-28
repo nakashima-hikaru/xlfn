@@ -7,11 +7,11 @@ fn complete_twice(delivery: PendingDelivery<NoObservation>) {
 }
 
 fn fail_then_fallback(delivery: PendingDelivery<NoObservation>) {
-    delivery.fail(crate::XllError::Closing);
+    delivery.fail(crate::XllError::CLOSING);
     delivery.fallback(None); // error: E0382
 }
 
 fn fallback_then_fail(delivery: PendingDelivery<NoObservation>) {
     delivery.fallback(Some("panic".to_owned()));
-    delivery.fail(crate::XllError::Closing); // error: E0382
+    delivery.fail(crate::XllError::CLOSING); // error: E0382
 }

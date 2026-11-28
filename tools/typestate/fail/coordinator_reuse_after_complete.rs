@@ -11,6 +11,6 @@ fn complete_twice(coordinator: &TerminationCoordinator) {
 fn fail_after_complete(coordinator: &TerminationCoordinator) {
     if let TerminationClaim::Owner(owner) = coordinator.begin() {
         let _ = owner.complete(Ok(()));
-        let _ = owner.fail(crate::XllError::Panic); // error: E0382
+        let _ = owner.fail(crate::XllError::PANIC); // error: E0382
     }
 }

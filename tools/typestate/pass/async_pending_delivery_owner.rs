@@ -6,7 +6,7 @@ fn complete(delivery: PendingDelivery<NoObservation>) {
 }
 
 fn fail(delivery: PendingDelivery<NoObservation>) {
-    delivery.fail(crate::XllError::Closing);
+    delivery.fail(crate::XllError::CLOSING);
 }
 
 fn fallback(delivery: PendingDelivery<NoObservation>) {
