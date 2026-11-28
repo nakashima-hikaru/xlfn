@@ -91,13 +91,12 @@ pub(crate) struct BuildSelectionArgs {
 }
 
 impl BuildSelectionArgs {
-    pub(crate) fn normalized_features(&self) -> Vec<String> {
+    pub(crate) fn normalized_features(&self) -> Vec<&str> {
         let mut features = self
             .features
             .iter()
             .flat_map(|f| f.split(','))
             .flat_map(str::split_whitespace)
-            .map(str::to_owned)
             .collect::<Vec<_>>();
         features.sort_unstable();
         features.dedup();
@@ -133,7 +132,9 @@ impl BuildSelectionArgs {
     pub(crate) fn apply_to_metadata(&self, command: &mut MetadataCommand) {
         let features = self.normalized_features();
         if !features.is_empty() {
-            command.features(CargoOpt::SomeFeatures(features));
+            command.features(CargoOpt::SomeFeatures(
+                features.into_iter().map(str::to_owned).collect(),
+            ));
         }
         if self.no_default_features {
             command.features(CargoOpt::NoDefaultFeatures);
