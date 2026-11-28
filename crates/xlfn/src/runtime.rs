@@ -683,7 +683,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
 }
 
 impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
-    pub(crate) fn next_call_id(&self) -> u64 {
+    pub(crate) fn next_call_id(&self) -> std::num::NonZeroU64 {
         self.return_protocol.next_call_id()
     }
 
@@ -694,9 +694,11 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         }
         #[cfg(not(feature = "async"))]
         {
-            crate::execution::CalculationId::new(
+            let value = std::num::NonZeroU64::new(
                 self.return_protocol.calculation_id.load(Ordering::Acquire),
             )
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+            crate::execution::CalculationId::new(value)
         }
     }
 
@@ -931,7 +933,7 @@ impl<A: crate::Addin> AsyncCallGuard<'_, A> {
         self.async_runtime
     }
 
-    pub(crate) fn next_call_id(&self) -> u64 {
+    pub(crate) fn next_call_id(&self) -> std::num::NonZeroU64 {
         self.returns.next_call_id()
     }
 

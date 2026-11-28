@@ -36,7 +36,7 @@ pub(crate) struct SourceRegistration<
     C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
 > {
     generation: RuntimeGeneration,
-    registration_id: Option<u64>,
+    registration_id: Option<std::num::NonZeroU64>,
     sources: Mutex<Option<C>>,
     marker: PhantomData<fn() -> E>,
 }
@@ -61,7 +61,8 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceRegistration<E, C>
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     current.checked_add(1)
                 })
-                .ok(),
+                .ok()
+                .and_then(std::num::NonZeroU64::new),
             sources: Mutex::new(None),
             marker: PhantomData,
         }
@@ -80,6 +81,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceRegistration<E, C>
     }
     fn registration_id(&self) -> XllResult<u64> {
         self.registration_id
+            .map(std::num::NonZeroU64::get)
             .ok_or(crate::error::construct::internal(
                 crate::diagnostics::catalog::RTD_SUBSCRIPTION_ID_OVERFLOW,
             ))
@@ -166,7 +168,7 @@ pub(crate) struct SourceArena<
     C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
 > {
     generation: RuntimeGeneration,
-    registration_id: Option<u64>,
+    registration_id: Option<std::num::NonZeroU64>,
     sources: Option<C::Stored>,
     marker: PhantomData<fn() -> E>,
 }
@@ -187,7 +189,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceArena<E, C> {
     }
     pub(crate) fn resolve(&self, id: SourceHandleId) -> Option<ResolvedSource<'_, E, C>> {
         if id.generation != self.generation
-            || Some(id.registration) != self.registration_id
+            || self.registration_id.map(std::num::NonZeroU64::get) != Some(id.registration)
             || id.sequence == 0
         {
             return None;

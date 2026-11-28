@@ -2,7 +2,7 @@
 
 use crate::sync::Mutex;
 use std::cell::Cell;
-use std::ops::Range;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // A stamp is never reused, including when a ReturnProtocol is moved or its
@@ -31,14 +31,18 @@ struct CallIds {
 
 #[derive(Clone, Copy)]
 struct CallIdRange {
-    issuer: u64,
-    next: u64,
-    end: u64,
+    issuer: Option<NonZeroU64>,
+    next: NonZeroU64,
+    end: NonZeroU64,
 }
 
 thread_local! {
     static CALL_ID_RANGE: Cell<CallIdRange> = const {
-        Cell::new(CallIdRange { issuer: 0, next: 0, end: 0 })
+        Cell::new(CallIdRange {
+            issuer: None,
+            next: NonZeroU64::MIN,
+            end: NonZeroU64::MIN,
+        })
     };
 }
 
@@ -51,58 +55,60 @@ impl CallIds {
     }
 
     #[cold]
-    fn initialize_issuer(&self) -> u64 {
+    fn initialize_issuer(&self) -> NonZeroU64 {
         let candidate = NEXT_CALL_ISSUER
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
         // The stamp carries identity only, not visibility of any runtime
         // state. Concurrent initializers agree on the first published value.
-        match self
+        let raw = match self
             .issuer
             .compare_exchange(0, candidate, Ordering::Relaxed, Ordering::Relaxed)
         {
             Ok(_) => candidate,
             Err(issuer) => issuer,
-        }
+        };
+        NonZeroU64::new(raw).unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
     }
 
     // MAX is the exhaustion sentinel, never a returned ID. Use the remaining
     // partial range rather than wrapping or failing a block early.
-    fn reserve(&self, count: u64) -> Option<Range<u64>> {
+    fn reserve(&self, count: u64) -> Option<(NonZeroU64, NonZeroU64)> {
         let first = self
             .next_unreserved
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |first| {
                 (first != u64::MAX).then_some(first.saturating_add(count))
             })
             .ok()?;
-        Some(first..first.saturating_add(count))
+        let start = NonZeroU64::new(first)?;
+        Some((start, start.saturating_add(count)))
     }
 
     #[cold]
-    fn refill(&self, issuer: u64, slot: &Cell<CallIdRange>) -> u64 {
-        let range = self
+    fn refill(&self, issuer: NonZeroU64, slot: &Cell<CallIdRange>) -> NonZeroU64 {
+        let (start, end) = self
             .reserve(CALL_ID_BATCH)
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
         slot.set(CallIdRange {
-            issuer,
-            next: range.start + 1,
-            end: range.end,
+            issuer: Some(issuer),
+            next: start.saturating_add(1),
+            end,
         });
-        range.start
+        start
     }
 
     #[inline]
-    fn next(&self) -> u64 {
-        let issuer = match self.issuer.load(Ordering::Relaxed) {
-            0 => self.initialize_issuer(),
-            issuer => issuer,
+    fn next(&self) -> NonZeroU64 {
+        let issuer = match NonZeroU64::new(self.issuer.load(Ordering::Relaxed)) {
+            Some(issuer) => issuer,
+            None => self.initialize_issuer(),
         };
         CALL_ID_RANGE
             .try_with(|slot| {
                 let mut range = slot.get();
-                if range.issuer == issuer && range.next < range.end {
+                if range.issuer == Some(issuer) && range.next < range.end {
                     let id = range.next;
-                    range.next += 1;
+                    range.next = id.saturating_add(1);
                     slot.set(range);
                     id
                 } else {
@@ -113,7 +119,7 @@ impl CallIds {
                 // Keep correlation available even if invoked during TLS teardown.
                 self.reserve(1)
                     .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
-                    .start
+                    .0
             })
     }
 }
@@ -281,7 +287,7 @@ impl ReturnProtocol {
         self.returns.try_enter_producer()
     }
 
-    pub(crate) fn next_call_id(&self) -> u64 {
+    pub(crate) fn next_call_id(&self) -> NonZeroU64 {
         self.call_ids.next()
     }
 }
@@ -317,7 +323,7 @@ mod tests {
             ids.sort_unstable();
             ids.dedup();
             assert_eq!(ids.len(), 2400);
-            assert_eq!(ids[0], 1);
+            assert_eq!(ids[0].get(), 1);
         });
         assert_eq!(
             protocol.call_ids.next_unreserved.load(Ordering::Relaxed),
@@ -329,22 +335,22 @@ mod tests {
     fn call_id_slot_rejects_reused_protocol_storage() {
         let mut protocol = Box::new(ReturnProtocol::new());
         let address = std::ptr::from_ref(&*protocol).addr();
-        assert_eq!(protocol.next_call_id(), 1);
+        assert_eq!(protocol.next_call_id().get(), 1);
         let issuer = protocol.call_ids.issuer.load(Ordering::Relaxed);
         *protocol = ReturnProtocol::new();
         assert_eq!(std::ptr::from_ref(&*protocol).addr(), address);
-        assert_eq!(protocol.next_call_id(), 1);
+        assert_eq!(protocol.next_call_id().get(), 1);
         assert_ne!(protocol.call_ids.issuer.load(Ordering::Relaxed), issuer);
         protocol.reopen_admission().unwrap();
-        assert_eq!(protocol.next_call_id(), 2);
+        assert_eq!(protocol.next_call_id().get(), 2);
     }
 
     #[test]
     fn call_id_partial_final_batch_does_not_wrap() {
         let ids = CallIds::new();
         ids.next_unreserved.store(u64::MAX - 2, Ordering::Relaxed);
-        assert_eq!(ids.next(), u64::MAX - 2);
-        assert_eq!(ids.next(), u64::MAX - 1);
+        assert_eq!(ids.next().get(), u64::MAX - 2);
+        assert_eq!(ids.next().get(), u64::MAX - 1);
         assert_eq!(ids.reserve(1), None);
     }
 

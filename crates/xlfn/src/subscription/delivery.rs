@@ -440,7 +440,7 @@ mod typed_sink_tests {
         let core = server.test_server().publish.as_ref();
         let topic = TopicId(1);
         let generation = ConnectionGeneration::ONE;
-        core.reserve_connection(topic, SubscriptionId(1), generation)
+        core.reserve_connection(topic, SubscriptionId(std::num::NonZeroU64::MIN), generation)
             .unwrap();
         core.install_connection(topic, generation).unwrap();
         assert!(

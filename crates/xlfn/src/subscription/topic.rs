@@ -238,7 +238,7 @@ impl SubscriptionIdentityKey {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct SubscriptionId(pub(crate) u64);
+pub(crate) struct SubscriptionId(pub(crate) std::num::NonZeroU64);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SubscriptionKey {
@@ -265,7 +265,7 @@ impl SubscriptionKey {
     pub(crate) const fn from_internal(runtime_id: u64, id: SubscriptionId) -> Self {
         Self {
             runtime_id,
-            subscription_id: id.0,
+            subscription_id: id.0.get(),
         }
     }
 
@@ -279,7 +279,7 @@ impl SubscriptionKey {
 
     pub(crate) fn validate_runtime(self, expected_runtime_id: u64) -> Option<SubscriptionId> {
         if self.runtime_id == expected_runtime_id {
-            Some(SubscriptionId(self.subscription_id))
+            std::num::NonZeroU64::new(self.subscription_id).map(SubscriptionId)
         } else {
             None
         }

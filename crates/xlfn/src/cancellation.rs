@@ -48,8 +48,8 @@ struct CancellationSlot {
 
 struct SlotWaiters {
     generation: u64,
-    next_id: u64,
-    entries: FxHashMap<u64, std::task::Waker>,
+    next_id: std::num::NonZeroU64,
+    entries: FxHashMap<std::num::NonZeroU64, std::task::Waker>,
     // One framework task per source. Public cancellation waiters remain an
     // independent collection; task cancellation never allocates a map entry.
     #[cfg(feature = "async")]
@@ -57,7 +57,7 @@ struct SlotWaiters {
 }
 
 struct DetachedWaiters {
-    entries: FxHashMap<u64, std::task::Waker>,
+    entries: FxHashMap<std::num::NonZeroU64, std::task::Waker>,
     #[cfg(feature = "async")]
     task_waker: Option<std::task::Waker>,
 }
@@ -143,7 +143,7 @@ impl CancellationRegistry {
                 debug_assert!(waiters.task_waker.is_none());
             }
             waiters.generation = generation;
-            waiters.next_id = 1;
+            waiters.next_id = std::num::NonZeroU64::MIN;
             slot.generation.store(generation, Ordering::Release);
             slot.cancelled.store(false, Ordering::Release);
             slot.delivery_state.store(STATE_RUNNING, Ordering::Release);
@@ -162,7 +162,7 @@ impl CancellationRegistry {
                 delivery_state: AtomicU8::new(STATE_RUNNING),
                 waiters: Mutex::new(SlotWaiters {
                     generation: 1,
-                    next_id: 1,
+                    next_id: std::num::NonZeroU64::MIN,
                     entries: FxHashMap::default(),
                     #[cfg(feature = "async")]
                     task_waker: None,
@@ -535,7 +535,7 @@ impl CancellationToken {
 /// unregisters its waiter and does not cancel the scope.
 pub struct Cancelled<'token> {
     token: CancellationToken,
-    waiter_id: Option<u64>,
+    waiter_id: Option<std::num::NonZeroU64>,
     registered_waker: Option<WakerIdentity>,
     _marker: PhantomData<&'token ()>,
 }
@@ -1402,7 +1402,7 @@ mod tests {
                         .poll(&mut Context::from_waker(&noop))
                         .is_pending()
                 );
-                assert_eq!(old_waiter.waiter_id, Some(1));
+                assert_eq!(old_waiter.waiter_id, std::num::NonZeroU64::new(1));
             }
             let paused = std::sync::Barrier::new(2);
             let resume = std::sync::Barrier::new(2);
@@ -1428,7 +1428,7 @@ mod tests {
                         .poll(&mut Context::from_waker(&waker))
                         .is_pending()
                 );
-                assert_eq!(next_waiter.waiter_id, Some(1));
+                assert_eq!(next_waiter.waiter_id, std::num::NonZeroU64::new(1));
                 resume.wait();
                 assert_eq!(old_poll.join().unwrap(), Poll::Ready(()));
                 // SAFETY: next_source keeps its fixture slot live.

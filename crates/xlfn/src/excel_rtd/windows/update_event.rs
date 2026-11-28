@@ -179,11 +179,11 @@ impl RetainedUpdateCallback {
         self.pump().map_or(Ok(()), NotificationPump::request)
     }
 
-    pub(super) fn pending_notice(&self) -> Option<u64> {
+    pub(super) fn pending_notice(&self) -> Option<std::num::NonZeroU64> {
         self.pump().and_then(NotificationPump::pending)
     }
 
-    pub(super) fn acknowledge(&self, notice: Option<u64>) {
+    pub(super) fn acknowledge(&self, notice: Option<std::num::NonZeroU64>) {
         if let Some(pump) = self.pump() {
             pump.acknowledge(notice);
         }

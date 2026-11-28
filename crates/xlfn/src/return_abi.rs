@@ -2262,7 +2262,7 @@ mod tests {
             drop(free_guard);
         }
         let after = runtime.next_call_id();
-        assert_eq!(after - before, 101);
+        assert_eq!(after.get() - before.get(), 101);
     }
     #[test]
     fn fp12_failures_record_original_error_and_correlation_without_sink() {

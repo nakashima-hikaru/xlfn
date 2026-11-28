@@ -1529,7 +1529,11 @@ mod tests {
         for id in 1..=2 {
             let topic = TopicId(id);
             publish
-                .reserve_connection(topic, SubscriptionId(id as u64), generation)
+                .reserve_connection(
+                    topic,
+                    SubscriptionId(std::num::NonZeroU64::new(id as u64).unwrap()),
+                    generation,
+                )
                 .unwrap();
             assert!(
                 publish
@@ -1619,7 +1623,7 @@ mod tests {
             let topic = TopicId(1);
             let generation = ConnectionGeneration::ONE;
             publish
-                .reserve_connection(topic, SubscriptionId(1), generation)
+                .reserve_connection(topic, SubscriptionId(std::num::NonZeroU64::MIN), generation)
                 .unwrap();
             publish
                 .publish(topic, generation, StoredRtdValue::Integer(1))

@@ -2554,7 +2554,7 @@ fn identity_lookup_reports_orphaned_candidate() {
         .identities
         .insert(
             SubscriptionIdentityKey::new(SourceId(source.id), &topic),
-            SubscriptionId(1),
+            SubscriptionId(std::num::NonZeroU64::MIN),
             1,
         )
         .unwrap();
@@ -3868,7 +3868,11 @@ fn server_handle_cannot_cross_subscription_runtime_boundary() {
     let server_a = runtime_a.register_test_server(1);
 
     assert!(matches!(
-        runtime_b.connect_transaction(&server_a, TopicId(1), SubscriptionId(1)),
+        runtime_b.connect_transaction(
+            &server_a,
+            TopicId(1),
+            SubscriptionId(std::num::NonZeroU64::MIN),
+        ),
         Err(XllError::StaleHandle)
     ));
     assert!(matches!(

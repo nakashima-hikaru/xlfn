@@ -272,8 +272,8 @@ fn observation(
     let metadata = CallMetadata {
         udf_id: "SCOPED.TEST",
         excel_name: "SCOPED.TEST",
-        call_id: CallId::new(1),
-        calculation_id: CalculationId::new(1),
+        call_id: CallId::new(std::num::NonZeroU64::MIN),
+        calculation_id: CalculationId::new(std::num::NonZeroU64::MIN),
         started_at: std::time::SystemTime::UNIX_EPOCH,
         concurrent_calls: 1,
     };

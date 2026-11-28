@@ -100,7 +100,11 @@ impl SubscriptionCatalog {
                 .ok_or(crate::error::construct::internal(
                     crate::diagnostics::catalog::RTD_SUBSCRIPTION_OVERFLOW,
                 ))?;
-        let id = SubscriptionId(raw_id);
+        let id = SubscriptionId(std::num::NonZeroU64::new(raw_id).ok_or(
+            crate::error::construct::internal(
+                crate::diagnostics::catalog::RTD_SUBSCRIPTION_OVERFLOW,
+            ),
+        )?);
         let key = SubscriptionKey::from_internal(runtime_id, id);
         let source_id = SourceId(source_id);
         let identity_key = topic.identity_key(source_id);

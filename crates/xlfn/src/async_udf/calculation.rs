@@ -34,7 +34,7 @@ impl CalculationEpoch {
 
 impl From<CalculationEpoch> for crate::execution::CalculationId {
     fn from(epoch: CalculationEpoch) -> Self {
-        Self::new(epoch.get().get())
+        Self::new(epoch.get())
     }
 }
 

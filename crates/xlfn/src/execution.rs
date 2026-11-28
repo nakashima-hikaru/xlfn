@@ -11,17 +11,17 @@ use std::time::{Duration, Instant, SystemTime};
 /// IDs can have gaps, and their numeric order does not indicate the order in
 /// which calls on different threads began or completed.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CallId(u64);
+pub struct CallId(std::num::NonZeroU64);
 
 impl CallId {
-    pub(crate) const fn new(value: u64) -> Self {
+    pub(crate) const fn new(value: std::num::NonZeroU64) -> Self {
         Self(value)
     }
 
     #[must_use]
     /// Returns the numeric identifier for logging and correlation.
     pub const fn get(self) -> u64 {
-        self.0
+        self.0.get()
     }
 }
 
@@ -31,17 +31,17 @@ impl CallId {
 /// those events for some programmatic recalculations, so this is not a unique
 /// identifier for every possible recalculation request.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CalculationId(u64);
+pub struct CalculationId(std::num::NonZeroU64);
 
 impl CalculationId {
-    pub(crate) const fn new(value: u64) -> Self {
+    pub(crate) const fn new(value: std::num::NonZeroU64) -> Self {
         Self(value)
     }
 
     #[must_use]
     /// Returns the numeric identifier for logging and correlation.
     pub const fn get(self) -> u64 {
-        self.0
+        self.0.get()
     }
 }
 
@@ -802,8 +802,8 @@ mod tests {
         CallMetadata {
             udf_id: "test",
             excel_name: "TEST",
-            call_id: CallId::new(1),
-            calculation_id: CalculationId::new(1),
+            call_id: CallId::new(std::num::NonZeroU64::MIN),
+            calculation_id: CalculationId::new(std::num::NonZeroU64::MIN),
             started_at: SystemTime::UNIX_EPOCH,
             concurrent_calls: 1,
         }
@@ -946,8 +946,8 @@ mod tests {
                 trace_metadata: UdfTraceMetadata {
                     udf_id: "test",
                     excel_name: "TEST",
-                    call_id: CallId::new(1),
-                    calculation_id: CalculationId::new(1),
+                    call_id: CallId::new(std::num::NonZeroU64::MIN),
+                    calculation_id: CalculationId::new(std::num::NonZeroU64::MIN),
                     concurrent_calls: 1,
                 },
                 trace_enabled: false,

@@ -3,6 +3,7 @@
 
 use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
+use std::num::NonZeroU64;
 use std::panic::AssertUnwindSafe;
 use std::thread::{Builder, JoinHandle};
 use std::time::{Duration, Instant};
@@ -15,7 +16,7 @@ struct State {
     stopping: bool,
     sequence: u64,
     acknowledged: u64,
-    pending: Option<u64>,
+    pending: Option<NonZeroU64>,
     next_attempt: Option<Instant>,
 }
 
@@ -132,24 +133,29 @@ impl NotificationPump {
         if state.stopping {
             return Err(XllError::Closing);
         }
-        state.sequence = state.sequence.checked_add(1).ok_or(XllError::Overloaded)?;
-        state.pending = Some(state.sequence);
+        let next = state
+            .sequence
+            .checked_add(1)
+            .and_then(NonZeroU64::new)
+            .ok_or(XllError::Overloaded)?;
+        state.sequence = next.get();
+        state.pending = Some(next);
         // Coalesce requests without postponing an already scheduled retry.
         self.shared.changed.notify_one();
         Ok(())
     }
 
-    pub(super) fn pending(&self) -> Option<u64> {
+    pub(super) fn pending(&self) -> Option<NonZeroU64> {
         self.shared.state.lock().pending
     }
 
-    pub(super) fn acknowledge(&self, sequence: Option<u64>) {
+    pub(super) fn acknowledge(&self, sequence: Option<NonZeroU64>) {
         let mut state = self.shared.state.lock();
         if let (Some(sequence), Some(pending)) = (sequence, state.pending)
-            && state.acknowledged < sequence
+            && state.acknowledged < sequence.get()
             && sequence <= pending
         {
-            state.acknowledged = sequence;
+            state.acknowledged = sequence.get();
             if sequence == pending {
                 state.pending = None;
             }

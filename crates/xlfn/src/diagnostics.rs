@@ -1373,8 +1373,12 @@ mod tests {
         report_udf_failure_with_history_no_unwind(
             &history,
             "fp12_result",
-            Some(crate::execution::CallId::new(17)),
-            Some(crate::execution::CalculationId::new(5)),
+            Some(crate::execution::CallId::new(
+                std::num::NonZeroU64::new(17).unwrap(),
+            )),
+            Some(crate::execution::CalculationId::new(
+                std::num::NonZeroU64::new(5).unwrap(),
+            )),
             &error,
             true,
         );

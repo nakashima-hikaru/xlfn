@@ -498,8 +498,8 @@ mod tests {
             FailureMetadata {
                 diagnostic_id: crate::diagnostics::id::from_u64(id),
                 udf_id: "prices",
-                call_id: Some(CallId::new(id)),
-                calculation_id: Some(CalculationId::new(7)),
+                call_id: std::num::NonZeroU64::new(id).map(CallId::new),
+                calculation_id: Some(CalculationId::new(std::num::NonZeroU64::new(7).unwrap())),
                 timestamp: SystemTime::UNIX_EPOCH,
             },
             error,

@@ -173,8 +173,8 @@ mod tests {
         CallMetadata {
             udf_id: "test_async_observation",
             excel_name: "TEST.ASYNC.OBSERVATION",
-            call_id: CallId::new(1),
-            calculation_id: CalculationId::new(1),
+            call_id: CallId::new(std::num::NonZeroU64::MIN),
+            calculation_id: CalculationId::new(std::num::NonZeroU64::MIN),
             started_at: SystemTime::UNIX_EPOCH,
             concurrent_calls: 1,
         }
