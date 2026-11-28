@@ -2103,19 +2103,19 @@ mod tests {
         use std::cell::RefCell;
 
         struct NonSyncSink {
-            _events: RefCell<Vec<DiagnosticId>>,
+            events: RefCell<Vec<DiagnosticId>>,
         }
 
         // RefCell is Send + !Sync
         impl DiagnosticSink for NonSyncSink {
             fn report(&self, event: &DiagnosticEvent<'_>) {
-                self._events.borrow_mut().push(event.diagnostic_id);
+                self.events.borrow_mut().push(event.diagnostic_id);
             }
         }
 
         let _router_guard = prepare_global_router();
         set_diagnostic_sink(NonSyncSink {
-            _events: RefCell::new(Vec::new()),
+            events: RefCell::new(Vec::new()),
         })
         .unwrap();
         clear_diagnostic_sink().unwrap();

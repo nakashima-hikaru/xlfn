@@ -71,10 +71,7 @@ impl<'slot, C, R, E: Clone> InitializingTxn<'slot, C, R, E> {
         self.recovery.complete();
         slot.changed.notify_all();
         drop(state);
-        GenerationServiceRead {
-            pointer,
-            _permit: permit,
-        }
+        GenerationServiceRead { pointer, permit }
     }
 
     pub(super) fn fail(self, error: E) -> ServiceSlotError<E> {

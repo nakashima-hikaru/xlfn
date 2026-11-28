@@ -500,7 +500,7 @@ impl ExportIngress {
             ingress: self,
             epoch: self.epoch.load(Ordering::Acquire),
             stripe: Some(stripe_index),
-            _permit: Some(permit),
+            permit: Some(permit),
             udf,
         };
         if phase == PHASE_OPEN {
@@ -687,7 +687,7 @@ impl ExportIngress {
                 ingress: self,
                 epoch: self.epoch.load(Ordering::Acquire),
                 stripe: None,
-                _permit: None,
+                permit: None,
                 udf: false,
             },
         }
@@ -699,7 +699,7 @@ pub(crate) struct ExportCallGuard<'a> {
     ingress: &'a ExportIngress,
     epoch: u64,
     stripe: Option<usize>,
-    _permit: Option<StripedDrainPermit<'a, INGRESS_STRIPE_COUNT>>,
+    permit: Option<StripedDrainPermit<'a, INGRESS_STRIPE_COUNT>>,
     udf: bool,
 }
 
@@ -716,7 +716,7 @@ impl Drop for ExportCallGuard<'_> {
         if self.udf {
             self.ingress.udf_stripes[stripe_index].leave();
         }
-        let _ = self._permit.take();
+        let _ = self.permit.take();
     }
 }
 

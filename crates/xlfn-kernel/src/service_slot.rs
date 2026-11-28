@@ -61,7 +61,7 @@ enum GenerationServiceState<C, R, E> {
 /// A non-owning read capability over one published generation service.
 pub struct GenerationServiceRead<'slot, R> {
     pointer: NonNull<R>,
-    _permit: StripedDrainPermit<'slot, SERVICE_READER_STRIPES>,
+    permit: StripedDrainPermit<'slot, SERVICE_READER_STRIPES>,
 }
 
 impl<R> GenerationServiceRead<'_, R> {
@@ -76,7 +76,7 @@ impl<R> GenerationServiceRead<'_, R> {
         DetachedGenerationServiceRead {
             pointer: self.pointer,
             // SAFETY: the caller guarantees the issuing slot/gate's lifetime.
-            _permit: unsafe { self._permit.detach() },
+            _permit: unsafe { self.permit.detach() },
         }
     }
 }
@@ -193,10 +193,7 @@ impl<C, R, E> GenerationServiceSlot<C, R, E> {
         let permit = self.readers.try_enter_current().ok()?;
         let pointer = NonNull::new(self.published.load(Ordering::Acquire));
         match pointer {
-            Some(pointer) => Some(GenerationServiceRead {
-                pointer,
-                _permit: permit,
-            }),
+            Some(pointer) => Some(GenerationServiceRead { pointer, permit }),
             None => {
                 drop(permit);
                 None

@@ -20,7 +20,7 @@ pub(super) mod retirement;
 pub struct DrainedGeneration<'drain> {
     index: GenerationIndex,
     #[cfg(test)]
-    _domain: &'drain AtomicUsize,
+    domain: &'drain AtomicUsize,
     transition: std::marker::PhantomData<&'drain mut Option<GenerationIndex>>,
 }
 
@@ -32,7 +32,7 @@ impl DrainedGeneration<'_> {
         &self,
         domain: &RotatingReadDomain<N>,
     ) -> Option<usize> {
-        protocol::authorize_domain!(self._domain, &domain.current, self.index.index())
+        protocol::authorize_domain!(self.domain, &domain.current, self.index.index())
     }
 }
 
@@ -231,7 +231,7 @@ impl<'domain, const N: usize> DrainedRotation<'domain, N> {
         DrainedGeneration {
             index: self.old,
             #[cfg(test)]
-            _domain: &self.authority.domain.current,
+            domain: &self.authority.domain.current,
             transition: std::marker::PhantomData,
         }
     }

@@ -1427,7 +1427,7 @@ impl<A: crate::Addin> CompletedRemovalIntent<'_, A> {
 /// Canonical generation is ready for observation and external admission.
 /// Only this owner can advance committed history after ingress publication.
 pub(crate) struct CommittedOpen<'access, 'coordinator, A: crate::Addin> {
-    _access: &'access mut LifecycleAccess<'coordinator, A>,
+    access: &'access mut LifecycleAccess<'coordinator, A>,
     attempt: OpenAttemptId,
 }
 
@@ -1439,7 +1439,7 @@ impl<A: crate::Addin> CommittedOpen<'_, '_, A> {
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn access(&self) -> &LifecycleAccess<'_, A> {
-        self._access
+        self.access
     }
 
     pub(crate) fn publish(
@@ -1447,7 +1447,7 @@ impl<A: crate::Addin> CommittedOpen<'_, '_, A> {
         ingress: crate::ingress::OpeningPublication<'static>,
     ) -> Result<(), crate::ingress::OpeningPublicationLost> {
         ingress.publish(crate::module_runtime::ingress())?;
-        self._access.transition(|core| {
+        self.access.transition(|core| {
             core.last_committed_generation = Some(self.attempt.into_runtime_generation());
             ((), TransitionEffect::Keep)
         });
@@ -2082,7 +2082,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             }
         })?;
         Ok(CommittedOpen {
-            _access: core,
+            access: core,
             attempt: published.attempt,
         })
     }
