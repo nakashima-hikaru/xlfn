@@ -217,7 +217,7 @@ impl DetachedInitializations {
 
 pub(crate) struct TopicTableState {
     pub(crate) by_key: FxHashMap<HandleTopicKey, Topic>,
-    pub(crate) by_lifetime_key: std::collections::HashMap<String, HandleTopicKey>,
+    pub(crate) by_lifetime_key: FxHashMap<String, HandleTopicKey>,
     pub(crate) by_observer_id: FxHashMap<FormulaObserverId, HandleTopicKey>,
     pub(crate) initializing: FxHashMap<HandleTopicKey, InitializationPtr>,
     pub(crate) generation: TopicGeneration,
@@ -228,7 +228,7 @@ impl Default for TopicTableState {
     fn default() -> Self {
         Self {
             by_key: FxHashMap::default(),
-            by_lifetime_key: std::collections::HashMap::new(),
+            by_lifetime_key: FxHashMap::default(),
             by_observer_id: FxHashMap::default(),
             initializing: FxHashMap::default(),
             generation: TopicGeneration::ONE,
@@ -273,7 +273,7 @@ impl Topic {
 
     fn remove_indexes(
         &self,
-        by_lifetime_key: &mut std::collections::HashMap<String, HandleTopicKey>,
+        by_lifetime_key: &mut FxHashMap<String, HandleTopicKey>,
         by_observer_id: &mut FxHashMap<FormulaObserverId, HandleTopicKey>,
     ) {
         by_lifetime_key.remove(self.publication.lifetime_key.as_str());
