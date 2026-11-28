@@ -373,7 +373,8 @@ fn publication_rejects_lifetime_key_collision_without_overwriting_existing_topic
     }
 
     let result = runtime.prepare(second_key, || Ok(DataRecord(2)));
-    assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+    assert!(matches!(
+        (result).as_ref().map_err(crate::error::construct::view),
         Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::HANDLE_TOPIC_COLLISION,
             ..
@@ -902,7 +903,8 @@ fn csprng_failure_is_a_stable_initialization_error_not_a_panic() {
     let error = HandleRegistry::try_new_with(2, |_| Err("injected CSPRNG failure"), false)
         .err()
         .expect("injected entropy failure is returned");
-    assert!(matches!(crate::error::construct::view(&(error)),
+    assert!(matches!(
+        crate::error::construct::view(&(error)),
         crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::HANDLE_ENTROPY,
             ..
@@ -2084,10 +2086,12 @@ fn handle_lease_survives_terminal_runtime_close() {
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     assert_eq!(pinned.value_for_test().0.load(Ordering::SeqCst), 0);
-    assert!(matches!((sealed.finish_quiescence()).as_ref().map_err(crate::error::construct::view),
-        Err(crate::error::construct::ErrorView::Internal { diagnostic_id, .. })
-            if diagnostic_id == crate::diagnostics::catalog::HANDLE_PINS
-    ));
+    assert!(
+        matches!((sealed.finish_quiescence()).as_ref().map_err(crate::error::construct::view),
+            Err(crate::error::construct::ErrorView::Internal { diagnostic_id, .. })
+                if diagnostic_id == crate::diagnostics::catalog::HANDLE_PINS
+        )
+    );
     drop(pinned);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     sealed.finish_quiescence().unwrap();
@@ -2432,7 +2436,10 @@ fn failed_observation_does_not_publish_a_topic_and_allows_retry() {
             ))
         },
     );
-    assert!(matches!((first).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::ExcelApi { .. })));
+    assert!(matches!(
+        (first).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::ExcelApi { .. })
+    ));
     assert_eq!(runtime.len(), 0);
 
     let preparation = runtime
@@ -2474,7 +2481,10 @@ fn cache_hit_observe_failure_does_not_invalidate_object() {
             ))
         },
     );
-    assert!(matches!((result).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::ExcelApi { .. })));
+    assert!(matches!(
+        (result).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::ExcelApi { .. })
+    ));
 
     // factory was never invoked because cache hit skips it
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -2511,7 +2521,10 @@ fn cache_hit_observe_failure_preserves_existing_topic() {
             ))
         },
     );
-    assert!(matches!((result).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::ExcelApi { .. })));
+    assert!(matches!(
+        (result).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::ExcelApi { .. })
+    ));
 
     // Retry with successful observation still reuses the same object
     let retry_preparation = runtime
@@ -2860,7 +2873,10 @@ fn concurrent_waiter_retries_after_observation_failure() {
     }
 
     finish_tx.send(()).unwrap();
-    assert!(matches!((first.join().unwrap()).as_ref().map_err(crate::error::construct::view),
+    assert!(matches!(
+        (first.join().unwrap())
+            .as_ref()
+            .map_err(crate::error::construct::view),
         Err(crate::error::construct::ErrorView::ExcelApi { .. })
     ));
     let second_preparation = second.join().unwrap().unwrap();
@@ -3554,7 +3570,10 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
         let err = return_ctx
             .publish_new_handle(|| Ok(TestObj(456)))
             .unwrap_err();
-        assert!(matches!(crate::error::construct::view(&(err)), crate::error::construct::ErrorView::ExcelApi { .. }));
+        assert!(matches!(
+            crate::error::construct::view(&(err)),
+            crate::error::construct::ErrorView::ExcelApi { .. }
+        ));
     });
 }
 

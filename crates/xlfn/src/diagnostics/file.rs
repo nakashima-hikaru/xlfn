@@ -917,7 +917,8 @@ mod bounded_text_tests {
             bounded_diagnostic_text("udf"),
             Cow::Borrowed("udf")
         ));
-        let error = crate::XllError::native(17, "a\n\u{0085}日本🦀".repeat(DIAGNOSTIC_TEXT_MAX_BYTES));
+        let error =
+            crate::XllError::native(17, "a\n\u{0085}日本🦀".repeat(DIAGNOSTIC_TEXT_MAX_BYTES));
         let expected: String = bounded_diagnostic_text(&error.to_string())
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })

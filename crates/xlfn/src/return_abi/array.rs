@@ -76,13 +76,15 @@ pub struct ExcelArrayBuilder {
 impl ExcelArrayBuilder {
     /// Allocates an array builder after validating positive dimensions and payload limits.
     pub fn new(rows: usize, columns: usize) -> XllResult<Self> {
-        let len = rows.checked_mul(columns).ok_or(XllError::domain(DomainErrorCode::Overflow))?;
+        let len = rows
+            .checked_mul(columns)
+            .ok_or(XllError::domain(DomainErrorCode::Overflow))?;
 
         validate_matrix_dimensions(rows, columns, len)?;
 
-        let cell_bytes =
-            len.checked_mul(std::mem::size_of::<XLOPER12>())
-                .ok_or(XllError::domain(DomainErrorCode::Overflow))?;
+        let cell_bytes = len
+            .checked_mul(std::mem::size_of::<XLOPER12>())
+            .ok_or(XllError::domain(DomainErrorCode::Overflow))?;
 
         if cell_bytes > MAX_ARRAY_BYTES {
             return Err(XllError::input(
@@ -315,14 +317,20 @@ mod tests {
             panic!("dimensions must be validated before reading values")
         });
         assert!(ExcelArrayOutput::from_iter(0, 1, invalid_shape).is_err());
-        assert!(matches!((ExcelArrayOutput::from_iter(1, 2, ["written"])).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (ExcelArrayOutput::from_iter(1, 2, ["written"]))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::ElementCountMismatch {
                 expected: 2,
                 actual: 1,
                 ..
             })
         ));
-        assert!(matches!((ExcelArrayOutput::from_iter(1, 1, ["written", "extra"])).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (ExcelArrayOutput::from_iter(1, 1, ["written", "extra"]))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::Malformed("too many array cells"),
                 ..
@@ -333,7 +341,10 @@ mod tests {
         let values = ["written", overlong.as_str()]
             .into_iter()
             .chain(std::iter::from_fn(|| panic!("reads must stop on error")));
-        assert!(matches!((ExcelArrayOutput::from_iter(1, 3, values)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (ExcelArrayOutput::from_iter(1, 3, values))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge { .. },
                 ..
@@ -381,7 +392,10 @@ mod tests {
             builder.push_f64(f64::NAN),
             Err(__err) if __err.domain_code() == Some(DomainErrorCode::InvalidInput)
         ));
-        assert!(matches!((builder.push_f64(1.0)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (builder.push_f64(1.0))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::Malformed("too many array cells"),
                 ..
@@ -397,7 +411,10 @@ mod tests {
 
     #[test]
     fn numeric_slice_encoding_rejects_shape_and_non_finite_values() {
-        assert!(matches!((ExcelArrayBuilder::from_f64(1, 2, &[1.0])).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (ExcelArrayBuilder::from_f64(1, 2, &[1.0]))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::ElementCountMismatch { .. })
         ));
         assert!(ExcelArrayBuilder::from_f64(0, 1, &[]).is_err());

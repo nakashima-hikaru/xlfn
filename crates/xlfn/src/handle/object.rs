@@ -185,7 +185,10 @@ impl ObjectArena {
         if entry.cell.as_non_null() != cell {
             return Err(XllError::STALE_HANDLE);
         }
-        entry.bindings = entry.bindings.checked_add(1).ok_or(XllError::domain(crate::error::DomainErrorCode::Overflow))?;
+        entry.bindings = entry
+            .bindings
+            .checked_add(1)
+            .ok_or(XllError::domain(crate::error::DomainErrorCode::Overflow))?;
         Ok(())
     }
 
@@ -199,12 +202,18 @@ impl ObjectArena {
         if state.sealed {
             return Err(XllError::CLOSING);
         }
-        let active_pins = state.active_pins.checked_add(1).ok_or(XllError::domain(crate::error::DomainErrorCode::Overflow))?;
+        let active_pins = state
+            .active_pins
+            .checked_add(1)
+            .ok_or(XllError::domain(crate::error::DomainErrorCode::Overflow))?;
         let entry = state.objects.get_mut(&id).ok_or(XllError::STALE_HANDLE)?;
         if entry.cell.as_non_null() != cell {
             return Err(XllError::STALE_HANDLE);
         }
-        entry.pins = entry.pins.checked_add(1).ok_or(XllError::domain(crate::error::DomainErrorCode::Overflow))?;
+        entry.pins = entry
+            .pins
+            .checked_add(1)
+            .ok_or(XllError::domain(crate::error::DomainErrorCode::Overflow))?;
         state.active_pins = active_pins;
         drop(state);
         #[cfg(any(test, feature = "refinement"))]
@@ -860,7 +869,10 @@ mod tests {
             assert!(matches!(binding.acquire_lease(), Err(__err) if __err.is_closing()));
         }
         drop(bindings);
-        assert!(matches!((arena.finish_quiescence()).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (arena.finish_quiescence())
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Internal {
                 diagnostic_id: crate::diagnostics::catalog::HANDLE_PINS,
                 ..
@@ -1028,7 +1040,10 @@ mod tests {
             assert!(state.objects.is_empty());
             assert_eq!((state.active_pins, state.active_releases), (0, 1));
         }
-        assert!(matches!((arena.finish_quiescence()).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (arena.finish_quiescence())
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Internal {
                 diagnostic_id: crate::diagnostics::catalog::HANDLE_OBJECTS,
                 ..
@@ -1404,7 +1419,10 @@ mod tests {
                         self.release_depth,
                     );
                 }
-                assert!(matches!((arena.finish_quiescence()).as_ref().map_err(crate::error::construct::view),
+                assert!(matches!(
+                    (arena.finish_quiescence())
+                        .as_ref()
+                        .map_err(crate::error::construct::view),
                     Err(crate::error::construct::ErrorView::Internal {
                         diagnostic_id: crate::diagnostics::catalog::HANDLE_OBJECTS,
                         ..

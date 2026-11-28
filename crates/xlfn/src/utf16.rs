@@ -417,7 +417,10 @@ mod tests {
                 String::from_utf16(&units).unwrap()
             );
             units[index + 1] = 0x41;
-            assert!(matches!((decode_owned(&units, "test")).as_ref().map_err(crate::error::construct::view),
+            assert!(matches!(
+                (decode_owned(&units, "test"))
+                    .as_ref()
+                    .map_err(crate::error::construct::view),
                 Err(crate::error::construct::ErrorView::Input {
                     argument: "test",
                     reason: InputError::InvalidUtf16,
@@ -489,7 +492,10 @@ mod tests {
             assert_eq!(encoded.len(), usize::from(encoded[0]) + 1);
         }
         for text in ["x".repeat(32_768), "あ".repeat(32_768), "💡".repeat(16_384)] {
-            assert!(matches!((encode_counted(&text, "test", EXCEL_STRING_LIMIT)).as_ref().map_err(crate::error::construct::view),
+            assert!(matches!(
+                (encode_counted(&text, "test", EXCEL_STRING_LIMIT))
+                    .as_ref()
+                    .map_err(crate::error::construct::view),
                 Err(crate::error::construct::ErrorView::Input {
                     argument: "test",
                     reason: InputError::TooLarge {
@@ -499,7 +505,10 @@ mod tests {
                 }),
             ));
         }
-        assert!(matches!((encode_counted(&"x".repeat(65_536), "test", usize::MAX)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (encode_counted(&"x".repeat(65_536), "test", usize::MAX))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: 65_535,
@@ -565,7 +574,10 @@ mod tests {
 
         let ascii_over_limit = "x".repeat(EXCEL_STRING_LIMIT + 1);
         assert_eq!(ascii_over_limit.len(), 32_768);
-        assert!(matches!((validate_utf16_limit(&ascii_over_limit, "test", EXCEL_STRING_LIMIT)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (validate_utf16_limit(&ascii_over_limit, "test", EXCEL_STRING_LIMIT))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: 32_767,
@@ -584,7 +596,10 @@ mod tests {
         assert!(validate_utf16_limit(&bmp_at_limit, "test", EXCEL_STRING_LIMIT).is_ok());
 
         let bmp_over_limit = "あ".repeat(EXCEL_STRING_LIMIT + 1);
-        assert!(matches!((validate_utf16_limit(&bmp_over_limit, "test", EXCEL_STRING_LIMIT)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (validate_utf16_limit(&bmp_over_limit, "test", EXCEL_STRING_LIMIT))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: 32_767,
@@ -604,7 +619,10 @@ mod tests {
 
         let astral_over_at_32768 = "😀".repeat(16_384);
         assert_eq!(astral_over_at_32768.len(), 16_384 * 4);
-        assert!(matches!((validate_utf16_limit(&astral_over_at_32768, "test", EXCEL_STRING_LIMIT)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (validate_utf16_limit(&astral_over_at_32768, "test", EXCEL_STRING_LIMIT))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: 32_767,
@@ -627,7 +645,10 @@ mod tests {
         let mut mixed_over_limit = "a".repeat(32_765);
         mixed_over_limit.push('あ');
         mixed_over_limit.push('😀');
-        assert!(matches!((validate_utf16_limit(&mixed_over_limit, "test", EXCEL_STRING_LIMIT)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (validate_utf16_limit(&mixed_over_limit, "test", EXCEL_STRING_LIMIT))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: 32_767,

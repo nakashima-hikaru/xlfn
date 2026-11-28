@@ -216,7 +216,10 @@ mod tests {
                 ..first
             },
         ] {
-            assert!(matches!((preflight_registration(&[first, second])).as_ref().map_err(crate::error::construct::view),
+            assert!(matches!(
+                (preflight_registration(&[first, second]))
+                    .as_ref()
+                    .map_err(crate::error::construct::view),
                 Err(crate::error::construct::ErrorView::Internal {
                     diagnostic_id: crate::diagnostics::catalog::REGISTRY,
                     ..
@@ -285,13 +288,19 @@ mod tests {
             },
             ..descriptor()
         };
-        assert!(matches!((preflight_registration(&[first, second])).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (preflight_registration(&[first, second]))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Internal {
                 diagnostic_id: crate::diagnostics::catalog::REGISTRY,
                 ..
             })
         ));
-        assert!(matches!((preflight_registration(&[first])).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (preflight_registration(&[first]))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Internal {
                 diagnostic_id: crate::diagnostics::catalog::STRING_LENGTH,
                 ..
@@ -347,7 +356,10 @@ mod tests {
             arguments: &INVALID_ARGUMENTS,
             ..descriptor
         };
-        assert!(matches!((preflight_registration(&[invalid])).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (preflight_registration(&[invalid]))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Internal {
                 diagnostic_id: crate::diagnostics::catalog::STRING_LENGTH,
                 ..
@@ -360,7 +372,10 @@ mod tests {
             category: long_category,
             ..self::descriptor()
         };
-        assert!(matches!((preflight_registration(&[over_category])).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (preflight_registration(&[over_category]))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Internal {
                 diagnostic_id: crate::diagnostics::catalog::STRING_LENGTH,
                 ..

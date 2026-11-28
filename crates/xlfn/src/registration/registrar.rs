@@ -262,7 +262,10 @@ mod tests {
                 excel_name: name,
                 ..test_descriptor()
             };
-            assert!(matches!((preflight_registration(&[descriptor])).as_ref().map_err(crate::error::construct::view),
+            assert!(matches!(
+                (preflight_registration(&[descriptor]))
+                    .as_ref()
+                    .map_err(crate::error::construct::view),
                 Err(crate::error::construct::ErrorView::Internal {
                     diagnostic_id: crate::diagnostics::catalog::REGISTRY,
                     ..
@@ -306,7 +309,8 @@ mod tests {
             else {
                 panic!("registration replaced a bound name");
             };
-            assert!(matches!(crate::error::construct::view(&(*error.source)),
+            assert!(matches!(
+                crate::error::construct::view(&error.source),
                 crate::error::construct::ErrorView::RegistrationConflict { name: NAME, .. }
             ));
             script.assert_calls(&[XLF_EVALUATE]);
@@ -522,7 +526,8 @@ mod tests {
             assert!(outcome.failed.is_empty());
             assert!(outcome.succeeded.is_empty());
             assert_eq!(outcome.metadata_debt.len(), 1);
-            assert!(matches!(crate::error::construct::view(&(outcome.metadata_debt[0].last_error())),
+            assert!(matches!(
+                crate::error::construct::view(outcome.metadata_debt[0].last_error()),
                 crate::error::construct::ErrorView::MetadataDebtBindingChanged {
                     name: "TEST.OWNED",
                     ..

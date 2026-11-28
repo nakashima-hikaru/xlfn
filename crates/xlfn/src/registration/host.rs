@@ -1113,7 +1113,10 @@ mod tests {
             XLOPER12::number(1.0),
         ] {
             let result = ExcelCallbackValue::from_raw_for_test(raw);
-            assert!(matches!((read_applied_bool(&result, ExcelApiFunction::Unregister)).as_ref().map_err(crate::error::construct::view),
+            assert!(matches!(
+                (read_applied_bool(&result, ExcelApiFunction::Unregister))
+                    .as_ref()
+                    .map_err(crate::error::construct::view),
                 Err(crate::error::construct::ErrorView::ExcelApi {
                     function: ExcelApiFunction::Unregister,
                     failure: ExcelApiFailure::UnexpectedResult,

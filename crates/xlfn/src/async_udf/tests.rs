@@ -939,7 +939,10 @@ fn timed_close_retains_executor_until_blocking_poll_returns() {
         )
         .unwrap();
     started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    assert!(matches!((lifecycle.close_with_timeout(Duration::from_millis(10))).as_ref().map_err(crate::error::construct::view),
+    assert!(matches!(
+        (lifecycle.close_with_timeout(Duration::from_millis(10)))
+            .as_ref()
+            .map_err(crate::error::construct::view),
         Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::ASYNC_TIME,
             ..
@@ -1632,7 +1635,10 @@ fn async_boundary_records_delivery_rejection_as_failure() {
             if metadata.udf_id == "test_async_layer_rejection" {
                 // Give the call clock a predictable, positive elapsed value.
                 std::thread::sleep(Duration::from_millis(1));
-                return Err(XllError::native(75, "injected layer admission failure".to_owned()));
+                return Err(XllError::native(
+                    75,
+                    "injected layer admission failure".to_owned(),
+                ));
             }
             Ok(())
         }
@@ -1766,7 +1772,10 @@ fn async_boundary_records_delivery_rejection_as_failure() {
             &mut handle,
             |_, _, _| {
                 Ok(async {
-                    Err::<f64, _>(XllError::native(73, "injected computation failure".to_owned()))
+                    Err::<f64, _>(XllError::native(
+                        73,
+                        "injected computation failure".to_owned(),
+                    ))
                 })
             },
         );
@@ -1812,7 +1821,10 @@ fn async_boundary_records_delivery_rejection_as_failure() {
                             runtime.async_runtime().cancel_current_calculation();
                             Ok(std::future::ready(Ok::<_, XllError>(42.0)))
                         } else {
-                            Err(XllError::native(74, "injected synchronous preparation failure".to_owned()))
+                            Err(XllError::native(
+                                74,
+                                "injected synchronous preparation failure".to_owned(),
+                            ))
                         }
                     },
                 );

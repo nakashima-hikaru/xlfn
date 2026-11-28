@@ -1034,7 +1034,10 @@ fn spawn_failure_preserves_capture_until_disposal_outside_source_mutexes() {
         crate::subscription::tests::connected_sink::<i32>(None, "spawn-failure");
     source.fail_spawn.store(true, Ordering::Release);
     let result = source.subscribe(&RtdTopic::single("spawn-failure").unwrap(), sink);
-    assert!(matches!((result).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::Native { .. })));
+    assert!(matches!(
+        (result).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Native { .. })
+    ));
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     assert!(matches!(*source.worker.state.lock(), Worker::Unstarted(_)));
     assert!(source.worker.shared.state.lock().active.is_empty());
@@ -1068,7 +1071,10 @@ fn miri_multiplex_spawn_failure_retries_the_same_job_without_a_stale_event() {
         crate::subscription::tests::connected_sink::<i32>(None, "multiplex-retry");
     source.fail_spawn.store(true, Ordering::Relaxed);
     let first = source.subscribe(&RtdTopic::single("abandoned").unwrap(), sink.clone());
-    assert!(matches!((first).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::Native { .. })));
+    assert!(matches!(
+        (first).as_ref().map_err(crate::error::construct::view),
+        Err(crate::error::construct::ErrorView::Native { .. })
+    ));
     assert!(!source.worker.shared.closed.load(Ordering::Acquire));
     {
         let state = source.worker.shared.state.lock();

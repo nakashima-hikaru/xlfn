@@ -917,10 +917,11 @@ impl TerminationWorker {
     }
 
     fn dispatch_error(error: crate::XllError) -> ServerCloseError {
-        let code = match error {
-            crate::XllError::Native { code, .. } | crate::XllError::WindowsApi { code, .. } => code,
-            _ => crate::win32::E_UNEXPECTED,
-        };
+        let code = error
+            .native_details()
+            .map(|(code, _)| code)
+            .or_else(|| error.windows_api_details().map(|(_, code)| code))
+            .unwrap_or(crate::win32::E_UNEXPECTED);
         ServerCloseError::WaitFailed(code)
     }
 

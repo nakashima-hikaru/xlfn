@@ -1616,7 +1616,10 @@ mod tests {
                             crate::host_api::ExcelHost::new(&callbacks),
                         ),
                     );
-                    assert!(matches!((context.rtd().subscribe(&source, &topic)).as_ref().map_err(crate::error::construct::view),
+                    assert!(matches!(
+                        (context.rtd().subscribe(&source, &topic))
+                            .as_ref()
+                            .map_err(crate::error::construct::view),
                         Err(crate::error::construct::ErrorView::ExcelApi {
                             function: crate::ExcelApiFunction::Rtd,
                             failure: crate::ExcelApiFailure::Status(

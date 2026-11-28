@@ -502,7 +502,8 @@ fn numeric_element_count(rows: usize, columns: usize) -> XllResult<usize> {
     // budget equally on 32-bit and 64-bit hosts.
     enforce_limit(rows, 1_048_576, "<numeric return rows>")?;
     enforce_limit(columns, 16_384, "<numeric return columns>")?;
-    rows.checked_mul(columns).ok_or(XllError::domain(DomainErrorCode::Overflow))
+    rows.checked_mul(columns)
+        .ok_or(XllError::domain(DomainErrorCode::Overflow))
 }
 
 fn enforce_limit(actual: usize, limit: usize, argument: &'static str) -> XllResult<()> {
@@ -546,7 +547,9 @@ fn retained_bytes_after(
     limit: usize,
     argument: &'static str,
 ) -> XllResult<usize> {
-    let next = current.checked_add(additional).ok_or(XllError::domain(DomainErrorCode::Overflow))?;
+    let next = current
+        .checked_add(additional)
+        .ok_or(XllError::domain(DomainErrorCode::Overflow))?;
     enforce_limit(next, limit, argument)?;
     Ok(next)
 }
@@ -654,14 +657,20 @@ mod tests {
         let invalid_shape =
             std::iter::from_fn(|| panic!("dimensions must be validated before reading values"));
         assert!(NumericArrayOutput::from_iter(1, 0, invalid_shape).is_err());
-        assert!(matches!((NumericArrayOutput::from_iter(1, 2, [1.0])).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (NumericArrayOutput::from_iter(1, 2, [1.0]))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::ElementCountMismatch {
                 expected: 2,
                 actual: 1,
                 ..
             })
         ));
-        assert!(matches!((NumericArrayOutput::from_iter(1, 1, [1.0, 2.0])).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (NumericArrayOutput::from_iter(1, 1, [1.0, 2.0]))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::Malformed("too many array cells"),
                 ..
@@ -814,7 +823,10 @@ mod tests {
         assert!(NumericArrayBuilder::new(1, 1).unwrap().finish().is_err());
         assert!(NumericArrayBuilder::new(0, 1).is_err());
         assert!(NumericArrayBuilder::new(usize::MAX, 2).is_err());
-        assert!(matches!((NumericArrayBuilder::new(1024, 2048)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (NumericArrayBuilder::new(1024, 2048))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: MAX_NUMERIC_RETURN_BYTES,
@@ -850,7 +862,10 @@ mod tests {
                 values[index] = saved;
             }
         }
-        assert!(matches!((NumericArrayBuilder::from_f64(1, 2, &[f64::NAN])).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (NumericArrayBuilder::from_f64(1, 2, &[f64::NAN]))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::ElementCountMismatch { .. })
         ));
     }
@@ -864,7 +879,10 @@ mod tests {
         drop(builder);
         // Valid Excel axes reach the FP12 byte check before any allocation or
         // generic XLOPER12 element-count rejection.
-        assert!(matches!((NumericArrayBuilder::new(1_048_576, 4)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (NumericArrayBuilder::new(1_048_576, 4))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: MAX_NUMERIC_RETURN_BYTES,
@@ -873,7 +891,10 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!((NumericArrayBuilder::new(1_048_577, 1)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (NumericArrayBuilder::new(1_048_577, 1))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: 1_048_576,
@@ -882,7 +903,10 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!((NumericArrayBuilder::new(1, 16_385)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (NumericArrayBuilder::new(1, 16_385))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge { limit: 16_384, .. },
                 ..
@@ -1048,7 +1072,8 @@ mod tests {
             .unwrap()
             .publish(&call);
         THREAD_STATE.with(|slot| slot.set(original));
-        assert!(matches!((rejected).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (rejected).as_ref().map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: MAX_THREAD_NUMERIC_RETURN_BYTES,
@@ -1073,8 +1098,10 @@ mod tests {
                 retained_bytes_after(limit - 16, 16, limit, "test").unwrap(),
                 limit
             );
-            assert!(matches!((retained_bytes_after(limit, 1, limit, "test")).as_ref().map_err(crate::error::construct::view),
-                Err(crate::error::construct::ErrorView::Input { reason: InputError::TooLarge { actual, .. }, .. }) if *actual == limit + 1));
+            assert!(
+                matches!((retained_bytes_after(limit, 1, limit, "test")).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input { reason: InputError::TooLarge { actual, .. }, .. }) if *actual == limit + 1)
+            );
         }
         assert!(matches!(
             retained_bytes_after(usize::MAX, 1, usize::MAX, "test"),

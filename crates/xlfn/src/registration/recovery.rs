@@ -193,7 +193,8 @@ mod tests {
         assert_eq!(remaining.len(), 2);
         for debt in remaining {
             assert_eq!(debt.attempts(), 2);
-            assert!(matches!(crate::error::construct::view(&(debt.last_error())),
+            assert!(matches!(
+                crate::error::construct::view(debt.last_error()),
                 crate::error::construct::ErrorView::MetadataDebtBindingChanged {
                     name: "TEST.REBOUND",
                     ..
@@ -340,12 +341,14 @@ mod tests {
             let ledger = HostLedger::new();
             ledger.retain_metadata_debt(vec![debt("TEST.OWNED", 7.0)]);
 
-            assert!(matches!((retry_metadata_debt(&ledger, &callbacks)).as_ref().map_err(crate::error::construct::view),
-                Err(crate::error::construct::ErrorView::ExcelApi {
-                    failure: crate::error::ExcelApiFailure::Suppressed(terminal),
-                    ..
-                }) if terminal == crate::error::callback_status_from_raw(status),
-            ));
+            assert!(
+                matches!((retry_metadata_debt(&ledger, &callbacks)).as_ref().map_err(crate::error::construct::view),
+                    Err(crate::error::construct::ErrorView::ExcelApi {
+                        failure: crate::error::ExcelApiFailure::Suppressed(terminal),
+                        ..
+                    }) if terminal == crate::error::callback_status_from_raw(status),
+                )
+            );
             assert!(!ledger.metadata_debt_status().has_pending_work());
             assert_eq!(
                 callbacks.terminal_status(),
@@ -363,12 +366,14 @@ mod tests {
             callbacks.suppress_for_test(status);
             let ledger = HostLedger::new();
 
-            assert!(matches!((retry_metadata_debt(&ledger, &callbacks)).as_ref().map_err(crate::error::construct::view),
-                Err(crate::error::construct::ErrorView::ExcelApi {
-                    failure: crate::error::ExcelApiFailure::Suppressed(terminal),
-                    ..
-                }) if terminal == status,
-            ));
+            assert!(
+                matches!((retry_metadata_debt(&ledger, &callbacks)).as_ref().map_err(crate::error::construct::view),
+                    Err(crate::error::construct::ErrorView::ExcelApi {
+                        failure: crate::error::ExcelApiFailure::Suppressed(terminal),
+                        ..
+                    }) if terminal == status,
+                )
+            );
             let outcome = retry_metadata_debt_with_host(
                 &RegistrationHost::new(&callbacks),
                 MetadataDebts::new(),

@@ -503,7 +503,10 @@ mod budget_tests {
             .observer()
             .payload_bytes
             .store(0, Ordering::Relaxed);
-        let oversized = crate::XllError::native(1, "x".repeat(super::super::DIAGNOSTIC_PAYLOAD_MAX_BYTES + 1));
+        let oversized = crate::XllError::native(
+            1,
+            "x".repeat(super::super::DIAGNOSTIC_PAYLOAD_MAX_BYTES + 1),
+        );
         sink.report(&oversized, || {
             panic!("an oversize error must not be cloned")
         });

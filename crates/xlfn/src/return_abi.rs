@@ -102,9 +102,11 @@ impl PreparedReturn {
 
         enforce_return_limit(total_bytes)?;
 
-        let rows = i32::try_from(encoded.rows).map_err(|_| XllError::domain(crate::error::DomainErrorCode::Overflow))?;
+        let rows = i32::try_from(encoded.rows)
+            .map_err(|_| XllError::domain(crate::error::DomainErrorCode::Overflow))?;
 
-        let columns = i32::try_from(encoded.columns).map_err(|_| XllError::domain(crate::error::DomainErrorCode::Overflow))?;
+        let columns = i32::try_from(encoded.columns)
+            .map_err(|_| XllError::domain(crate::error::DomainErrorCode::Overflow))?;
 
         // Establish the non-retagging owner before deriving the ABI pointer:
         // PreparedReturn and ReturnBlock both move after cells are published.

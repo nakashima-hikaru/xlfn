@@ -72,7 +72,7 @@ impl<T, D: RtdDeliveryPolicy> RtdSourceContext<T, D> {
     /// Waits for a subscription change, returning `None` on timeout.
     ///
     /// A zero timeout polls without waiting. Source cancellation wakes the
-    /// waiter and returns [`XllError::Closing`]. Reading an unsubscribe returns
+    /// waiter and returns [`XllError::CLOSING`]. Reading an unsubscribe returns
     /// its reserved control capacity before handing the event to the caller.
     pub fn recv_timeout(&self, timeout: Duration) -> XllResult<Option<RtdSourceEvent<T, D>>> {
         let mut state = self.shared.state.lock();

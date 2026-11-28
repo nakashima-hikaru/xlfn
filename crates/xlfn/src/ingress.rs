@@ -578,7 +578,10 @@ impl ExportIngress {
             fault.set(Some((target, attempts)));
             attempts == target
         }) {
-            return Err(crate::XllError::native(-1, "injected export drain preparation failure"));
+            return Err(crate::XllError::native(
+                -1,
+                "injected export drain preparation failure",
+            ));
         }
         if crate::return_abi::numeric::Fp12CallGuard::on_current_thread()
             || active_export_on_current_thread()
@@ -742,7 +745,10 @@ mod tests {
         let sta_udf = crate::return_abi::numeric::Fp12CallGuard::enter();
         let admitted = ingress.enter_with(|| {});
         ingress.begin_close_with(|| {});
-        assert!(matches!((ingress.seal_and_drain()).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (ingress.seal_and_drain())
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Native { .. })
         ));
         assert_eq!(ingress.phase(), PHASE_CLOSING);
@@ -757,7 +763,10 @@ mod tests {
         let non_fp12_scope = ThreadExportGuard::enter();
         let non_fp12_admitted = second.enter_with(|| {});
         second.begin_close_with(|| {});
-        assert!(matches!((second.seal_and_drain()).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (second.seal_and_drain())
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Native { .. })
         ));
         drop(non_fp12_admitted);

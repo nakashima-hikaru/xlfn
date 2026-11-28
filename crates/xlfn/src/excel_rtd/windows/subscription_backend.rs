@@ -204,10 +204,10 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> DrainWork for ConnectDat
                 Err(code) => {
                     crate::diagnostics::report_no_unwind(
                         "IRtdServer::ConnectData apartment",
-                        &crate::XllError::Native {
+                        &crate::XllError::native(
                             code,
-                            message: "failed to initialize COM connection apartment".into(),
-                        },
+                            "failed to initialize COM connection apartment",
+                        ),
                     );
                     return E_FAIL;
                 }

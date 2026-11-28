@@ -61,13 +61,14 @@ impl CallIds {
             .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
         // The stamp carries identity only, not visibility of any runtime
         // state. Concurrent initializers agree on the first published value.
-        let raw = match self
-            .issuer
-            .compare_exchange(0, candidate, Ordering::Relaxed, Ordering::Relaxed)
-        {
-            Ok(_) => candidate,
-            Err(issuer) => issuer,
-        };
+        let raw =
+            match self
+                .issuer
+                .compare_exchange(0, candidate, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => candidate,
+                Err(issuer) => issuer,
+            };
         NonZeroU64::new(raw).unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
     }
 

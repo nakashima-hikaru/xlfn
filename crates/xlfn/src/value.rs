@@ -2548,9 +2548,11 @@ mod tests {
                 let write = cow.write_into(&mut array);
                 if text == too_long {
                     for error in [scalar.err().unwrap(), write.unwrap_err()] {
-                        assert!(matches!(crate::error::construct::view(&(error)), crate::error::construct::ErrorView::Input {
+                        assert!(
+                            matches!(crate::error::construct::view(&(error)), crate::error::construct::ErrorView::Input {
                             reason: InputError::TooLarge { limit, actual }, ..
-                        } if *limit == crate::utf16::EXCEL_STRING_LIMIT && *actual == *limit + 1));
+                        } if *limit == crate::utf16::EXCEL_STRING_LIMIT && *actual == *limit + 1)
+                        );
                     }
                 } else {
                     let scalar = scalar.unwrap();
@@ -2804,7 +2806,10 @@ mod tests {
     #[test]
     fn integer_conversion_checks_fraction_and_range() {
         let mut fractional = XLOPER12::number(1.5);
-        assert!(matches!((convert::<i32>(&mut fractional)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (convert::<i32>(&mut fractional))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::NotInteger,
                 ..
@@ -2812,7 +2817,10 @@ mod tests {
         ));
 
         let mut huge = XLOPER12::number(i32::MAX as f64 + 1.0);
-        assert!(matches!((convert::<i32>(&mut huge)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (convert::<i32>(&mut huge))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::NumericOverflow,
                 ..
@@ -2825,13 +2833,18 @@ mod tests {
         let per_cell = std::mem::size_of::<XLOPER12>() + std::mem::size_of::<f64>();
         let maximum = MAX_ARRAY_BYTES / per_cell;
         assert!(ArrayInputBudget::new::<f64>(maximum, "values").is_ok());
-        assert!(matches!((ArrayInputBudget::new::<f64>(maximum + 1, "values")).as_ref().map_err(crate::error::construct::view),
-            Err(crate::error::construct::ErrorView::Input {
-                argument: "values",
-                reason: InputError::TooLarge { limit: MAX_ARRAY_BYTES, actual },
-            }) if *actual == (maximum + 1) * per_cell
-        ));
-        assert!(matches!((ArrayInputBudget::new::<f64>(usize::MAX, "values")).as_ref().map_err(crate::error::construct::view),
+        assert!(
+            matches!((ArrayInputBudget::new::<f64>(maximum + 1, "values")).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
+                    argument: "values",
+                    reason: InputError::TooLarge { limit: MAX_ARRAY_BYTES, actual },
+                }) if *actual == (maximum + 1) * per_cell
+            )
+        );
+        assert!(matches!(
+            (ArrayInputBudget::new::<f64>(usize::MAX, "values"))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::Malformed("output byte-size overflow"),
                 ..
@@ -2855,12 +2868,14 @@ mod tests {
         };
         assert!(budget.include(value).is_ok());
         assert_eq!(budget.referenced_bytes, MAX_ARRAY_BYTES);
-        assert!(matches!((budget.include(value)).as_ref().map_err(crate::error::construct::view),
-            Err(crate::error::construct::ErrorView::Input {
-                argument: "values",
-                reason: InputError::TooLarge { limit: MAX_ARRAY_BYTES, actual },
-            }) if *actual == MAX_ARRAY_BYTES + 5
-        ));
+        assert!(
+            matches!((budget.include(value)).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
+                    argument: "values",
+                    reason: InputError::TooLarge { limit: MAX_ARRAY_BYTES, actual },
+                }) if *actual == MAX_ARRAY_BYTES + 5
+            )
+        );
     }
 
     #[test]
@@ -2882,12 +2897,14 @@ mod tests {
         budget.referenced_bytes = MAX_ARRAY_BYTES - 6;
         budget.include_raw(value).unwrap();
         assert_eq!(budget.referenced_bytes, MAX_ARRAY_BYTES);
-        assert!(matches!((budget.include_raw(value)).as_ref().map_err(crate::error::construct::view),
-            Err(crate::error::construct::ErrorView::Input {
-                argument: "raw_values",
-                reason: InputError::TooLarge { limit: MAX_ARRAY_BYTES, actual },
-            }) if *actual == MAX_ARRAY_BYTES + 6
-        ));
+        assert!(
+            matches!((budget.include_raw(value)).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
+                    argument: "raw_values",
+                    reason: InputError::TooLarge { limit: MAX_ARRAY_BYTES, actual },
+                }) if *actual == MAX_ARRAY_BYTES + 6
+            )
+        );
     }
 
     #[test]
@@ -3025,7 +3042,10 @@ mod tests {
             },
             xltype: XLTYPE_STR | XLBIT_XL_FREE,
         };
-        assert!(matches!((convert::<String>(&mut raw)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (convert::<String>(&mut raw))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::InvalidUtf16,
                 ..
@@ -3147,7 +3167,10 @@ mod tests {
                 .map(|text| text.with_argument("currency"))
                 .map_err(|error| error.with_argument("currency"))
                 .unwrap();
-            assert!(matches!((string.try_to_string()).as_ref().map_err(crate::error::construct::view),
+            assert!(matches!(
+                (string.try_to_string())
+                    .as_ref()
+                    .map_err(crate::error::construct::view),
                 Err(crate::error::construct::ErrorView::Input {
                     argument: "currency",
                     reason: InputError::InvalidUtf16,
@@ -3359,7 +3382,8 @@ mod tests {
         };
 
         let result = convert::<BoundedVarArgs<PanicOnConvert, 1>>(&mut raw);
-        assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (result).as_ref().map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: 1,
@@ -3453,7 +3477,10 @@ mod tests {
     fn malformed_xltype_flags_are_rejected() {
         let mut raw = XLOPER12::number(1.0);
         raw.xltype |= 0x2000;
-        assert!(matches!((convert::<f64>(&mut raw)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (convert::<f64>(&mut raw))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::Malformed("unknown xltype flag"),
                 ..
@@ -3479,7 +3506,8 @@ mod tests {
             convert::<Matrix<f64>>(&mut array).unwrap_err(),
             convert::<ExcelValue>(&mut array).unwrap_err(),
         ] {
-            assert!(matches!(crate::error::construct::view(&(error)),
+            assert!(matches!(
+                crate::error::construct::view(&(error)),
                 crate::error::construct::ErrorView::Input {
                     argument: "arg",
                     reason: InputError::Malformed("unknown xltype flag"),
@@ -3685,7 +3713,8 @@ mod tests {
         with_excel_call_scope(|scope| {
             // SAFETY: the root is live; the malformed nested pointer is tested for rejection.
             let result = unsafe { argument_from_raw::<XlArrayRef<'_>>(scope, "values", &mut raw) };
-            assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+            assert!(matches!(
+                (result).as_ref().map_err(crate::error::construct::view),
                 Err(crate::error::construct::ErrorView::Input {
                     reason: InputError::Malformed("misaligned array pointer"),
                     ..
@@ -3858,9 +3887,11 @@ mod tests {
                 Matrix::<()>::from_fn(rows, columns, |_, _| panic!("invalid shape")).unwrap_err(),
             ];
             for error in errors {
-                assert!(matches!(crate::error::construct::view(&(error)), crate::error::construct::ErrorView::Input {
+                assert!(
+                    matches!(crate::error::construct::view(&(error)), crate::error::construct::ErrorView::Input {
                     argument: "<matrix>", reason: actual,
-                } if *actual == reason));
+                } if *actual == reason)
+                );
             }
         }
     }
@@ -3898,15 +3929,17 @@ mod tests {
                 xltype: XLTYPE_MULTI,
             };
 
-            assert!(matches!((convert::<Matrix<f64>>(&mut raw)).as_ref().map_err(crate::error::construct::view),
-                Err(crate::error::construct::ErrorView::Input {
-                    reason: InputError::TooLarge {
-                        limit: error_limit,
-                        actual: error_actual,
-                    },
-                    ..
-                }) if *error_limit == limit && *error_actual == actual
-            ));
+            assert!(
+                matches!((convert::<Matrix<f64>>(&mut raw)).as_ref().map_err(crate::error::construct::view),
+                    Err(crate::error::construct::ErrorView::Input {
+                        reason: InputError::TooLarge {
+                            limit: error_limit,
+                            actual: error_actual,
+                        },
+                        ..
+                    }) if *error_limit == limit && *error_actual == actual
+                )
+            );
         }
     }
 

@@ -118,7 +118,9 @@ impl SyncBoundaryWorkerPool {
                                             crate::XllError::excel_value(crate::ExcelError::Number),
                                         ),
                                         SyncBenchKind::DomainErrorNoSubscriber => {
-                                            Err(crate::XllError::domain(crate::error::DomainErrorCode::InvalidInput))
+                                            Err(crate::XllError::domain(
+                                                crate::error::DomainErrorCode::InvalidInput,
+                                            ))
                                         }
                                         _ => crate::return_abi::XlScalarOutput::encode(42.0),
                                     },

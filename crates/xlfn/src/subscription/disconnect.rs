@@ -347,10 +347,10 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                     let _apartment = match crate::excel_rtd::ComApartmentGuard::enter() {
                         Ok(apartment) => apartment,
                         Err(code) => {
-                            let _ = started.send(Err(XllError::Native {
+                            let _ = started.send(Err(XllError::native(
                                 code,
-                                message: "failed to initialize RTD cleanup COM apartment".into(),
-                            }));
+                                "failed to initialize RTD cleanup COM apartment",
+                            )));
                             return;
                         }
                     };
@@ -1343,7 +1343,12 @@ mod tests {
         let original_queue = pool.published.get().unwrap();
         for fail in failures {
             fail();
-            assert!(matches!((pool.stop()).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::Native { .. })));
+            assert!(matches!(
+                (pool.stop())
+                    .as_ref()
+                    .map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Native { .. })
+            ));
             let worker = pool.worker.lock();
             let DisconnectWorker::Running(running) = &*worker else {
                 panic!("COM preparation must return the unstarted drain");

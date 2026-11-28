@@ -601,7 +601,8 @@ mod date_tests {
                     assert_eq!(usize::from(counted[0]), counted.len() - 1);
                     assert!(counted[1..].iter().copied().eq(name.encode_utf16()));
                 }
-                None => assert!(matches!((parsed).as_ref().map_err(crate::error::construct::view),
+                None => assert!(matches!(
+                    (parsed).as_ref().map_err(crate::error::construct::view),
                     Err(crate::error::construct::ErrorView::ExcelApi {
                         function: ExcelApiFunction::SheetName,
                         failure: ExcelApiFailure::UnexpectedResult,
@@ -612,7 +613,10 @@ mod date_tests {
         }
         let mut malformed = "[Book.xlsx]Data".encode_utf16().collect::<Vec<_>>();
         malformed.push(0xd800);
-        assert!(matches!((workbook_name_counted(&malformed)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (workbook_name_counted(&malformed))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 argument: "reference",
                 reason: crate::error::InputError::InvalidUtf16,
@@ -696,7 +700,10 @@ mod date_tests {
         let script = CallbackScript::install([]);
         let callbacks = HostCallbackSession::new();
         for raw in &roots {
-            assert!(matches!((ExcelHost::new(&callbacks).workbook_date_system(&reference(raw))).as_ref().map_err(crate::error::construct::view),
+            assert!(matches!(
+                (ExcelHost::new(&callbacks).workbook_date_system(&reference(raw)))
+                    .as_ref()
+                    .map_err(crate::error::construct::view),
                 Err(crate::error::construct::ErrorView::Input {
                     argument: "reference",
                     ..
@@ -734,7 +741,8 @@ mod date_tests {
                     __err if __err.excel_value_error() == Some(crate::ExcelError::Reference)
                 ));
             } else {
-                assert!(matches!(crate::error::construct::view(&(error)),
+                assert!(matches!(
+                    crate::error::construct::view(&(error)),
                     crate::error::construct::ErrorView::ExcelApi {
                         function: ExcelApiFunction::GetDocument,
                         failure: ExcelApiFailure::UnexpectedResult,
@@ -801,7 +809,10 @@ mod date_tests {
                 }) if actual == crate::error::callback_status_from_raw(status))
                 );
                 if status != xlfn_sys::XLRET_FAILED {
-                    assert!(matches!((host.workbook_date_system(&reference(&raw))).as_ref().map_err(crate::error::construct::view),
+                    assert!(matches!(
+                        (host.workbook_date_system(&reference(&raw)))
+                            .as_ref()
+                            .map_err(crate::error::construct::view),
                         Err(crate::error::construct::ErrorView::ExcelApi {
                             failure: ExcelApiFailure::Suppressed(_),
                             ..
@@ -831,7 +842,10 @@ mod date_tests {
                 .release_status(xlfn_sys::XLRET_FAILED),
         ]);
         let callbacks = HostCallbackSession::new();
-        assert!(matches!((ExcelHost::new(&callbacks).workbook_date_system(&reference(&raw))).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (ExcelHost::new(&callbacks).workbook_date_system(&reference(&raw)))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::ExcelApi {
                 function: ExcelApiFunction::Free,
                 ..
@@ -892,7 +906,8 @@ mod tests {
             let callbacks = HostCallbackSession::new();
             let result = ExcelHost::new(&callbacks).caller();
             if id == 0 {
-                assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+                assert!(matches!(
+                    (result).as_ref().map_err(crate::error::construct::view),
                     Err(crate::error::construct::ErrorView::ExcelApi {
                         function: ExcelApiFunction::SheetId,
                         failure: ExcelApiFailure::UnexpectedResult,
@@ -948,7 +963,10 @@ mod tests {
             ];
             for raw in &roots {
                 let value = XlValueRef::from_array_cell(raw).unwrap();
-                assert!(matches!((caller_location(value)).as_ref().map_err(crate::error::construct::view),
+                assert!(matches!(
+                    (caller_location(value))
+                        .as_ref()
+                        .map_err(crate::error::construct::view),
                     Err(crate::error::construct::ErrorView::Input {
                         argument: "caller",
                         reason: InputError::Malformed("invalid reference area"),
@@ -973,7 +991,10 @@ mod tests {
             xltype: xlfn_sys::XLTYPE_REF,
         };
         let value = XlValueRef::from_array_cell(&raw).unwrap();
-        assert!(matches!((caller_location(value)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (caller_location(value))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 argument: "caller",
                 reason: InputError::Malformed("misaligned reference table pointer"),
@@ -1115,23 +1136,32 @@ mod coerce_tests {
             host.coerce_with(&reference, |value| sum(value, 2)).unwrap(),
             3.5
         );
-        assert!(matches!((host.coerce_with(&reference, |value| sum(value, 3))).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (host.coerce_with(&reference, |value| sum(value, 3)))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 argument: "reference",
                 reason: InputError::Malformed("unknown base xltype")
             })
         ));
-        assert!(matches!((host.coerce_with(&reference, |value| sum(value, 2))).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (host.coerce_with(&reference, |value| sum(value, 2)))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::ExcelApi {
                 function: ExcelApiFunction::Free,
                 ..
             })
         ));
-        assert!(matches!((host.coerce_with(&reference, |value| XlArrayRef::from_excel(
+        assert!(matches!(
+            (host.coerce_with(&reference, |value| XlArrayRef::from_excel(
                 value,
                 "reference"
             )
-            .map(|_| ()))).as_ref().map_err(crate::error::construct::view),
+            .map(|_| ())))
+            .as_ref()
+            .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 argument: "reference",
                 reason: InputError::Malformed("unknown base xltype")
@@ -1167,7 +1197,10 @@ mod coerce_tests {
             },
             xltype: XLTYPE_MULTI,
         };
-        assert!(matches!((CoercedGridRef::new(XlValueRef::from_array_cell(&missing_buffer).unwrap())).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (CoercedGridRef::new(XlValueRef::from_array_cell(&missing_buffer).unwrap()))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 argument: "reference",
                 reason: InputError::NullPointer
@@ -1230,7 +1263,10 @@ mod coerce_tests {
         let host = ExcelHost::new(&callbacks);
         let reference_raw = reference_raw();
         let reference = reference(&reference_raw);
-        assert!(matches!((host.coerce_with(&reference, |value| value.as_f64())).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (host.coerce_with(&reference, |value| value.as_f64()))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::ExcelApi {
                 function: ExcelApiFunction::Free,
                 ..
@@ -1251,7 +1287,8 @@ mod coerce_tests {
         let result: XllResult<()> = host.coerce_with(&reference, |_| {
             panic!("terminal callback must not expose a result")
         });
-        assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (result).as_ref().map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::ExcelApi {
                 function: ExcelApiFunction::Coerce,
                 ..
@@ -1275,7 +1312,10 @@ mod coerce_tests {
             .coerce_with(&reference, |outer| {
                 assert_eq!(outer.as_f64()?, 12.0);
                 assert!(host.sheet_name(&reference).is_err());
-                assert!(matches!((host.sheet_name(&reference)).as_ref().map_err(crate::error::construct::view),
+                assert!(matches!(
+                    (host.sheet_name(&reference))
+                        .as_ref()
+                        .map_err(crate::error::construct::view),
                     Err(crate::error::construct::ErrorView::ExcelApi {
                         failure: ExcelApiFailure::Suppressed(ExcelCallbackStatus::Uncalced),
                         ..

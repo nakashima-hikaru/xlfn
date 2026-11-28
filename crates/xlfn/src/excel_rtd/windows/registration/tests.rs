@@ -68,7 +68,8 @@ fn global_registration_mutex_excludes_other_processes_until_released() {
 }
 
 fn assert_mutex_timeout(result: XllResult<CrossProcessRegistrationGuard>) {
-    assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+    assert!(matches!(
+        result.as_ref().map_err(crate::error::construct::view),
         Err(crate::error::construct::ErrorView::WindowsApi {
             function: "CoWaitForMultipleHandles(RTD registration mutex)",
             code: RPC_S_CALLPENDING,

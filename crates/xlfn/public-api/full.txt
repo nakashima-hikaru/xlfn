@@ -536,6 +536,7 @@ pub use xlfn::error::InvalidLimit
 pub use xlfn::error::UdfError
 pub use xlfn::error::UdfResult
 pub use xlfn::error::XllError
+pub use xlfn::error::XllErrorKind
 pub use xlfn::error::XllResult
 pub mod xlfn::execution
 #[non_exhaustive] pub enum xlfn::execution::UdfCompletionOutcome<'call>

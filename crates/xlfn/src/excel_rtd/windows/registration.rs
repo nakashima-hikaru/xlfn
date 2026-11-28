@@ -604,7 +604,8 @@ impl RegistryKey {
     fn set_value(&self, name: Option<&str>, value: &str) -> XllResult<()> {
         let name = name.map(wide_nul);
         let value = wide_nul(value);
-        let bytes = u32::try_from(size_of_val(value.as_slice())).map_err(|_| XllError::domain(crate::error::DomainErrorCode::Overflow))?;
+        let bytes = u32::try_from(size_of_val(value.as_slice()))
+            .map_err(|_| XllError::domain(crate::error::DomainErrorCode::Overflow))?;
 
         // SAFETY: this key is open and both buffers are NUL terminated.
         let status = unsafe {

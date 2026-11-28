@@ -80,11 +80,11 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceRegistration<E, C>
         Ok(handles)
     }
     fn registration_id(&self) -> XllResult<u64> {
-        self.registration_id
-            .map(std::num::NonZeroU64::get)
-            .ok_or(crate::error::construct::internal(
+        self.registration_id.map(std::num::NonZeroU64::get).ok_or(
+            crate::error::construct::internal(
                 crate::diagnostics::catalog::RTD_SUBSCRIPTION_ID_OVERFLOW,
-            ))
+            ),
+        )
     }
     pub(crate) fn finish(self) -> SourceArena<E, C> {
         SourceArena {

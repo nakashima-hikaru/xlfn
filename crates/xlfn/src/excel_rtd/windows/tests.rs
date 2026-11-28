@@ -5420,7 +5420,8 @@ fn registration_mutex_timeout_is_bounded_and_does_not_release_other_owner() {
     let waiter = thread::spawn(move || {
         let started = std::time::Instant::now();
         let result = CrossProcessRegistrationGuard::acquire_named_with_timeout(&waiter_name, 20);
-        assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            result.as_ref().map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::WindowsApi {
                 function: "CoWaitForMultipleHandles(RTD registration mutex)",
                 code: crate::win32::RPC_S_CALLPENDING,

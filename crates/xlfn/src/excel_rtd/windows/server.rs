@@ -1640,7 +1640,7 @@ unsafe fn disconnect_data_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E
         };
         match subscription_server.disconnect_deferred(crate::subscription::TopicId(topic_id), lease)
         {
-            Err(error) if !matches!(error, __err if __err.is_closing()) => {
+            Err(error) if !error.is_closing() => {
                 crate::diagnostics::report_no_unwind("IRtdServer::DisconnectData", &error);
                 return E_FAIL;
             }

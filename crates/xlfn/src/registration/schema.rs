@@ -242,7 +242,10 @@ mod tests {
                 volatile: false,
             },
         ] {
-            assert!(matches!((signature.encode()).as_ref().map_err(crate::error::construct::view),
+            assert!(matches!(
+                (signature.encode())
+                    .as_ref()
+                    .map_err(crate::error::construct::view),
                 Err(crate::error::construct::ErrorView::Internal {
                     diagnostic_id: crate::diagnostics::catalog::REGISTRATION_SIGNATURE,
                     ..

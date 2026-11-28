@@ -208,7 +208,9 @@ mod tests {
                 if self.1 {
                     Ok(ExcelCellOutput::String("custom".to_owned()))
                 } else {
-                    Err(XllError::domain(crate::error::DomainErrorCode::NativeFailure))
+                    Err(XllError::domain(
+                        crate::error::DomainErrorCode::NativeFailure,
+                    ))
                 }
             }
         }
@@ -234,7 +236,10 @@ mod tests {
                 Ok(())
             }
         }
-        assert!(matches!((XlScalarOutput::encode(Empty)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (XlScalarOutput::encode(Empty))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 argument: "<return>",
                 reason: InputError::Malformed("scalar conversion produced no cell"),
@@ -250,7 +255,10 @@ mod tests {
             .as_ref()
             .unwrap()
             .allocated_bytes();
-        assert!(matches!((sink.push_str(&"x".repeat(crate::utf16::EXCEL_STRING_LIMIT))).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (sink.push_str(&"x".repeat(crate::utf16::EXCEL_STRING_LIMIT)))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 argument: "<return>",
                 reason: InputError::Malformed("scalar conversion produced multiple cells"),

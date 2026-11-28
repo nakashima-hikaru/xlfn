@@ -39,7 +39,7 @@ pub extern "C" fn fp12_fixture_published_bytes() -> usize {
 #[cfg(windows)]
 #[unsafe(no_mangle)]
 pub extern "C" fn fp12_fixture_probe(bytes: usize) -> i32 {
-    use xlfn_engine::error::{InputError, XllError};
+    use xlfn_engine::error::InputError;
     match Reservation::reserve(bytes) {
         Ok(reserved) => {
             drop(reserved);

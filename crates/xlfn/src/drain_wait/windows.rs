@@ -21,13 +21,17 @@ pub(crate) fn drain_with_com_dispatch<W: DrainWork>(
         .map(DispatchPrepared)
         .map_err(|(error, owner)| {
             let error = match error {
-                DrainPreparationError::Apartment(code) => XllError::Native {
-                    code,
-                    message: "failed to initialize COM drain apartment".into(),
-                },
-                DrainPreparationError::Event(error) => XllError::native(error.code as i32, "failed to create COM drain completion event".into()),
-                DrainPreparationError::Injected(stage) => XllError::native(crate::win32::E_UNEXPECTED, format!("injected COM drain preparation failure: {stage:?)"),
-                },
+                DrainPreparationError::Apartment(code) => {
+                    XllError::native(code, "failed to initialize COM drain apartment")
+                }
+                DrainPreparationError::Event(error) => XllError::native(
+                    error.code as i32,
+                    "failed to create COM drain completion event",
+                ),
+                DrainPreparationError::Injected(stage) => XllError::native(
+                    crate::win32::E_UNEXPECTED,
+                    format!("injected COM drain preparation failure: {stage:?}"),
+                ),
             };
             (error, owner)
         })
@@ -37,8 +41,10 @@ impl<W: DrainWork> DispatchPrepared<W> {
     pub(crate) fn run(self) -> Result<WorkerJoined<W::Output>, (XllError, UnstartedDrain<W>)> {
         self.0.run().map_err(|(error, owner)| {
             (
-                XllError::native(error.raw_os_error().unwrap_or(0), format!("failed to start COM drain worker: {error)"),
-                },
+                XllError::native(
+                    error.raw_os_error().unwrap_or(0),
+                    format!("failed to start COM drain worker: {error}"),
+                ),
                 owner,
             )
         })
@@ -90,7 +96,10 @@ mod tests {
             let Err((error, unused_wait)) = result else {
                 panic!("injected {stage:?} preparation failure succeeded");
             };
-            assert!(matches!(crate::error::construct::view(&(error)), crate::error::construct::ErrorView::Native { .. }));
+            assert!(matches!(
+                crate::error::construct::view(&error),
+                crate::error::construct::ErrorView::Native { .. }
+            ));
             assert_eq!(calls.load(Ordering::Acquire), 0);
             assert_eq!(drops.load(Ordering::Acquire), 0);
             drop(unused_wait);
@@ -111,7 +120,10 @@ mod tests {
         let Err((error, unstarted)) = ready.run() else {
             panic!("injected spawn failure started a worker");
         };
-        assert!(matches!(crate::error::construct::view(&(error)), crate::error::construct::ErrorView::Native { .. }));
+        assert!(matches!(
+            crate::error::construct::view(&error),
+            crate::error::construct::ErrorView::Native { .. }
+        ));
         assert_eq!(drops.load(Ordering::Acquire), 0);
         drop(unstarted);
         assert_eq!(drops.load(Ordering::Acquire), 1);

@@ -438,7 +438,8 @@ mod tests {
         raw.xltype |= 0x2000;
         // SAFETY: the SRef remains readable; admission rejects the unknown flag.
         let result = unsafe { reference_from_raw::<ExcelReference<'_>>("source_range", &mut raw) };
-        assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (result).as_ref().map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 argument: "source_range",
                 reason: InputError::Malformed("unknown xltype flag")
@@ -463,7 +464,8 @@ mod tests {
         // SAFETY: the root is live; the misaligned nested pointer is rejected
         // before any reference table storage is accessed.
         let result = unsafe { reference_from_raw::<ExcelReference<'_>>("range", &mut raw) };
-        assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (result).as_ref().map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 argument: "range",
                 reason: InputError::Malformed("misaligned reference table pointer"),
@@ -574,7 +576,8 @@ mod tests {
         };
         // SAFETY: the two-entry table is readable; admission must reject its second area.
         let result = unsafe { reference_from_raw::<ExcelReference<'_>>("range", &mut raw) };
-        assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (result).as_ref().map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 argument: "range",
                 reason: InputError::Malformed("invalid reference area")

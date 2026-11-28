@@ -687,10 +687,12 @@ mod tests {
                     XlArrayRef::from_excel_with_identity(value, "values", encoder).map(drop)
                 }
             });
-            assert!(matches!((result).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::Input {
+            assert!(
+                matches!((result).as_ref().map_err(crate::error::construct::view), Err(crate::error::construct::ErrorView::Input {
                 argument: "values",
                 reason: InputError::TooLarge { limit: super::super::MAX_ARRAY_BYTES, actual },
-            }) if *actual > super::super::MAX_ARRAY_BYTES));
+            }) if *actual > super::super::MAX_ARRAY_BYTES)
+            );
             assert!(builder.finish().is_err());
         }
     }
@@ -754,12 +756,14 @@ mod tests {
 
         assert_eq!(left, right);
         for (value, expected) in [(left, "left"), (right, "right")] {
-            assert!(matches!((value.try_to_string()).as_ref().map_err(crate::error::construct::view),
-                Err(crate::error::construct::ErrorView::Input {
-                    argument,
-                    reason: InputError::InvalidUtf16,
-                }) if argument == expected
-            ));
+            assert!(
+                matches!((value.try_to_string()).as_ref().map_err(crate::error::construct::view),
+                    Err(crate::error::construct::ErrorView::Input {
+                        argument,
+                        reason: InputError::InvalidUtf16,
+                    }) if argument == expected
+                )
+            );
         }
     }
 
@@ -855,7 +859,8 @@ mod tests {
             .cast();
         // SAFETY: the misaligned root must be rejected without accessing it.
         let error = unsafe { XlValueRef::from_raw(pointer) }.unwrap_err();
-        assert!(matches!(crate::error::construct::view(&(error)),
+        assert!(matches!(
+            crate::error::construct::view(&(error)),
             crate::error::construct::ErrorView::Input {
                 reason: InputError::Malformed("misaligned value pointer"),
                 ..
@@ -870,7 +875,10 @@ mod tests {
             xltype: XLTYPE_STR,
         };
         let value = XlValueRef::from_array_cell(&raw).unwrap();
-        assert!(matches!((value.utf16("label")).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (value.utf16("label"))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 argument: "label",
                 reason: InputError::Malformed("misaligned string pointer"),
@@ -919,12 +927,14 @@ mod tests {
             };
             let value = XlValueRef::from_array_cell(&raw).unwrap();
             let result = XlArrayRef::from_excel(value, "values");
-            assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
-                Err(crate::error::construct::ErrorView::Input {
-                    argument: "values",
-                    reason: InputError::Malformed(reason),
-                }) if *reason == expected
-            ));
+            assert!(
+                matches!((result).as_ref().map_err(crate::error::construct::view),
+                    Err(crate::error::construct::ErrorView::Input {
+                        argument: "values",
+                        reason: InputError::Malformed(reason),
+                    }) if *reason == expected
+                )
+            );
         }
     }
 
@@ -954,7 +964,10 @@ mod tests {
             array.cells().next().unwrap().value_type(),
             XlValueType::String
         );
-        assert!(matches!((array.get(0, 0).unwrap().as_str().unwrap().try_to_string()).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (array.get(0, 0).unwrap().as_str().unwrap().try_to_string())
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::InvalidUtf16,
                 ..

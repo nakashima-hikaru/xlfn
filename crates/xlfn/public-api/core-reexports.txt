@@ -229,101 +229,49 @@ impl core::marker::Unpin for xlfn_engine::error::InputError
 impl core::marker::UnsafeUnpin for xlfn_engine::error::InputError
 impl core::panic::unwind_safe::RefUnwindSafe for xlfn_engine::error::InputError
 impl core::panic::unwind_safe::UnwindSafe for xlfn_engine::error::InputError
-#[non_exhaustive] pub enum xlfn_engine::error::XllError
-#[non_exhaustive] pub xlfn_engine::error::XllError::AbiMismatch
-pub xlfn_engine::error::XllError::AbiMismatch::actual: u32
-pub xlfn_engine::error::XllError::AbiMismatch::expected: u32
-#[non_exhaustive] pub xlfn_engine::error::XllError::Application
-pub xlfn_engine::error::XllError::Application::excel: xlfn_engine::error::ExcelError
-pub xlfn_engine::error::XllError::Application::message: alloc::string::String
-pub xlfn_engine::error::XllError::Application::source: core::option::Option<alloc::boxed::Box<xlfn_engine::error::ErrorCause>>
-pub xlfn_engine::error::XllError::Closing
-pub xlfn_engine::error::XllError::Custom
-pub xlfn_engine::error::XllError::Custom::excel: xlfn_engine::error::ExcelError
-pub xlfn_engine::error::XllError::Custom::message: alloc::borrow::Cow<'static, str>
-pub xlfn_engine::error::XllError::Domain
-pub xlfn_engine::error::XllError::Domain::code: xlfn_engine::error::DomainErrorCode
-pub xlfn_engine::error::XllError::ElementCountMismatch
-pub xlfn_engine::error::XllError::ElementCountMismatch::actual: usize
-pub xlfn_engine::error::XllError::ElementCountMismatch::columns: usize
-pub xlfn_engine::error::XllError::ElementCountMismatch::expected: usize
-pub xlfn_engine::error::XllError::ElementCountMismatch::rows: usize
-#[non_exhaustive] pub xlfn_engine::error::XllError::ExcelApi
-pub xlfn_engine::error::XllError::ExcelApi::failure: xlfn_engine::error::ExcelApiFailure
-pub xlfn_engine::error::XllError::ExcelApi::function: xlfn_engine::error::ExcelApiFunction
-pub xlfn_engine::error::XllError::ExcelValue(xlfn_engine::error::ExcelError)
-pub xlfn_engine::error::XllError::Input
-pub xlfn_engine::error::XllError::Input::argument: &'static str
-pub xlfn_engine::error::XllError::Input::reason: xlfn_engine::error::InputError
-#[non_exhaustive] pub xlfn_engine::error::XllError::Internal
-pub xlfn_engine::error::XllError::Internal::diagnostic_id: xlfn_engine::diagnostic_id::DiagnosticId
-pub xlfn_engine::error::XllError::InvalidHandle
-#[non_exhaustive] pub xlfn_engine::error::XllError::LibraryLoad
-pub xlfn_engine::error::XllError::LibraryLoad::os_error: u32
-pub xlfn_engine::error::XllError::LibraryLoad::path: std::path::PathBuf
-#[non_exhaustive] pub xlfn_engine::error::XllError::MetadataDebtBindingChanged
-pub xlfn_engine::error::XllError::MetadataDebtBindingChanged::name: &'static str
-#[non_exhaustive] pub xlfn_engine::error::XllError::MissingSymbol
-pub xlfn_engine::error::XllError::MissingSymbol::symbol: &'static str
-pub xlfn_engine::error::XllError::Native
-pub xlfn_engine::error::XllError::Native::code: i32
-pub xlfn_engine::error::XllError::Native::message: alloc::string::String
-pub xlfn_engine::error::XllError::Overloaded
-pub xlfn_engine::error::XllError::Panic
-pub xlfn_engine::error::XllError::ReentrantCall
-#[non_exhaustive] pub xlfn_engine::error::XllError::RegistrationConflict
-pub xlfn_engine::error::XllError::RegistrationConflict::name: &'static str
-#[non_exhaustive] pub xlfn_engine::error::XllError::RtdProducerFailure
-pub xlfn_engine::error::XllError::RtdProducerFailure::source: alloc::boxed::Box<xlfn_engine::error::XllError>
-pub xlfn_engine::error::XllError::RtdProducerFailure::topic: alloc::string::String
-#[non_exhaustive] pub xlfn_engine::error::XllError::RtdSubscriptionShutdown
-pub xlfn_engine::error::XllError::RtdSubscriptionShutdown::key: alloc::string::String
-pub xlfn_engine::error::XllError::RtdSubscriptionShutdown::server_generation: u64
-pub xlfn_engine::error::XllError::RtdSubscriptionShutdown::source: alloc::boxed::Box<xlfn_engine::error::XllError>
-pub xlfn_engine::error::XllError::RtdSubscriptionShutdown::topic_id: i32
-pub xlfn_engine::error::XllError::Shape
-pub xlfn_engine::error::XllError::Shape::actual: xlfn_engine::value_types::Shape
-pub xlfn_engine::error::XllError::Shape::expected: xlfn_engine::value_types::Shape
-pub xlfn_engine::error::XllError::StaleHandle
-#[non_exhaustive] pub xlfn_engine::error::XllError::WindowsApi
-pub xlfn_engine::error::XllError::WindowsApi::code: i32
-pub xlfn_engine::error::XllError::WindowsApi::function: &'static str
-impl xlfn_engine::error::XllError
-pub fn xlfn_engine::error::XllError::custom(xlfn_engine::error::ExcelError, impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
-pub const fn xlfn_engine::error::XllError::domain(xlfn_engine::error::DomainErrorCode) -> Self
-pub const fn xlfn_engine::error::XllError::input(&'static str, xlfn_engine::error::InputError) -> Self
-pub const fn xlfn_engine::error::XllError::to_excel_error(&self) -> xlfn_engine::error::ExcelError
-pub fn xlfn_engine::error::XllError::validation(&'static str, xlfn_engine::error::InputError) -> Self
-pub fn xlfn_engine::error::XllError::with_argument(self, &'static str) -> Self
-impl core::clone::Clone for xlfn_engine::error::XllError
-pub fn xlfn_engine::error::XllError::clone(&self) -> Self
-impl core::convert::From<core::io::error::Error> for xlfn_engine::error::XllError
-pub fn xlfn_engine::error::XllError::from(core::io::error::Error) -> Self
-impl core::convert::From<xlfn_engine::error::DiagnosticInitError> for xlfn_engine::error::XllError
-pub fn xlfn_engine::error::XllError::from(xlfn_engine::error::DiagnosticInitError) -> Self
-impl core::convert::From<xlfn_engine::error::ExcelError> for xlfn_engine::error::XllError
-pub fn xlfn_engine::error::XllError::from(xlfn_engine::error::ExcelError) -> Self
-impl core::convert::From<xlfn_engine::error::InvalidLimit> for xlfn_engine::error::XllError
-pub fn xlfn_engine::error::XllError::from(xlfn_engine::error::InvalidLimit) -> Self
-impl core::convert::From<xlfn_engine::error::UdfError> for xlfn_engine::error::XllError
-pub fn xlfn_engine::error::XllError::from(xlfn_engine::error::UdfError) -> Self
-impl core::convert::From<xlfn_engine::error::XllError> for xlfn_engine::error::UdfError
-pub fn xlfn_engine::error::UdfError::from(xlfn_engine::error::XllError) -> Self
-impl core::error::Error for xlfn_engine::error::XllError
-pub fn xlfn_engine::error::XllError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
-impl core::fmt::Debug for xlfn_engine::error::XllError
-pub fn xlfn_engine::error::XllError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for xlfn_engine::error::XllError
-pub fn xlfn_engine::error::XllError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl xlfn_engine::error::IntoXllError for xlfn_engine::error::XllError
-pub fn xlfn_engine::error::XllError::into_xll_error(self) -> xlfn_engine::error::XllError
-impl core::marker::Freeze for xlfn_engine::error::XllError
-impl core::marker::Send for xlfn_engine::error::XllError
-impl core::marker::Sync for xlfn_engine::error::XllError
-impl core::marker::Unpin for xlfn_engine::error::XllError
-impl core::marker::UnsafeUnpin for xlfn_engine::error::XllError
-impl core::panic::unwind_safe::RefUnwindSafe for xlfn_engine::error::XllError
-impl core::panic::unwind_safe::UnwindSafe for xlfn_engine::error::XllError
+#[non_exhaustive] pub enum xlfn_engine::error::XllErrorKind
+pub xlfn_engine::error::XllErrorKind::AbiMismatch
+pub xlfn_engine::error::XllErrorKind::Application
+pub xlfn_engine::error::XllErrorKind::Closing
+pub xlfn_engine::error::XllErrorKind::Custom
+pub xlfn_engine::error::XllErrorKind::Domain
+pub xlfn_engine::error::XllErrorKind::ElementCountMismatch
+pub xlfn_engine::error::XllErrorKind::ExcelApi
+pub xlfn_engine::error::XllErrorKind::ExcelValue
+pub xlfn_engine::error::XllErrorKind::Input
+pub xlfn_engine::error::XllErrorKind::Internal
+pub xlfn_engine::error::XllErrorKind::InvalidHandle
+pub xlfn_engine::error::XllErrorKind::LibraryLoad
+pub xlfn_engine::error::XllErrorKind::MetadataDebtBindingChanged
+pub xlfn_engine::error::XllErrorKind::MissingSymbol
+pub xlfn_engine::error::XllErrorKind::Native
+pub xlfn_engine::error::XllErrorKind::Overloaded
+pub xlfn_engine::error::XllErrorKind::Panic
+pub xlfn_engine::error::XllErrorKind::ReentrantCall
+pub xlfn_engine::error::XllErrorKind::RegistrationConflict
+pub xlfn_engine::error::XllErrorKind::RtdProducerFailure
+pub xlfn_engine::error::XllErrorKind::RtdSubscriptionShutdown
+pub xlfn_engine::error::XllErrorKind::Shape
+pub xlfn_engine::error::XllErrorKind::StaleHandle
+pub xlfn_engine::error::XllErrorKind::WindowsApi
+impl core::clone::Clone for xlfn_engine::error::XllErrorKind
+pub fn xlfn_engine::error::XllErrorKind::clone(&self) -> Self
+impl core::cmp::Eq for xlfn_engine::error::XllErrorKind
+impl core::cmp::PartialEq for xlfn_engine::error::XllErrorKind
+pub fn xlfn_engine::error::XllErrorKind::eq(&self, &Self) -> bool
+impl core::fmt::Debug for xlfn_engine::error::XllErrorKind
+pub fn xlfn_engine::error::XllErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for xlfn_engine::error::XllErrorKind
+pub fn xlfn_engine::error::XllErrorKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for xlfn_engine::error::XllErrorKind
+impl core::marker::StructuralPartialEq for xlfn_engine::error::XllErrorKind
+impl core::marker::Freeze for xlfn_engine::error::XllErrorKind
+impl core::marker::Send for xlfn_engine::error::XllErrorKind
+impl core::marker::Sync for xlfn_engine::error::XllErrorKind
+impl core::marker::Unpin for xlfn_engine::error::XllErrorKind
+impl core::marker::UnsafeUnpin for xlfn_engine::error::XllErrorKind
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn_engine::error::XllErrorKind
+impl core::panic::unwind_safe::UnwindSafe for xlfn_engine::error::XllErrorKind
 pub struct xlfn_engine::error::ErrorCause
 impl core::clone::Clone for xlfn_engine::error::ErrorCause
 pub fn xlfn_engine::error::ErrorCause::clone(&self) -> Self
@@ -395,6 +343,69 @@ impl core::marker::Unpin for xlfn_engine::error::UdfError
 impl core::marker::UnsafeUnpin for xlfn_engine::error::UdfError
 impl !core::panic::unwind_safe::RefUnwindSafe for xlfn_engine::error::UdfError
 impl !core::panic::unwind_safe::UnwindSafe for xlfn_engine::error::UdfError
+pub struct xlfn_engine::error::XllError(_)
+impl xlfn_engine::error::XllError
+pub const xlfn_engine::error::XllError::CLOSING: Self
+pub const xlfn_engine::error::XllError::INVALID_HANDLE: Self
+pub const xlfn_engine::error::XllError::OVERLOADED: Self
+pub const xlfn_engine::error::XllError::PANIC: Self
+pub const xlfn_engine::error::XllError::REENTRANT_CALL: Self
+pub const xlfn_engine::error::XllError::STALE_HANDLE: Self
+pub fn xlfn_engine::error::XllError::custom(xlfn_engine::error::ExcelError, impl core::convert::Into<alloc::borrow::Cow<'static, str>>) -> Self
+pub fn xlfn_engine::error::XllError::custom_details(&self) -> core::option::Option<(xlfn_engine::error::ExcelError, &alloc::borrow::Cow<'static, str>)>
+pub const fn xlfn_engine::error::XllError::diagnostic_id(&self) -> core::option::Option<xlfn_engine::diagnostic_id::DiagnosticId>
+pub const fn xlfn_engine::error::XllError::domain(xlfn_engine::error::DomainErrorCode) -> Self
+pub const fn xlfn_engine::error::XllError::domain_code(&self) -> core::option::Option<xlfn_engine::error::DomainErrorCode>
+pub fn xlfn_engine::error::XllError::element_count_mismatch(usize, usize, usize, usize) -> Self
+pub const fn xlfn_engine::error::XllError::excel_api_details(&self) -> core::option::Option<(xlfn_engine::error::ExcelApiFunction, xlfn_engine::error::ExcelApiFailure)>
+pub const fn xlfn_engine::error::XllError::excel_value(xlfn_engine::error::ExcelError) -> Self
+pub const fn xlfn_engine::error::XllError::excel_value_error(&self) -> core::option::Option<xlfn_engine::error::ExcelError>
+pub fn xlfn_engine::error::XllError::input(&'static str, xlfn_engine::error::InputError) -> Self
+pub fn xlfn_engine::error::XllError::input_details(&self) -> core::option::Option<(&'static str, &xlfn_engine::error::InputError)>
+pub const fn xlfn_engine::error::XllError::is_closing(&self) -> bool
+pub const fn xlfn_engine::error::XllError::is_invalid_handle(&self) -> bool
+pub const fn xlfn_engine::error::XllError::is_overloaded(&self) -> bool
+pub const fn xlfn_engine::error::XllError::is_panic(&self) -> bool
+pub const fn xlfn_engine::error::XllError::is_reentrant_call(&self) -> bool
+pub const fn xlfn_engine::error::XllError::is_stale_handle(&self) -> bool
+pub fn xlfn_engine::error::XllError::kind(&self) -> xlfn_engine::error::XllErrorKind
+pub fn xlfn_engine::error::XllError::native(i32, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn xlfn_engine::error::XllError::native_details(&self) -> core::option::Option<(i32, &str)>
+pub fn xlfn_engine::error::XllError::shape(xlfn_engine::value_types::Shape, xlfn_engine::value_types::Shape) -> Self
+pub fn xlfn_engine::error::XllError::shape_details(&self) -> core::option::Option<(xlfn_engine::value_types::Shape, xlfn_engine::value_types::Shape)>
+pub fn xlfn_engine::error::XllError::to_excel_error(&self) -> xlfn_engine::error::ExcelError
+pub fn xlfn_engine::error::XllError::validation(&'static str, xlfn_engine::error::InputError) -> Self
+pub fn xlfn_engine::error::XllError::windows_api_details(&self) -> core::option::Option<(&'static str, i32)>
+pub fn xlfn_engine::error::XllError::with_argument(self, &'static str) -> Self
+impl core::clone::Clone for xlfn_engine::error::XllError
+pub fn xlfn_engine::error::XllError::clone(&self) -> Self
+impl core::convert::From<core::io::error::Error> for xlfn_engine::error::XllError
+pub fn xlfn_engine::error::XllError::from(core::io::error::Error) -> Self
+impl core::convert::From<xlfn_engine::error::DiagnosticInitError> for xlfn_engine::error::XllError
+pub fn xlfn_engine::error::XllError::from(xlfn_engine::error::DiagnosticInitError) -> Self
+impl core::convert::From<xlfn_engine::error::ExcelError> for xlfn_engine::error::XllError
+pub fn xlfn_engine::error::XllError::from(xlfn_engine::error::ExcelError) -> Self
+impl core::convert::From<xlfn_engine::error::InvalidLimit> for xlfn_engine::error::XllError
+pub fn xlfn_engine::error::XllError::from(xlfn_engine::error::InvalidLimit) -> Self
+impl core::convert::From<xlfn_engine::error::UdfError> for xlfn_engine::error::XllError
+pub fn xlfn_engine::error::XllError::from(xlfn_engine::error::UdfError) -> Self
+impl core::convert::From<xlfn_engine::error::XllError> for xlfn_engine::error::UdfError
+pub fn xlfn_engine::error::UdfError::from(xlfn_engine::error::XllError) -> Self
+impl core::error::Error for xlfn_engine::error::XllError
+pub fn xlfn_engine::error::XllError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for xlfn_engine::error::XllError
+pub fn xlfn_engine::error::XllError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for xlfn_engine::error::XllError
+pub fn xlfn_engine::error::XllError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl xlfn_engine::error::IntoXllError for xlfn_engine::error::XllError
+pub fn xlfn_engine::error::XllError::into_xll_error(self) -> xlfn_engine::error::XllError
+impl core::marker::Freeze for xlfn_engine::error::XllError
+impl core::marker::Send for xlfn_engine::error::XllError
+impl core::marker::Sync for xlfn_engine::error::XllError
+impl core::marker::Unpin for xlfn_engine::error::XllError
+impl core::marker::UnsafeUnpin for xlfn_engine::error::XllError
+impl core::panic::unwind_safe::RefUnwindSafe for xlfn_engine::error::XllError
+impl core::panic::unwind_safe::UnwindSafe for xlfn_engine::error::XllError
 pub trait xlfn_engine::error::IntoXllError
 pub fn xlfn_engine::error::IntoXllError::into_xll_error(self) -> xlfn_engine::error::XllError
 impl xlfn_engine::error::IntoXllError for core::io::error::Error

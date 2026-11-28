@@ -287,7 +287,10 @@ mod tests {
                 .eq("handle:日本語😀".encode_utf16())
         );
         let long_tail = "a".repeat(crate::utf16::EXCEL_STRING_LIMIT - 6);
-        assert!(matches!((CountedString::concat(["handle:", &long_tail])).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (CountedString::concat(["handle:", &long_tail]))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: InputError::TooLarge {
                     limit: 32_767,
@@ -318,7 +321,10 @@ mod tests {
         };
         // SAFETY: raw and its initialized counted buffer remain live.
         let value = unsafe { crate::value::XlValueRef::from_raw(&raw mut raw) }.unwrap();
-        assert!(matches!((handle_matches(value, "Y")).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (handle_matches(value, "Y"))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 argument: "RTD handle",
                 reason: InputError::InvalidUtf16
@@ -371,14 +377,16 @@ mod tests {
             })
         };
         assert!(matches!(observe(), Ok(false)));
-        assert!(matches!((observe()).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (observe()).as_ref().map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::ExcelApi {
                 function: ExcelApiFunction::Free,
                 failure: ExcelApiFailure::Status(ExcelCallbackStatus::Abort),
                 ..
             })
         ));
-        assert!(matches!((observe()).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (observe()).as_ref().map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::ExcelApi {
                 function: ExcelApiFunction::Rtd,
                 failure: ExcelApiFailure::Suppressed(ExcelCallbackStatus::Abort),

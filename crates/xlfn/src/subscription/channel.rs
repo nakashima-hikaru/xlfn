@@ -127,7 +127,7 @@ impl<T: IntoRtdValue + Send + 'static, F, D: RtdDeliveryPolicy> RtdChannelSource
 
     /// Limits producer threads owned by this source, including exited workers
     /// that have not been joined. The default is 64. At capacity, subscription
-    /// setup returns [`XllError::Overloaded`] before invoking the factory.
+    /// setup returns [`XllError::OVERLOADED`] before invoking the factory.
     ///
     /// Each subscription retains its slot until disconnect joins its worker.
     /// Changing this limit preserves existing reservations; lowering it below
@@ -1205,7 +1205,7 @@ impl<D: RtdDeliveryPolicy> Channel<D> {
                 "RTD producer",
                 &crate::error::construct::rtd_producer_failure(
                     format!("{:?}", TopicDiagnostic(topic)),
-                    Box::new(error.clone()),
+                    error.clone(),
                 ),
             );
         }

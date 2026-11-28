@@ -428,16 +428,24 @@ mod tests {
             (f64::MAX, ExcelDateSystem::Mac1904),
         ] {
             let date = ExcelSerialDate::new(serial, system).unwrap();
-            assert!(matches!((date.to_ymd()
-                    .map_err(|error| error.with_argument("settlement"))).as_ref().map_err(crate::error::construct::view),
+            assert!(matches!(
+                (date
+                    .to_ymd()
+                    .map_err(|error| error.with_argument("settlement")))
+                .as_ref()
+                .map_err(crate::error::construct::view),
                 Err(crate::error::construct::ErrorView::Input {
                     argument: "settlement",
                     ..
                 })
             ));
             #[cfg(feature = "jiff")]
-            assert!(matches!((date.to_jiff()
-                    .map_err(|error| error.with_argument("settlement"))).as_ref().map_err(crate::error::construct::view),
+            assert!(matches!(
+                (date
+                    .to_jiff()
+                    .map_err(|error| error.with_argument("settlement")))
+                .as_ref()
+                .map_err(crate::error::construct::view),
                 Err(crate::error::construct::ErrorView::Input {
                     argument: "settlement",
                     ..

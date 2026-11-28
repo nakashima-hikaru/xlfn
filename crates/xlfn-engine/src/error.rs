@@ -1172,7 +1172,11 @@ mod tests {
             XllError::from(DiagnosticInitError::AlreadyInstalled).to_excel_error(),
             ExcelError::Value
         );
-        assert!(DiagnosticInitError::ReentrantMutation.into_xll_error().is_reentrant_call());
+        assert!(
+            DiagnosticInitError::ReentrantMutation
+                .into_xll_error()
+                .is_reentrant_call()
+        );
         assert!(XllError::from(DiagnosticInitError::RouterClosed).is_closing());
         let error = XllError::from(DiagnosticInitError::WorkerSpawn(io::Error::other(
             "worker resource limit",
@@ -1195,10 +1199,7 @@ mod tests {
         ));
         let error = internal::rtd_producer_failure(
             "last:EXAMPLE".to_owned(),
-            Box::new(XllError::custom(
-                ExcelError::Reference,
-                "upstream reference",
-            )),
+            XllError::custom(ExcelError::Reference, "upstream reference"),
         );
         assert_eq!(error.to_excel_error(), ExcelError::Reference);
     }
@@ -1224,12 +1225,8 @@ mod tests {
 
     #[test]
     fn rtd_shutdown_error_preserves_owner_and_source_context() {
-        let error = internal::rtd_subscription_shutdown(
-            7,
-            42,
-            "stream:test".to_owned(),
-            Box::new(XllError::PANIC),
-        );
+        let error =
+            internal::rtd_subscription_shutdown(7, 42, "stream:test".to_owned(), XllError::PANIC);
         let message = error.to_string();
         assert!(message.contains("server generation 7"));
         assert!(message.contains("topic 42"));
@@ -1354,10 +1351,7 @@ pub mod internal {
                     message: message.as_str(),
                     source: source.as_deref(),
                 },
-                BoxedXllError::Input { argument, reason } => ErrorView::Input {
-                    argument: *argument,
-                    reason,
-                },
+                BoxedXllError::Input { argument, reason } => ErrorView::Input { argument, reason },
                 BoxedXllError::Shape { expected, actual } => ErrorView::Shape {
                     expected: *expected,
                     actual: *actual,
@@ -1378,22 +1372,20 @@ pub mod internal {
                     message,
                 },
                 BoxedXllError::WindowsApi { function, code } => ErrorView::WindowsApi {
-                    function: *function,
+                    function,
                     code: *code,
                 },
                 BoxedXllError::RegistrationConflict { name } => {
-                    ErrorView::RegistrationConflict { name: *name }
+                    ErrorView::RegistrationConflict { name }
                 }
                 BoxedXllError::MetadataDebtBindingChanged { name } => {
-                    ErrorView::MetadataDebtBindingChanged { name: *name }
+                    ErrorView::MetadataDebtBindingChanged { name }
                 }
                 BoxedXllError::LibraryLoad { path, os_error } => ErrorView::LibraryLoad {
                     path,
                     os_error: *os_error,
                 },
-                BoxedXllError::MissingSymbol { symbol } => {
-                    ErrorView::MissingSymbol { symbol: *symbol }
-                }
+                BoxedXllError::MissingSymbol { symbol } => ErrorView::MissingSymbol { symbol },
                 BoxedXllError::Native { code, message } => ErrorView::Native {
                     code: *code,
                     message: message.as_str(),
@@ -1539,9 +1531,9 @@ pub mod internal {
     }
 
     pub fn missing_symbol(symbol: &'static str) -> XllError {
-        XllError(XllErrorRepr::Boxed(Box::new(BoxedXllError::MissingSymbol {
-            symbol,
-        })))
+        XllError(XllErrorRepr::Boxed(Box::new(
+            BoxedXllError::MissingSymbol { symbol },
+        )))
     }
 
     pub const fn abi_mismatch(expected: u32, actual: u32) -> XllError {
@@ -1552,24 +1544,21 @@ pub mod internal {
         server_generation: u64,
         topic_id: i32,
         key: String,
-        source: Box<XllError>,
+        source: XllError,
     ) -> XllError {
         XllError(XllErrorRepr::Boxed(Box::new(
             BoxedXllError::RtdSubscriptionShutdown {
                 server_generation,
                 topic_id,
                 key,
-                source: *source,
+                source,
             },
         )))
     }
 
-    pub fn rtd_producer_failure(topic: String, source: Box<XllError>) -> XllError {
+    pub fn rtd_producer_failure(topic: String, source: XllError) -> XllError {
         XllError(XllErrorRepr::Boxed(Box::new(
-            BoxedXllError::RtdProducerFailure {
-                topic,
-                source: *source,
-            },
+            BoxedXllError::RtdProducerFailure { topic, source },
         )))
     }
 

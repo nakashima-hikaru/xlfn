@@ -60,7 +60,8 @@ impl<'table> BindingReservation<'table> {
                 if index >= table.maximum_bindings as usize {
                     return Err(XllError::domain(DomainErrorCode::Overflow));
                 }
-                let slot = u32::try_from(index).map_err(|_| XllError::domain(DomainErrorCode::Overflow))?;
+                let slot = u32::try_from(index)
+                    .map_err(|_| XllError::domain(DomainErrorCode::Overflow))?;
                 state.slots.push(BindingSlot {
                     next_generation: BindingGeneration::ONE,
                     record: None,

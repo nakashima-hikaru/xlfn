@@ -8,8 +8,6 @@
 #![allow(unsafe_code, reason = "Benchmark-only XLOPER12 pointer construction")]
 
 #[cfg(feature = "async-builtin")]
-use crate::XllError;
-#[cfg(feature = "async-builtin")]
 use crate::async_udf::AsyncRuntime;
 #[cfg(feature = "async-builtin")]
 use crate::cancellation::CancellationGuarantee;

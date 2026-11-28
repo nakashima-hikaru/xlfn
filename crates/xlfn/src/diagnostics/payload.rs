@@ -260,10 +260,7 @@ mod tests {
         assert_eq!(clone_bytes(&large), None);
         for error in [
             &large,
-            &crate::error::construct::rtd_producer_failure(
-                "test".to_owned(),
-                Box::new(large.clone()),
-            ),
+            &crate::error::construct::rtd_producer_failure("test".to_owned(), large.clone()),
         ] {
             for text in [
                 format!("{}", TracedError(error)),
@@ -286,12 +283,12 @@ mod tests {
         message.push_str("abc");
         let error = crate::error::construct::rtd_producer_failure(
             "topic".to_owned(),
-            Box::new(crate::error::construct::rtd_subscription_shutdown(
+            crate::error::construct::rtd_subscription_shutdown(
                 1,
                 2,
                 "key".to_owned(),
-                Box::new(XllError::native(1, message)),
-            )),
+                XllError::native(1, message),
+            ),
         );
         assert_eq!(clone_bytes(&error), Some(11 + 3 * boxed_size));
         let path = std::path::PathBuf::from("native/日本語.dll");
@@ -308,13 +305,13 @@ mod tests {
         let boxed_size = crate::error::construct::boxed_error_size();
         let mut error = XllError::PANIC;
         for _ in 1..MAX_ERROR_DEPTH {
-            error = crate::error::construct::rtd_producer_failure(String::new(), Box::new(error));
+            error = crate::error::construct::rtd_producer_failure(String::new(), error);
         }
         assert_eq!(
             clone_bytes(&error),
             Some((MAX_ERROR_DEPTH - 1) * boxed_size)
         );
-        error = crate::error::construct::rtd_producer_failure(String::new(), Box::new(error));
+        error = crate::error::construct::rtd_producer_failure(String::new(), error);
         assert_eq!(clone_bytes(&error), None);
     }
 

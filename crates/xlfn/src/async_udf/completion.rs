@@ -491,12 +491,17 @@ mod tests {
     fn uninvoked_async_return_preserves_the_callback_failure_status() {
         use crate::error::{ExcelApiFailure, ExcelApiFunction};
         let failed = crate::error::callback_status_from_raw(xlfn_sys::XLRET_FAILED);
-        assert!(matches!((check_async_acceptance(failed, XLOPER12::nil(), false)).as_ref().map_err(crate::error::construct::view),
-            Err(crate::error::construct::ErrorView::ExcelApi {
-                function: ExcelApiFunction::AsyncReturn,
-                failure: ExcelApiFailure::Status(status), .. }) if status == failed
-        ));
-        assert!(matches!((check_async_acceptance(ExcelCallbackStatus::Success, XLOPER12::boolean(false), true)).as_ref().map_err(crate::error::construct::view),
+        assert!(
+            matches!((check_async_acceptance(failed, XLOPER12::nil(), false)).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::ExcelApi {
+                    function: ExcelApiFunction::AsyncReturn,
+                    failure: ExcelApiFailure::Status(status), .. }) if status == failed
+            )
+        );
+        assert!(matches!(
+            (check_async_acceptance(ExcelCallbackStatus::Success, XLOPER12::boolean(false), true))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::ExcelApi {
                 function: ExcelApiFunction::AsyncReturn,
                 failure: ExcelApiFailure::UnexpectedResult,

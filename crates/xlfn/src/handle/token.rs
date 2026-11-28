@@ -403,7 +403,8 @@ mod tests {
                 }
                 Err(_) => {
                     assert!(!looked_up);
-                    assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+                    assert!(matches!(
+                        (result).as_ref().map_err(crate::error::construct::view),
                         Err(crate::error::construct::ErrorView::Input {
                             argument: "handle",
                             reason: crate::error::InputError::InvalidUtf16,

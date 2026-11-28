@@ -261,7 +261,8 @@ fn batched_publish_overflow_keeps_the_accepted_prefix_deliverable() {
             .collect(),
         &AtomicBool::new(false),
     );
-    assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+    assert!(matches!(
+        (result).as_ref().map_err(crate::error::construct::view),
         Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::REFERENCE_OVERFLOW,
             ..
@@ -917,12 +918,14 @@ fn borrowed_string_validates_the_utf16_limit_before_admission() {
     sink.publish_str(&exact).unwrap();
 
     let assert_oversized = || {
-        assert!(matches!((sink.publish_str(&oversized)).as_ref().map_err(crate::error::construct::view),
-            Err(crate::error::construct::ErrorView::Input {
-                argument: "RTD value",
-                reason: InputError::TooLarge { limit, actual },
-            }) if *limit == EXCEL_STRING_LIMIT && *actual == EXCEL_STRING_LIMIT + 1
-        ));
+        assert!(
+            matches!((sink.publish_str(&oversized)).as_ref().map_err(crate::error::construct::view),
+                Err(crate::error::construct::ErrorView::Input {
+                    argument: "RTD value",
+                    reason: InputError::TooLarge { limit, actual },
+                }) if *limit == EXCEL_STRING_LIMIT && *actual == EXCEL_STRING_LIMIT + 1
+            )
+        );
     };
     assert_oversized();
     let refresh = server.begin_refresh().unwrap();
@@ -1734,13 +1737,15 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
     let res_owner = server.terminate();
     let res_waiter = handle.join().unwrap();
 
-    assert!(matches!((res_owner).as_ref().map_err(crate::error::construct::view),
+    assert!(matches!(
+        (res_owner).as_ref().map_err(crate::error::construct::view),
         Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
             ..
         }) | Err(crate::error::construct::ErrorView::Panic)
     ));
-    assert!(matches!((res_waiter).as_ref().map_err(crate::error::construct::view),
+    assert!(matches!(
+        (res_waiter).as_ref().map_err(crate::error::construct::view),
         Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
             ..
@@ -1818,7 +1823,8 @@ fn disconnect_propagates_subscription_cleanup_error() {
     conn.commit().unwrap();
 
     let error = server.disconnect(TopicId(1)).unwrap_err();
-    assert!(matches!(crate::error::construct::view(&(error)),
+    assert!(matches!(
+        crate::error::construct::view(&(error)),
         crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
             ..
@@ -1848,7 +1854,10 @@ fn rollback_records_subscription_cleanup_error() {
 
     conn.rollback();
 
-    assert!(matches!((runtime.cleanup_result()).as_ref().map_err(crate::error::construct::view),
+    assert!(matches!(
+        (runtime.cleanup_result())
+            .as_ref()
+            .map_err(crate::error::construct::view),
         Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
             ..
@@ -1916,7 +1925,10 @@ fn miri_connection_unwind_allows_reentrant_cleanup_before_releasing_admission() 
     assert!(server.test_server().subscriptions.lock().is_empty());
     prepared.rollback();
     assert!(runtime.catalog.lock().entries.is_empty());
-    assert!(matches!((runtime.cleanup_result()).as_ref().map_err(crate::error::construct::view),
+    assert!(matches!(
+        (runtime.cleanup_result())
+            .as_ref()
+            .map_err(crate::error::construct::view),
         Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::PANIC_DISCONNECT,
             ..
@@ -2080,14 +2092,18 @@ fn install_failure_during_closing_propagates_cleanup_error() {
     tx_close.send(()).unwrap();
 
     let res = handle.join().unwrap();
-    assert!(matches!((res).as_ref().map_err(crate::error::construct::view),
+    assert!(matches!(
+        (res).as_ref().map_err(crate::error::construct::view),
         Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
             ..
         })
     ));
 
-    assert!(matches!((runtime.cleanup_result()).as_ref().map_err(crate::error::construct::view),
+    assert!(matches!(
+        (runtime.cleanup_result())
+            .as_ref()
+            .map_err(crate::error::construct::view),
         Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::TEST_SENTINEL,
             ..
@@ -2545,7 +2561,10 @@ fn identity_lookup_reports_orphaned_candidate() {
             1,
         )
         .unwrap();
-    assert!(matches!((catalog.find_identity(SourceId(source.id), &topic.borrowed())).as_ref().map_err(crate::error::construct::view),
+    assert!(matches!(
+        (catalog.find_identity(SourceId(source.id), &topic.borrowed()))
+            .as_ref()
+            .map_err(crate::error::construct::view),
         Err(crate::error::construct::ErrorView::Internal {
             diagnostic_id: crate::diagnostics::catalog::RTD_INDEX_ORPHAN,
             ..

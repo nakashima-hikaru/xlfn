@@ -1904,7 +1904,10 @@ mod tests {
 
         let mut invalid = vec![u16::from(b'x'); 2000];
         invalid.push(0xd800);
-        assert!(matches!((decode_mode(invalid)).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (decode_mode(invalid))
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: crate::error::InputError::InvalidUtf16,
                 ..

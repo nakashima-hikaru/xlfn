@@ -49,7 +49,10 @@ fn miri_typed_finalization_rejects_missing_or_failed_arguments() {
         incomplete
             .decode::<f64>(0, "first", XlValueRef::from_array_cell(&inputs[0]).unwrap())
             .unwrap();
-        assert!(matches!((incomplete.finish_typed()).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (incomplete.finish_typed())
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Internal {
                 diagnostic_id: crate::diagnostics::catalog::INPUT_FINGERPRINT,
                 ..
@@ -69,7 +72,10 @@ fn miri_typed_finalization_rejects_missing_or_failed_arguments() {
             error,
             Err(__err) if __err.excel_value_error() == Some(crate::ExcelError::Value)
         ));
-        assert!(matches!((failed.finish_typed()).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (failed.finish_typed())
+                .as_ref()
+                .map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Internal {
                 diagnostic_id: crate::diagnostics::catalog::INPUT_FINGERPRINT,
                 ..
@@ -92,7 +98,8 @@ fn miri_scope_only_formula_return_rejects_missing_publication_access() {
                 callbacks,
             },
         );
-        assert!(matches!((result).as_ref().map_err(crate::error::construct::view),
+        assert!(matches!(
+            (result).as_ref().map_err(crate::error::construct::view),
             Err(crate::error::construct::ErrorView::Input {
                 reason: crate::error::InputError::Malformed(
                     "formula return requires admitted handle access"

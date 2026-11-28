@@ -1,9 +1,11 @@
-error[E0639]: cannot create non-exhaustive variant using struct expression
+error[E0223]: ambiguous associated type
  --> tests/ui/fail/framework_error_construction.rs:4:13
   |
-4 |       let _ = XllError::WindowsApi {
-  |  _____________^
-5 | |         function: "invented framework call",
-6 | |         code: 42,
-7 | |     };
-  | |_____^
+4 |     let _ = XllError::WindowsApi {
+  |             ^^^^^^^^^^^^^^^^^^^^
+  |
+help: if there were a trait named `Example` with associated type `WindowsApi` implemented for `XllError`, you could use the fully-qualified path
+  |
+4 -     let _ = XllError::WindowsApi {
+4 +     let _ = <XllError as Example>::WindowsApi {
+  |
