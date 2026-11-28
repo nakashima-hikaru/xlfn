@@ -265,7 +265,11 @@ pub fn async_arm(
         .state()
         .async_control
         .arm(std::path::Path::new(&directory), expected as u64)
-        .map_err(|error| XllError::native(error.raw_os_error().unwrap_or(0), format!("cannot arm async gate: {error)"),
+        .map_err(|error| {
+            XllError::native(
+                error.raw_os_error().unwrap_or(0),
+                format!("cannot arm async gate: {error}"),
+            )
         })?;
     Ok(1.0)
 }
