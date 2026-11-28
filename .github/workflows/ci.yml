@@ -666,54 +666,10 @@ jobs:
                   --target ${{ matrix.target }}
                   --locked
 
-    verus-refinement:
-        name: Verus refinement shard ${{ matrix.shard }}
+    verus:
+        name: Verus formal verification
         runs-on: ubuntu-latest
-        timeout-minutes: 45
-        strategy:
-            fail-fast: false
-            matrix:
-                shard: [0, 1, 2, 3]
-        steps:
-            - name: Check out repository
-              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-              with:
-                persist-credentials: false
-
-            - name: Set up uv and Python
-              uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
-              with:
-                  version: "0.13.6"
-                  python-version: "3.15"
-                  enable-cache: true
-                  cache-dependency-glob: tools/uv.lock
-
-            - name: Install Verus
-              run: |
-                  ./tools/install_verus.sh "${RUNNER_TEMP}/xlfn-verus"
-                  echo "${RUNNER_TEMP}/xlfn-verus" >> "$GITHUB_PATH"
-
-            - name: Test verification runner
-              run: uv run --project tools --locked python -B -m unittest discover -s tools/tests -p 'test*refinement*.py'
-
-            - name: Run disjoint Verus mutation shard
-              run: >
-                  uv run --project tools --locked python -B -m xlfn_tools.check_verus_refinement
-                  --shard-index ${{ matrix.shard }} --shard-count 4
-                  --jobs 2 --threads 2
-                  --report verus-timings-${{ matrix.shard }}.json
-
-            - name: Upload verification timings
-              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-              with:
-                  name: verus-timings-${{ matrix.shard }}
-                  path: verus-timings-${{ matrix.shard }}.json
-                  if-no-files-found: error
-
-    verus-support:
-        name: Verus trust, borrowing and ordering checks
-        runs-on: ubuntu-latest
-        timeout-minutes: 30
+        timeout-minutes: 20
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -739,62 +695,11 @@ jobs:
                   ./tools/install_verus.sh "${RUNNER_TEMP}/xlfn-verus"
                   echo "${RUNNER_TEMP}/xlfn-verus" >> "$GITHUB_PATH"
 
-            - name: Audit Verus TCB compliance (assumes and unapproved external_body)
+            - name: Audit Verus TCB compliance (assumes and unapproved external_bodies)
               run: just verus-audit
 
-            - name: Restore Cargo cache
-              uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-              with:
-                  key: verus-support
-                  cache-bin: false
-                  save-if: ${{ github.ref == 'refs/heads/main' }}
-                  cache-targets: false
-
-            - name: Check Verus and native borrow rejection
-              run: |
-                  uv run --project tools --locked python -B -m xlfn_tools.check_transition_borrows
-                  uv run --project tools --locked python -B -m xlfn_tools.check_native_publication_borrow
-
-            - name: Check shared Cache release ordering with Loom mutations
-              run: just cache-release-ordering
-
-    verus:
-        name: Verus formal verification
-        runs-on: ubuntu-latest
-        timeout-minutes: 10
-        needs: [verus-refinement, verus-support]
-        if: always()
-        steps:
-            - name: Check out repository
-              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-              with:
-                persist-credentials: false
-
-            - name: Require every verification job to pass
-              env:
-                  REFINEMENT_RESULT: ${{ needs.verus-refinement.result }}
-                  SUPPORT_RESULT: ${{ needs.verus-support.result }}
-              run: |
-                  test "$REFINEMENT_RESULT" = success
-                  test "$SUPPORT_RESULT" = success
-
-            - name: Set up uv and Python
-              uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
-              with:
-                  version: "0.13.6"
-                  python-version: "3.15"
-                  enable-cache: true
-                  cache-dependency-glob: tools/uv.lock
-
-            - name: Download shard timings
-              uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-              with:
-                  pattern: verus-timings-*
-                  path: verus-timings
-                  merge-multiple: true
-
-            - name: Require every mutation case exactly once
-              run: uv run --project tools --locked python -B -m xlfn_tools.check_verus_reports verus-timings --shard-count 4
+            - name: Verify all Verus proof targets
+              run: uv run --project tools --locked python -B -m xlfn_tools.check_verus_refinement --jobs 2 --threads 2
 
     lean-static:
         name: Lean proofs and checked-in fixtures

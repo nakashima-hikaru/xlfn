@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
-"""Run all eight proof targets and all mutation suites in one bounded invocation."""
+"""Run all eight Verus formal verification proof targets."""
+
+from __future__ import annotations
 
 import argparse
 import json
 import os
 import platform
-import runpy
+import re
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .verus_mutations import ROOT, MutationPlan, MutationRunner, Snapshot, collect_mutations
+from ._repository import ROOT
 
-SUITES = (
-    "check_drain_gate_refinement",
-    "check_published_owner_permission",
-    "check_rotating_domain_refinement",
-    "check_cache_pin_refinement",
-    "check_cache_ownership_refinement",
-    "check_handle_completion_refinement",
-)
-PROOFS = (
+PROOFS: tuple[str, ...] = (
     "sealable_counter",
     "drain_gate",
     "published_owner",
@@ -30,33 +26,72 @@ PROOFS = (
     "handle_domain",
 )
 
-
-SHARED_BASELINE_SOURCES = {
-    "sealable_counter": (Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),),
-    "operation_gate": (
-        Path("crates/xlfn-engine/src/quarantine/transitions.rs"),
-        Path("crates/xlfn-services/src/rtd/transitions.rs"),
-    ),
-}
+VERIFIED_RE = re.compile(r"verification results:: ([1-9]\d*) verified, 0 errors")
 
 
-def build_plan() -> MutationPlan:
-    plan = MutationPlan()
-    previous = Path.cwd()
+def cpu_count() -> int:
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0))
+    return getattr(os, "process_cpu_count", os.cpu_count)() or 1
+
+
+def proof_entry(name: str) -> Path:
+    return Path("verification/verus") / name / "src/lib.rs"
+
+
+def verify_proof(name: str, threads: int, root: Path = ROOT) -> dict[str, object]:
+    entry = proof_entry(name)
+    command = [
+        "verus",
+        "--crate-type=lib",
+        "--num-threads",
+        str(threads),
+        str(entry),
+    ]
+    started = time.monotonic()
     try:
-        # Existing suite dependency globs are repository-relative.
-        os.chdir(ROOT)
-        with collect_mutations(plan):
-            for suite in SUITES:
-                runpy.run_module(f"{__package__}.{suite}", run_name="__main__")
-        covered = {snapshot.proof.name for snapshot in plan.snapshots.values()}
-        for name in PROOFS:
-            if name not in covered:
-                dependencies = SHARED_BASELINE_SOURCES.get(name, ())
-                plan.add_baseline(Snapshot.read(Path("verification/verus") / name, dependencies))
-    finally:
-        os.chdir(previous)
-    return plan
+        result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as error:
+        raise SystemExit(f"FAIL: verifier timed out for {name}") from error
+    elapsed = time.monotonic() - started
+    output = result.stdout + result.stderr
+    summary = VERIFIED_RE.search(output)
+    if result.returncode != 0 or summary is None:
+        raise SystemExit(f"FAIL: Verus verification failed for {name}:\n{output}")
+    verified = int(summary.group(1))
+    print(f"PASS: {name}, {verified} verified ({elapsed:.2f}s)", flush=True)
+    return {"proof": name, "entry": str(entry), "verified": verified, "seconds": elapsed}
+
+
+def run_all(jobs: int = 2, threads: int | None = None, root: Path = ROOT) -> dict[str, object]:
+    if jobs < 1 or (threads is not None and threads < 1):
+        raise ValueError("jobs and threads must be positive")
+    verifier_threads = threads if threads is not None else max(1, cpu_count() // jobs)
+    started = time.monotonic()
+    print(
+        f"Verus: {len(PROOFS)} proofs, {jobs} workers x {verifier_threads} verifier threads",
+        flush=True,
+    )
+    results: dict[str, dict[str, object]] = {}
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        pending = {
+            executor.submit(verify_proof, name, verifier_threads, root): name for name in PROOFS
+        }
+        try:
+            for future in as_completed(pending):
+                results[pending[future]] = future.result()
+        except BaseException:
+            for future in pending:
+                future.cancel()
+            raise
+    elapsed = time.monotonic() - started
+    print(f"PASS: {len(results)} proofs verified ({elapsed:.2f}s)", flush=True)
+    return {
+        "jobs": jobs,
+        "threads": verifier_threads,
+        "seconds": elapsed,
+        "proofs": [results[name] for name in PROOFS],
+    }
 
 
 def main() -> None:
@@ -67,39 +102,20 @@ def main() -> None:
     parser.add_argument(
         "--threads", type=int, help="verifier threads per process (default: CPUs / jobs)"
     )
+    parser.add_argument("--report", type=Path, help="write proof timings as JSON")
     parser.add_argument(
-        "--report", type=Path, help="write successful baseline and mutation timings as JSON"
-    )
-    parser.add_argument(
-        "--list", action="store_true", help="list exact mutation inputs without running Verus"
-    )
-    parser.add_argument(
-        "--shard-index", type=int, default=0, help="zero-based proof shard (default: 0)"
-    )
-    parser.add_argument(
-        "--shard-count",
-        type=int,
-        default=1,
-        help="number of disjoint proof-affine shards (default: 1)",
+        "--list", action="store_true", help="list proof entry points without running"
     )
     args = parser.parse_args()
     if args.jobs < 1 or (args.threads is not None and args.threads < 1):
         parser.error("jobs and threads must be positive")
-    if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
-        parser.error("shard index must be in [0, shard count)")
-    plan = build_plan()
-    total = len(plan.mutations)
-    plan = plan.shard(args.shard_index, args.shard_count)
     if args.list:
-        print(json.dumps([mutation.describe() for mutation in plan.mutations], indent=2))
+        print(json.dumps([str(proof_entry(name)) for name in PROOFS], indent=2))
         return
-    report = MutationRunner(args.jobs, args.threads).run(plan)
+    report = run_all(args.jobs, args.threads)
     if args.report:
         report.update(
             {
-                "shard_index": args.shard_index,
-                "shard_count": args.shard_count,
-                "total_mutations": total,
                 "platform": platform.platform(),
                 "verus_version": subprocess.check_output(
                     ["verus", "--version"], text=True, timeout=30

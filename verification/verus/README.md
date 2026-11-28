@@ -76,7 +76,6 @@ The installer needs `bash`, `curl`, `unzip`, `uv` and `rustup`. The uv project i
 ./tools/install_verus.sh
 just verus-audit
 just verus
-just cache-release-ordering
 ```
 
 The installer checks the pinned release against
@@ -87,24 +86,13 @@ destination. The default destination is
 dedicated directory as the first argument. Updating the verifier requires
 reviewing and committing the corresponding platform hashes.
 
-`just verus` runs the proof targets, negative mutation suites, and Verus/native
-borrow-rejection checks. Mutations check sensitivity of the maintained proofs;
-they do not establish completeness. Parser errors, timeouts and unrelated
-compiler errors never count as proof rejection. The explicitly named ownership
-case requires its expected Rust diagnostic.
-
-The runner shares a baseline only when its entry point and copied input bytes
-match. Each mutation starts from an immutable temporary snapshot. Results are
-not cached between invocations or machines.
+`just verus` runs the TCB compliance audit (`just verus-audit`) and verifies
+all eight maintained proof targets directly with Verus.
 
 ```bash
-# Inspect exact inputs and rejection criteria without invoking Verus.
+# List proof entry points without invoking Verus.
 uv run --project tools --locked python -B -m xlfn_tools.check_verus_refinement --list
 
 # Save timings locally when diagnosing verification throughput.
 uv run --project tools --locked python -B -m xlfn_tools.check_verus_refinement --jobs 2 --report /tmp/verus-timings.json
 ```
-
-CI shards mutation inputs and checks that reports cover every current case
-exactly once, with matching baseline inputs and verifier version. Timing reports
-are run artifacts; they are not checked-in performance baselines.

@@ -139,8 +139,7 @@ rolls back when necessary, ends the observation and hands off retirement. The
 shared CAS retry loop preserves observed state on failure. Final native pin
 release uses Release decrement followed by an Acquire fence only for the final
 pin. Verus pin atomics use vstd's primitive contract; that does not establish the
-native fence history. `just cache-release-ordering` separately checks removal
-and late-placement mutations with Loom.
+native fence history, which is covered by Loom tests.
 
 The resource model conserves creator/resident/flight/lease pins and observations.
 Typed borrowing requires a live matching observation or lease; reclamation

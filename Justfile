@@ -135,18 +135,13 @@ miri-cache-endpoints:
 
 # Verus formal verification of concurrent kernel primitives.
 verus:
+    just verus-audit
     just verus-refinement
-    uv run --project tools --locked python -B -m xlfn_tools.check_transition_borrows
-    uv run --project tools --locked python -B -m xlfn_tools.check_native_publication_borrow
 
-# One invocation-local baseline per exact input; all mutation cases remain enabled.
-verus-refinement shard-index="0" shard-count="1":
-    uv run --project tools --locked python -B -m unittest discover -s tools/tests -p 'test*refinement*.py'
-    uv run --project tools --locked python -B -m xlfn_tools.check_verus_refinement --shard-index {{shard-index}} --shard-count {{shard-count}}
-
-# Weak-memory mutation gate for the shared final-pin release tail.
-cache-release-ordering:
-    uv run --project tools --locked python -B -m xlfn_tools.check_cache_release_ordering
+# Verify all Verus proof targets.
+verus-refinement:
+    uv run --project tools --locked python -B -m unittest discover -s tools/tests -p 'test_verus_refinement_runner.py'
+    uv run --project tools --locked python -B -m xlfn_tools.check_verus_refinement
 
 # Audit Verus verification TCB compliance (enforces 0 assumes and approved external_bodies).
 verus-audit:

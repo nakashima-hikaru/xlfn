@@ -59,7 +59,7 @@ artifacts and must stay out of version control. Scripts continue to launch
 Python subprocesses through `sys.executable` so child checks use the same
 managed interpreter.
 
-## Feature and Verus shard plans
+## Feature shard plans
 
 The Windows library feature checker and production tests use the same
 manifest-derived inventory as the former cargo-hack powersets: 288 distinct
@@ -87,12 +87,3 @@ lightest non-full shard first (total proxy weight 1320 per check shard). For
 `tools/feature-test-costs.json` (834–835 s per shard, falling back to `4 * weight`
 for new combinations). Each case prints its elapsed time so Windows CI can be
 used to validate or tune the cost model.
-
-Verus shards assign each exact input snapshot and all of its mutations to one
-runner. A runner proves the unmodified snapshot before starting any local
-mutation. Shard assignment uses the number of verifier calls (one baseline plus
-its mutations) as a proxy, so indivisible large suites can still dominate the
-largest job. Across four jobs the current plan executes eight baselines rather
-than thirty-two, and retains all 423 mutations. The required Verus check
-reconstructs the current plan and requires every expected baseline and mutation
-in its designated report, with matching source digests and Verus versions.

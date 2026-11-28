@@ -25,14 +25,13 @@ preconditions.
 
 The [native adapter plan](NATIVE_ADAPTER_PLAN.md) specifies the concrete work.
 [TCB.md](TCB.md) records the trusted library boundary and claim limits. Proof
-entry points and the mutation inventory are maintained in source rather than in
-historical counts or local execution diaries.
+entry points are maintained in source rather than in historical counts or local
+execution diaries.
 
 ## Ongoing validation
 
 - `just verus-audit` rejects project-local assumptions and unapproved trust boundaries.
-- `just verus` checks proof targets, mutation sensitivity and borrow rejection.
-- `just cache-release-ordering` checks the native shared final-pin release ordering with Loom mutations.
+- `just verus` verifies all maintained Verus proof targets and audits the TCB boundary.
 - `just miri` and focused Miri recipes exercise maintained ownership paths.
 - CI also checks Rust-generated traces against the Lean checkers and exercises
   Windows/feature configurations.
