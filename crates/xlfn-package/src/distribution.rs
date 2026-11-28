@@ -405,8 +405,10 @@ fn require_directory_identity(
     Ok(())
 }
 
-/// Snapshots transaction payloads while excluding journal control files.
-fn transaction_payloads(transaction: &Path) -> PackageResult<Vec<PathBuf>> {
+/// Yields transaction payload paths while excluding journal control files.
+fn transaction_payloads(
+    transaction: &Path,
+) -> io::Result<impl Iterator<Item = io::Result<PathBuf>> + use<>> {
     Ok(fs::read_dir(transaction)?
         .map(|entry| entry.map(|entry| entry.path()))
         .filter(|entry| match entry {
@@ -415,8 +417,7 @@ fn transaction_payloads(transaction: &Path) -> PackageResult<Vec<PathBuf>> {
                 Some(TRANSACTION_JOURNAL) | Some("journal.next")
             ),
             Err(_) => true,
-        })
-        .collect::<io::Result<_>>()?)
+        }))
 }
 
 /// Extracts a transaction identifier from its canonical directory name.
@@ -476,7 +477,12 @@ fn cleanup_unmutated_transaction(
 ) -> PackageResult {
     let directory = PrivateStagingDirectory::open(transaction)?;
     directory.verify()?;
-    if directory.identity != identity || !transaction_payloads(transaction)?.is_empty() {
+    if directory.identity != identity
+        || transaction_payloads(transaction)?
+            .next()
+            .transpose()?
+            .is_some()
+    {
         return Err(format!(
             "transaction cannot be cleaned before publication: {}",
             transaction.display()
@@ -1528,7 +1534,8 @@ fn recover_stale_transactions_with_policy(
     }
     crate::validate_directory_path(parent)?;
     let prefix = format!(".{destination_name}.transaction-");
-    let transactions = pending_transaction_paths(parent, &prefix)?;
+    let transactions =
+        pending_transaction_paths(parent, &prefix)?.collect::<io::Result<Vec<_>>>()?;
 
     for transaction in transactions {
         recover_distribution_transaction(
@@ -1544,17 +1551,18 @@ fn recover_stale_transactions_with_policy(
     Ok(())
 }
 
-fn pending_transaction_paths(parent: &Path, prefix: &str) -> io::Result<Vec<PathBuf>> {
-    fs::read_dir(parent)?
-        .filter_map(|entry| match entry {
-            Ok(entry) => entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(prefix))
-                .then(|| Ok(entry.path())),
-            Err(error) => Some(Err(error)),
-        })
-        .collect()
+fn pending_transaction_paths<'a>(
+    parent: &Path,
+    prefix: &'a str,
+) -> io::Result<impl Iterator<Item = io::Result<PathBuf>> + use<'a>> {
+    Ok(fs::read_dir(parent)?.filter_map(move |entry| match entry {
+        Ok(entry) => entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(prefix))
+            .then(|| Ok(entry.path())),
+        Err(error) => Some(Err(error)),
+    }))
 }
 
 fn recover_distribution_transaction(
@@ -1575,7 +1583,10 @@ fn recover_distribution_transaction(
         // journal, including invalid-journal cleanup and quarantine paths.
         PrivateStagingDirectory::open(transaction)?.verify()?;
         let private_transaction = is_private_transaction(transaction, prefix)?;
-        let payloads = transaction_payloads(transaction)?;
+        let has_payloads = transaction_payloads(transaction)?
+            .next()
+            .transpose()?
+            .is_some();
         let journal = transaction.join(TRANSACTION_JOURNAL);
         let next = transaction.join("journal.next");
         crate::validate_path_components(&journal)?;
@@ -1629,7 +1640,7 @@ fn recover_distribution_transaction(
             }
             let next_state = match read_transaction_journal(&next) {
                 Ok(state) => state,
-                Err(_error) if payloads.is_empty() => {
+                Err(_error) if !has_payloads => {
                     fs::remove_file(&next)?;
                     file_ops.sync_directory(transaction)?;
                     remove_empty_transaction(parent, transaction, file_ops)?;
@@ -1659,7 +1670,7 @@ fn recover_distribution_transaction(
             file_ops.sync_directory(parent)?;
             next_metadata = None;
             next_state
-        } else if payloads.is_empty() {
+        } else if !has_payloads {
             remove_empty_transaction(parent, transaction, file_ops)?;
             return Ok(());
         } else {
@@ -1720,7 +1731,7 @@ fn recover_distribution_transaction(
         }
 
         if private_transaction {
-            if !payloads.is_empty()
+            if has_payloads
                 || journal_state.state != TransactionState::Prepared
                 || journal_state.previous_identity.is_some()
                 || journal_state.installed_identity.is_some()

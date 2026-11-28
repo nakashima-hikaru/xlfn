@@ -53,7 +53,10 @@ impl PackageOutputLock {
             .expect("validated package output basename");
         let parent = root.parent().expect("validated package output parent");
         let prefix = format!(".{name}.transaction-");
-        if let Some(pending) = pending_transaction_paths(parent, &prefix)?.first() {
+        if let Some(pending) = pending_transaction_paths(parent, &prefix)?
+            .next()
+            .transpose()?
+        {
             return Err(DistributionError::Invalid(format!(
                 "unfinished all-target output transaction at {}; retry the previous --all command before packaging a single target",
                 pending.display()

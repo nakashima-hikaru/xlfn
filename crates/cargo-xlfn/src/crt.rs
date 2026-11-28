@@ -320,12 +320,11 @@ impl CrtObservation {
         }
     }
 
-    pub(crate) fn auto_admitted_external_imports(&self) -> Vec<String> {
+    pub(crate) fn auto_admitted_external_imports(&self) -> impl Iterator<Item = &str> {
         self.observed_dynamic_crt_imports
             .iter()
             .filter(|name| is_redistributable_dynamic_crt_import(name))
-            .cloned()
-            .collect()
+            .map(String::as_str)
     }
 
     pub(crate) fn manifest(self, requested: ResolvedCrtPolicy) -> xlfn_package::CrtManifest {
@@ -660,7 +659,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            observation.auto_admitted_external_imports(),
+            observation
+                .auto_admitted_external_imports()
+                .collect::<Vec<_>>(),
             vec!["vcruntime140.dll"]
         );
     }

@@ -218,8 +218,7 @@ fn effective_external_imports(
     external_imports.extend(
         observation
             .auto_admitted_external_imports()
-            .into_iter()
-            .map(|name| name.to_ascii_lowercase())
+            .map(str::to_ascii_lowercase)
             .filter(|name| !bundled.contains(name)),
     );
     external_imports.into_iter().collect()
