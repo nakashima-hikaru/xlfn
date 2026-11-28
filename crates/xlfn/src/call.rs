@@ -407,7 +407,7 @@ mod scratch_tests {
         use std::mem::size_of;
         // The scope includes the service read and cached error. The decode
         // context now borrows that storage instead of carrying a second owner.
-        assert_eq!(size_of::<super::CallStorage<'_, '_>>(), 168);
+        assert_eq!(size_of::<super::CallStorage<'_, '_>>(), 136);
         assert_eq!(size_of::<ghost_cell::GhostToken<'_>>(), 0);
         assert_eq!(size_of::<super::HandleDomainWitness<'_>>(), 16);
         assert!(size_of::<crate::value::DecodeCallContext<'_, '_>>() <= 80);

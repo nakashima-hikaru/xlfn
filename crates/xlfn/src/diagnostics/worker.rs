@@ -412,6 +412,7 @@ mod budget_tests {
     #[test]
     fn miri_dequeued_credit_retains_bytes_after_slot_return() {
         let observer = DiagnosticObserver::new();
+        let expected = crate::error::construct::boxed_error_size() + 7;
         let error = crate::XllError::native(1, "payload".to_owned());
         let QueuedDiagnosticEvent { event, credit } = observer
             .build_queued_event(&error, || event(error.clone()))
@@ -419,9 +420,9 @@ mod budget_tests {
         assert_eq!(observer.reserved.load(Ordering::Relaxed), 1);
         let delivery = credit.dequeue();
         assert_eq!(observer.reserved.load(Ordering::Relaxed), 0);
-        assert_eq!(observer.reserved_payload_bytes(), 7);
+        assert_eq!(observer.reserved_payload_bytes(), expected);
         drop(event);
-        assert_eq!(observer.reserved_payload_bytes(), 7);
+        assert_eq!(observer.reserved_payload_bytes(), expected);
         drop(delivery);
         assert_eq!(observer.reserved_payload_bytes(), 0);
     }
@@ -433,6 +434,7 @@ mod budget_tests {
     )]
     fn miri_forgotten_delivery_credit_cannot_discharge_bytes() {
         let observer = DiagnosticObserver::new();
+        let expected = crate::error::construct::boxed_error_size() + 7;
         let error = crate::XllError::native(1, "payload".to_owned());
         let QueuedDiagnosticEvent { event, credit } = observer
             .build_queued_event(&error, || event(error.clone()))
@@ -441,12 +443,13 @@ mod budget_tests {
         drop(event);
         std::mem::forget(delivery);
         assert_eq!(observer.reserved.load(Ordering::Relaxed), 0);
-        assert_eq!(observer.reserved_payload_bytes(), 7);
+        assert_eq!(observer.reserved_payload_bytes(), expected);
     }
 
     #[test]
     fn miri_payload_credit_returns_on_failed_send_and_receiver_discard() {
         let observer = DiagnosticObserver::new();
+        let expected = crate::error::construct::boxed_error_size() + 7;
         let error = crate::XllError::native(1, "payload".to_owned());
         let (sender, receiver) = mpsc::sync_channel(1);
         let first = observer
@@ -455,14 +458,14 @@ mod budget_tests {
         sender
             .try_send(first)
             .unwrap_or_else(|_| panic!("first send failed"));
-        assert_eq!(observer.reserved_payload_bytes(), 7);
+        assert_eq!(observer.reserved_payload_bytes(), expected);
         let second = observer
             .build_queued_event(&error, || event(error.clone()))
             .unwrap();
         let unused = sender.try_send(second).err().unwrap();
-        assert_eq!(observer.reserved_payload_bytes(), 14);
+        assert_eq!(observer.reserved_payload_bytes(), 2 * expected);
         drop(unused);
-        assert_eq!(observer.reserved_payload_bytes(), 7);
+        assert_eq!(observer.reserved_payload_bytes(), expected);
         drop(receiver);
         assert_eq!(observer.reserved_payload_bytes(), 0);
         assert_eq!(observer.reserved.load(Ordering::Relaxed), 0);
@@ -511,7 +514,10 @@ mod budget_tests {
 
     #[test]
     fn slow_delivery_holds_payload_credit_and_preserves_full_error() {
+        let boxed_size = crate::error::construct::boxed_error_size();
+        let message_len = 1024 * 1024 - boxed_size;
         struct SlowSink {
+            message_len: usize,
             reports: Arc<AtomicUsize>,
             started: mpsc::SyncSender<()>,
             release: crate::sync::Mutex<mpsc::Receiver<()>>,
@@ -520,7 +526,7 @@ mod budget_tests {
         impl DiagnosticSink for SlowSink {
             fn report(&self, event: &DiagnosticEvent<'_>) {
                 if let Some((_, message)) = event.error().native_details() {
-                    assert_eq!(message.len(), 1024 * 1024);
+                    assert_eq!(message.len(), self.message_len);
                     assert!(message.bytes().all(|byte| byte == b'x'));
                     if self.reports.fetch_add(1, Ordering::Relaxed) == 0 {
                         self.started.send(()).unwrap();
@@ -537,6 +543,7 @@ mod budget_tests {
         let reports = Arc::new(AtomicUsize::new(0));
         let sink = Box::new(
             AsyncDiagnosticSink::new(SlowSink {
+                message_len,
                 reports: Arc::clone(&reports),
                 started: started_tx,
                 release: crate::sync::Mutex::new(release_rx),
@@ -544,7 +551,7 @@ mod budget_tests {
             })
             .unwrap(),
         );
-        let error = crate::XllError::native(1, "x".repeat(1024 * 1024));
+        let error = crate::XllError::native(1, "x".repeat(message_len));
         sink.report(&error, metadata);
         started_rx.recv().unwrap();
         assert_eq!(sink.worker.observer().reserved_payload_bytes(), 1024 * 1024);
@@ -583,11 +590,15 @@ mod budget_tests {
             sender,
             worker: DiagnosticWorker::from_parts_for_test(observer, worker),
         };
+        let boxed_size = crate::error::construct::boxed_error_size();
         let error = crate::XllError::native(1, "owned".to_owned());
         for _ in 0..3 {
             sink.report(&error, metadata);
         }
-        assert_eq!(sink.worker.observer().reserved_payload_bytes(), 15);
+        assert_eq!(
+            sink.worker.observer().reserved_payload_bytes(),
+            3 * (boxed_size + 5)
+        );
         release_tx.send(()).unwrap();
         let AsyncDiagnosticSink { sender, worker } = sink;
         drop(sender);
